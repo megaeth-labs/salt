@@ -96,7 +96,7 @@ impl Committer {
     }
 
     /// Calculate the new commitment after applying the deltas
-    pub fn calculate_delta_by_hash_bytes(
+    pub fn calculate_delta_by_bytes(
         &self,
         old_commitment: [u8; 64],
         delta_indices: &[(usize, [u8; 32], [u8; 32])],
