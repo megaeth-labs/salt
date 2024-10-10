@@ -26,7 +26,8 @@ impl Committer {
             tables: bases
                 .par_iter()
                 .map(|base| {
-                    let win_num = (256 + window_size - 1) / window_size;
+                    // 253 is the bit length of Fr
+                    let win_num = 253 / window_size + 1;
                     let mut table = Vec::with_capacity(win_num * (1 << (window_size - 1)));
                     let mut element = base.0;
 
