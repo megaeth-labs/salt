@@ -57,6 +57,24 @@ impl Committer {
         ]
     }
 
+    /// Calculate the new commitment after applying the deltas
+    /// return old_c + (new_bytes[0] - old_bytes[0]) * G[tbi[0]] + ... + (new_bytes[n] - old_bytes[n]) * G[tbi[n]]
+    pub fn add_deltas(
+        &self,
+        old_commitment: [u8; 64],
+        delta_indices: &[(usize, [u8; 32], [u8; 32])],
+    ) -> Element {
+        let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
+        delta_indices
+            .iter()
+            .for_each(|(tb_i, old_bytes, new_bytes)| {
+                let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
+                let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
+                old += self.mul_index(&(new_fr - old_fr), *tb_i)
+            });
+        old
+    }
+
     /// scalar a fixed G[i] point
     fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
@@ -96,48 +114,13 @@ impl Committer {
         Element(result)
     }
 
-    /// Calculate the new commitment after applying the deltas
-    pub fn calculate_delta_by_bytes(
-        &self,
-        old_commitment: [u8; 64],
-        delta_indices: &[(usize, [u8; 32], [u8; 32])],
-    ) -> Element {
-        let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
-        delta_indices
-            .iter()
-            .for_each(|(tb_i, old_bytes, new_bytes)| {
-                let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
-                let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
-                old += self.mul_index(&(new_fr - old_fr), *tb_i)
-            });
-        old
-    }
-}
-
-/// Calculate the corresponding data index in the
-/// precomputed table through the scalar
-#[inline]
-fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
-    // Convert scalar from Montgomery form to big integer
-    let source_vec = scalar.into_bigint().0;
-    let mut index_vec = vec![];
-
-    // Extract w bits of data from a scalar of n bits length
-    for start_bit in (0..64 * source_vec.len()).step_by(w) {
-        let source_i = start_bit >> 6;
-        let offset_in_i = start_bit & 63;
-
-        let mut d = (source_vec[source_i] >> offset_in_i) & ((1 << w) - 1);
-        // If the data is not enough, take the remaining data from the next
-        if offset_in_i + w > 64 && source_i < source_vec.len() - 1 {
-            let left = w - (64 - offset_in_i);
-            d |= (source_vec[source_i + 1] & ((1 << left) - 1)) << (64 - offset_in_i);
-        };
-
-        index_vec.push(d)
+    /// returns G[i] * (new_bytes - old_bytes)
+    pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
+        let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
+        let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
+        self.mul_index(&(new_fr - old_fr), g_i)
     }
 
-    index_vec
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -210,6 +193,32 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
     mont_mul_asm(&mut result.z.0 .0, &f.0 .0, &g.0 .0);
 }
 
+/// Calculate the corresponding data index in the
+/// precomputed table through the scalar
+#[inline]
+fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
+    // Convert scalar from Montgomery form to big integer
+    let source_vec = scalar.into_bigint().0;
+    let mut index_vec = vec![];
+
+    // Extract w bits of data from a scalar of n bits length
+    for start_bit in (0..64 * source_vec.len()).step_by(w) {
+        let source_i = start_bit >> 6;
+        let offset_in_i = start_bit & 63;
+
+        let mut d = (source_vec[source_i] >> offset_in_i) & ((1 << w) - 1);
+        // If the data is not enough, take the remaining data from the next
+        if offset_in_i + w > 64 && source_i < source_vec.len() - 1 {
+            let left = w - (64 - offset_in_i);
+            d |= (source_vec[source_i + 1] & ((1 << left) - 1)) << (64 - offset_in_i);
+        };
+
+        index_vec.push(d)
+    }
+
+    index_vec
+}
+
 impl Element {
     /// Batch conversion from EdwardsProjective to EdwardsAffine
     #[inline]
@@ -268,53 +277,9 @@ impl Element {
         result
     }
 
-    /// Batch conversion from Element to Hash bytes
-    #[inline]
-    pub fn batch_elements_to_hash_bytes(elements: &[Element]) -> Vec<[u8; 32]> {
-        let mut bytes = vec![[0 as u8; 32]; elements.len()];
-        let mut yi_mul = vec![Fq::ZERO; elements.len()];
-        let mut zeroes = vec![false; elements.len()];
-        let mut ys_mul = Fq::ONE;
-
-        //ys_mul = y1*y2*y3.....yn
-        //yi_mul[i] = 1*y1...yi-1
-        elements.iter().enumerate().for_each(|(i, element)| {
-            if element.0.y.is_zero() {
-                zeroes[i] = true;
-                return;
-            }
-            yi_mul[i] = ys_mul;
-            ys_mul = ys_mul * &elements[i].0.y;
-        });
-
-        // ys_inv = 1/ys_mul
-        let mut ys_inv = ys_mul.inverse().expect("ys_mul is not zero");
-
-        for i in (0..elements.len()).rev().step_by(1) {
-            if zeroes[i] {
-                continue;
-            }
-            // y_inv = 1/yi
-            let y_inv = yi_mul[i] * &ys_inv;
-            ys_inv = ys_inv * &elements[i].0.y;
-            let _ = (elements[i].0.x * &y_inv).serialize_uncompressed(&mut bytes[i][..]);
-        }
-        bytes
-    }
-
-    /// Batch conversion from CommitmentBytes to Hash bytes
-    #[inline]
-    pub fn batch_commitment_to_hash_bytes(cs: &[[u8; 64]]) -> Vec<[u8; 32]> {
-        let elements: Vec<_> = cs
-            .iter()
-            .map(|c| Self::from_bytes_unchecked_uncompressed(*c))
-            .collect();
-        Self::batch_elements_to_hash_bytes(&elements)
-    }
-
     /// Batch conversion from Element to CommitmentBytes
     #[inline]
-    pub fn batch_elements_to_hash_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
+    pub fn batch_elements_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
         let mut bytes = vec![[0 as u8; 64]; elements.len()];
         let mut zi_mul = vec![Fq::ZERO; elements.len()];
         let mut zeroes = vec![false; elements.len()];
@@ -362,30 +327,13 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn batch_elements_to_hash_bytes() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(1111)),
-            (Element::prime_subgroup_generator() * Fr::from(2222)),
-        ];
-
-        let hash_bytes = Element::batch_elements_to_hash_bytes(&a_vec);
-
-        for i in 0..a_vec.len() {
-            let mut bytes = [0 as u8; 32];
-            let x = a_vec[i].0.x * &a_vec[i].0.y.inverse().unwrap();
-            let _ = x.serialize_uncompressed(&mut bytes[..]);
-            assert_eq!(bytes, hash_bytes[i]);
-        }
-    }
-
-    #[test]
     fn batch_elements_to_hash_commitments() {
         let a_vec = vec![
             (Element::prime_subgroup_generator() * Fr::from(3333)),
             (Element::prime_subgroup_generator() * Fr::from(4444)),
         ];
 
-        let hash_bytes = Element::batch_elements_to_hash_commitments(&a_vec);
+        let hash_bytes = Element::batch_elements_to_commitments(&a_vec);
 
         for i in 0..a_vec.len() {
             let mut bytes = [0 as u8; 64];
