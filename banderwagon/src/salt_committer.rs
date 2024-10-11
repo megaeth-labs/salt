@@ -10,7 +10,8 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
-use hugepage_rs::{alloc, dealloc};
+use hugepage_rs;
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::alloc::Layout;
 
 
@@ -130,6 +131,75 @@ impl Committer {
 
     /// scalar a fixed G[i] point
     fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+        let chunks = calculate_prefetch_index(scalar, self.window_size);
+        let mut result = EdwardsProjective::default();
+        let precom_table = &self.tables[g_i];
+
+        let half_size = 1 << (self.window_size - 1) as u64;
+        let win_size = 1 << self.window_size as u64;
+    
+        let mut c; // carry bit for current point
+        let mut c_next; // carry bit for prefetching next point
+        let mut idx; // the index of base_table to compute
+        let mut idx_next; // the index of base_table to prefetch
+    
+        // prefetch first point
+        let data_0 = unsafe { *chunks.get_unchecked(0) };
+        c_next = (data_0 > half_size) as u64;
+        idx_next = data_0 + c_next * (win_size - 2 * data_0)git;
+        unsafe {
+            _mm_prefetch(precom_table.as_ptr().add(idx_next as usize) as *const i8, _MM_HINT_T0);
+        }
+        idx = idx_next;
+    
+        // calculate point
+        for i in 0..chunks.len() - 1 {
+            // fetch next point
+            idx_next = unsafe { *chunks.get_unchecked(i + 1) } + c_next;
+            c = c_next;
+            c_next = (idx_next > half_size) as u64;
+            idx_next += c_next * (win_size - 2 * idx_next);
+            idx_next += (i + 1) as u64 * (half_size + 1);
+            unsafe {
+                _mm_prefetch(precom_table.as_ptr().add(idx_next as usize) as *const i8, _MM_HINT_T0);
+            }
+
+            // add current point
+            if c > 0 {
+                add_affine_point(
+                    &mut result,
+                    unsafe { &(-precom_table.get_unchecked(idx as usize).x) },
+                    unsafe { &precom_table.get_unchecked(idx as usize).y },
+                );
+            } else {
+                add_affine_point(
+                    &mut result,
+                    unsafe { &precom_table.get_unchecked(idx as usize).x },
+                    unsafe { &precom_table.get_unchecked(idx as usize).y },
+                );
+            }
+            idx = idx_next;
+        }
+
+        // last point
+        if c_next > 0 {
+            add_affine_point(
+                &mut result,
+                unsafe { &(-precom_table.get_unchecked(idx as usize).x) },
+                unsafe { &precom_table.get_unchecked(idx as usize).y },
+            );
+        } else {
+            add_affine_point(
+                &mut result,
+                unsafe { &precom_table.get_unchecked(idx as usize).x },
+                unsafe { &precom_table.get_unchecked(idx as usize).y },
+            );
+        }
+
+        Element(result)
+    }
+
+    fn mul_index_old(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
