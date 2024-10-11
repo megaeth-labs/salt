@@ -10,6 +10,9 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
+use hugepage_rs::{alloc, dealloc};
+use std::alloc::Layout;
+
 
 ///MSM calculation for a fixed G points
 #[derive(Clone, Debug)]
@@ -20,31 +23,80 @@ pub struct Committer {
     tables: Vec<Vec<EdwardsAffine>>,
 }
 
+impl Drop for Committer {
+    fn drop(&mut self) {
+        // drop inner vectors
+        for table in self.tables.iter_mut() {
+            let ptr = table.as_mut_ptr() as *mut u8;
+            let cap = table.capacity();
+            let layout = Layout::array::<EdwardsAffine>(cap).unwrap();
+            std::mem::forget(std::mem::replace(table, Vec::new()));
+            hugepage_rs::dealloc(ptr, layout);
+        }
+
+        // drop the outer vector
+        let ptr = self.tables.as_mut_ptr() as *mut u8;
+        let cap = self.tables.capacity();
+        let layout = Layout::array::<Vec<EdwardsAffine>>(cap).unwrap();
+        std::mem::forget(std::mem::replace(&mut self.tables, Vec::new()));
+        hugepage_rs::dealloc(ptr, layout);
+    }
+}
+
 impl Committer {
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        Committer {
-            tables: bases
-                .par_iter()
-                .map(|base| {
-                    // 253 is the bit length of Fr
-                    let win_num = 253 / window_size + 1;
-                    let mut table = Vec::with_capacity(win_num * (1 << (window_size - 1)));
-                    let mut element = base.0;
+        let table_num = bases.len();
+        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let inner_length = win_num * (1 << (window_size - 1));
 
-                    //Calculate the element values for each window
-                    for _ in 0..win_num {
-                        let base = element;
-                        table.push(EdwardsProjective::zero());
-                        table.push(element);
-                        for _i in 1..(1 << (window_size - 1)) {
-                            element += &base;
-                            table.push(element);
-                        }
-                        element += element;
-                    }
-                    Element::batch_proj_to_affine(&table)
-                })
-                .collect(),
+        let src_tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
+                    table.push(element);
+                }
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        }).collect();
+
+        let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
+        let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
+        if tables_ptr.is_null() {
+            panic!("failed to allocate tables");
+        }
+
+        for i in 0..src_tables.len() {
+            let src_ptr = src_tables[i].as_ptr();
+            let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
+            let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
+            if dst_ptr.is_null() {
+                panic!("Failed: allocating huge page for precomputed table");
+            }
+            assert!(
+                src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                "Source pointer is not aligned"
+            );
+            assert!(
+                dst_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                "Destination pointer is not aligned"
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, inner_length);
+                *tables_ptr.add(i) = Vec::from_raw_parts(dst_ptr, inner_length, inner_length);
+            }
+        }
+
+        let tables = unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) };
+
+        Committer {
+            tables,
             window_size,
         }
     }
