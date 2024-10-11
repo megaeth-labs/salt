@@ -163,7 +163,7 @@ impl Committer {
             }
         }
 
-        ponits.iter().for_each(|p| add_affine_point(&mut result, p));
+        ponits.iter().for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
 
@@ -207,7 +207,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
 
 /// Optimized affine point addition for x86_64
 #[cfg(target_arch = "x86_64")]
-fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
+fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use crate::scalar_multi_asm::*;
 
     let mut a = Fq::default();
@@ -215,9 +215,9 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
     let mut c = Fq::default();
     let mut d = Fq::default();
 
-    mont_mul_asm(&mut a.0 .0, &result.x.0 .0, &p2.x.0 .0);
-    mont_mul_asm(&mut b.0 .0, &result.y.0 .0, &p2.y.0 .0);
-    mont_mul_asm(&mut c.0 .0, &p2.x.0 .0, &p2.y.0 .0);
+    mont_mul_asm(&mut a.0 .0, &result.x.0 .0, &p2_x.0 .0);
+    mont_mul_asm(&mut b.0 .0, &result.y.0 .0, &p2_y.0 .0);
+    mont_mul_asm(&mut c.0 .0, &p2_x.0 .0, &p2_y.0 .0);
     mont_mul_asm(&mut d.0 .0, &result.t.0 .0, &c.0 .0);
 
     mont_mul_asm(
@@ -233,7 +233,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
     mont_mul_asm(
         &mut d.0 .0,
         &(result.x + result.y).0 .0,
-        &(p2.x + p2.y).0 .0,
+        &(p2_x + p2_y).0 .0,
     );
     let e = d - a - b;
     let f = result.z - c;
