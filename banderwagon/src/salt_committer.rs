@@ -34,6 +34,7 @@ impl Committer {
                     //Calculate the element values for each window
                     for _ in 0..win_num {
                         let base = element;
+                        table.push(EdwardsProjective::zero());
                         table.push(element);
                         for _i in 1..(1 << (window_size - 1)) {
                             element += &base;
@@ -99,14 +100,14 @@ impl Committer {
                 index = (1 << self.window_size) - index;
                 if index != 0 {
                     let neg_point = EdwardsAffine {
-                        x: -precom_table[index - 1 + i * half_win].x,
-                        y: precom_table[index - 1 + i * half_win].y,
+                        x: -precom_table[index + i * (half_win + 1)].x,
+                        y: precom_table[index + i * (half_win + 1)].y,
                     };
                     ponits.push(neg_point);
                 }
                 carry = 1;
             } else {
-                ponits.push(precom_table[index - 1 + i * half_win].clone());
+                ponits.push(precom_table[index + i * (half_win + 1)].clone());
             }
         }
 
