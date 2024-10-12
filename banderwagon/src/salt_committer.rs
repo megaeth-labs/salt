@@ -11,9 +11,10 @@ use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
 use hugepage_rs;
-use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::alloc::Layout;
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
 ///MSM calculation for a fixed G points
 #[derive(Clone, Debug)]
@@ -25,6 +26,10 @@ pub struct Committer {
 }
 
 impl Drop for Committer {
+    #[cfg(target_os = "macos")]
+    fn drop(&mut self) {}
+
+    #[cfg(not(target_os = "macos"))]
     fn drop(&mut self) {
         // drop inner vectors
         for table in self.tables.iter_mut() {
@@ -48,7 +53,7 @@ impl Committer {
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         let table_num = bases.len();
         let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
-        let inner_length = win_num * (1 << (window_size - 1));
+        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
         let src_tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
             let mut table = Vec::with_capacity(inner_length);
@@ -67,34 +72,40 @@ impl Committer {
             Element::batch_proj_to_affine(&table)
         }).collect();
 
-        let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
-        let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
-        if tables_ptr.is_null() {
-            panic!("failed to allocate tables");
-        }
+        #[cfg(target_os = "macos")]
+        let tables = src_tables;
 
-        for i in 0..src_tables.len() {
-            let src_ptr = src_tables[i].as_ptr();
-            let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
-            let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
-            if dst_ptr.is_null() {
-                panic!("Failed: allocating huge page for precomputed table");
+        #[cfg(not(target_os = "macos"))]
+        let tables = {
+            let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
+            let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
+            if tables_ptr.is_null() {
+                panic!("failed to allocate tables");
             }
-            assert!(
-                src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
-                "Source pointer is not aligned"
-            );
-            assert!(
-                dst_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
-                "Destination pointer is not aligned"
-            );
-            unsafe {
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, inner_length);
-                *tables_ptr.add(i) = Vec::from_raw_parts(dst_ptr, inner_length, inner_length);
-            }
-        }
 
-        let tables = unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) };
+            for i in 0..src_tables.len() {
+                let src_ptr = src_tables[i].as_ptr();
+                let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
+                let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
+                if dst_ptr.is_null() {
+                    panic!("Failed: allocating huge page for precomputed table");
+                }
+                assert!(
+                    src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                    "Source pointer is not aligned"
+                );
+                assert!(
+                    dst_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                    "Destination pointer is not aligned"
+                );
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, inner_length);
+                    *tables_ptr.add(i) = Vec::from_raw_parts(dst_ptr, inner_length, inner_length);
+                }
+            }
+
+            unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) }
+        };
 
         Committer {
             tables,
@@ -130,52 +141,53 @@ impl Committer {
     }
 
     /// scalar a fixed G[i] point
+    #[cfg(target_arch = "x86_64")]
     fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
+        let half_win = 1 << (self.window_size - 1);
+        let win_size = 1 << self.window_size;
         let mut result = EdwardsProjective::default();
-        let precom_table = &self.tables[g_i];
+        let precomp_table = &self.tables[g_i];
 
-        let half_size = 1 << (self.window_size - 1) as u64;
-        let win_size = 1 << self.window_size as u64;
-    
-        let mut c; // carry bit for current point
-        let mut c_next; // carry bit for prefetching next point
-        let mut idx; // the index of base_table to compute
-        let mut idx_next; // the index of base_table to prefetch
-    
         // prefetch first point
-        let data_0 = unsafe { *chunks.get_unchecked(0) };
-        c_next = (data_0 > half_size) as u64;
-        idx_next = data_0 + c_next * (win_size - 2 * data_0)git;
+        let data_0 = unsafe { *chunks.get_unchecked(0) as i32 };
+        let mut c_next = (data_0 > half_win) as i32;
+        let mut idx_next = data_0 + c_next * (win_size - 2 * data_0);
         unsafe {
-            _mm_prefetch(precom_table.as_ptr().add(idx_next as usize) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(
+                precomp_table.as_ptr().add(idx_next as usize) as *const i8,
+                _MM_HINT_T0,
+            );
         }
-        idx = idx_next;
-    
+        let mut idx = idx_next;
+
         // calculate point
         for i in 0..chunks.len() - 1 {
             // fetch next point
-            idx_next = unsafe { *chunks.get_unchecked(i + 1) } + c_next;
-            c = c_next;
-            c_next = (idx_next > half_size) as u64;
+            idx_next = unsafe { *chunks.get_unchecked(i + 1) as i32 } + c_next;
+            let carry = c_next;
+            c_next = (idx_next > half_win) as i32;
             idx_next += c_next * (win_size - 2 * idx_next);
-            idx_next += (i + 1) as u64 * (half_size + 1);
+            idx_next += (i + 1) as i32 * (half_win + 1);
             unsafe {
-                _mm_prefetch(precom_table.as_ptr().add(idx_next as usize) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(
+                    precomp_table.as_ptr().add(idx_next as usize) as *const i8,
+                    _MM_HINT_T0,
+                );
             }
 
             // add current point
-            if c > 0 {
+            if carry > 0 {
                 add_affine_point(
                     &mut result,
-                    unsafe { &(-precom_table.get_unchecked(idx as usize).x) },
-                    unsafe { &precom_table.get_unchecked(idx as usize).y },
+                    unsafe { &(-precomp_table.get_unchecked(idx as usize).x) },
+                    unsafe { &precomp_table.get_unchecked(idx as usize).y },
                 );
             } else {
                 add_affine_point(
                     &mut result,
-                    unsafe { &precom_table.get_unchecked(idx as usize).x },
-                    unsafe { &precom_table.get_unchecked(idx as usize).y },
+                    unsafe { &precomp_table.get_unchecked(idx as usize).x },
+                    unsafe { &precomp_table.get_unchecked(idx as usize).y },
                 );
             }
             idx = idx_next;
@@ -185,34 +197,34 @@ impl Committer {
         if c_next > 0 {
             add_affine_point(
                 &mut result,
-                unsafe { &(-precom_table.get_unchecked(idx as usize).x) },
-                unsafe { &precom_table.get_unchecked(idx as usize).y },
+                unsafe { &(-precomp_table.get_unchecked(idx as usize).x) },
+                unsafe { &precomp_table.get_unchecked(idx as usize).y },
             );
         } else {
             add_affine_point(
                 &mut result,
-                unsafe { &precom_table.get_unchecked(idx as usize).x },
-                unsafe { &precom_table.get_unchecked(idx as usize).y },
+                unsafe { &precomp_table.get_unchecked(idx as usize).x },
+                unsafe { &precomp_table.get_unchecked(idx as usize).y },
             );
         }
 
         Element(result)
     }
 
-    fn mul_index_old(&self, scalar: &Fr, g_i: usize) -> Element {
+    /// scalar a fixed G[i] point
+    #[cfg(not(target_arch = "x86_64"))]
+    fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
         let mut result = EdwardsProjective::default();
         let precom_table = &self.tables[g_i];
         let mut ponits = Vec::with_capacity(chunks.len());
-
         for i in 0..chunks.len() {
             let mut index = (chunks[i] + carry) as usize;
             if index == 0 {
                 continue;
             }
-
             carry = 0;
             // precom_table Stores half of the window values, from 1 to half_size
             // If index = 0, no calculation is needed, skip directly
@@ -232,10 +244,10 @@ impl Committer {
                 ponits.push(precom_table[index + i * (half_win + 1)].clone());
             }
         }
-
         ponits.iter().for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
+
 
     /// returns G[i] * (new_bytes - old_bytes)
     pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
@@ -325,7 +337,8 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     let mut index_vec = vec![];
 
     // Extract w bits of data from a scalar of n bits length
-    for start_bit in (0..64 * source_vec.len()).step_by(w) {
+    // Fr's bit length is 253 + Carry, so the maximum length is 254
+    for start_bit in (0..64 * source_vec.len() - 2).step_by(w) {
         let source_i = start_bit >> 6;
         let offset_in_i = start_bit & 63;
 
