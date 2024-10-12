@@ -10,11 +10,6 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
-use hugepage_rs;
-use std::alloc::Layout;
-
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
 ///MSM calculation for a fixed G points
 #[derive(Clone, Debug)]
@@ -31,6 +26,8 @@ impl Drop for Committer {
 
     #[cfg(not(target_os = "macos"))]
     fn drop(&mut self) {
+        use hugepage_rs;
+        use std::alloc::Layout;
         // drop inner vectors
         for table in self.tables.iter_mut() {
             let ptr = table.as_mut_ptr() as *mut u8;
@@ -50,7 +47,11 @@ impl Drop for Committer {
 }
 
 impl Committer {
+    #[cfg(not(target_os = "macos"))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
+        use hugepage_rs;
+        use std::alloc::Layout;
+
         let table_num = bases.len();
         let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
@@ -72,10 +73,6 @@ impl Committer {
             Element::batch_proj_to_affine(&table)
         }).collect();
 
-        #[cfg(target_os = "macos")]
-        let tables = src_tables;
-
-        #[cfg(not(target_os = "macos"))]
         let tables = {
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
             let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
@@ -113,6 +110,35 @@ impl Committer {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn new(bases: &[Element], window_size: usize) -> Committer {
+        let table_num = bases.len();
+        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
+
+        let tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
+                    table.push(element);
+                }
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        }).collect();
+
+        Committer {
+            tables,
+            window_size,
+        }
+    }
+
     /// This is the identity element of the group
     pub fn zero() -> [u8; 64] {
         [
@@ -143,6 +169,8 @@ impl Committer {
     /// scalar a fixed G[i] point
     #[cfg(target_arch = "x86_64")]
     fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let half_win = 1 << (self.window_size - 1);
         let win_size = 1 << self.window_size;
@@ -259,12 +287,12 @@ impl Committer {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
+fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
 
-    let mut a = result.x * p2.x;
-    let b = result.y * p2.y;
-    let mut c = p2.x * p2.y;
+    let mut a = result.x * p2_x;
+    let b = result.y * p2_y;
+    let mut c = p2_x * p2_y;
     let mut d = result.t * c;
 
     c = d * Fq::new_unchecked(BigInt::new([
@@ -274,7 +302,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
         3904213385886034240u64,
     ]));
 
-    d = (result.x + result.y) * (p2.x + p2.y);
+    d = (result.x + result.y) * (p2_x + p2_y);
     let e = d - a - b;
     let f = result.z - c;
     let g = result.z + c;
@@ -338,7 +366,7 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
 
     // Extract w bits of data from a scalar of n bits length
     // Fr's bit length is 253 + Carry, so the maximum length is 254
-    for start_bit in (0..64 * source_vec.len() - 2).step_by(w) {
+    for start_bit in (0..254).step_by(w) {
         let source_i = start_bit >> 6;
         let offset_in_i = start_bit & 63;
 
