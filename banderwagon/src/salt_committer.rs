@@ -168,38 +168,50 @@ impl Committer {
 
     /// scalar a fixed G[i] point
     #[cfg(target_arch = "x86_64")]
-    fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+    pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
         let chunks = calculate_prefetch_index(scalar, self.window_size);
-        let half_win = 1 << (self.window_size - 1);
-        let win_size = 1 << self.window_size;
         let mut result = EdwardsProjective::default();
         let precomp_table = &self.tables[g_i];
 
+        let half_wnd = (1 << (self.window_size - 1)) + 1;
+        let wnd_size = 1 << self.window_size;
+        let mut idx_next;
+        let mut idx;
+        let mut c_next = 0;
+        
         // prefetch first point
-        let data_0 = unsafe { *chunks.get_unchecked(0) as i32 };
-        let mut c_next = (data_0 > half_win) as i32;
-        let mut idx_next = data_0 + c_next * (win_size - 2 * data_0);
+        let data_0 = unsafe { *chunks.get_unchecked(0) } as usize;
+        if data_0 >= half_wnd {
+            c_next = 1;
+            idx_next = wnd_size - data_0;
+        } else {
+            idx_next = data_0;
+        }
         unsafe {
             _mm_prefetch(
                 precomp_table.as_ptr().add(idx_next as usize) as *const i8,
                 _MM_HINT_T0,
             );
         }
-        let mut idx = idx_next;
+        idx = idx_next;
 
         // calculate point
-        for i in 0..chunks.len() - 1 {
+        for i in 1..chunks.len() {
             // fetch next point
-            idx_next = unsafe { *chunks.get_unchecked(i + 1) as i32 } + c_next;
+            idx_next = unsafe { *chunks.get_unchecked(i) as usize } + c_next;
             let carry = c_next;
-            c_next = (idx_next > half_win) as i32;
-            idx_next += c_next * (win_size - 2 * idx_next);
-            idx_next += (i + 1) as i32 * (half_win + 1);
+            if idx_next >= half_wnd {
+                c_next = 1;
+                idx_next = wnd_size - idx_next + i * half_wnd;
+            } else {
+                c_next = 0;
+                idx_next += i * half_wnd;
+            }
             unsafe {
                 _mm_prefetch(
-                    precomp_table.as_ptr().add(idx_next as usize) as *const i8,
+                    precomp_table.as_ptr().add(idx_next) as *const i8,
                     _MM_HINT_T0,
                 );
             }
@@ -208,14 +220,14 @@ impl Committer {
             if carry > 0 {
                 add_affine_point(
                     &mut result,
-                    unsafe { &(-precomp_table.get_unchecked(idx as usize).x) },
-                    unsafe { &precomp_table.get_unchecked(idx as usize).y },
+                    unsafe { &(-precomp_table.get_unchecked(idx).x) },
+                    unsafe { &precomp_table.get_unchecked(idx).y },
                 );
             } else {
                 add_affine_point(
                     &mut result,
-                    unsafe { &precomp_table.get_unchecked(idx as usize).x },
-                    unsafe { &precomp_table.get_unchecked(idx as usize).y },
+                    unsafe { &precomp_table.get_unchecked(idx).x },
+                    unsafe { &precomp_table.get_unchecked(idx).y },
                 );
             }
             idx = idx_next;
@@ -225,14 +237,14 @@ impl Committer {
         if c_next > 0 {
             add_affine_point(
                 &mut result,
-                unsafe { &(-precomp_table.get_unchecked(idx as usize).x) },
-                unsafe { &precomp_table.get_unchecked(idx as usize).y },
+                unsafe { &(-precomp_table.get_unchecked(idx).x) },
+                unsafe { &precomp_table.get_unchecked(idx).y },
             );
         } else {
             add_affine_point(
                 &mut result,
-                unsafe { &precomp_table.get_unchecked(idx as usize).x },
-                unsafe { &precomp_table.get_unchecked(idx as usize).y },
+                unsafe { &precomp_table.get_unchecked(idx).x },
+                unsafe { &precomp_table.get_unchecked(idx).y },
             );
         }
 
@@ -241,7 +253,7 @@ impl Committer {
 
     /// scalar a fixed G[i] point
     #[cfg(not(target_arch = "x86_64"))]
-    fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+    pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
