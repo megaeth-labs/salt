@@ -20,31 +20,121 @@ pub struct Committer {
     tables: Vec<Vec<EdwardsAffine>>,
 }
 
-impl Committer {
-    pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        Committer {
-            tables: bases
-                .par_iter()
-                .map(|base| {
-                    // 253 is the bit length of Fr
-                    let win_num = 253 / window_size + 1;
-                    let mut table = Vec::with_capacity(win_num * (1 << (window_size - 1)));
-                    let mut element = base.0;
+impl Drop for Committer {
+    #[cfg(target_os = "macos")]
+    fn drop(&mut self) {}
 
-                    //Calculate the element values for each window
-                    for _ in 0..win_num {
-                        let base = element;
-                        table.push(EdwardsProjective::zero());
-                        table.push(element);
-                        for _i in 1..(1 << (window_size - 1)) {
-                            element += &base;
-                            table.push(element);
-                        }
-                        element += element;
-                    }
-                    Element::batch_proj_to_affine(&table)
-                })
-                .collect(),
+    #[cfg(not(target_os = "macos"))]
+    fn drop(&mut self) {
+        use hugepage_rs;
+        use std::alloc::Layout;
+        // drop inner vectors
+        for table in self.tables.iter_mut() {
+            let ptr = table.as_mut_ptr() as *mut u8;
+            let cap = table.capacity();
+            let layout = Layout::array::<EdwardsAffine>(cap).unwrap();
+            std::mem::forget(std::mem::replace(table, Vec::new()));
+            hugepage_rs::dealloc(ptr, layout);
+        }
+
+        // drop the outer vector
+        let ptr = self.tables.as_mut_ptr() as *mut u8;
+        let cap = self.tables.capacity();
+        let layout = Layout::array::<Vec<EdwardsAffine>>(cap).unwrap();
+        std::mem::forget(std::mem::replace(&mut self.tables, Vec::new()));
+        hugepage_rs::dealloc(ptr, layout);
+    }
+}
+
+impl Committer {
+    #[cfg(not(target_os = "macos"))]
+    pub fn new(bases: &[Element], window_size: usize) -> Committer {
+        use hugepage_rs;
+        use std::alloc::Layout;
+
+        let table_num = bases.len();
+        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
+
+        let src_tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
+                    table.push(element);
+                }
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        }).collect();
+
+        let tables = {
+            let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
+            let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
+            if tables_ptr.is_null() {
+                panic!("failed to allocate tables");
+            }
+
+            for i in 0..src_tables.len() {
+                let src_ptr = src_tables[i].as_ptr();
+                let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
+                let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
+                if dst_ptr.is_null() {
+                    panic!("Failed: allocating huge page for precomputed table");
+                }
+                assert!(
+                    src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                    "Source pointer is not aligned"
+                );
+                assert!(
+                    dst_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
+                    "Destination pointer is not aligned"
+                );
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, inner_length);
+                    *tables_ptr.add(i) = Vec::from_raw_parts(dst_ptr, inner_length, inner_length);
+                }
+            }
+
+            unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) }
+        };
+
+        Committer {
+            tables,
+            window_size,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn new(bases: &[Element], window_size: usize) -> Committer {
+        let table_num = bases.len();
+        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
+
+        let tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
+                    table.push(element);
+                }
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        }).collect();
+
+        Committer {
+            tables,
             window_size,
         }
     }
@@ -77,20 +167,104 @@ impl Committer {
     }
 
     /// scalar a fixed G[i] point
-    fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+    #[cfg(target_arch = "x86_64")]
+    pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+        let chunks = calculate_prefetch_index(scalar, self.window_size);
+        let mut result = EdwardsProjective::default();
+        let precomp_table = &self.tables[g_i];
+
+        let half_wnd = (1 << (self.window_size - 1)) + 1;
+        let wnd_size = 1 << self.window_size;
+        let mut idx_next;
+        let mut idx;
+        let mut c_next = 0;
+        
+        // prefetch first point
+        let data_0 = unsafe { *chunks.get_unchecked(0) } as usize;
+        if data_0 >= half_wnd {
+            c_next = 1;
+            idx_next = wnd_size - data_0;
+        } else {
+            idx_next = data_0;
+        }
+        unsafe {
+            _mm_prefetch(
+                precomp_table.as_ptr().add(idx_next as usize) as *const i8,
+                _MM_HINT_T0,
+            );
+        }
+        idx = idx_next;
+
+        // calculate point
+        for i in 1..chunks.len() {
+            // fetch next point
+            idx_next = unsafe { *chunks.get_unchecked(i) as usize } + c_next;
+            let carry = c_next;
+            if idx_next >= half_wnd {
+                c_next = 1;
+                idx_next = wnd_size - idx_next + i * half_wnd;
+            } else {
+                c_next = 0;
+                idx_next += i * half_wnd;
+            }
+            unsafe {
+                _mm_prefetch(
+                    precomp_table.as_ptr().add(idx_next) as *const i8,
+                    _MM_HINT_T0,
+                );
+            }
+
+            // add current point
+            if carry > 0 {
+                add_affine_point(
+                    &mut result,
+                    unsafe { &(-precomp_table.get_unchecked(idx).x) },
+                    unsafe { &precomp_table.get_unchecked(idx).y },
+                );
+            } else {
+                add_affine_point(
+                    &mut result,
+                    unsafe { &precomp_table.get_unchecked(idx).x },
+                    unsafe { &precomp_table.get_unchecked(idx).y },
+                );
+            }
+            idx = idx_next;
+        }
+
+        // last point
+        if c_next > 0 {
+            add_affine_point(
+                &mut result,
+                unsafe { &(-precomp_table.get_unchecked(idx).x) },
+                unsafe { &precomp_table.get_unchecked(idx).y },
+            );
+        } else {
+            add_affine_point(
+                &mut result,
+                unsafe { &precomp_table.get_unchecked(idx).x },
+                unsafe { &precomp_table.get_unchecked(idx).y },
+            );
+        }
+
+        Element(result)
+    }
+
+    /// scalar a fixed G[i] point
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
         let mut result = EdwardsProjective::default();
         let precom_table = &self.tables[g_i];
         let mut ponits = Vec::with_capacity(chunks.len());
-
         for i in 0..chunks.len() {
             let mut index = (chunks[i] + carry) as usize;
             if index == 0 {
                 continue;
             }
-
             carry = 0;
             // precom_table Stores half of the window values, from 1 to half_size
             // If index = 0, no calculation is needed, skip directly
@@ -110,10 +284,10 @@ impl Committer {
                 ponits.push(precom_table[index + i * (half_win + 1)].clone());
             }
         }
-
-        ponits.iter().for_each(|p| add_affine_point(&mut result, p));
+        ponits.iter().for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
+
 
     /// returns G[i] * (new_bytes - old_bytes)
     pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
@@ -125,12 +299,12 @@ impl Committer {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
+fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
 
-    let mut a = result.x * p2.x;
-    let b = result.y * p2.y;
-    let mut c = p2.x * p2.y;
+    let mut a = result.x * p2_x;
+    let b = result.y * p2_y;
+    let mut c = p2_x * p2_y;
     let mut d = result.t * c;
 
     c = d * Fq::new_unchecked(BigInt::new([
@@ -140,7 +314,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
         3904213385886034240u64,
     ]));
 
-    d = (result.x + result.y) * (p2.x + p2.y);
+    d = (result.x + result.y) * (p2_x + p2_y);
     let e = d - a - b;
     let f = result.z - c;
     let g = result.z + c;
@@ -155,7 +329,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
 
 /// Optimized affine point addition for x86_64
 #[cfg(target_arch = "x86_64")]
-fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
+fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use crate::scalar_multi_asm::*;
 
     let mut a = Fq::default();
@@ -163,9 +337,9 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
     let mut c = Fq::default();
     let mut d = Fq::default();
 
-    mont_mul_asm(&mut a.0 .0, &result.x.0 .0, &p2.x.0 .0);
-    mont_mul_asm(&mut b.0 .0, &result.y.0 .0, &p2.y.0 .0);
-    mont_mul_asm(&mut c.0 .0, &p2.x.0 .0, &p2.y.0 .0);
+    mont_mul_asm(&mut a.0 .0, &result.x.0 .0, &p2_x.0 .0);
+    mont_mul_asm(&mut b.0 .0, &result.y.0 .0, &p2_y.0 .0);
+    mont_mul_asm(&mut c.0 .0, &p2_x.0 .0, &p2_y.0 .0);
     mont_mul_asm(&mut d.0 .0, &result.t.0 .0, &c.0 .0);
 
     mont_mul_asm(
@@ -181,7 +355,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2: &EdwardsAffine) {
     mont_mul_asm(
         &mut d.0 .0,
         &(result.x + result.y).0 .0,
-        &(p2.x + p2.y).0 .0,
+        &(p2_x + p2_y).0 .0,
     );
     let e = d - a - b;
     let f = result.z - c;
@@ -203,7 +377,8 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     let mut index_vec = vec![];
 
     // Extract w bits of data from a scalar of n bits length
-    for start_bit in (0..64 * source_vec.len()).step_by(w) {
+    // Fr's bit length is 253 + Carry, so the maximum length is 254
+    for start_bit in (0..254).step_by(w) {
         let source_i = start_bit >> 6;
         let offset_in_i = start_bit & 63;
 
