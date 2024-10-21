@@ -2,10 +2,7 @@
 //!
 
 use crate::element::Element;
-use ark_ec::CurveConfig;
-use ark_ed_on_bls12_381_bandersnatch::{
-    BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq, Fr,
-};
+use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
@@ -53,25 +50,28 @@ impl Committer {
         use std::alloc::Layout;
 
         let table_num = bases.len();
-        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let src_tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
-            let mut table = Vec::with_capacity(inner_length);
-            let mut element = base.0;
-            // Calculate the element values for each window
-            for _ in 0..win_num {
-                let base = element;
-                table.push(EdwardsProjective::zero());
-                table.push(element);
-                for _i in 1..(1 << (window_size - 1)) {
-                    element += &base;
+        let src_tables: Vec<Vec<EdwardsAffine>> = bases
+            .par_iter()
+            .map(|base| {
+                let mut table = Vec::with_capacity(inner_length);
+                let mut element = base.0;
+                // Calculate the element values for each window
+                for _ in 0..win_num {
+                    let base = element;
+                    table.push(EdwardsProjective::zero());
                     table.push(element);
+                    for _i in 1..(1 << (window_size - 1)) {
+                        element += &base;
+                        table.push(element);
+                    }
+                    element += element;
                 }
-                element += element;
-            }
-            Element::batch_proj_to_affine(&table)
-        }).collect();
+                Element::batch_proj_to_affine(&table)
+            })
+            .collect();
 
         let tables = {
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
@@ -113,25 +113,28 @@ impl Committer {
     #[cfg(target_os = "macos")]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         let table_num = bases.len();
-        let win_num = 253 / window_size + 1;  // 253 is the bit length of Fr
+        let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let tables: Vec<Vec<EdwardsAffine>> = bases.par_iter().map(|base| {
-            let mut table = Vec::with_capacity(inner_length);
-            let mut element = base.0;
-            // Calculate the element values for each window
-            for _ in 0..win_num {
-                let base = element;
-                table.push(EdwardsProjective::zero());
-                table.push(element);
-                for _i in 1..(1 << (window_size - 1)) {
-                    element += &base;
+        let tables: Vec<Vec<EdwardsAffine>> = bases
+            .par_iter()
+            .map(|base| {
+                let mut table = Vec::with_capacity(inner_length);
+                let mut element = base.0;
+                // Calculate the element values for each window
+                for _ in 0..win_num {
+                    let base = element;
+                    table.push(EdwardsProjective::zero());
                     table.push(element);
+                    for _i in 1..(1 << (window_size - 1)) {
+                        element += &base;
+                        table.push(element);
+                    }
+                    element += element;
                 }
-                element += element;
-            }
-            Element::batch_proj_to_affine(&table)
-        }).collect();
+                Element::batch_proj_to_affine(&table)
+            })
+            .collect();
 
         Committer {
             tables,
@@ -180,7 +183,7 @@ impl Committer {
         let mut idx_next;
         let mut idx;
         let mut c_next = 0;
-        
+
         // prefetch first point
         let data_0 = unsafe { *chunks.get_unchecked(0) } as usize;
         if data_0 >= half_wnd {
@@ -284,10 +287,11 @@ impl Committer {
                 ponits.push(precom_table[index + i * (half_win + 1)].clone());
             }
         }
-        ponits.iter().for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
+        ponits
+            .iter()
+            .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
-
 
     /// returns G[i] * (new_bytes - old_bytes)
     pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
@@ -295,7 +299,6 @@ impl Committer {
         let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
         self.mul_index(&(new_fr - old_fr), g_i)
     }
-
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -399,58 +402,20 @@ impl Element {
     /// Batch conversion from EdwardsProjective to EdwardsAffine
     #[inline]
     pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
-        let mut zeroes = vec![false; elements.len()];
-        let mut zs_mul = <BandersnatchConfig as CurveConfig>::BaseField::ONE;
-
-        // zs_mul = z0 * z1 * ... * zn
-        // result[i] = z0 * z1 * ... * zi-1
-        let mut result: Vec<EdwardsAffine> = (0..elements.len())
-            .into_iter()
-            .map(|i| {
-                if elements[i].z.is_zero() {
-                    zeroes[i] = true;
-                    return EdwardsAffine::default();
-                }
-
-                let r = EdwardsAffine {
-                    x: zs_mul,
-                    y: Fq::default(),
-                };
-
-                zs_mul *= &elements[i].z;
-
-                r
+        let commitments = Element::batch_elements_to_commitments(
+            &elements
+                .iter()
+                .map(|element| Element(*element))
+                .collect::<Vec<Element>>(),
+        );
+        // Convert commitments from CommitmentBytes to EdwardsAffine
+        commitments
+            .iter()
+            .map(|bytes| EdwardsAffine {
+                x: Fq::from_le_bytes_mod_order(&bytes[0..32]),
+                y: Fq::from_le_bytes_mod_order(&bytes[32..64]),
             })
-            .collect();
-
-        // zs_inv = 1 / zs_mul
-        let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
-
-        // result[i] = (z0 * z1 * ... * zi-1)/(z0 * z1 * ... * zi) = 1/zi
-        for i in (0..elements.len()).rev() {
-            if zeroes[i] {
-                continue;
-            }
-            result[i].x = result[i].x * &zs_inv;
-            zs_inv = zs_inv * &elements[i].z;
-        }
-
-        // result[i].x = xi / zi, result[i].y = xi / zi
-        elements
-            .into_iter()
-            .zip(result.iter_mut())
-            .zip(zeroes.iter())
-            .for_each(|((element, res), &is_zero)| {
-                if is_zero {
-                    return;
-                }
-
-                let z_inv = res.x;
-                res.x = &element.x * &z_inv;
-                res.y = &element.y * &z_inv;
-            });
-
-        result
+            .collect()
     }
 
     /// Batch conversion from Element to CommitmentBytes
