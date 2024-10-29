@@ -1,3 +1,39 @@
+# SALT Development Notes
+
+To accelerate ECC multiplication that sums around twenty points, we overlap the memory prefetching with point additions.
+
+In the `mul_index` function, we use `mm_prefetch` to prefetch the next point to be added, which is a random memory access. 
+Using huge pages decreases TLB misses that potentially invalidates an `mm_prefetch`.
+
+To set up, first ensure your machine supports hugepages and verify the allocated number by executing (currently only supported on Linux):
+
+```bash
+grep HugePages /proc/meminfo
+```
+
+The output looks like:
+
+```bash
+~> grep HugePage /proc/meminfo
+AnonHugePages:         0 kB
+ShmemHugePages:        0 kB
+FileHugePages:         0 kB
+HugePages_Total:   10240
+HugePages_Free:    10240
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+```
+
+This means the system has 10240 2MB hugepages allocated. 
+
+In our case, 1024 hugepages is enough because precomputed table is around 400MB.
+
+You can allocate hugepages by running:
+```bash
+sudo sysctl -w vm.nr_hugepages=1024
+```
+Sometimes it fails because the system doesn't have enough continous physical memory. You might want to reboot in that case.
+
 # Verkle Trie 
 
 **This code has not been reviewed and is not safe to use in non-research capacities.**
