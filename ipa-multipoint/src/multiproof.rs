@@ -12,6 +12,8 @@ use crate::transcript::TranscriptProtocol;
 use std::collections::HashMap;
 
 use banderwagon::{trait_defs::*, Element, Fr};
+use rayon::prelude::*;
+
 pub struct MultiPoint;
 
 #[derive(Clone, Debug)]
@@ -78,7 +80,7 @@ impl MultiPoint {
 
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
-            .into_iter()
+            .into_par_iter()
             .map(|(point, queries_challenges)| {
                 let mut aggregated_polynomial = vec![Fr::zero(); crs.n];
 
@@ -103,12 +105,9 @@ impl MultiPoint {
         // Compute g(X)
         //
         let g_x: LagrangeBasis = aggregated_queries
-            .iter()
+            .par_iter()
             .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
-            .fold(LagrangeBasis::zero(), |mut res, val| {
-                res = res + val;
-                res
-            });
+            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
         transcript.append_point(b"D", &g_x_comm);
@@ -121,13 +120,13 @@ impl MultiPoint {
         //
 
         let mut g1_den: Vec<_> = aggregated_queries
-            .iter()
+            .par_iter()
             .map(|(z_i, _)| t - Fr::from(*z_i as u128))
             .collect();
         batch_inversion(&mut g1_den);
 
         let g1_x = aggregated_queries
-            .into_iter()
+            .into_par_iter()
             .zip(g1_den)
             .map(|((_, agg_f_x), den_inv)| {
                 let term: Vec<_> = agg_f_x
@@ -138,10 +137,7 @@ impl MultiPoint {
 
                 LagrangeBasis::new(term)
             })
-            .fold(LagrangeBasis::zero(), |mut res, val| {
-                res = res + val;
-                res
-            });
+            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
         transcript.append_point(b"E", &g1_comm);
@@ -218,23 +214,23 @@ impl MultiPointProof {
 
         // 3. Compute g_2(t)
         //
-        let mut g2_den: Vec<_> = queries.iter().map(|query| t - query.point).collect();
+        let mut g2_den: Vec<_> = queries.par_iter().map(|query| t - query.point).collect();
         batch_inversion(&mut g2_den);
 
         let helper_scalars: Vec<_> = powers_of_r
-            .iter()
+            .into_par_iter()
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
 
         let g2_t: Fr = helper_scalars
-            .iter()
-            .zip(queries.iter())
+            .par_iter()
+            .zip(queries.par_iter())
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
         //4. Compute [g_1(X)] = E
-        let comms: Vec<_> = queries.iter().map(|query| query.commitment).collect();
+        let comms: Vec<_> = queries.par_iter().map(|query| query.commitment).collect();
         let g1_comm = slow_vartime_multiscalar_mul(helper_scalars.iter(), comms.iter());
 
         transcript.append_point(b"E", &g1_comm);
