@@ -64,7 +64,7 @@ impl MultiPoint {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        transcript.append_raw(&get_state(&queries));
+        transcript.append_raw(&get_state_prover(&queries));
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of(r, queries.len());
@@ -150,7 +150,7 @@ impl MultiPoint {
     }
 }
 
-fn get_state(queries: &[ProverQuery]) -> Vec<u8> {
+fn get_state_prover(queries: &[ProverQuery]) -> Vec<u8> {
     const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
     let total_size = queries.len() * BYTES_PER_QUERY;
 
@@ -182,6 +182,54 @@ fn get_state(queries: &[ProverQuery]) -> Vec<u8> {
                 point_scalar
                     .serialize_compressed(&mut chunk_result)
                     .unwrap();
+
+                // Result
+                chunk_result.push(b'y');
+
+                p.result.serialize_compressed(&mut chunk_result).unwrap();
+            }
+            chunk_result
+        })
+        .collect::<Vec<_>>();
+
+    // Combine all chunks
+    let mut result = Vec::with_capacity(total_size);
+    chunks.into_iter().for_each(|chunk| {
+        result.extend(chunk);
+    });
+
+    result
+}
+
+fn get_state_verifier(queries: &[VerifierQuery]) -> Vec<u8> {
+    const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
+    let total_size = queries.len() * BYTES_PER_QUERY;
+
+    // Pre-allocate chunks
+    let chunk_size =
+        (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let chunks: Vec<_> = queries
+        .chunks(chunk_size)
+        .map(|chunk| Vec::with_capacity(chunk.len() * BYTES_PER_QUERY))
+        .collect();
+
+    // Process chunks in parallel
+    let chunks = chunks
+        .into_par_iter()
+        .zip(queries.par_chunks(chunk_size))
+        .map(|(mut chunk_result, queries_chunk)| {
+            for p in queries_chunk {
+                // Commitment
+                chunk_result.push(b'C');
+
+                p.commitment
+                    .serialize_compressed(&mut chunk_result)
+                    .unwrap();
+
+                // Point
+                chunk_result.push(b'z');
+
+                p.point.serialize_compressed(&mut chunk_result).unwrap();
 
                 // Result
                 chunk_result.push(b'y');
@@ -244,11 +292,7 @@ impl MultiPointProof {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        for query in queries.iter() {
-            transcript.append_point(b"C", &query.commitment);
-            transcript.append_scalar(b"z", &query.point);
-            transcript.append_scalar(b"y", &query.result);
-        }
+        transcript.append_raw(&get_state_verifier(queries));
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of(r, queries.len());
@@ -608,7 +652,7 @@ mod tests {
         };
 
         let state2 = get_state2(&vec![prover_query.clone()]);
-        let state = get_state(&vec![prover_query]);
+        let state = get_state_prover(&vec![prover_query]);
 
         assert_eq!(state, state2);
     }
@@ -627,7 +671,7 @@ mod tests {
             // Warm up
             let _ = get_state2(&queries[..10]);
 
-            let _ = get_state(&queries[..10]);
+            let _ = get_state_prover(&queries[..10]);
 
             // Multiple iterations for more accurate timing
             const ITERATIONS: u32 = 3;
@@ -637,7 +681,7 @@ mod tests {
             for _ in 0..ITERATIONS {
                 // Test get_state
                 let start = Instant::now();
-                let state1 = get_state(&queries);
+                let state1 = get_state_prover(&queries);
                 state1_total += start.elapsed().as_micros();
 
                 // Test get_state2
