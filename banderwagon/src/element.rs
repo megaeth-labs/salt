@@ -168,6 +168,37 @@ impl Element {
         scalars
     }
 
+    pub fn batch_map_to_scalar_field2(elements: &[Element]) -> Vec<Fr> {
+        use ark_ff::PrimeField;
+        use rayon::prelude::*;
+
+        // Step 1: Collect y coordinates
+        let mut x_div_y: Vec<_> = elements.par_iter().map(|element| element.0.y).collect();
+
+        // Step 2: Batch inversion (this is already optimized internally)
+        batch_inversion(&mut x_div_y);
+
+        // Step 3: Multiply with x coordinates in parallel
+        x_div_y
+            .par_iter_mut()
+            .zip(elements.par_iter())
+            .for_each(|(y_inv, element)| {
+                *y_inv *= element.0.x;
+            });
+
+        // Step 4: Convert to scalars in parallel
+        x_div_y
+            .par_iter()
+            .map(|element| {
+                let mut bytes = [0u8; 32];
+                element
+                    .serialize_compressed(&mut bytes[..])
+                    .expect("could not serialize point into a 32 byte array");
+                Fr::from_le_bytes_mod_order(&bytes)
+            })
+            .collect()
+    }
+
     pub fn zero() -> Element {
         Element(EdwardsProjective::zero())
     }
@@ -255,6 +286,9 @@ mod tests {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ark_std::{test_rng, UniformRand};
+    use std::time::Instant;
+
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
     fn two_torsion() -> EdwardsProjective {
         EdwardsProjective::new_unchecked(Fq::zero(), -Fq::one(), Fq::zero(), Fq::one())
@@ -355,5 +389,67 @@ mod test {
 
         assert!(inf1.double().is_zero());
         assert!(inf2.double().is_zero());
+    }
+
+    fn generate_random_elements(size: usize) -> Vec<Element> {
+        let mut rng = test_rng();
+        (0..size)
+            .map(|_| {
+                let random_scalar = Fr::rand(&mut rng);
+                Element::prime_subgroup_generator() * random_scalar
+            })
+            .collect()
+    }
+
+    #[test]
+    fn benchmark_batch_map() {
+        let sizes = vec![100_000, 200_000, 300_000, 400_000, 500_000];
+
+        println!("\nBenchmarking batch_map_to_scalar_field vs batch_map_to_scalar_field2:");
+        println!("Size\t\tSequential(μs)\tParallel(μs)\tSpeedup");
+        println!("------------------------------------------------");
+
+        for size in sizes {
+            let elements = generate_random_elements(size);
+
+            // Warm up
+            let _ = Element::batch_map_to_scalar_field(&elements[..10]);
+            let _ = Element::batch_map_to_scalar_field2(&elements[..10]);
+
+            // Multiple iterations for more accurate timing
+            const ITERATIONS: u32 = 5;
+            let mut seq_total = 0;
+            let mut par_total = 0;
+
+            for _ in 0..ITERATIONS {
+                // Test sequential version
+                let start = Instant::now();
+                let seq_result = Element::batch_map_to_scalar_field(&elements);
+                seq_total += start.elapsed().as_micros();
+
+                // Test parallel version
+                let start = Instant::now();
+                let par_result = Element::batch_map_to_scalar_field2(&elements);
+                par_total += start.elapsed().as_micros();
+
+                // Verify results match
+                assert_eq!(seq_result, par_result);
+            }
+
+            let seq_avg = seq_total as f64 / ITERATIONS as f64;
+            let par_avg = par_total as f64 / ITERATIONS as f64;
+
+            // Calculate speedup
+            let speedup = if par_avg > 0.0 {
+                seq_avg / par_avg
+            } else {
+                f64::INFINITY
+            };
+
+            println!(
+                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x",
+                size, seq_avg, par_avg, speedup
+            );
+        }
     }
 }

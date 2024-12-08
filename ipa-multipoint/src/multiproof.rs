@@ -64,14 +64,7 @@ impl MultiPoint {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        for query in queries.iter() {
-            transcript.append_point(b"C", &query.commitment);
-            transcript.append_scalar(b"z", &Fr::from(query.point as u128));
-            // XXX: note that since we are always opening on the domain
-            // the prover does not need to pass y_i explicitly
-            // It's just an index operation on the lagrange basis
-            transcript.append_scalar(b"y", &query.result)
-        }
+        transcript.append_raw(&get_state(&queries));
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of(r, queries.len());
@@ -156,6 +149,58 @@ impl MultiPoint {
         }
     }
 }
+
+fn get_state(queries: &[ProverQuery]) -> Vec<u8> {
+    const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
+    let total_size = queries.len() * BYTES_PER_QUERY;
+
+    // Pre-allocate chunks
+    let chunk_size =
+        (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let chunks: Vec<_> = queries
+        .chunks(chunk_size)
+        .map(|chunk| Vec::with_capacity(chunk.len() * BYTES_PER_QUERY))
+        .collect();
+
+    // Process chunks in parallel
+    let chunks = chunks
+        .into_par_iter()
+        .zip(queries.par_chunks(chunk_size))
+        .map(|(mut chunk_result, queries_chunk)| {
+            for p in queries_chunk {
+                // Commitment
+                chunk_result.push(b'C');
+
+                p.commitment
+                    .serialize_compressed(&mut chunk_result)
+                    .unwrap();
+
+                // Point
+                chunk_result.push(b'z');
+
+                let point_scalar = Fr::from(p.point as u128);
+                point_scalar
+                    .serialize_compressed(&mut chunk_result)
+                    .unwrap();
+
+                // Result
+                chunk_result.push(b'y');
+
+                p.result.serialize_compressed(&mut chunk_result).unwrap();
+            }
+            chunk_result
+        })
+        .collect::<Vec<_>>();
+
+    // Combine all chunks
+    let mut result = Vec::with_capacity(total_size);
+    chunks.into_iter().for_each(|chunk| {
+        result.extend(chunk);
+    });
+
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiPointProof {
     open_proof: IPAProof,
@@ -498,4 +543,127 @@ fn multiproof_consistency() {
     let got = hex::encode(bytes);
     let expected = "4f53588244efaf07a370ee3f9c467f933eed360d4fbf7a19dfc8bc49b67df4711bf1d0a720717cd6a8c75f1a668cb7cbdd63b48c676b89a7aee4298e71bd7f4013d7657146aa9736817da47051ed6a45fc7b5a61d00eb23e5df82a7f285cc10e67d444e91618465ca68d8ae4f2c916d1942201b7e2aae491ef0f809867d00e83468fb7f9af9b42ede76c1e90d89dd789ff22eb09e8b1d062d8a58b6f88b3cbe80136fc68331178cd45a1df9496ded092d976911b5244b85bc3de41e844ec194256b39aeee4ea55538a36139211e9910ad6b7a74e75d45b869d0a67aa4bf600930a5f760dfb8e4df9938d1f47b743d71c78ba8585e3b80aba26d24b1f50b36fa1458e79d54c05f58049245392bc3e2b5c5f9a1b99d43ed112ca82b201fb143d401741713188e47f1d6682b0bf496a5d4182836121efff0fd3b030fc6bfb5e21d6314a200963fe75cb856d444a813426b2084dfdc49dca2e649cb9da8bcb47859a4c629e97898e3547c591e39764110a224150d579c33fb74fa5eb96427036899c04154feab5344873d36a53a5baefd78c132be419f3f3a8dd8f60f72eb78dd5f43c53226f5ceb68947da3e19a750d760fb31fa8d4c7f53bfef11c4b89158aa56b1f4395430e16a3128f88e234ce1df7ef865f2d2c4975e8c82225f578310c31fd41d265fd530cbfa2b8895b228a510b806c31dff3b1fa5c08bffad443d567ed0e628febdd22775776e0cc9cebcaea9c6df9279a5d91dd0ee5e7a0434e989a160005321c97026cb559f71db23360105460d959bcdf74bee22c4ad8805a1d497507";
     assert_eq!(got, expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_std::{test_rng, UniformRand};
+    use std::time::Instant;
+
+    fn generate_test_queries(size: usize) -> Vec<ProverQuery> {
+        let mut rng = test_rng();
+
+        let poly = LagrangeBasis::new(vec![
+            Fr::one(),
+            Fr::from(10u128),
+            Fr::from(200u128),
+            Fr::from(78u128),
+            Fr::from(400u128),
+            Fr::from(34u128),
+            Fr::from(10u128),
+        ]);
+
+        (0..size)
+            .map(|i| {
+                let random_scalar = Fr::rand(&mut rng);
+                let random_element = Element::prime_subgroup_generator() * random_scalar;
+
+                ProverQuery {
+                    commitment: random_element,
+                    poly: poly.clone(),
+                    point: i % 7,
+                    result: random_scalar,
+                }
+            })
+            .collect()
+    }
+
+    fn get_state2(queries: &[ProverQuery]) -> Vec<u8> {
+        let mut transcript = Transcript { state: Vec::new() };
+
+        for query in queries.iter() {
+            transcript.append_point(b"C", &query.commitment);
+            transcript.append_scalar(b"z", &Fr::from(query.point as u128));
+            // XXX: note that since we are always opening on the domain
+            // the prover does not need to pass y_i explicitly
+            // It's just an index operation on the lagrange basis
+            transcript.append_scalar(b"y", &query.result)
+        }
+        transcript.state
+    }
+
+    #[test]
+    fn get_state_consistency() {
+        let prover_query = ProverQuery {
+            commitment: Element::prime_subgroup_generator(),
+            poly: LagrangeBasis::new(vec![
+                Fr::one(),
+                Fr::from(10u128),
+                Fr::from(200u128),
+                Fr::from(78u128),
+            ]),
+            point: 1,
+            result: Fr::from(10u128),
+        };
+
+        let state2 = get_state2(&vec![prover_query.clone()]);
+        let state = get_state(&vec![prover_query]);
+
+        assert_eq!(state, state2);
+    }
+
+    #[test]
+    fn benchmark_get_state() {
+        let sizes = vec![100_000, 200_000, 300_000, 400_000, 500_000];
+
+        println!("\nBenchmarking get_state2 vs get_state:");
+        println!("Size\t\tget_state2(μs)\tget_state(μs)\tSpeedup");
+        println!("------------------------------------------------");
+
+        for size in sizes {
+            let queries = generate_test_queries(size);
+
+            // Warm up
+            let _ = get_state2(&queries[..10]);
+
+            let _ = get_state(&queries[..10]);
+
+            // Multiple iterations for more accurate timing
+            const ITERATIONS: u32 = 3;
+            let mut state2_total = 0;
+            let mut state1_total = 0;
+
+            for _ in 0..ITERATIONS {
+                // Test get_state
+                let start = Instant::now();
+                let state1 = get_state(&queries);
+                state1_total += start.elapsed().as_micros();
+
+                // Test get_state2
+                let start = Instant::now();
+                let state2 = get_state2(&queries);
+                state2_total += start.elapsed().as_micros();
+
+                // Verify results match
+                assert_eq!(state1.len(), state2.len());
+                assert_eq!(state1, state2);
+            }
+
+            let state1_avg = state1_total as f64 / ITERATIONS as f64;
+            let state2_avg = state2_total as f64 / ITERATIONS as f64;
+
+            // Calculate speedup
+            let speedup = if state2_avg > 0.0 {
+                state2_avg / state1_avg
+            } else {
+                f64::INFINITY
+            };
+
+            println!(
+                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x",
+                size, state2_avg, state1_avg, speedup
+            );
+        }
+    }
 }

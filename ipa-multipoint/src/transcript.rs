@@ -9,7 +9,7 @@ pub trait TranscriptProtocol {
 
 use sha2::{Digest, Sha256};
 pub struct Transcript {
-    state: Vec<u8>,
+    pub state: Vec<u8>,
 }
 
 impl Transcript {
@@ -30,6 +30,10 @@ impl Transcript {
     pub fn append_u64(&mut self, label: &'static [u8], number: u64) {
         self.state.extend(label);
         self.state.extend(number.to_be_bytes());
+    }
+
+    pub fn append_raw(&mut self, message: &[u8]) {
+        self.state.extend(message);
     }
 }
 
