@@ -402,7 +402,7 @@ impl Element {
     /// Batch conversion from EdwardsProjective to EdwardsAffine
     #[inline]
     pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
-        let commitments = Element::batch_elements_to_commitments(
+        let commitments = Element::batch_to_commitments(
             &elements
                 .iter()
                 .map(|element| Element(*element))
@@ -420,8 +420,8 @@ impl Element {
 
     /// Batch conversion from Element to CommitmentBytes
     #[inline]
-    pub fn batch_elements_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let mut bytes = vec![[0 as u8; 64]; elements.len()];
+    pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
+        let mut commitments = vec![[0 as u8; 64]; elements.len()];
         let mut zi_mul = vec![Fq::ZERO; elements.len()];
         let mut zeroes = vec![false; elements.len()];
         let mut zs_mul = Fq::ONE;
@@ -442,17 +442,55 @@ impl Element {
 
         for i in (0..elements.len()).rev().step_by(1) {
             if zeroes[i] {
-                let _ = Fq::ONE.serialize_uncompressed(&mut bytes[i][32..64]);
+                let _ = Fq::ONE.serialize_uncompressed(&mut commitments[i][32..64]);
                 continue;
             }
             // z_inv = 1/zi
             let z_inv = zi_mul[i] * &zs_inv;
             zs_inv = zs_inv * &elements[i].0.z;
 
-            let _ = (elements[i].0.x * &z_inv).serialize_uncompressed(&mut bytes[i][0..32]);
-            let _ = (elements[i].0.y * &z_inv).serialize_uncompressed(&mut bytes[i][32..64]);
+            let _ = (elements[i].0.x * &z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
+            let _ = (elements[i].0.y * &z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
         }
-        bytes
+        commitments
+    }
+
+    /// Batch conversion from commitments to hash bytes
+    #[inline]
+    pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
+        let elements = commitments
+            .iter()
+            .map(|commitment| Element::from_bytes_unchecked_uncompressed(*commitment))
+            .collect::<Vec<_>>();
+        let mut hashs = vec![[0 as u8; 32]; elements.len()];
+        let mut yi_mul = vec![Fq::ZERO; elements.len()];
+        let mut zeroes = vec![false; elements.len()];
+        let mut ys_mul = Fq::ONE;
+
+        //ys_mul = y1*y2*y3.....yn
+        //yi_mul[i] = 1*y1...yi-1
+        elements.iter().enumerate().for_each(|(i, element)| {
+            if element.0.y.is_zero() {
+                zeroes[i] = true;
+                return;
+            }
+            yi_mul[i] = ys_mul;
+            ys_mul = ys_mul * &elements[i].0.y;
+        });
+
+        // ys_inv = 1/ys_mul
+        let mut ys_inv = ys_mul.inverse().expect("ys_mul is not zero");
+
+        for i in (0..elements.len()).rev().step_by(1) {
+            if zeroes[i] {
+                continue;
+            }
+            // y_inv = 1/yi
+            let y_inv = yi_mul[i] * &ys_inv;
+            ys_inv = ys_inv * &elements[i].0.y;
+            let _ = (elements[i].0.x * &y_inv).serialize_uncompressed(&mut hashs[i][..]);
+        }
+        hashs
     }
 }
 
@@ -468,13 +506,35 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn batch_elements_to_hash_commitments() {
+    fn batch_elements_to_hash_bytes() {
+        let a_vec = vec![
+            (Element::prime_subgroup_generator() * Fr::from(1111)),
+            (Element::prime_subgroup_generator() * Fr::from(2222)),
+        ];
+
+        let c_vec = a_vec
+            .iter()
+            .map(|e| e.to_bytes_uncompressed())
+            .collect::<Vec<_>>();
+
+        let hash_bytes = Element::hash_commitments(&c_vec);
+
+        for i in 0..a_vec.len() {
+            let mut bytes = [0 as u8; 32];
+            let x = a_vec[i].0.x * &a_vec[i].0.y.inverse().unwrap();
+            let _ = x.serialize_uncompressed(&mut bytes[..]);
+            assert_eq!(bytes, hash_bytes[i]);
+        }
+    }
+
+    #[test]
+    fn batch_elements_to_commitments() {
         let a_vec = vec![
             (Element::prime_subgroup_generator() * Fr::from(3333)),
             (Element::prime_subgroup_generator() * Fr::from(4444)),
         ];
 
-        let hash_bytes = Element::batch_elements_to_commitments(&a_vec);
+        let hash_bytes = Element::batch_to_commitments(&a_vec);
 
         for i in 0..a_vec.len() {
             let mut bytes = [0 as u8; 64];
