@@ -2,7 +2,7 @@ pub mod msm;
 pub mod trait_impls;
 
 mod element;
-use ark_ed_on_bls12_381_bandersnatch::Fq;
+pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, Element, Fr};
 pub mod salt_committer;
@@ -18,7 +18,10 @@ mod scalar_multi_asm;
 // This reexport allows us to avoid that.
 pub use trait_defs::*;
 pub mod trait_defs {
-    pub use ark_ff::{batch_inversion, batch_inversion_and_mul, Field, One, PrimeField, Zero};
+    pub use ark_ff::{
+        batch_inversion, batch_inversion_and_mul, serial_batch_inversion_and_mul, Field, One,
+        PrimeField, Zero,
+    };
     pub use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 }
 

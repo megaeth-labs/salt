@@ -1,12 +1,13 @@
-use ark_ec::{twisted_edwards::TECurveConfig, Group, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{batch_inversion, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use timetrace_ffi::*;
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
 #[derive(Debug, Clone, Copy, Eq)]
-pub struct Element(pub(crate) EdwardsProjective);
+pub struct Element(pub EdwardsProjective);
 
 impl PartialEq for Element {
     fn eq(&self, other: &Self) -> bool {
@@ -168,31 +169,56 @@ impl Element {
         scalars
     }
 
-    pub fn batch_map_to_scalar_field2(elements: &[Element]) -> Vec<Fr> {
+    // serial optimized version
+    pub fn batch_map_to_scalar_field2(elements: Vec<[u8; 64]>) -> Vec<Fr> {
+        use ark_ff::PrimeField;
+
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
+            .into_iter()
+            .map(|e| {
+                let e = Element::from_bytes_unchecked_uncompressed(e);
+                (e.0.x, e.0.y)
+            })
+            .unzip();
+
+        batch_inversion_op(&mut ys);
+
+        ys.iter_mut().zip(xs.iter()).for_each(|(y, x)| {
+            *y *= x;
+        });
+
+        ys.iter()
+            .map(|e| {
+                let mut bytes = [0u8; 32];
+                e.serialize_compressed(&mut bytes[..])
+                    .expect("could not serialize point into a 32 byte array");
+                Fr::from_le_bytes_mod_order(&bytes)
+            })
+            .collect()
+    }
+
+    pub fn batch_map_to_scalar_field3(elements: Vec<[u8; 64]>) -> Vec<Fr> {
         use ark_ff::PrimeField;
         use rayon::prelude::*;
 
-        // Step 1: Collect y coordinates
-        let mut x_div_y: Vec<_> = elements.par_iter().map(|element| element.0.y).collect();
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
+            .into_par_iter()
+            .map(|e| {
+                let a = Element::from_bytes_unchecked_uncompressed(e);
+                (a.0.x, a.0.y)
+            })
+            .unzip();
 
-        // Step 2: Batch inversion (this is already optimized internally)
-        batch_inversion(&mut x_div_y);
+        batch_inversion(&mut ys);
 
-        // Step 3: Multiply with x coordinates in parallel
-        x_div_y
-            .par_iter_mut()
-            .zip(elements.par_iter())
-            .for_each(|(y_inv, element)| {
-                *y_inv *= element.0.x;
-            });
+        ys.par_iter_mut().zip(xs.par_iter()).for_each(|(y, x)| {
+            *y *= x;
+        });
 
-        // Step 4: Convert to scalars in parallel
-        x_div_y
-            .par_iter()
-            .map(|element| {
+        ys.par_iter()
+            .map(|e| {
                 let mut bytes = [0u8; 32];
-                element
-                    .serialize_compressed(&mut bytes[..])
+                e.serialize_compressed(&mut bytes[..])
                     .expect("could not serialize point into a 32 byte array");
                 Fr::from_le_bytes_mod_order(&bytes)
             })
@@ -232,6 +258,42 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         .expect("number of bases should equal number of scalars");
 
     Element(result)
+}
+
+pub fn batch_inversion_op(v: &mut [Fq]) {
+    // Montgomery’s Trick and Fast Implementation of Masked AES
+    // Genelle, Prouff and Quisquater
+    // Section 3.2
+    // but with an optimization to multiply every element in the returned vector by
+    // coeff
+
+    // First pass: compute [a, ab, abc, ...]
+
+    let mut prod = v.to_vec();
+
+    let mut tmp = v[0];
+
+    for i in 1..v.len() {
+        tmp *= v[i];
+        prod[i] = tmp;
+    }
+
+    // Invert `tmp`.
+    tmp = tmp.inverse().unwrap(); // Guaranteed to be nonzero.
+
+    // Second pass: iterate backwards to compute inverses
+    for (f, s) in v
+        .iter_mut()
+        // Backwards
+        .rev()
+        // Backwards, skip last element, fill in one for last term.
+        .zip(prod.into_iter().rev().skip(1).chain(Some(Fq::one())))
+    {
+        // tmp := tmp * f; f := tmp * s = 1/f
+        let new_tmp = tmp * *f;
+        *f = tmp * &s;
+        tmp = new_tmp;
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +348,7 @@ mod tests {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ark_ff::AdditiveGroup;
     use ark_std::{test_rng, UniformRand};
     use std::time::Instant;
 
@@ -403,7 +466,8 @@ mod test {
 
     #[test]
     fn benchmark_batch_map() {
-        let sizes = vec![100_000, 200_000, 300_000, 400_000, 500_000];
+        let sizes = vec![256, 100_000, 1000_000];
+        let chunk_sizes = vec![1024, 2048, 4096, 8192];
 
         println!("\nBenchmarking batch_map_to_scalar_field vs batch_map_to_scalar_field2:");
         println!("Size\t\tSequential(μs)\tParallel(μs)\tSpeedup");
@@ -411,15 +475,18 @@ mod test {
 
         for size in sizes {
             let elements = generate_random_elements(size);
-
-            // Warm up
-            let _ = Element::batch_map_to_scalar_field(&elements[..10]);
-            let _ = Element::batch_map_to_scalar_field2(&elements[..10]);
+            let elements_bytes = elements
+                .iter()
+                .map(|e| e.to_bytes_uncompressed())
+                .collect::<Vec<_>>();
 
             // Multiple iterations for more accurate timing
             const ITERATIONS: u32 = 5;
             let mut seq_total = 0;
-            let mut par_total = 0;
+            let mut par_total_1 = 0;
+            let mut par_total_2 = 0;
+            let mut par_total_4 = 0;
+            let mut par_total_8 = 0;
 
             for _ in 0..ITERATIONS {
                 // Test sequential version
@@ -429,26 +496,71 @@ mod test {
 
                 // Test parallel version
                 let start = Instant::now();
-                let par_result = Element::batch_map_to_scalar_field2(&elements);
-                par_total += start.elapsed().as_micros();
+                let par_result_1 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
+                par_total_1 += start.elapsed().as_micros();
+
+                let start = Instant::now();
+                let par_result_2 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
+                par_total_2 += start.elapsed().as_micros();
+
+                let start = Instant::now();
+                let par_result_4 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
+                par_total_4 += start.elapsed().as_micros();
+
+                let start = Instant::now();
+                let par_result_8 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
+                par_total_8 += start.elapsed().as_micros();
 
                 // Verify results match
-                assert_eq!(seq_result, par_result);
+                assert_eq!(seq_result, par_result_1);
+                assert_eq!(seq_result, par_result_2);
+                assert_eq!(seq_result, par_result_4);
+                assert_eq!(seq_result, par_result_8);
             }
 
             let seq_avg = seq_total as f64 / ITERATIONS as f64;
-            let par_avg = par_total as f64 / ITERATIONS as f64;
+            let par_avg_1 = par_total_1 as f64 / ITERATIONS as f64;
+            let par_avg_2 = par_total_2 as f64 / ITERATIONS as f64;
+            let par_avg_4 = par_total_4 as f64 / ITERATIONS as f64;
+            let par_avg_8 = par_total_8 as f64 / ITERATIONS as f64;
 
             // Calculate speedup
-            let speedup = if par_avg > 0.0 {
-                seq_avg / par_avg
+            let speedup_1 = if par_avg_1 > 0.0 {
+                seq_avg / par_avg_1
+            } else {
+                f64::INFINITY
+            };
+
+            let speedup_2 = if par_avg_2 > 0.0 {
+                seq_avg / par_avg_2
+            } else {
+                f64::INFINITY
+            };
+
+            let speedup_4 = if par_avg_4 > 0.0 {
+                seq_avg / par_avg_4
+            } else {
+                f64::INFINITY
+            };
+
+            let speedup_8 = if par_avg_8 > 0.0 {
+                seq_avg / par_avg_8
             } else {
                 f64::INFINITY
             };
 
             println!(
-                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x",
-                size, seq_avg, par_avg, speedup
+                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x",
+                size,
+                seq_avg,
+                par_avg_1,
+                speedup_1,
+                par_avg_2,
+                speedup_2,
+                par_avg_4,
+                speedup_4,
+                par_avg_8,
+                speedup_8
             );
         }
     }

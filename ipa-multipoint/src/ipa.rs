@@ -3,10 +3,11 @@ use crate::crs::CRS;
 use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
+use crate::{IOError, IOErrorKind, IOResult};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
 use itertools::Itertools;
-
-use crate::{IOError, IOErrorKind, IOResult};
+use rayon::prelude::*;
+use timetrace_ffi::*;
 
 use std::iter;
 
@@ -82,11 +83,15 @@ pub fn create(
     // This is the z in f(z)
     input_point: Fr,
 ) -> IPAProof {
+    tt_record!("01-04-00-16-02-00");
+
     transcript.domain_sep(b"ipa");
 
     let mut a = &mut a_vec[..];
     let mut b = &mut b_vec[..];
     let mut G = &mut crs.G[..];
+
+    tt_record!("01-04-00-16-02-01");
 
     let n = G.len();
 
@@ -103,15 +108,122 @@ pub fn create(
     transcript.append_point(b"C", &a_comm);
     transcript.append_scalar(b"input point", &input_point);
     transcript.append_scalar(b"output point", &output_point);
+    tt_record!("01-04-00-16-02-02");
 
     let w = transcript.challenge_scalar(b"w");
     let Q = crs.Q * w; // XXX: It would not hurt to add this augmented point into the transcript
 
+    tt_record!("01-04-00-16-02-03");
     let num_rounds = log2(n);
+    tt_record!("01-04-00-16-02-04");
 
     let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
     let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+    tt_record!("01-04-00-16-02-05");
 
+    for _k in 0..num_rounds {
+        let (a_L, a_R) = halve(a);
+        let (b_L, b_R) = halve(b);
+        let (G_L, G_R) = halve(G);
+
+        let left_compute = || -> Element {
+            let z_L = inner_product(a_R, b_L);
+
+            let L = slow_vartime_multiscalar_mul(
+                a_R.iter().chain(iter::once(&z_L)),
+                G_L.iter().chain(iter::once(&Q)),
+            );
+
+            L_vec.push(L);
+            L
+        };
+
+        let right_compute = || -> Element {
+            let z_R = inner_product(a_L, b_R);
+
+            let R = slow_vartime_multiscalar_mul(
+                a_L.iter().chain(iter::once(&z_R)),
+                G_R.iter().chain(iter::once(&Q)),
+            );
+
+            R_vec.push(R);
+            R
+        };
+
+        let (L, R) = rayon::join(left_compute, right_compute);
+
+        transcript.append_point(b"L", &L);
+
+        transcript.append_point(b"R", &R);
+
+        let x = transcript.challenge_scalar(b"x");
+        let x_inv = x.inverse().unwrap();
+
+        for i in 0..a_L.len() {
+            a_L[i] += x * a_R[i];
+            b_L[i] += x_inv * b_R[i];
+            G_L[i] += G_R[i] * x_inv;
+        }
+
+        a = a_L;
+        b = b_L;
+        G = G_L;
+    }
+
+    tt_record!("01-04-00-16-02-06");
+    IPAProof {
+        L_vec,
+        R_vec,
+        a: a[0],
+    }
+}
+
+pub fn create_backup(
+    transcript: &mut Transcript,
+    mut crs: CRS,
+    mut a_vec: Vec<Fr>,
+    a_comm: Element,
+    mut b_vec: Vec<Fr>,
+    // This is the z in f(z)
+    input_point: Fr,
+) -> IPAProof {
+    tt_record!("01-04-00-16-02-00");
+
+    transcript.domain_sep(b"ipa");
+
+    let mut a = &mut a_vec[..];
+    let mut b = &mut b_vec[..];
+    let mut G = &mut crs.G[..];
+
+    tt_record!("01-04-00-16-02-01");
+
+    let n = G.len();
+
+    // All of the input vectors must have the same length.
+    assert_eq!(G.len(), n);
+    assert_eq!(a.len(), n);
+    assert_eq!(b.len(), n);
+
+    // All of the input vectors must have a length that is a power of two.
+    assert!(n.is_power_of_two());
+
+    // transcript.append_u64(b"n", n as u64);
+    let output_point = inner_product(a, b);
+    transcript.append_point(b"C", &a_comm);
+    transcript.append_scalar(b"input point", &input_point);
+    transcript.append_scalar(b"output point", &output_point);
+    tt_record!("01-04-00-16-02-02");
+
+    let w = transcript.challenge_scalar(b"w");
+    let Q = crs.Q * w; // XXX: It would not hurt to add this augmented point into the transcript
+
+    tt_record!("01-04-00-16-02-03");
+    let num_rounds = log2(n);
+    tt_record!("01-04-00-16-02-04");
+
+    let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+    let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+    tt_record!("01-04-00-16-02-05");
     for _k in 0..num_rounds {
         let (a_L, a_R) = halve(a);
         let (b_L, b_R) = halve(b);
@@ -148,12 +260,14 @@ pub fn create(
         G = G_L;
     }
 
+    tt_record!("01-04-00-16-02-06");
     IPAProof {
         L_vec,
         R_vec,
         a: a[0],
     }
 }
+
 // Halves the slice that is passed in
 // Assumes that the slice has an even length
 fn halve<T>(scalars: &mut [T]) -> (&mut [T], &mut [T]) {

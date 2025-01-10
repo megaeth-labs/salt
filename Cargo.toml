@@ -5,7 +5,8 @@ members = [
     "verkle-trie",
     "verkle-spec",
     "ipa-multipoint",
-    "banderwagon", "ffi_interface",
+    "banderwagon",
+    "ffi_interface",
 ]
 resolver = "2"
 
@@ -27,3 +28,9 @@ opt-level = 3
 debug-assertions = true
 incremental = true
 debug = true
+
+[patch.crates-io]
+ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/flyq/algebra.git", branch = "master" }
+ark-ff = { git = "https://github.com/flyq/algebra.git", branch = "master" }
+ark-ec = { git = "https://github.com/flyq/algebra.git", branch = "master" }
+ark-serialize = { git = "https://github.com/flyq/algebra.git", branch = "master" }

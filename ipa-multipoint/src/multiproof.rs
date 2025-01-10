@@ -5,14 +5,17 @@ use crate::crs::CRS;
 use crate::ipa::{slow_vartime_multiscalar_mul, IPAProof};
 use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 
-use crate::math_utils::powers_of;
+use crate::math_utils::{powers_of, powers_of_par};
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 use banderwagon::{trait_defs::*, Element, Fr};
+use dashmap::DashMap;
 use rayon::prelude::*;
+use timetrace_ffi::*;
 
 pub struct MultiPoint;
 
@@ -34,6 +37,8 @@ impl From<ProverQuery> for VerifierQuery {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VerifierQuery {
     pub commitment: Element,
     pub point: Fr,
@@ -41,16 +46,51 @@ pub struct VerifierQuery {
 }
 
 //XXX: change to group_prover_queries_by_point
+#[inline(always)]
 fn group_prover_queries<'a>(
     prover_queries: &'a [ProverQuery],
     challenges: &'a [Fr],
-) -> HashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
+) -> FxHashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
     // We want to group all of the polynomials which are evaluated at the same point together
-    use itertools::Itertools;
+    // use itertools::Itertools;
+    // prover_queries
+    //     .iter()
+    //     .zip(challenges.iter())
+    //     .into_group_map_by(|x| x.0.point)
+    let mut res = FxHashMap::default();
+
     prover_queries
         .iter()
         .zip(challenges.iter())
-        .into_group_map_by(|x| x.0.point)
+        .for_each(|(key, val)| {
+            res.entry(key.point)
+                .or_insert_with(Vec::new)
+                .push((key, val));
+        });
+
+    res
+}
+#[inline(always)]
+fn group_prover_queries2<'a>(
+    prover_queries: &'a [ProverQuery],
+    challenges: &'a [Fr],
+) -> Vec<(usize, Vec<(&'a ProverQuery, &'a Fr)>)> {
+    // We want to group all of the polynomials which are evaluated at the same point together
+    // use itertools::Itertools;
+    // prover_queries
+    //     .iter()
+    //     .zip(challenges.iter())
+    //     .into_group_map_by(|x| x.0.point)
+    let zipped: Vec<(_, _)> = prover_queries
+        .par_iter()
+        .zip(challenges.par_iter())
+        .collect();
+
+    zipped
+        .par_chunk_by(|a, b| a.0.point == b.0.point)
+        .into_par_iter()
+        .map(|chunk| (chunk[0].0.point, chunk.to_vec()))
+        .collect()
 }
 
 impl MultiPoint {
@@ -60,40 +100,50 @@ impl MultiPoint {
         transcript: &mut Transcript,
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
+        tt_record!("01-04-00-01");
+
         transcript.domain_sep(b"multiproof");
+
+        tt_record!("01-04-00-02");
+
         // 1. Compute `r`
         //
         // Add points and evaluations
-        transcript.append_raw(&get_state_prover(&queries));
+        get_state_prover(transcript, &queries);
+
+        tt_record!("01-04-00-03");
 
         let r = transcript.challenge_scalar(b"r");
-        let powers_of_r = powers_of(r, queries.len());
+        let powers_of_r = powers_of_par(r, queries.len());
+
+        tt_record!("01-04-00-04");
 
         let grouped_queries = group_prover_queries(&queries, &powers_of_r);
 
+        tt_record!("01-04-00-05");
+        let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
+        tt_record!("01-04-00-05-1");
+
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
-            .into_par_iter()
-            .map(|(point, queries_challenges)| {
-                let mut aggregated_polynomial = vec![Fr::zero(); crs.n];
+            .par_chunks(8)
+            .flat_map(|chunk| {
+                chunk
+                    .into_iter()
+                    .map(|(point, queries_challenges)| {
+                        let aggregated_polynomial = queries_challenges
+                            .into_iter()
+                            .map(|(query, challenge)| query.poly.clone() * *challenge)
+                            .reduce(|acc, x| acc + x)
+                            .unwrap();
 
-                let scaled_lagrange_polynomials =
-                    queries_challenges.into_iter().map(|(query, challenge)| {
-                        // scale the polynomial by the challenge
-                        query.poly.values().iter().map(move |x| *x * challenge)
-                    });
-
-                for poly_mul_challenge in scaled_lagrange_polynomials {
-                    for (result, scaled_poly) in
-                        aggregated_polynomial.iter_mut().zip(poly_mul_challenge)
-                    {
-                        *result += scaled_poly;
-                    }
-                }
-
-                (point, LagrangeBasis::new(aggregated_polynomial))
+                        (*point, aggregated_polynomial)
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        tt_record!("01-04-00-06");
 
         // Compute g(X)
         //
@@ -102,8 +152,15 @@ impl MultiPoint {
             .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
             .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
+        tt_record!("01-04-00-07");
+
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
+
+        tt_record!("01-04-00-08");
+
         transcript.append_point(b"D", &g_x_comm);
+
+        tt_record!("01-04-00-09");
 
         // 2. Compute g_1(t)
         //
@@ -111,12 +168,18 @@ impl MultiPoint {
         let t = transcript.challenge_scalar(b"t");
         //
         //
+        tt_record!("01-04-00-10");
 
         let mut g1_den: Vec<_> = aggregated_queries
             .par_iter()
             .map(|(z_i, _)| t - Fr::from(*z_i as u128))
             .collect();
-        batch_inversion(&mut g1_den);
+        tt_record!("01-04-00-11");
+
+        println!("g1_den: {:?}", g1_den.len());
+        serial_batch_inversion_and_mul(&mut g1_den, &Fr::one());
+
+        tt_record!("01-04-00-12");
 
         let g1_x = aggregated_queries
             .into_par_iter()
@@ -132,16 +195,27 @@ impl MultiPoint {
             })
             .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
+        tt_record!("01-04-00-13");
+
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
+
+        tt_record!("01-04-00-14");
+
         transcript.append_point(b"E", &g1_comm);
+
+        tt_record!("01-04-00-15");
 
         //3. Compute g_1(X) - g(X)
         // This is the polynomial, we will create an opening for
         let g_3_x = &g1_x - &g_x;
         let g_3_x_comm = g1_comm - g_x_comm;
 
+        tt_record!("01-04-00-16");
+
         // 4. Compute the IPA for g_3
         let g_3_ipa = open_point_outside_of_domain(crs, precomp, transcript, g_3_x, g_3_x_comm, t);
+
+        tt_record!("01-04-00-17");
 
         MultiPointProof {
             open_proof: g_3_ipa,
@@ -150,103 +224,92 @@ impl MultiPoint {
     }
 }
 
-fn get_state_prover(queries: &[ProverQuery]) -> Vec<u8> {
+#[inline(always)]
+fn get_state_prover(transcript: &mut Transcript, queries: &[ProverQuery]) {
     const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
     let total_size = queries.len() * BYTES_PER_QUERY;
+
+    let origin = transcript.state.len();
+    transcript.state.resize(origin + total_size, 0);
 
     // Pre-allocate chunks
     let chunk_size =
         (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
-    let chunks: Vec<_> = queries
-        .chunks(chunk_size)
-        .map(|chunk| Vec::with_capacity(chunk.len() * BYTES_PER_QUERY))
-        .collect();
 
     // Process chunks in parallel
-    let chunks = chunks
-        .into_par_iter()
+    transcript.state[origin..]
+        .par_chunks_mut(chunk_size * BYTES_PER_QUERY)
         .zip(queries.par_chunks(chunk_size))
-        .map(|(mut chunk_result, queries_chunk)| {
-            for p in queries_chunk {
-                // Commitment
-                chunk_result.push(b'C');
+        .for_each(|(chunk_res, queries_chunk)| {
+            for (i, p) in queries_chunk.iter().enumerate() {
+                let index = i * BYTES_PER_QUERY;
+                chunk_res[index] = b'C';
 
+                // Commitment
                 p.commitment
-                    .serialize_compressed(&mut chunk_result)
+                    .serialize_compressed(&mut chunk_res[index + 1..index + 33])
                     .unwrap();
 
                 // Point
-                chunk_result.push(b'z');
+                chunk_res[index + 33] = b'z';
 
                 let point_scalar = Fr::from(p.point as u128);
                 point_scalar
-                    .serialize_compressed(&mut chunk_result)
+                    .serialize_compressed(&mut chunk_res[index + 34..index + 66])
                     .unwrap();
 
                 // Result
-                chunk_result.push(b'y');
+                chunk_res[index + 66] = b'y';
 
-                p.result.serialize_compressed(&mut chunk_result).unwrap();
+                p.result
+                    .serialize_compressed(&mut chunk_res[index + 67..index + 99])
+                    .unwrap();
             }
-            chunk_result
-        })
-        .collect::<Vec<_>>();
-
-    // Combine all chunks
-    let mut result = Vec::with_capacity(total_size);
-    chunks.into_iter().for_each(|chunk| {
-        result.extend(chunk);
-    });
-
-    result
+        });
 }
 
-fn get_state_verifier(queries: &[VerifierQuery]) -> Vec<u8> {
+fn get_state_verifier(transcript: &mut Transcript, queries: &[VerifierQuery]) {
     const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
     let total_size = queries.len() * BYTES_PER_QUERY;
+
+    let origin = transcript.state.len();
+    transcript.state.resize(origin + total_size, 0);
 
     // Pre-allocate chunks
     let chunk_size =
         (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
-    let chunks: Vec<_> = queries
-        .chunks(chunk_size)
-        .map(|chunk| Vec::with_capacity(chunk.len() * BYTES_PER_QUERY))
-        .collect();
 
     // Process chunks in parallel
-    let chunks = chunks
-        .into_par_iter()
+    transcript.state[origin..]
+        .par_chunks_mut(chunk_size * BYTES_PER_QUERY)
         .zip(queries.par_chunks(chunk_size))
-        .map(|(mut chunk_result, queries_chunk)| {
-            for p in queries_chunk {
+        .for_each(|(chunk_res, queries_chunk)| {
+            for (i, p) in queries_chunk.iter().enumerate() {
                 // Commitment
-                chunk_result.push(b'C');
+                let index = i * BYTES_PER_QUERY;
+                chunk_res[index] = b'C';
 
                 p.commitment
-                    .serialize_compressed(&mut chunk_result)
+                    .serialize_compressed(&mut chunk_res[index + 1..index + 33])
                     .unwrap();
 
                 // Point
-                chunk_result.push(b'z');
 
-                p.point.serialize_compressed(&mut chunk_result).unwrap();
+                chunk_res[index + 33] = b'z';
+
+                let point_scalar = p.point;
+                point_scalar
+                    .serialize_compressed(&mut chunk_res[index + 34..index + 66])
+                    .unwrap();
 
                 // Result
-                chunk_result.push(b'y');
+                chunk_res[index + 66] = b'y';
 
-                p.result.serialize_compressed(&mut chunk_result).unwrap();
+                p.result
+                    .serialize_compressed(&mut chunk_res[index + 67..index + 99])
+                    .unwrap();
             }
-            chunk_result
-        })
-        .collect::<Vec<_>>();
-
-    // Combine all chunks
-    let mut result = Vec::with_capacity(total_size);
-    chunks.into_iter().for_each(|chunk| {
-        result.extend(chunk);
-    });
-
-    result
+        });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,7 +355,7 @@ impl MultiPointProof {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        transcript.append_raw(&get_state_verifier(queries));
+        get_state_verifier(transcript, queries);
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of(r, queries.len());
@@ -346,9 +409,17 @@ pub(crate) fn open_point_outside_of_domain(
     commitment: Element,
     z_i: Fr,
 ) -> IPAProof {
+    tt_record!("01-04-00-16-00");
+
     let a = polynomial.values().to_vec();
+    tt_record!("01-04-00-16-01");
+
     let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, z_i);
-    crate::ipa::create(transcript, crs, a, commitment, b, z_i)
+    tt_record!("01-04-00-16-02");
+
+    let a = crate::ipa::create(transcript, crs, a, commitment, b, z_i);
+    tt_record!("01-04-00-16-03");
+    a
 }
 
 #[test]
@@ -652,62 +723,10 @@ mod tests {
         };
 
         let state2 = get_state2(&vec![prover_query.clone()]);
-        let state = get_state_prover(&vec![prover_query]);
+        let mut transcript = Transcript::new(b"");
+        get_state_prover(&mut transcript, &vec![prover_query]);
+        let state = transcript.state;
 
         assert_eq!(state, state2);
-    }
-
-    #[test]
-    fn benchmark_get_state() {
-        let sizes = vec![100_000, 200_000, 300_000, 400_000, 500_000];
-
-        println!("\nBenchmarking get_state2 vs get_state:");
-        println!("Size\t\tget_state2(μs)\tget_state(μs)\tSpeedup");
-        println!("------------------------------------------------");
-
-        for size in sizes {
-            let queries = generate_test_queries(size);
-
-            // Warm up
-            let _ = get_state2(&queries[..10]);
-
-            let _ = get_state_prover(&queries[..10]);
-
-            // Multiple iterations for more accurate timing
-            const ITERATIONS: u32 = 3;
-            let mut state2_total = 0;
-            let mut state1_total = 0;
-
-            for _ in 0..ITERATIONS {
-                // Test get_state
-                let start = Instant::now();
-                let state1 = get_state_prover(&queries);
-                state1_total += start.elapsed().as_micros();
-
-                // Test get_state2
-                let start = Instant::now();
-                let state2 = get_state2(&queries);
-                state2_total += start.elapsed().as_micros();
-
-                // Verify results match
-                assert_eq!(state1.len(), state2.len());
-                assert_eq!(state1, state2);
-            }
-
-            let state1_avg = state1_total as f64 / ITERATIONS as f64;
-            let state2_avg = state2_total as f64 / ITERATIONS as f64;
-
-            // Calculate speedup
-            let speedup = if state2_avg > 0.0 {
-                state2_avg / state1_avg
-            } else {
-                f64::INFINITY
-            };
-
-            println!(
-                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x",
-                size, state2_avg, state1_avg, speedup
-            );
-        }
     }
 }

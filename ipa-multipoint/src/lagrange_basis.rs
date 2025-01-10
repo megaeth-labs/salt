@@ -5,7 +5,7 @@ use std::{
     ops::{Add, Mul, Sub},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LagrangeBasis {
     // We assume that the domain starts at zero,
     // so we only need to supply the upperbound
@@ -29,10 +29,37 @@ impl Add<LagrangeBasis> for LagrangeBasis {
         self
     }
 }
+
+impl Add<&LagrangeBasis> for LagrangeBasis {
+    type Output = LagrangeBasis;
+
+    fn add(mut self, rhs: &LagrangeBasis) -> Self::Output {
+        if self.domain == 0 {
+            return rhs.clone();
+        } else if rhs.domain == 0 {
+            return self;
+        }
+        self.values
+            .iter_mut()
+            .zip(rhs.values.iter())
+            .for_each(|(lhs, rhs)| *lhs += rhs);
+        self
+    }
+}
+
 impl Mul<Fr> for LagrangeBasis {
     type Output = LagrangeBasis;
 
     fn mul(mut self, rhs: Fr) -> Self::Output {
+        self.values.iter_mut().for_each(|values| *values *= rhs);
+        self
+    }
+}
+
+impl Mul<&Fr> for LagrangeBasis {
+    type Output = LagrangeBasis;
+
+    fn mul(mut self, rhs: &Fr) -> Self::Output {
         self.values.iter_mut().for_each(|values| *values *= rhs);
         self
     }

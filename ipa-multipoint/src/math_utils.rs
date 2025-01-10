@@ -1,9 +1,12 @@
 use banderwagon::{trait_defs::*, Fr};
+use rayon::prelude::*;
+
 /// Computes the inner product between two scalar vectors
 pub fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {
     a.iter().zip(b.iter()).map(|(a, b)| *a * *b).sum()
 }
 
+#[inline(always)]
 pub fn powers_of(point: Fr, n: usize) -> Vec<Fr> {
     let mut powers = Vec::with_capacity(n);
     powers.push(Fr::one());
@@ -11,6 +14,30 @@ pub fn powers_of(point: Fr, n: usize) -> Vec<Fr> {
     for i in 1..n {
         powers.push(powers[i - 1] * point);
     }
+    powers
+}
+
+#[inline(always)]
+pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
+    let mut powers = vec![Fr::zero(); n];
+
+    // Compute base powers for each chunk
+    let chunk_size = 8192;
+
+    // to handle the case where n is not a multiple of chunk_size
+    let len = (n + chunk_size - 1) / chunk_size;
+    let base_powers = powers_of(point.pow([chunk_size as u64]), len);
+
+    powers
+        .par_chunks_mut(chunk_size)
+        .zip(base_powers)
+        .for_each(|(chunk, base)| {
+            chunk[0] = base;
+            for i in 1..chunk.len() {
+                chunk[i] = chunk[i - 1] * point;
+            }
+        });
+
     powers
 }
 
