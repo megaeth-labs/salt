@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 use crate::crs::CRS;
-use crate::ipa::{slow_vartime_multiscalar_mul, IPAProof};
+use crate::ipa::{multi_scalar_mul_par, slow_vartime_multiscalar_mul, IPAProof};
 use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 
 use crate::math_utils::{powers_of, powers_of_par};
@@ -124,9 +124,12 @@ impl MultiPoint {
         let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
         tt_record!("01-04-00-05-1");
 
+        let chunk_size = (grouped_queries.len() + rayon::current_num_threads() - 1)
+            / rayon::current_num_threads();
+
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
-            .par_chunks(8)
+            .par_chunks(chunk_size)
             .flat_map(|chunk| {
                 chunk
                     .into_iter()
@@ -176,7 +179,6 @@ impl MultiPoint {
             .collect();
         tt_record!("01-04-00-11");
 
-        println!("g1_den: {:?}", g1_den.len());
         serial_batch_inversion_and_mul(&mut g1_den, &Fr::one());
 
         tt_record!("01-04-00-12");
@@ -351,29 +353,44 @@ impl MultiPointProof {
         queries: &[VerifierQuery],
         transcript: &mut Transcript,
     ) -> bool {
+        tt_record!("02-07-01-00");
+
         transcript.domain_sep(b"multiproof");
         // 1. Compute `r`
         //
         // Add points and evaluations
+        tt_record!("02-07-01-01");
+
         get_state_verifier(transcript, queries);
 
+        tt_record!("02-07-01-02");
+
         let r = transcript.challenge_scalar(b"r");
-        let powers_of_r = powers_of(r, queries.len());
+        let powers_of_r = powers_of_par(r, queries.len());
+
+        tt_record!("02-07-01-03");
 
         // 2. Compute `t`
         transcript.append_point(b"D", &self.g_x_comm);
         let t = transcript.challenge_scalar(b"t");
 
+        tt_record!("02-07-01-04");
+
         // 3. Compute g_2(t)
         //
         let mut g2_den: Vec<_> = queries.par_iter().map(|query| t - query.point).collect();
+
+        tt_record!("02-07-01-05");
         batch_inversion(&mut g2_den);
 
+        tt_record!("02-07-01-06");
         let helper_scalars: Vec<_> = powers_of_r
             .into_par_iter()
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
+
+        tt_record!("02-07-01-07");
 
         let g2_t: Fr = helper_scalars
             .par_iter()
@@ -381,17 +398,26 @@ impl MultiPointProof {
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
+        tt_record!("02-07-01-08");
+
         //4. Compute [g_1(X)] = E
         let comms: Vec<_> = queries.par_iter().map(|query| query.commitment).collect();
-        let g1_comm = slow_vartime_multiscalar_mul(helper_scalars.iter(), comms.iter());
 
+        tt_record!("02-07-01-09");
+        let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
+
+        tt_record!("02-07-01-10");
         transcript.append_point(b"E", &g1_comm);
 
         // E - D
         let g3_comm = g1_comm - self.g_x_comm;
 
+        tt_record!("02-07-01-11");
+
         // Check IPA
         let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t); // TODO: we could put this as a method on PrecomputedWeights
+
+        tt_record!("02-07-01-12");
 
         self.open_proof
             .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t)

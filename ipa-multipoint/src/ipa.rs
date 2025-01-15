@@ -502,6 +502,17 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     multi_scalar_mul(&points, &scalars)
 }
 
+pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
+    let chunk_size =
+        (bases.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+
+    bases
+        .par_chunks(chunk_size)
+        .zip(scalars.par_chunks(chunk_size))
+        .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
+        .sum()
+}
+
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
     let mut challenges: Vec<Fr> = Vec::with_capacity(proof.L_vec.len());
 
