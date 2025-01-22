@@ -76,17 +76,14 @@ impl Committer {
         let tables = {
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
             let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
-            if tables_ptr.is_null() {
-                panic!("failed to allocate tables");
-            }
 
             for i in 0..src_tables.len() {
-                let src_ptr = src_tables[i].as_ptr();
                 let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
                 let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
-                if dst_ptr.is_null() {
-                    panic!("Failed: allocating huge page for precomputed table");
+                if tables_ptr.is_null() || dst_ptr.is_null() {
+                    panic!("Failed to allocate hugepages for the ECMUL precompute table.");
                 }
+                let src_ptr = src_tables[i].as_ptr();
                 assert!(
                     src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
                     "Source pointer is not aligned"
