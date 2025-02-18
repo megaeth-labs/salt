@@ -2,7 +2,6 @@ use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBase
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{batch_inversion, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use timetrace_ffi::*;
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 

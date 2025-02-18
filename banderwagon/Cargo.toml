@@ -16,9 +16,6 @@ ark-serialize = { git = "https://github.com/flyq/algebra.git", branch = "master"
 rayon = "*"
 hugepage-rs = "0.1.0"
 
-timetrace-ffi = { git = "ssh://git@github.com/megaeth-labs/timetrace-ffi", branch = "main", features = [
-    "enable",
-] }
 
 [dev-dependencies]
 hex = "0.4.3"

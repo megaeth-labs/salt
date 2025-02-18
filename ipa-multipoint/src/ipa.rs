@@ -7,7 +7,6 @@ use crate::{IOError, IOErrorKind, IOResult};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
 use itertools::Itertools;
 use rayon::prelude::*;
-use timetrace_ffi::*;
 
 use std::iter;
 
@@ -83,15 +82,11 @@ pub fn create(
     // This is the z in f(z)
     input_point: Fr,
 ) -> IPAProof {
-    tt_record!("01-04-00-16-02-00");
-
     transcript.domain_sep(b"ipa");
 
     let mut a = &mut a_vec[..];
     let mut b = &mut b_vec[..];
     let mut G = &mut crs.G[..];
-
-    tt_record!("01-04-00-16-02-01");
 
     let n = G.len();
 
@@ -108,18 +103,14 @@ pub fn create(
     transcript.append_point(b"C", &a_comm);
     transcript.append_scalar(b"input point", &input_point);
     transcript.append_scalar(b"output point", &output_point);
-    tt_record!("01-04-00-16-02-02");
 
     let w = transcript.challenge_scalar(b"w");
     let Q = crs.Q * w; // XXX: It would not hurt to add this augmented point into the transcript
 
-    tt_record!("01-04-00-16-02-03");
     let num_rounds = log2(n);
-    tt_record!("01-04-00-16-02-04");
 
     let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
     let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
-    tt_record!("01-04-00-16-02-05");
 
     for _k in 0..num_rounds {
         let (a_L, a_R) = halve(a);
@@ -170,7 +161,6 @@ pub fn create(
         G = G_L;
     }
 
-    tt_record!("01-04-00-16-02-06");
     IPAProof {
         L_vec,
         R_vec,
@@ -187,15 +177,11 @@ pub fn create_backup(
     // This is the z in f(z)
     input_point: Fr,
 ) -> IPAProof {
-    tt_record!("01-04-00-16-02-00");
-
     transcript.domain_sep(b"ipa");
 
     let mut a = &mut a_vec[..];
     let mut b = &mut b_vec[..];
     let mut G = &mut crs.G[..];
-
-    tt_record!("01-04-00-16-02-01");
 
     let n = G.len();
 
@@ -212,18 +198,13 @@ pub fn create_backup(
     transcript.append_point(b"C", &a_comm);
     transcript.append_scalar(b"input point", &input_point);
     transcript.append_scalar(b"output point", &output_point);
-    tt_record!("01-04-00-16-02-02");
 
     let w = transcript.challenge_scalar(b"w");
     let Q = crs.Q * w; // XXX: It would not hurt to add this augmented point into the transcript
 
-    tt_record!("01-04-00-16-02-03");
     let num_rounds = log2(n);
-    tt_record!("01-04-00-16-02-04");
-
     let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
     let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
-    tt_record!("01-04-00-16-02-05");
     for _k in 0..num_rounds {
         let (a_L, a_R) = halve(a);
         let (b_L, b_R) = halve(b);
@@ -260,7 +241,6 @@ pub fn create_backup(
         G = G_L;
     }
 
-    tt_record!("01-04-00-16-02-06");
     IPAProof {
         L_vec,
         R_vec,
