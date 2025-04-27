@@ -30,7 +30,7 @@ incremental = true
 debug = true
 
 [patch.crates-io]
-ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/flyq/algebra.git", branch = "master" }
-ark-ff = { git = "https://github.com/flyq/algebra.git", branch = "master" }
-ark-ec = { git = "https://github.com/flyq/algebra.git", branch = "master" }
-ark-serialize = { git = "https://github.com/flyq/algebra.git", branch = "master" }
+ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
