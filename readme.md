@@ -34,6 +34,28 @@ sudo sysctl -w vm.nr_hugepages=1024
 ```
 Sometimes it fails because the system doesn't have enough continous physical memory. You might want to reboot in that case.
 
+## Disabling Hugepages
+
+If you don't need the performance benefits of hugepages or if your system doesn't support hugepages, you can disable this feature completely.
+
+### Using the disable-hugepages feature
+
+Hugepages are enabled by default for performance. To disable them, simply add the `disable-hugepages` feature:
+
+```toml
+[dependencies]
+ffi_interface = { version = "0.1.0", features = ["disable-hugepages"] }
+# or directly for banderwagon
+# banderwagon = { version = "0.1.0", features = ["disable-hugepages"] }
+```
+
+When building from source:
+```bash
+cargo build --features disable-hugepages
+```
+
+**Note:** The `disable-hugepages` feature takes precedence over the default hugepage support. This means that even though the default features are still enabled when you specify `features = ["disable-hugepages"]`, hugepage functionality will be completely disabled.
+
 # Verkle Trie 
 
 **This code has not been reviewed and is not safe to use in non-research capacities.**

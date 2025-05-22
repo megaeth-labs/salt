@@ -18,10 +18,7 @@ pub struct Committer {
 }
 
 impl Drop for Committer {
-    #[cfg(target_os = "macos")]
-    fn drop(&mut self) {}
-
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(feature = "disable-hugepages")))]
     fn drop(&mut self) {
         use hugepage_rs;
         use std::alloc::Layout;
@@ -41,10 +38,15 @@ impl Drop for Committer {
         std::mem::forget(std::mem::replace(&mut self.tables, Vec::new()));
         hugepage_rs::dealloc(ptr, layout);
     }
+
+    #[cfg(any(target_os = "macos", feature = "disable-hugepages"))]
+    fn drop(&mut self) {
+        // Standard drop implementation, no need for explicit deallocation
+    }
 }
 
 impl Committer {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"),not(feature = "disable-hugepages")))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         use hugepage_rs;
         use std::alloc::Layout;
@@ -107,9 +109,8 @@ impl Committer {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "disable-hugepages"))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        let table_num = bases.len();
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
