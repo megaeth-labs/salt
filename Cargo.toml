@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-reth = ["reth-codecs", "reth-primitives-traits"]
+reth = ["reth-primitives-traits"]
 
 [dependencies]
 # alloy dependencies
@@ -21,7 +21,6 @@ ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", branch
 megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
 
 # reth dependencies (optional)
-reth-codecs = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5", optional = true }
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5", optional = true }
 
 # standard dependencies

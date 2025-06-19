@@ -46,8 +46,6 @@ pub use trie::{
 
 pub mod traits;
 pub mod types;
-#[cfg(feature = "reth")]
-pub mod types4reth;
 pub use types::*;
 
 #[cfg(test)]

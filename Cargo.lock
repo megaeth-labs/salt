@@ -1548,7 +1548,6 @@ dependencies = [
  "proptest-derive",
  "rand 0.8.5",
  "rayon",
- "reth-codecs",
  "reth-primitives-traits",
  "rustc-hash",
  "serde",

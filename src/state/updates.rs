@@ -12,8 +12,6 @@ use alloy_primitives::{
 };
 use bytes::BufMut;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-#[cfg(feature = "reth")]
-use reth_codecs::{decode_varuint, encode_varuint, Compact};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -233,65 +231,6 @@ impl SaltDeltas {
     }
 }
 
-#[cfg(feature = "reth")]
-impl Compact for SaltDeltas {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        let mut len = 0;
-        len += encode_varuint(self.puts.len(), buf);
-        self.puts.iter().for_each(|(key, value)| {
-            len += key.to_compact(buf);
-            len += value.to_compact(buf);
-        });
-
-        len += encode_varuint(self.deletes.len(), buf);
-        self.deletes.iter().for_each(|(key, value)| {
-            len += key.to_compact(buf);
-            len += value.to_compact(buf);
-        });
-
-        len += encode_varuint(self.updates.len(), buf);
-        self.updates.iter().for_each(|(key, value)| {
-            len += key.to_compact(buf);
-            len += value.to_compact(buf);
-        });
-        len
-    }
-
-    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let (puts_len, mut buf) = decode_varuint(buf);
-        let mut puts = BTreeMap::new();
-        for _ in 0..puts_len {
-            let (key, rest) = SaltKey::from_compact(buf, buf.len());
-            let (value, rest) = SaltValue::from_compact(rest, rest.len());
-            puts.insert(key, value);
-            buf = rest;
-        }
-
-        let (deletes_len, mut buf) = decode_varuint(buf);
-        let mut deletes = BTreeMap::new();
-        for _ in 0..deletes_len {
-            let (key, rest) = SaltKey::from_compact(buf, buf.len());
-            let (value, rest) = SaltValue::from_compact(rest, rest.len());
-            deletes.insert(key, value);
-            buf = rest;
-        }
-
-        let (updates_len, mut buf) = decode_varuint(buf);
-        let mut updates = BTreeMap::new();
-        for _ in 0..updates_len {
-            let (key, rest) = SaltKey::from_compact(buf, buf.len());
-            let (value, rest) = SaltValueDelta::from_compact(rest, rest.len());
-            updates.insert(key, value);
-            buf = rest;
-        }
-
-        (Self { puts, deletes, updates }, buf)
-    }
-}
-
 impl Encodable for SaltDeltas {
     fn encode(&self, out: &mut dyn BufMut) {
         self.puts.len().encode(out);
@@ -364,7 +303,6 @@ mod tests {
         types::{compute_xor, PlainKey, PlainValue},
     };
     use alloy_primitives::{Address, B256, U256};
-    use reth_codecs::Compact;
     use std::collections::HashMap;
 
     #[test]
