@@ -132,57 +132,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(state_updates)
     }
 
-    /// Updates the state with a batch of `SaltDeltas`.
-    ///
-    /// This function processes a list of `SaltDeltas` and computes the resulting
-    /// `StateUpdates` based on the current state.
-    /// This will also tentatively update some SALT state like `update` method.
-    ///
-    /// # Arguments
-    ///
-    /// * `salt_delta_list` - An iterator over a batch of `SaltDeltas`.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a vector of `StateUpdates` or an error.
-    pub fn batch_salt_delta_update(
-        &mut self,
-        salt_delta_list: impl IntoIterator<Item = SaltDeltas>,
-    ) -> Vec<StateUpdates> {
-        let mut state_updates_list = Vec::new();
-
-        salt_delta_list.into_iter().for_each(|salt_delta| {
-            let mut state_updates = StateUpdates::default();
-
-            salt_delta.puts.into_iter().for_each(|(salt_key, new_salt_value)| {
-                self.update_entry(&mut state_updates, salt_key, None, Some(new_salt_value));
-            });
-
-            salt_delta.deletes.into_iter().for_each(|(salt_key, old_salt_value)| {
-                self.update_entry(&mut state_updates, salt_key, Some(old_salt_value), None);
-            });
-
-            salt_delta.updates.into_iter().for_each(|(salt_key, salt_value_delta)| {
-                if let Some(old_salt_value) = self.get_entry(salt_key).unwrap() {
-                    let old_value_slice = old_salt_value.data.as_slice();
-                    let new_value_slice = compute_xor(old_value_slice, salt_value_delta.as_ref());
-                    let (new_salt_value, _) =
-                        SaltValue::from_compact(&new_value_slice, new_value_slice.len());
-                    self.update_entry(
-                        &mut state_updates,
-                        salt_key,
-                        Some(old_salt_value),
-                        Some(new_salt_value),
-                    );
-                } else {
-                    panic!("update a non-exist key {:?} from salt delta", salt_key);
-                }
-            });
-            state_updates_list.push(state_updates);
-        });
-        state_updates_list
-    }
-
     /// Inserts or updates a plain key-value pair in the given bucket. This method
     /// implements the SHI hash table insertion algorithm described in the paper.
     fn upsert(

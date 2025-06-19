@@ -39,7 +39,6 @@ pub use state::{
 };
 pub mod trie;
 pub use trie::{
-    proof::{get_proof, AccountProof},
     trie::{get_child_node, hash_commitment, StateRoot},
     updates::TrieUpdates,
     witness::{get_block_witness, BlockWitness},
