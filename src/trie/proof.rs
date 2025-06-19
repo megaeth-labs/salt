@@ -9,8 +9,6 @@ use crate::{
     types::*,
 };
 use alloy_primitives::{Address, B256, U256};
-use reth_codecs::Compact;
-use reth_primitives_traits::Account;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -320,7 +318,7 @@ impl StateReader for PlainKeysProof {
         if key.bucket_id() < NUM_META_BUCKETS as BucketId {
             let data_bucket_id =
                 (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId;
-            return Ok(Some(self.get_meta(data_bucket_id)?.into()))
+            return Ok(Some(self.get_meta(data_bucket_id)?.into()));
         } else {
             let result = self.sub_state.get(&key).cloned().flatten();
             Ok(result)
@@ -429,36 +427,36 @@ impl AccountProof {
 
         let slots_vals = if let Some(storage_proof) = &self.storage_proof {
             storage_proof
-                    .keys
-                    .iter()
-                    .zip(storage_proof.status.iter())
-                    .map(|(key, status)| {
-                        let slot = match key {
-                            PlainKey::Storage(addr, slot) => {
-                                if *addr != address {
-                                    return Err("address mismatch".to_string());
-                                }
-                                slot
+                .keys
+                .iter()
+                .zip(storage_proof.status.iter())
+                .map(|(key, status)| {
+                    let slot = match key {
+                        PlainKey::Storage(addr, slot) => {
+                            if *addr != address {
+                                return Err("address mismatch".to_string());
                             }
-                            _ => {
-                                return Err(
-                                    "key should be Storage type in the storage proof".to_string()
-                                )
-                            }
-                        };
+                            slot
+                        }
+                        _ => {
+                            return Err(
+                                "key should be Storage type in the storage proof".to_string()
+                            )
+                        }
+                    };
 
-                        let storage_val = match status {
-                            PlainKeysStatus::Existed(salt_key) => {
-                                let salt_val = storage_proof
-                                    .entry(*salt_key)?
-                                    .ok_or("slot's salt value not found")?;
-                                U256::from_compact(salt_val.value(), salt_val.value().len()).0
-                            }
-                            PlainKeysStatus::NotExisted(_) => U256::ZERO,
-                        };
+                    let storage_val = match status {
+                        PlainKeysStatus::Existed(salt_key) => {
+                            let salt_val = storage_proof
+                                .entry(*salt_key)?
+                                .ok_or("slot's salt value not found")?;
+                            U256::from_compact(salt_val.value(), salt_val.value().len()).0
+                        }
+                        PlainKeysStatus::NotExisted(_) => U256::ZERO,
+                    };
 
-                        Ok((*slot, storage_val))
-                    })
+                    Ok((*slot, storage_val))
+                })
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             vec![]
@@ -471,10 +469,11 @@ impl AccountProof {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mem_salt::MemSalt, state::state::EphemeralSaltState, trie::trie::StateRoot};
+    use crate::{
+        mem_salt::MemSalt, state::state::EphemeralSaltState, trie::trie::StateRoot, types::Account,
+    };
     use alloy_primitives::{B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
 
     /// Checks if the account proof is correct
@@ -558,13 +557,6 @@ mod tests {
         assert_eq!(account2_storages[1].0, slot2);
         assert_eq!(account2_storages[1].1, storage_value2.into());
 
-        let serialized =
-            bincode::serde::encode_to_vec(&account_proof2, bincode::config::legacy()).unwrap();
-        let deserialized: (AccountProof, usize) =
-            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
-
-        assert_eq!(account_proof2, deserialized.0);
-
         let serialized = serde_json::to_string(&account_proof2).unwrap();
         let deserialized: AccountProof = serde_json::from_str(&serialized).unwrap();
 
@@ -592,12 +584,10 @@ mod tests {
         let plain_keys_proof =
             create_proof(&vec![*kvs.keys().next().unwrap()], &mem_salt, &mem_salt).unwrap();
 
-        let serialized =
-            bincode::serde::encode_to_vec(&plain_keys_proof, bincode::config::legacy()).unwrap();
-        let deserialized: (PlainKeysProof, usize) =
-            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
+        let serialized = serde_json::to_string(&plain_keys_proof).unwrap();
+        let deserialized: PlainKeysProof = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(plain_keys_proof, deserialized.0);
+        assert_eq!(plain_keys_proof, deserialized);
     }
 
     #[test]

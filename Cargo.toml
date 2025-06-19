@@ -3,6 +3,10 @@ name = "megaeth-salt"
 version = "1.0.0"
 edition = "2021"
 
+[features]
+default = []
+reth = ["reth-codecs", "reth-primitives-traits"]
+
 [dependencies]
 # alloy dependencies
 alloy-genesis = "0.2.1"
@@ -16,9 +20,9 @@ ffi_interface = { git = "https://github.com/megaeth-labs/rust-salt.git", branch 
 ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", branch = "feature/par_proof" }
 megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
 
-# reth dependencies
-# reth-codecs = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5" }
-# reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5" }
+# reth dependencies (optional)
+reth-codecs = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5", optional = true }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.0.5", optional = true }
 
 # standard dependencies
 blake3 = "1.8"

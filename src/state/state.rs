@@ -5,6 +5,7 @@
 //!     resulting incremental changes in memory.
 use super::updates::{SaltDeltas, StateUpdates};
 use crate::{
+    compat::Account,
     constant::{BUCKET_SLOT_BITS, ROOT_NODE_ID},
     traits::{BucketMetadataReader, StateReader, TrieReader},
     trie::trie::hash_commitment,
@@ -12,8 +13,6 @@ use crate::{
     StateRoot, TrieUpdates,
 };
 use alloy_primitives::{Address, B256, U256};
-use reth_codecs::Compact;
-use reth_primitives_traits::Account;
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
@@ -221,7 +220,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                             Some(val),
                             Some(SaltValue::new(&pending_key, &pending_value)),
                         );
-                        return Ok(())
+                        return Ok(());
                     }
                     Ordering::Less => {
                         // exchange the slot key & value with pending key & value, and then
@@ -265,7 +264,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                         *meta,
                     );
                 }
-                return Ok(())
+                return Ok(());
             }
         }
 
@@ -323,7 +322,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     None => {
                         // If no suitable slot is found, the delete slot is cleared.
                         self.update_entry(out_updates, salt_id, Some(delete_slot.1), None);
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }
@@ -470,7 +469,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     Ordering::Greater => continue,
                 }
             } else {
-                return Ok(None)
+                return Ok(None);
             }
         }
         Ok(None)
@@ -499,7 +498,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     if rank(hashed_id, next_slot_id, capacity) > rank(hashed_id, slot_id, capacity)
                     {
                         // If the weight is greater, it returns the current slot and slot value.
-                        return Ok(Some((next_slot_id, entry)))
+                        return Ok(Some((next_slot_id, entry)));
                     }
                 }
                 None => return Ok(None),
@@ -673,7 +672,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
                     Ordering::Greater => continue,
                 }
             } else {
-                return Ok(None)
+                return Ok(None);
             }
         }
         Ok(None)
@@ -748,6 +747,7 @@ pub mod pk_hasher {
 #[cfg(test)]
 mod tests {
     use crate::{
+        compat::Account,
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         genesis::EmptySalt,
         mem_salt::*,
@@ -760,7 +760,6 @@ mod tests {
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::Rng;
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
 
     const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
@@ -803,7 +802,7 @@ mod tests {
         for slot_id in 0..MIN_BUCKET_SIZE {
             let salt_id = (bucket_id, slot_id as SlotId).into();
             if table1.get_entry(salt_id) != table2.get_entry(salt_id) {
-                return false
+                return false;
             }
         }
         true

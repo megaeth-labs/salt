@@ -27,6 +27,7 @@
 //! pairs inside the buckets, and the "trie" module, which maintains commitments
 //! of the trie nodes.
 
+pub mod compat;
 pub mod constant;
 pub mod genesis;
 pub mod proof;
@@ -46,6 +47,8 @@ pub use trie::{
 
 pub mod traits;
 pub mod types;
+#[cfg(feature = "reth")]
+pub mod types4reth;
 pub use types::*;
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use alloy_primitives::{
 };
 use bytes::BufMut;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+#[cfg(feature = "reth")]
 use reth_codecs::{decode_varuint, encode_varuint, Compact};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -158,7 +159,13 @@ impl StateUpdates {
             .map(|(key, delta)| match reader.entry(*key) {
                 Ok(Some(old_value)) => {
                     let buf = compute_xor(&old_value.data, delta);
+                    #[cfg(feature = "reth")]
                     let new_value = SaltValue::from_compact(&buf, buf.len()).0;
+                    #[cfg(not(feature = "reth"))]
+                    let new_value = {
+                        // When reth feature is disabled, use compute function instead
+                        SaltValue::compute(&old_value, &SaltValueDelta(buf))
+                    };
                     (*key, (Some(old_value), Some(new_value)))
                 }
                 _ => {
@@ -306,6 +313,7 @@ impl SaltDeltas {
     }
 }
 
+#[cfg(feature = "reth")]
 impl Compact for SaltDeltas {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
@@ -430,13 +438,13 @@ impl Decodable for SaltDeltas {
 mod tests {
     use super::*;
     use crate::{
+        compat::Account,
         mem_salt::*,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         types::{compute_xor, PlainKey, PlainValue},
     };
     use alloy_primitives::{Address, B256, U256};
     use reth_codecs::Compact;
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
 
     #[test]

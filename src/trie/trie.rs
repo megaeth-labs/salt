@@ -722,12 +722,12 @@ mod tests {
     use itertools::Itertools;
 
     use crate::{
+        compat::Account,
         constant::{zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL, STARTING_NODE_ID, TRIE_LEVELS},
         genesis::EmptySalt,
         traits::*,
         types::Bytes,
     };
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
