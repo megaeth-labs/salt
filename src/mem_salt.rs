@@ -1,0 +1,269 @@
+//! This module provides a simple in-memory implementation of the SALT
+//! data structure. Only used in testing.
+use crate::{constant::*, traits::*, trie::trie::get_child_node, types::*, SaltDeltas};
+use alloy_primitives::BlockNumber;
+use std::{
+    collections::BTreeMap,
+    ops::{Bound::Included, Range, RangeInclusive},
+    sync::RwLock,
+};
+
+/// [`MemSalt`] provides a simple implementation for storing
+/// salt in memory. It implements trait [`StateReader`] [`StateWriter`]
+/// [`TrieReader`] [`TrieWriter`].
+#[derive(Debug, Default)]
+pub(crate) struct MemSalt {
+    /// Stores the buckect meta in the state.
+    meta: RwLock<BTreeMap<BucketId, BucketMeta>>,
+    /// Stores the key-value pairs that represent the blockchain state.
+    state: RwLock<BTreeMap<SaltKey, SaltValue>>,
+    /// Stores the node commitments in the trie.
+    trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
+}
+
+impl MemSalt {
+    /// Create a new [`MemSalt`] instance, and the initial value of all nonce is 0.
+    pub(crate) fn new() -> Self {
+        Self {
+            meta: RwLock::new(BTreeMap::new()),
+            state: RwLock::new(BTreeMap::new()),
+            trie: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Get all key-value pairs in the state.
+    pub(crate) fn get_all(&self) -> Vec<(SaltKey, SaltValue)> {
+        self.state.read().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+}
+
+impl StateReader for MemSalt {
+    fn entry(
+        &self,
+        key: SaltKey,
+    ) -> Result<Option<SaltValue>, <Self as BucketMetadataReader>::Error> {
+        let result = self.state.read().unwrap().get(&key).cloned();
+        if result.is_none() && key.bucket_id() < NUM_META_BUCKETS as BucketId {
+            return Ok(Some(BucketMeta::default().into()));
+        }
+        Ok(result)
+    }
+
+    fn range_bucket(
+        &self,
+        range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(self
+            .state
+            .read()
+            .unwrap()
+            .range((
+                Included(SaltKey::from((*range.start(), 0))),
+                Included(SaltKey::from((*range.end(), (1 << BUCKET_SLOT_BITS) - 1))),
+            ))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    fn range_slot(
+        &self,
+        bucket_id: BucketId,
+        range: Range<u64>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
+            assert!(range.end <= MIN_BUCKET_SIZE as NodeId);
+            range
+                .into_iter()
+                .map(|slot_id| {
+                    let key = SaltKey::from((bucket_id, slot_id));
+                    (
+                        key,
+                        self.entry(key).expect("slot should exist").expect("metadata should exist"),
+                    )
+                })
+                .collect()
+        } else {
+            self.state
+                .read()
+                .unwrap()
+                .range(
+                    SaltKey::from((bucket_id, range.start))..SaltKey::from((bucket_id, range.end)),
+                )
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        Ok(data)
+    }
+}
+
+impl BucketMetadataReader for MemSalt {
+    type Error = &'static str;
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        Ok(self.meta.read().unwrap().get(&bucket_id).map_or(BucketMeta::default(), |v| *v))
+    }
+}
+
+impl StateWriter for MemSalt {
+    fn put(
+        &self,
+        key: SaltKey,
+        val: SaltValue,
+    ) -> Result<(), <Self as BucketMetadataReader>::Error> {
+        if key.bucket_id() < NUM_META_BUCKETS as BucketId {
+            let meta = BucketMeta::from(&val);
+            let id = (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId;
+            self.put_meta(id, meta)?;
+        }
+        self.state.write().unwrap().insert(key, val);
+        Ok(())
+    }
+
+    fn put_meta(
+        &self,
+        id: BucketId,
+        meta: BucketMeta,
+    ) -> Result<(), <Self as BucketMetadataReader>::Error> {
+        self.meta.write().unwrap().insert(id, meta);
+        Ok(())
+    }
+
+    fn delete(&self, key: SaltKey) -> Result<bool, <Self as BucketMetadataReader>::Error> {
+        self.state.write().unwrap().remove(&key);
+        Ok(true)
+    }
+
+    fn clear(&self) -> Result<(), <Self as BucketMetadataReader>::Error> {
+        self.state.write().unwrap().clear();
+        Ok(())
+    }
+
+    fn apply_changesets(
+        &self,
+        _salt_deltas: crate::SaltDeltas,
+    ) -> Result<(), <Self as BucketMetadataReader>::Error> {
+        unimplemented!("apply_changesets not implemented")
+    }
+}
+
+impl SaltChangeReader for MemSalt {
+    type Error = &'static str;
+    fn read_changesets(&self, _block_number: BlockNumber) -> Result<SaltDeltas, Self::Error> {
+        unimplemented!("read_changesets not implemented")
+    }
+
+    fn latest_changesets(&self) -> Result<Option<(BlockNumber, SaltDeltas)>, Self::Error> {
+        unimplemented!("latest_changesets not implemented")
+    }
+
+    fn read_changesets_by_block_range(
+        &self,
+        _range: RangeInclusive<BlockNumber>,
+    ) -> Result<Vec<SaltDeltas>, Self::Error> {
+        unimplemented!("read_changesets_by_block_range not implemented")
+    }
+}
+
+impl SaltChangeWriter for MemSalt {
+    type Error = &'static str;
+    fn write_changesets(
+        &self,
+        _block_number: alloy_primitives::BlockNumber,
+        _salt_deltas: crate::SaltDeltas,
+    ) -> Result<(), Self::Error> {
+        unimplemented!("write_changesets not implemented")
+    }
+}
+
+impl TrieReader for MemSalt {
+    type Error = &'static str;
+
+    fn bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        Ok(match self.meta.read().unwrap().get(&bucket_id) {
+            Some(meta) => meta.capacity,
+            None => MIN_BUCKET_SIZE as u64,
+        })
+    }
+
+    fn get(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        Ok(self.trie.read().unwrap().get(&node_id).cloned().unwrap_or_else(|| {
+            let level = get_node_level(node_id);
+            if is_extension_node(node_id) ||
+                node_id >= DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId
+            {
+                zero_commitment()
+            } else {
+                DEFAULT_COMMITMENT_AT_LEVEL[level].1
+            }
+        }))
+    }
+
+    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
+        let zero = zero_commitment();
+        let child_start = get_child_node(&node_id, 0);
+        let mut children = vec![zero; TRIE_WIDTH];
+        let map = self.trie.read().unwrap();
+        // Fill in actual values where they exist
+        for (k, v) in map.range(child_start as NodeId..child_start + TRIE_WIDTH as NodeId) {
+            children[*k as usize - child_start as usize] = *v;
+        }
+
+        // Because the trie did not store the default value when init,
+        // so meta nodes needs to update the default commitment.
+        if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
+            let child_level = get_node_level(node_id) + 1;
+            assert!(child_level < TRIE_LEVELS);
+            for i in child_start..
+                std::cmp::min(
+                    DEFAULT_COMMITMENT_AT_LEVEL[child_level].0,
+                    child_start as usize + TRIE_WIDTH,
+                ) as NodeId
+            {
+                let j = (i - child_start) as usize;
+                if children[j] == zero {
+                    children[j] = DEFAULT_COMMITMENT_AT_LEVEL[child_level].1;
+                }
+            }
+        }
+
+        Ok(children)
+    }
+}
+
+impl TrieWriter for MemSalt {
+    type Error = &'static str;
+    fn put(&self, node_id: NodeId, commitment: CommitmentBytes) -> Result<(), Self::Error> {
+        self.trie.write().unwrap().insert(node_id, commitment);
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), Self::Error> {
+        self.trie.write().unwrap().clear();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_meta() {
+        let store = MemSalt::new();
+        let bucket_id = (NUM_META_BUCKETS + 400) as BucketId;
+        let salt_key: SaltKey = (
+            (bucket_id >> MIN_BUCKET_SIZE_BITS),
+            (bucket_id % MIN_BUCKET_SIZE as BucketId) as SlotId,
+        )
+            .into();
+        let mut meta = store.get_meta(bucket_id).unwrap();
+        assert_eq!(meta, BucketMeta::default());
+        let v = store.entry(salt_key).unwrap().unwrap();
+        assert_eq!(meta, BucketMeta::from(&v));
+        meta.capacity = 512;
+        store.put_meta(bucket_id, meta).unwrap();
+        assert_eq!(store.get_meta(bucket_id).unwrap(), meta);
+        meta.capacity = 1024;
+        StateWriter::put(&store, salt_key, SaltValue::from(meta)).unwrap();
+        assert_eq!(store.get_meta(bucket_id).unwrap(), meta);
+    }
+}

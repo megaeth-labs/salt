@@ -1,0 +1,52 @@
+[package]
+name = "megaeth-salt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[dependencies]
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+ark-ff.workspace = true
+banderwagon.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+ffi_interface.workspace = true
+ipa-multipoint.workspace = true
+itertools.workspace = true
+megaeth-ahash.workspace = true
+modular-bitfield.workspace = true
+once_cell.workspace = true
+rayon.workspace = true
+reth-codecs.workspace = true
+reth-primitives-traits.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_arrays.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy-primitives = { workspace = true, features = ["rand"] }
+arbitrary = { workspace = true, features = ["derive"] }
+bincode = { workspace = true, features = ["serde"] }
+criterion.workspace = true
+proptest.workspace = true
+proptest-arbitrary-interop.workspace = true
+proptest-derive.workspace = true
+rand.workspace = true
+reth-primitives-traits = { workspace = true, features = ["arbitrary"] }
+serde_json.workspace = true
+test-fuzz.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "salt_trie"
+harness = false
