@@ -319,13 +319,6 @@ impl SaltValue {
         let value_len = self.data[1] as usize;
         &self.data[2 + key_len..2 + key_len + value_len]
     }
-
-    /// Compute new [`SaltValue`] from old [`SaltValue`] and [`SaltValueDelta`].
-    #[inline]
-    pub fn compute(old_value: &Self, delta: &SaltValueDelta) -> Self {
-        let buf = compute_xor(&old_value.data, delta);
-        Self::from_compact(&buf, buf.len()).0
-    }
 }
 
 impl From<BucketMeta> for SaltValue {

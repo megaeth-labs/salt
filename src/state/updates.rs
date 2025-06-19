@@ -143,45 +143,6 @@ impl StateUpdates {
         state_updates
     }
 
-    /// Convert from a `SaltDeltas`.
-    ///
-    /// Requires the version of the `SaltState` is exactly the one before applying the
-    /// `salt_deltas`.
-    #[allow(clippy::field_reassign_with_default)]
-    pub fn from_deltas<T: StateReader>(
-        salt_deltas: &SaltDeltas,
-        reader: &T,
-    ) -> Result<Self, <T as BucketMetadataReader>::Error> {
-        let mut state_updates = Self::default();
-        state_updates.data = salt_deltas
-            .updates
-            .par_iter()
-            .map(|(key, delta)| match reader.entry(*key) {
-                Ok(Some(old_value)) => {
-                    let buf = compute_xor(&old_value.data, delta);
-                    #[cfg(feature = "reth")]
-                    let new_value = SaltValue::from_compact(&buf, buf.len()).0;
-                    #[cfg(not(feature = "reth"))]
-                    let new_value = {
-                        // When reth feature is disabled, use compute function instead
-                        SaltValue::compute(&old_value, &SaltValueDelta(buf))
-                    };
-                    (*key, (Some(old_value), Some(new_value)))
-                }
-                _ => {
-                    unreachable!("Failed to load existing key = {:?}", key);
-                }
-            })
-            .collect();
-        for (key, value) in &salt_deltas.puts {
-            state_updates.add(*key, None, Some(value.clone()));
-        }
-        for (key, value) in &salt_deltas.deletes {
-            state_updates.add(*key, Some(value.clone()), None);
-        }
-        Ok(state_updates)
-    }
-
     /// Generate the inverse of `StateUpdates`.
     pub fn inverse(mut self) -> Self {
         for (old_value, new_value) in self.data.values_mut() {
@@ -246,47 +207,6 @@ impl SaltDeltas {
         reader: &Reader,
     ) -> Result<Self, Reader::Error> {
         reader.read_changesets(block_number)
-    }
-
-    /// Merge with the next `SaltDeltas`.
-    pub fn merge(&mut self, new: &Self) {
-        for (key, value) in &new.deletes {
-            if self.puts.contains_key(key) {
-                // Delete a recent put key, nothing changed.
-                self.puts.remove(key);
-            } else if let Some(delta) = self.updates.remove(key) {
-                // Delete a recent updated key, the update is ignored and the old value is deleted.
-                let buf = compute_xor(&value.data, &delta);
-                let old_value = SaltValue::from_compact(&buf, buf.len()).0;
-                self.deletes.insert(*key, old_value);
-            } else {
-                // The key does not exist in puts or updates, just delete it.
-                self.deletes.insert(*key, value.clone());
-            }
-        }
-        for (key, value) in &new.puts {
-            if let Some(old_value) = self.deletes.remove(key) {
-                // Put a recent deleted key, the key is actually updated.
-                let delta = SaltValueDelta(compute_xor(&old_value.data, &value.data));
-                self.updates.insert(*key, delta);
-            } else {
-                // The key does not exist in deletes and should not exist in puts or updates.
-                self.puts.insert(*key, value.clone());
-            }
-        }
-        for (key, delta) in &new.updates {
-            if let Some(value) = self.puts.get_mut(key) {
-                // Update a recent put key, the value of put if updated.
-                let buf = compute_xor(&value.data, delta);
-                (*value, _) = SaltValue::from_compact(&buf, buf.len());
-            } else if let Some(old_delta) = self.updates.get_mut(key) {
-                // Update a recent updated key, the value of update is updated.
-                *old_delta = SaltValueDelta(compute_xor(old_delta, delta));
-            } else {
-                // The key does not exist in puts or updates and should not exist in deletes.
-                self.updates.insert(*key, delta.clone());
-            }
-        }
     }
 
     /// Write the SALT value deltas to a (persistent) data store.
