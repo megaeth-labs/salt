@@ -4,12 +4,12 @@
 
 use crate::constant::{BUCKET_SLOT_BITS, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS};
 pub use alloy_primitives::Bytes;
-use alloy_primitives::{bytes::Buf, Address, B256, B512, U256};
+use alloy_primitives::{Address, B256, B512, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable};
 pub use ffi_interface::CommitmentBytes;
 
 // Re-export Account for other modules
-pub use crate::compat::Account;
+pub use crate::account::Account;
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 

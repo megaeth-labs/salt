@@ -16,7 +16,7 @@ pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(TRIE_WIDTH));
 
 /// Create a new proof.
-pub(crate) fn create_salt_proof<S, T>(
+pub fn create_salt_proof<S, T>(
     keys: &[SaltKey],
     state_reader: &S,
     trie_reader: &T,

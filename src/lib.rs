@@ -27,7 +27,7 @@
 //! pairs inside the buckets, and the "trie" module, which maintains commitments
 //! of the trie nodes.
 
-pub mod compat;
+pub mod account;
 pub mod constant;
 pub mod genesis;
 pub mod proof;

@@ -1,6 +1,5 @@
 //! This module implements [`StateUpdates`].
 use crate::{
-    compute_xor,
     constant::NUM_META_BUCKETS,
     traits::*,
     types::{BucketMeta, Buckets, SaltKey, SaltValue, SaltValueDelta},
@@ -11,7 +10,7 @@ use alloy_primitives::{
     BlockNumber,
 };
 use bytes::BufMut;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{btree_map::Entry, BTreeMap},

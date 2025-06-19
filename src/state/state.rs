@@ -3,9 +3,9 @@
 //!     which is stored in some storage backend in SALT format.
 //! (2) Tentatively update the current state and accumulate the
 //!     resulting incremental changes in memory.
-use super::updates::{SaltDeltas, StateUpdates};
+use super::updates::StateUpdates;
 use crate::{
-    compat::Account,
+    account::Account,
     constant::{BUCKET_SLOT_BITS, ROOT_NODE_ID},
     traits::{BucketMetadataReader, StateReader, TrieReader},
     trie::trie::hash_commitment,
@@ -31,6 +31,12 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Cache the (key-values, bucket meta) read from base_state and the changes made to it.
     pub(crate) kv_cache: HashMap<SaltKey, Option<SaltValue>>,
     pub(crate) meta_cache: HashMap<BucketId, BucketMeta>,
+}
+
+impl<'a, BaseState> EphemeralSaltState<'a, BaseState> {
+    pub fn get_kv_cache(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.kv_cache
+    }
 }
 
 /// Implement the `Clone` trait for `EphemeralSaltState`.
@@ -398,7 +404,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if
     /// any.
-    pub(crate) fn find(
+    pub fn find(
         &mut self,
         bucket_id: BucketId,
         meta: &BucketMeta,
@@ -633,7 +639,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
 /// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
 /// the returned value must be in the range of [1, bucket size).
 #[inline(always)]
-pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
+pub fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
     ((hashed_key + i) & (capacity - 1)) as SlotId
 }
 
@@ -679,7 +685,7 @@ pub mod pk_hasher {
     /// The resulting hashed key will be used to search for the final bucket
     /// location (i.e., the SALT key) where the plain key will be placed.
     #[inline(always)]
-    pub(crate) fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
+    pub fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
         let mut data = plain_key.to_vec();
         data.extend_from_slice(&nonce.to_le_bytes());
 

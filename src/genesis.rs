@@ -2,7 +2,7 @@
 //! SALT state root for the genesis block with minimal dependency.
 
 use crate::{
-    compat::Account,
+    account::Account,
     constant::{
         get_node_level, is_extension_node, zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL,
         MIN_BUCKET_SIZE, NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
