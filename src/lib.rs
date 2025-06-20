@@ -27,6 +27,7 @@
 //! pairs inside the buckets, and the "trie" module, which maintains commitments
 //! of the trie nodes.
 
+pub mod account;
 pub mod constant;
 pub mod genesis;
 pub mod proof;
@@ -38,7 +39,6 @@ pub use state::{
 };
 pub mod trie;
 pub use trie::{
-    proof::{get_proof, AccountProof},
     trie::{get_child_node, hash_commitment, StateRoot},
     updates::TrieUpdates,
     witness::{get_block_witness, BlockWitness},

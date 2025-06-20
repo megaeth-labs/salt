@@ -4,11 +4,12 @@
 
 use crate::constant::{BUCKET_SLOT_BITS, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS};
 pub use alloy_primitives::Bytes;
-use alloy_primitives::{bytes::Buf, Address, B256, B512, U256};
+use alloy_primitives::{Address, B256, B512, U256};
 use alloy_rlp::{BufMut, Decodable, Encodable};
 pub use ffi_interface::CommitmentBytes;
-use reth_codecs::{decode_varuint, derive_arbitrary, encode_varuint, Compact};
-use reth_primitives_traits::Account;
+
+// Re-export Account for other modules
+pub use crate::account::Account;
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
@@ -232,7 +233,6 @@ impl BucketMeta {
 
 /// The [`SaltKey`] type, its high 32 bits are the bucket_id, and low 32 bits
 /// are the slot_id.
-#[derive_arbitrary(compact)]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash,
 )]
@@ -264,23 +264,6 @@ impl SaltKey {
     }
 }
 
-impl Compact for SaltKey {
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        buf.put_u64(self.0);
-        8
-    }
-
-    #[inline]
-    fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let value = buf.get_u64();
-        (SaltKey(value), buf)
-    }
-}
-
 /// The maximum number of bytes that can be stored in a [`SaltValue`].
 /// There are 3 types of [`SaltValue`]: Account, Storage, and BucketMetadata (i.e.,
 /// bucket nonce & capacity).
@@ -302,7 +285,6 @@ impl Compact for SaltKey {
 pub const MAX_SALT_VALUE_BYTES: usize = 94;
 
 /// Encodes PlainKey and PlainValue into a single byte array.
-#[derive_arbitrary(compact)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
     /// A byte array large enough to store any type of SaltValue.
@@ -337,38 +319,11 @@ impl SaltValue {
         let value_len = self.data[1] as usize;
         &self.data[2 + key_len..2 + key_len + value_len]
     }
-
-    /// Compute new [`SaltValue`] from old [`SaltValue`] and [`SaltValueDelta`].
-    #[inline]
-    pub fn compute(old_value: &Self, delta: &SaltValueDelta) -> Self {
-        let buf = compute_xor(&old_value.data, delta);
-        Self::from_compact(&buf, buf.len()).0
-    }
 }
 
 impl From<BucketMeta> for SaltValue {
     fn from(value: BucketMeta) -> Self {
         Self::new(&value.to_bytes(), &[])
-    }
-}
-
-impl Compact for SaltValue {
-    /// Encode [`SaltValue`] into [u8].
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        buf.put_slice(&self.data[..]);
-        MAX_SALT_VALUE_BYTES
-    }
-
-    /// Decode [u8] to [`SaltValue`].
-    #[inline]
-    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let mut data = [0u8; MAX_SALT_VALUE_BYTES];
-        data.copy_from_slice(&buf[0..MAX_SALT_VALUE_BYTES]);
-        (Self { data }, &buf[MAX_SALT_VALUE_BYTES..])
     }
 }
 
@@ -440,7 +395,6 @@ pub type Commitment = B512;
 /// The XOR delta between the old and new SaltValue's. To handle SaltValue's
 /// with different lengths, we first pad the shorter one with leading 0's,
 /// and then perform a byte-wise XOR operation between the two SaltValue's.
-#[derive_arbitrary(compact)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValueDelta(pub Vec<u8>);
 
@@ -462,29 +416,6 @@ impl SaltValueDelta {
     /// Construct a new delta by XOR'ing two [`SaltValue`]'s.
     pub fn new(old: &SaltValue, new: &SaltValue) -> Self {
         Self(compute_xor(&old.data, &new.data))
-    }
-}
-
-impl Compact for SaltValueDelta {
-    /// Encode [`SaltValueDelta`] into [u8].
-    #[inline]
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        let mut len = self.0.len();
-        len += encode_varuint(len, buf);
-        buf.put_slice(&self.0);
-        len
-    }
-
-    /// Decode [u8] to [`SaltValueDelta`].
-    #[inline]
-    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let (len, mut buf) = decode_varuint(buf);
-        let value = Vec::<u8>::from(&buf[..len]);
-        buf.advance(len);
-        (Self(value), buf)
     }
 }
 

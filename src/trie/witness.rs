@@ -10,14 +10,16 @@ use crate::{
     trie::trie::get_child_node,
     types::*,
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{b256, Address, B256};
 use rayon::prelude::*;
-use reth_primitives_traits::constants::KECCAK_EMPTY;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ops::{Bound::Included, Range, RangeInclusive},
 };
+
+pub const KECCAK_EMPTY: B256 =
+    b256!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
 
 /// create a block witness from the trie
 pub fn get_block_witness<'a, S, T>(
@@ -212,7 +214,7 @@ impl StateReader for BlockWitness {
         if key.bucket_id() < NUM_META_BUCKETS as BucketId {
             let data_bucket_id =
                 (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId;
-            return Ok(Some(self.get_meta(data_bucket_id)?.into()))
+            return Ok(Some(self.get_meta(data_bucket_id)?.into()));
         } else {
             let result = self.kvs.get(&key).cloned().flatten();
             Ok(result)
@@ -266,12 +268,11 @@ impl StateReader for BlockWitness {
 mod tests {
     use super::*;
     use crate::{
-        constant::MIN_BUCKET_SIZE_BITS, mem_salt::MemSalt, state::state::EphemeralSaltState,
-        trie::trie::StateRoot,
+        compat::Account, constant::MIN_BUCKET_SIZE_BITS, mem_salt::MemSalt,
+        state::state::EphemeralSaltState, trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
 
     #[test]

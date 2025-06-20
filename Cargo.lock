@@ -1359,40 +1359,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
-name = "megaeth-salt"
-version = "1.0.0"
-dependencies = [
- "ahash 0.8.11",
- "alloy-genesis",
- "alloy-primitives",
- "alloy-rlp",
- "arbitrary",
- "ark-ff 0.5.0",
- "banderwagon",
- "bincode 2.0.1",
- "blake3",
- "bytes",
- "criterion",
- "ffi_interface",
- "ipa-multipoint",
- "itertools 0.13.0",
- "modular-bitfield",
- "once_cell",
- "proptest",
- "proptest-arbitrary-interop",
- "proptest-derive",
- "rand 0.8.5",
- "rayon",
- "rustc-hash",
- "serde",
- "serde_arrays",
- "serde_json",
- "test-fuzz",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
 name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1909,6 +1875,40 @@ name = "ryu"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
+
+[[package]]
+name = "salt"
+version = "1.0.0"
+dependencies = [
+ "ahash 0.8.11",
+ "alloy-genesis",
+ "alloy-primitives",
+ "alloy-rlp",
+ "arbitrary",
+ "ark-ff 0.5.0",
+ "banderwagon",
+ "bincode 2.0.1",
+ "blake3",
+ "bytes",
+ "criterion",
+ "ffi_interface",
+ "ipa-multipoint",
+ "itertools 0.13.0",
+ "modular-bitfield",
+ "once_cell",
+ "proptest",
+ "proptest-arbitrary-interop",
+ "proptest-derive",
+ "rand 0.8.5",
+ "rayon",
+ "rustc-hash",
+ "serde",
+ "serde_arrays",
+ "serde_json",
+ "test-fuzz",
+ "thiserror 1.0.69",
+ "tracing",
+]
 
 [[package]]
 name = "same-file"

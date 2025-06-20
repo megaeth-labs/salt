@@ -3,8 +3,9 @@
 //!     which is stored in some storage backend in SALT format.
 //! (2) Tentatively update the current state and accumulate the
 //!     resulting incremental changes in memory.
-use super::updates::{SaltDeltas, StateUpdates};
+use super::updates::StateUpdates;
 use crate::{
+    account::Account,
     constant::{BUCKET_SLOT_BITS, ROOT_NODE_ID},
     traits::{BucketMetadataReader, StateReader, TrieReader},
     trie::trie::hash_commitment,
@@ -12,8 +13,6 @@ use crate::{
     StateRoot, TrieUpdates,
 };
 use alloy_primitives::{Address, B256, U256};
-use reth_codecs::Compact;
-use reth_primitives_traits::Account;
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
@@ -32,6 +31,12 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Cache the (key-values, bucket meta) read from base_state and the changes made to it.
     pub(crate) kv_cache: HashMap<SaltKey, Option<SaltValue>>,
     pub(crate) meta_cache: HashMap<BucketId, BucketMeta>,
+}
+
+impl<'a, BaseState> EphemeralSaltState<'a, BaseState> {
+    pub fn get_kv_cache(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.kv_cache
+    }
 }
 
 /// Implement the `Clone` trait for `EphemeralSaltState`.
@@ -133,57 +138,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(state_updates)
     }
 
-    /// Updates the state with a batch of `SaltDeltas`.
-    ///
-    /// This function processes a list of `SaltDeltas` and computes the resulting
-    /// `StateUpdates` based on the current state.
-    /// This will also tentatively update some SALT state like `update` method.
-    ///
-    /// # Arguments
-    ///
-    /// * `salt_delta_list` - An iterator over a batch of `SaltDeltas`.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a vector of `StateUpdates` or an error.
-    pub fn batch_salt_delta_update(
-        &mut self,
-        salt_delta_list: impl IntoIterator<Item = SaltDeltas>,
-    ) -> Vec<StateUpdates> {
-        let mut state_updates_list = Vec::new();
-
-        salt_delta_list.into_iter().for_each(|salt_delta| {
-            let mut state_updates = StateUpdates::default();
-
-            salt_delta.puts.into_iter().for_each(|(salt_key, new_salt_value)| {
-                self.update_entry(&mut state_updates, salt_key, None, Some(new_salt_value));
-            });
-
-            salt_delta.deletes.into_iter().for_each(|(salt_key, old_salt_value)| {
-                self.update_entry(&mut state_updates, salt_key, Some(old_salt_value), None);
-            });
-
-            salt_delta.updates.into_iter().for_each(|(salt_key, salt_value_delta)| {
-                if let Some(old_salt_value) = self.get_entry(salt_key).unwrap() {
-                    let old_value_slice = old_salt_value.data.as_slice();
-                    let new_value_slice = compute_xor(old_value_slice, salt_value_delta.as_ref());
-                    let (new_salt_value, _) =
-                        SaltValue::from_compact(&new_value_slice, new_value_slice.len());
-                    self.update_entry(
-                        &mut state_updates,
-                        salt_key,
-                        Some(old_salt_value),
-                        Some(new_salt_value),
-                    );
-                } else {
-                    panic!("update a non-exist key {:?} from salt delta", salt_key);
-                }
-            });
-            state_updates_list.push(state_updates);
-        });
-        state_updates_list
-    }
-
     /// Inserts or updates a plain key-value pair in the given bucket. This method
     /// implements the SHI hash table insertion algorithm described in the paper.
     fn upsert(
@@ -221,7 +175,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                             Some(val),
                             Some(SaltValue::new(&pending_key, &pending_value)),
                         );
-                        return Ok(())
+                        return Ok(());
                     }
                     Ordering::Less => {
                         // exchange the slot key & value with pending key & value, and then
@@ -265,7 +219,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                         *meta,
                     );
                 }
-                return Ok(())
+                return Ok(());
             }
         }
 
@@ -323,7 +277,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     None => {
                         // If no suitable slot is found, the delete slot is cleared.
                         self.update_entry(out_updates, salt_id, Some(delete_slot.1), None);
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }
@@ -406,7 +360,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Read the bucket entry of the given SALT key. Always look up `cache` before `base_state`.
     #[inline(always)]
-    fn get_entry(
+    pub fn get_entry(
         &mut self,
         key: SaltKey,
     ) -> Result<Option<SaltValue>, <BaseState as BucketMetadataReader>::Error> {
@@ -420,7 +374,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Updates the bucket entry and records the change in `out_updates`.
     #[inline(always)]
-    fn update_entry(
+    pub fn update_entry(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,
@@ -450,7 +404,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if
     /// any.
-    pub(crate) fn find(
+    pub fn find(
         &mut self,
         bucket_id: BucketId,
         meta: &BucketMeta,
@@ -470,7 +424,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     Ordering::Greater => continue,
                 }
             } else {
-                return Ok(None)
+                return Ok(None);
             }
         }
         Ok(None)
@@ -499,7 +453,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     if rank(hashed_id, next_slot_id, capacity) > rank(hashed_id, slot_id, capacity)
                     {
                         // If the weight is greater, it returns the current slot and slot value.
-                        return Ok(Some((next_slot_id, entry)))
+                        return Ok(Some((next_slot_id, entry)));
                     }
                 }
                 None => return Ok(None),
@@ -673,7 +627,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
                     Ordering::Greater => continue,
                 }
             } else {
-                return Ok(None)
+                return Ok(None);
             }
         }
         Ok(None)
@@ -685,7 +639,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
 /// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
 /// the returned value must be in the range of [1, bucket size).
 #[inline(always)]
-pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
+pub fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
     ((hashed_key + i) & (capacity - 1)) as SlotId
 }
 
@@ -731,7 +685,7 @@ pub mod pk_hasher {
     /// The resulting hashed key will be used to search for the final bucket
     /// location (i.e., the SALT key) where the plain key will be placed.
     #[inline(always)]
-    pub(crate) fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
+    pub fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
         let mut data = plain_key.to_vec();
         data.extend_from_slice(&nonce.to_le_bytes());
 
@@ -748,6 +702,7 @@ pub mod pk_hasher {
 #[cfg(test)]
 mod tests {
     use crate::{
+        compat::Account,
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         genesis::EmptySalt,
         mem_salt::*,
@@ -760,7 +715,6 @@ mod tests {
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::Rng;
-    use reth_primitives_traits::Account;
     use std::collections::HashMap;
 
     const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
@@ -803,7 +757,7 @@ mod tests {
         for slot_id in 0..MIN_BUCKET_SIZE {
             let salt_id = (bucket_id, slot_id as SlotId).into();
             if table1.get_entry(salt_id) != table2.get_entry(salt_id) {
-                return false
+                return false;
             }
         }
         true

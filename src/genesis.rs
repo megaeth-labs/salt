@@ -2,6 +2,7 @@
 //! SALT state root for the genesis block with minimal dependency.
 
 use crate::{
+    account::Account,
     constant::{
         get_node_level, is_extension_node, zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL,
         MIN_BUCKET_SIZE, NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
@@ -12,7 +13,6 @@ use crate::{
 };
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{keccak256, Address, B256};
-use reth_primitives_traits::Account;
 use std::{
     collections::HashMap,
     ops::{Range, RangeInclusive},

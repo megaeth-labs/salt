@@ -2,7 +2,6 @@
 //! that is used to authenticate the key-value pairs stored in the leaf
 //! nodes (i.e., the SALT buckets).
 
-pub mod proof;
 pub mod trie;
 pub mod updates;
 pub use banderwagon::Element;
