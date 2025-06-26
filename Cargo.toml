@@ -43,7 +43,6 @@ proptest-derive = "0.5"
 rand = "0.8.5"
 serde_json = "1.0.94"
 test-fuzz = "5"
-tarpaulin = "0.29.0"
 
 [[bench]]
 name = "salt_trie"
