@@ -702,7 +702,7 @@ pub mod pk_hasher {
 #[cfg(test)]
 mod tests {
     use crate::{
-        compat::Account,
+        account::Account,
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         genesis::EmptySalt,
         mem_salt::*,

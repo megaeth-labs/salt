@@ -722,7 +722,7 @@ mod tests {
     use itertools::Itertools;
 
     use crate::{
-        compat::Account,
+        account::Account,
         constant::{zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL, STARTING_NODE_ID, TRIE_LEVELS},
         genesis::EmptySalt,
         traits::*,

@@ -430,7 +430,7 @@ impl SaltValueDelta {
 /// # Examples
 ///
 /// ```
-/// use megaeth_salt::compute_xor;
+/// use salt::types::compute_xor;
 ///
 /// let a = vec![1, 2, 3];
 /// let b = vec![4, 5, 6, 7];

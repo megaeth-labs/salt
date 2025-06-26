@@ -268,7 +268,7 @@ impl StateReader for BlockWitness {
 mod tests {
     use super::*;
     use crate::{
-        compat::Account, constant::MIN_BUCKET_SIZE_BITS, mem_salt::MemSalt,
+        account::Account, constant::MIN_BUCKET_SIZE_BITS, mem_salt::MemSalt,
         state::state::EphemeralSaltState, trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};

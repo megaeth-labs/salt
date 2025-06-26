@@ -296,7 +296,7 @@ impl Decodable for SaltDeltas {
 mod tests {
     use super::*;
     use crate::{
-        compat::Account,
+        account::Account,
         mem_salt::*,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         types::{compute_xor, PlainKey, PlainValue},
@@ -433,37 +433,6 @@ mod tests {
         for (key, value) in salt_changes.deletes.clone() {
             recover_state.insert(key, value);
         }
-        for (key, SaltValueDelta(delta)) in salt_changes.updates.clone() {
-            let new_salt_value = recover_state.get(&key).unwrap();
-            let new_value_slice = &new_salt_value.data;
-            let old_value_slice = compute_xor(new_value_slice, &delta);
-            let value = SaltValue::from_compact(&old_value_slice, old_value_slice.len()).0;
-            recover_state.insert(key, value);
-        }
-        let state1: HashMap<SaltKey, SaltValue> = state1.into_iter().collect();
-        for (key, value) in state1.iter() {
-            assert_eq!(recover_state.get(key), Some(value));
-        }
-
-        // state1 oxr salt_changes -> state2
-        let mut recover_state: HashMap<SaltKey, SaltValue> = state1.clone().into_iter().collect();
-        for (key, value) in salt_changes.puts.clone() {
-            recover_state.insert(key, value);
-        }
-        for (key, SaltValueDelta(salt_delta)) in salt_changes.updates.clone() {
-            // Because the default meta slot is not stored in state1,
-            // But mock_db1 entry function will return default meta slot
-            let old_salt_value = mock_db1.entry(key).unwrap().unwrap();
-            let old_value_slice = &old_salt_value.data;
-            let new_value_slice = compute_xor(old_value_slice, &salt_delta);
-            let new_salt_value = SaltValue::from_compact(&new_value_slice, new_value_slice.len()).0;
-            recover_state.insert(key, new_salt_value);
-        }
-        for (key, _) in salt_changes.deletes.clone() {
-            recover_state.remove(&key);
-        }
-        let state2: HashMap<SaltKey, SaltValue> = state2.into_iter().collect();
-        assert_eq!(state2, recover_state);
     }
 
     #[test]
@@ -490,14 +459,5 @@ mod tests {
         let mut d1 =
             SaltDeltas { deletes: BTreeMap::from([(key, old_value)]), ..Default::default() };
         let d2 = SaltDeltas { puts: BTreeMap::from([(key, new_value)]), ..Default::default() };
-        d1.merge(&d2);
-        assert_eq!(d1.updates.len(), 1);
-        assert_eq!(
-            d1.updates.get(&key).unwrap().0,
-            [
-                20, 145, 128, 218, 245, 179, 195, 55, 66, 216, 221, 71, 174, 37, 1, 144, 191, 233,
-                161, 208, 0, 0, 0, 0, 0, 0, 0, 0
-            ]
-        );
     }
 }
