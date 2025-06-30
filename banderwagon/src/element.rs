@@ -319,6 +319,7 @@ mod tests {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ark_ff::AdditiveGroup;
 
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
     fn two_torsion() -> EdwardsProjective {
