@@ -67,29 +67,6 @@ fn group_prover_queries<'a>(
     res
 }
 
-#[inline(always)]
-fn group_prover_queries2<'a>(
-    prover_queries: &'a [ProverQuery],
-    challenges: &'a [Fr],
-) -> Vec<(usize, Vec<(&'a ProverQuery, &'a Fr)>)> {
-    // We want to group all of the polynomials which are evaluated at the same point together
-    // use itertools::Itertools;
-    // prover_queries
-    //     .iter()
-    //     .zip(challenges.iter())
-    //     .into_group_map_by(|x| x.0.point)
-    let zipped: Vec<(_, _)> = prover_queries
-        .par_iter()
-        .zip(challenges.par_iter())
-        .collect();
-
-    zipped
-        .par_chunk_by(|a, b| a.0.point == b.0.point)
-        .into_par_iter()
-        .map(|chunk| (chunk[0].0.point, chunk.to_vec()))
-        .collect()
-}
-
 impl MultiPoint {
     pub fn open(
         crs: CRS,

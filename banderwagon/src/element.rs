@@ -196,34 +196,6 @@ impl Element {
             .collect()
     }
 
-    pub fn batch_map_to_scalar_field3(elements: Vec<[u8; 64]>) -> Vec<Fr> {
-        use ark_ff::PrimeField;
-        use rayon::prelude::*;
-
-        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
-            .into_par_iter()
-            .map(|e| {
-                let a = Element::from_bytes_unchecked_uncompressed(e);
-                (a.0.x, a.0.y)
-            })
-            .unzip();
-
-        batch_inversion(&mut ys);
-
-        ys.par_iter_mut().zip(xs.par_iter()).for_each(|(y, x)| {
-            *y *= x;
-        });
-
-        ys.par_iter()
-            .map(|e| {
-                let mut bytes = [0u8; 32];
-                e.serialize_compressed(&mut bytes[..])
-                    .expect("could not serialize point into a 32 byte array");
-                Fr::from_le_bytes_mod_order(&bytes)
-            })
-            .collect()
-    }
-
     pub fn zero() -> Element {
         Element(EdwardsProjective::zero())
     }
@@ -347,9 +319,6 @@ mod tests {
 #[cfg(test)]
 mod test {
     use super::*;
-    use ark_ff::AdditiveGroup;
-    use ark_std::{test_rng, UniformRand};
-    use std::time::Instant;
 
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
     fn two_torsion() -> EdwardsProjective {
@@ -451,116 +420,5 @@ mod test {
 
         assert!(inf1.double().is_zero());
         assert!(inf2.double().is_zero());
-    }
-
-    fn generate_random_elements(size: usize) -> Vec<Element> {
-        let mut rng = test_rng();
-        (0..size)
-            .map(|_| {
-                let random_scalar = Fr::rand(&mut rng);
-                Element::prime_subgroup_generator() * random_scalar
-            })
-            .collect()
-    }
-
-    #[test]
-    fn benchmark_batch_map() {
-        let sizes = vec![256, 100_000, 1000_000];
-        let chunk_sizes = vec![1024, 2048, 4096, 8192];
-
-        println!("\nBenchmarking batch_map_to_scalar_field vs batch_map_to_scalar_field2:");
-        println!("Size\t\tSequential(μs)\tParallel(μs)\tSpeedup");
-        println!("------------------------------------------------");
-
-        for size in sizes {
-            let elements = generate_random_elements(size);
-            let elements_bytes = elements
-                .iter()
-                .map(|e| e.to_bytes_uncompressed())
-                .collect::<Vec<_>>();
-
-            // Multiple iterations for more accurate timing
-            const ITERATIONS: u32 = 5;
-            let mut seq_total = 0;
-            let mut par_total_1 = 0;
-            let mut par_total_2 = 0;
-            let mut par_total_4 = 0;
-            let mut par_total_8 = 0;
-
-            for _ in 0..ITERATIONS {
-                // Test sequential version
-                let start = Instant::now();
-                let seq_result = Element::batch_map_to_scalar_field(&elements);
-                seq_total += start.elapsed().as_micros();
-
-                // Test parallel version
-                let start = Instant::now();
-                let par_result_1 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
-                par_total_1 += start.elapsed().as_micros();
-
-                let start = Instant::now();
-                let par_result_2 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
-                par_total_2 += start.elapsed().as_micros();
-
-                let start = Instant::now();
-                let par_result_4 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
-                par_total_4 += start.elapsed().as_micros();
-
-                let start = Instant::now();
-                let par_result_8 = Element::batch_map_to_scalar_field2(elements_bytes.clone());
-                par_total_8 += start.elapsed().as_micros();
-
-                // Verify results match
-                assert_eq!(seq_result, par_result_1);
-                assert_eq!(seq_result, par_result_2);
-                assert_eq!(seq_result, par_result_4);
-                assert_eq!(seq_result, par_result_8);
-            }
-
-            let seq_avg = seq_total as f64 / ITERATIONS as f64;
-            let par_avg_1 = par_total_1 as f64 / ITERATIONS as f64;
-            let par_avg_2 = par_total_2 as f64 / ITERATIONS as f64;
-            let par_avg_4 = par_total_4 as f64 / ITERATIONS as f64;
-            let par_avg_8 = par_total_8 as f64 / ITERATIONS as f64;
-
-            // Calculate speedup
-            let speedup_1 = if par_avg_1 > 0.0 {
-                seq_avg / par_avg_1
-            } else {
-                f64::INFINITY
-            };
-
-            let speedup_2 = if par_avg_2 > 0.0 {
-                seq_avg / par_avg_2
-            } else {
-                f64::INFINITY
-            };
-
-            let speedup_4 = if par_avg_4 > 0.0 {
-                seq_avg / par_avg_4
-            } else {
-                f64::INFINITY
-            };
-
-            let speedup_8 = if par_avg_8 > 0.0 {
-                seq_avg / par_avg_8
-            } else {
-                f64::INFINITY
-            };
-
-            println!(
-                "{}\t\t{:.2}\t\t{:.2}\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x\t\t{:.2}x",
-                size,
-                seq_avg,
-                par_avg_1,
-                speedup_1,
-                par_avg_2,
-                speedup_2,
-                par_avg_4,
-                speedup_4,
-                par_avg_8,
-                speedup_8
-            );
-        }
     }
 }
