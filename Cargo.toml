@@ -8,8 +8,8 @@ default = []
 
 [dependencies]
 # alloy dependencies
-alloy-genesis = "0.2.1"
-alloy-primitives = "0.7.2"
+alloy-genesis = "0.5.4"
+alloy-primitives = { version = "0.8.24", features = ["rlp", "serde"] }
 alloy-rlp = "0.3.4"
 
 # megaeth dependencies
