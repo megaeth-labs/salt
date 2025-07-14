@@ -1,6 +1,6 @@
 use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
-use ark_ff::{batch_inversion, Field, One, Zero};
+use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
@@ -180,7 +180,7 @@ impl Element {
             })
             .unzip();
 
-        batch_inversion_op(&mut ys);
+        serial_batch_inversion_and_mul(&mut ys, &Fq::one());
 
         ys.iter_mut().zip(xs.iter()).for_each(|(y, x)| {
             *y *= x;
@@ -229,42 +229,6 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         .expect("number of bases should equal number of scalars");
 
     Element(result)
-}
-
-pub fn batch_inversion_op(v: &mut [Fq]) {
-    // Montgomery’s Trick and Fast Implementation of Masked AES
-    // Genelle, Prouff and Quisquater
-    // Section 3.2
-    // but with an optimization to multiply every element in the returned vector by
-    // coeff
-
-    // First pass: compute [a, ab, abc, ...]
-
-    let mut prod = v.to_vec();
-
-    let mut tmp = v[0];
-
-    for i in 1..v.len() {
-        tmp *= v[i];
-        prod[i] = tmp;
-    }
-
-    // Invert `tmp`.
-    tmp = tmp.inverse().unwrap(); // Guaranteed to be nonzero.
-
-    // Second pass: iterate backwards to compute inverses
-    for (f, s) in v
-        .iter_mut()
-        // Backwards
-        .rev()
-        // Backwards, skip last element, fill in one for last term.
-        .zip(prod.into_iter().rev().skip(1).chain(Some(Fq::one())))
-    {
-        // tmp := tmp * f; f := tmp * s = 1/f
-        let new_tmp = tmp * *f;
-        *f = tmp * &s;
-        tmp = new_tmp;
-    }
 }
 
 #[cfg(test)]

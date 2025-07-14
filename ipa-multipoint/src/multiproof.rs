@@ -79,7 +79,7 @@ impl MultiPoint {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        get_state_prover(transcript, &queries);
+        record_query_transcript(transcript, &queries);
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of_par(r, queries.len());
@@ -166,91 +166,69 @@ impl MultiPoint {
     }
 }
 
-#[inline(always)]
-fn get_state_prover(transcript: &mut Transcript, queries: &[ProverQuery]) {
-    const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
-    let total_size = queries.len() * BYTES_PER_QUERY;
-
-    let origin = transcript.state.len();
-    transcript.state.resize(origin + total_size, 0);
-
-    // Pre-allocate chunks
-    let chunk_size =
-        (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
-
-    // Process chunks in parallel
-    transcript.state[origin..]
-        .par_chunks_mut(chunk_size * BYTES_PER_QUERY)
-        .zip(queries.par_chunks(chunk_size))
-        .for_each(|(chunk_res, queries_chunk)| {
-            for (i, p) in queries_chunk.iter().enumerate() {
-                let index = i * BYTES_PER_QUERY;
-                chunk_res[index] = b'C';
-
-                // Commitment
-                p.commitment
-                    .serialize_compressed(&mut chunk_res[index + 1..index + 33])
-                    .unwrap();
-
-                // Point
-                chunk_res[index + 33] = b'z';
-
-                let point_scalar = Fr::from(p.point as u128);
-                point_scalar
-                    .serialize_compressed(&mut chunk_res[index + 34..index + 66])
-                    .unwrap();
-
-                // Result
-                chunk_res[index + 66] = b'y';
-
-                p.result
-                    .serialize_compressed(&mut chunk_res[index + 67..index + 99])
-                    .unwrap();
-            }
-        });
+trait QueryData {
+    fn commitment(&self) -> &Element;
+    fn point_as_fr(&self) -> Fr;
+    fn result(&self) -> &Fr;
 }
 
-fn get_state_verifier(transcript: &mut Transcript, queries: &[VerifierQuery]) {
+impl QueryData for ProverQuery {
+    fn commitment(&self) -> &Element {
+        &self.commitment
+    }
+    fn point_as_fr(&self) -> Fr {
+        Fr::from(self.point as u128)
+    }
+    fn result(&self) -> &Fr {
+        &self.result
+    }
+}
+
+impl QueryData for VerifierQuery {
+    fn commitment(&self) -> &Element {
+        &self.commitment
+    }
+    fn point_as_fr(&self) -> Fr {
+        self.point
+    }
+    fn result(&self) -> &Fr {
+        &self.result
+    }
+}
+
+#[inline(always)]
+fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, queries: &[T]) {
     const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
     let total_size = queries.len() * BYTES_PER_QUERY;
 
     let origin = transcript.state.len();
     transcript.state.resize(origin + total_size, 0);
 
-    // Pre-allocate chunks
-    let chunk_size =
-        (queries.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let state_slice = &mut transcript.state[origin..];
 
     // Process chunks in parallel
-    transcript.state[origin..]
-        .par_chunks_mut(chunk_size * BYTES_PER_QUERY)
-        .zip(queries.par_chunks(chunk_size))
-        .for_each(|(chunk_res, queries_chunk)| {
-            for (i, p) in queries_chunk.iter().enumerate() {
-                // Commitment
-                let index = i * BYTES_PER_QUERY;
-                chunk_res[index] = b'C';
+    state_slice
+        .par_chunks_mut(BYTES_PER_QUERY)
+        .zip(queries.par_iter())
+        .for_each(|(chunk_res, p)| {
+            // Commitment
+            chunk_res[0] = b'C';
+            p.commitment()
+                .serialize_compressed(&mut chunk_res[1..33])
+                .unwrap();
 
-                p.commitment
-                    .serialize_compressed(&mut chunk_res[index + 1..index + 33])
-                    .unwrap();
+            // Point
+            chunk_res[33] = b'z';
+            let point_scalar = p.point_as_fr();
+            point_scalar
+                .serialize_compressed(&mut chunk_res[34..66])
+                .unwrap();
 
-                // Point
-
-                chunk_res[index + 33] = b'z';
-
-                let point_scalar = p.point;
-                point_scalar
-                    .serialize_compressed(&mut chunk_res[index + 34..index + 66])
-                    .unwrap();
-
-                // Result
-                chunk_res[index + 66] = b'y';
-
-                p.result
-                    .serialize_compressed(&mut chunk_res[index + 67..index + 99])
-                    .unwrap();
-            }
+            // Result
+            chunk_res[66] = b'y';
+            p.result()
+                .serialize_compressed(&mut chunk_res[67..99])
+                .unwrap();
         });
 }
 
@@ -297,7 +275,7 @@ impl MultiPointProof {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        get_state_verifier(transcript, queries);
+        record_query_transcript(transcript, queries);
 
         let r = transcript.challenge_scalar(b"r");
         let powers_of_r = powers_of_par(r, queries.len());
@@ -603,7 +581,7 @@ mod tests {
     use super::*;
     use ark_std::{test_rng, UniformRand};
 
-    fn generate_test_queries(size: usize) -> Vec<ProverQuery> {
+    fn generate_test_queries(size: usize) -> (Vec<ProverQuery>, Vec<VerifierQuery>) {
         let mut rng = test_rng();
 
         let poly = LagrangeBasis::new(vec![
@@ -616,7 +594,7 @@ mod tests {
             Fr::from(10u128),
         ]);
 
-        (0..size)
+        let prover_queries: Vec<_> = (0..size)
             .map(|i| {
                 let random_scalar = Fr::rand(&mut rng);
                 let random_element = Element::prime_subgroup_generator() * random_scalar;
@@ -628,10 +606,21 @@ mod tests {
                     result: random_scalar,
                 }
             })
-            .collect()
+            .collect();
+
+        let verifier_queries: Vec<VerifierQuery> = prover_queries
+            .iter()
+            .map(|query| VerifierQuery {
+                commitment: query.commitment,
+                point: Fr::from(query.point as u128),
+                result: query.result,
+            })
+            .collect();
+
+        (prover_queries, verifier_queries)
     }
 
-    fn get_state2(queries: &[ProverQuery]) -> Vec<u8> {
+    fn prover_query_transcript(queries: &[ProverQuery]) -> Vec<u8> {
         let mut transcript = Transcript { state: Vec::new() };
 
         for query in queries.iter() {
@@ -645,25 +634,34 @@ mod tests {
         transcript.state
     }
 
+    fn verifier_query_transcript(queries: &[VerifierQuery]) -> Vec<u8> {
+        let mut transcript = Transcript { state: Vec::new() };
+
+        for query in queries.iter() {
+            transcript.append_point(b"C", &query.commitment);
+            transcript.append_scalar(b"z", &query.point);
+            transcript.append_scalar(b"y", &query.result);
+        }
+        transcript.state
+    }
+
     #[test]
-    fn get_state_consistency() {
-        let prover_query = ProverQuery {
-            commitment: Element::prime_subgroup_generator(),
-            poly: LagrangeBasis::new(vec![
-                Fr::one(),
-                Fr::from(10u128),
-                Fr::from(200u128),
-                Fr::from(78u128),
-            ]),
-            point: 1,
-            result: Fr::from(10u128),
-        };
+    fn record_query_transcript_consistency() {
+        let (prover_queries, verifier_queries) = generate_test_queries(100);
 
-        let state2 = get_state2(&vec![prover_query.clone()]);
+        let prover_state = prover_query_transcript(&prover_queries);
+        let verifier_state = verifier_query_transcript(&verifier_queries);
+
         let mut transcript = Transcript::new(b"");
-        get_state_prover(&mut transcript, &vec![prover_query]);
-        let state = transcript.state;
+        record_query_transcript(&mut transcript, &prover_queries);
+        let prover_state2 = transcript.state;
 
-        assert_eq!(state, state2);
+        assert_eq!(prover_state, prover_state2);
+
+        let mut transcript = Transcript::new(b"");
+        record_query_transcript(&mut transcript, &verifier_queries);
+        let verifier_state2 = transcript.state;
+
+        assert_eq!(verifier_state, verifier_state2);
     }
 }
