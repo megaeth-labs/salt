@@ -48,11 +48,6 @@ fn group_prover_queries<'a>(
     challenges: &'a [Fr],
 ) -> FxHashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
     // We want to group all of the polynomials which are evaluated at the same point together
-    // use itertools::Itertools;
-    // prover_queries
-    //     .iter()
-    //     .zip(challenges.iter())
-    //     .into_group_map_by(|x| x.0.point)
     let mut res = FxHashMap::default();
 
     prover_queries
