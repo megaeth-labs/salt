@@ -97,7 +97,7 @@ impl MultiPoint {
                             .into_iter()
                             .map(|(query, challenge)| query.poly.clone() * *challenge)
                             .reduce(|acc, x| acc + x)
-                            .unwrap();
+                            .expect("Failed to aggregate polynomial");
 
                         (*point, aggregated_polynomial)
                     })
@@ -161,6 +161,11 @@ impl MultiPoint {
     }
 }
 
+/// This trait is used to abstract over the query data that is used to record the transcript
+/// in the prover and verifier.
+///
+/// It is mainly used to solve the problem that the point field types of ProverQuery and VerifierQuery are different.
+/// The trait is implemented for both the prover and verifier query types.
 trait QueryData {
     fn commitment(&self) -> &Element;
     fn point_as_fr(&self) -> Fr;
@@ -210,20 +215,20 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
             chunk_res[0] = b'C';
             p.commitment()
                 .serialize_compressed(&mut chunk_res[1..33])
-                .unwrap();
+                .expect("Failed to serialize commitment");
 
             // Point
             chunk_res[33] = b'z';
             let point_scalar = p.point_as_fr();
             point_scalar
                 .serialize_compressed(&mut chunk_res[34..66])
-                .unwrap();
+                .expect("Failed to serialize point");
 
             // Result
             chunk_res[66] = b'y';
             p.result()
                 .serialize_compressed(&mut chunk_res[67..99])
-                .unwrap();
+                .expect("Failed to serialize result");
         });
 }
 
