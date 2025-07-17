@@ -2,6 +2,7 @@
 //!
 
 use crate::element::Element;
+use ark_ec::AdditiveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};

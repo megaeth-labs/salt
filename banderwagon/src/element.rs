@@ -1,12 +1,12 @@
-use ark_ec::{twisted_edwards::TECurveConfig, Group, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
-use ark_ff::{batch_inversion, Field, One, Zero};
+use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
 #[derive(Debug, Clone, Copy, Eq)]
-pub struct Element(pub(crate) EdwardsProjective);
+pub struct Element(pub EdwardsProjective);
 
 impl PartialEq for Element {
     fn eq(&self, other: &Self) -> bool {
@@ -168,6 +168,34 @@ impl Element {
         scalars
     }
 
+    // serial optimized version
+    pub fn serial_batch_map_to_scalar_field(elements: Vec<[u8; 64]>) -> Vec<Fr> {
+        use ark_ff::PrimeField;
+
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
+            .into_iter()
+            .map(|e| {
+                let e = Element::from_bytes_unchecked_uncompressed(e);
+                (e.0.x, e.0.y)
+            })
+            .unzip();
+
+        serial_batch_inversion_and_mul(&mut ys, &Fq::one());
+
+        ys.iter_mut().zip(xs.iter()).for_each(|(y, x)| {
+            *y *= x;
+        });
+
+        ys.iter()
+            .map(|e| {
+                let mut bytes = [0u8; 32];
+                e.serialize_compressed(&mut bytes[..])
+                    .expect("could not serialize point into a 32 byte array");
+                Fr::from_le_bytes_mod_order(&bytes)
+            })
+            .collect()
+    }
+
     pub fn zero() -> Element {
         Element(EdwardsProjective::zero())
     }
@@ -255,6 +283,8 @@ mod tests {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ark_ff::AdditiveGroup;
+
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
     fn two_torsion() -> EdwardsProjective {
         EdwardsProjective::new_unchecked(Fq::zero(), -Fq::one(), Fq::zero(), Fq::one())

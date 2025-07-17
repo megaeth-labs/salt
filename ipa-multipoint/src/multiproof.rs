@@ -2,16 +2,17 @@
 #![allow(non_snake_case)]
 
 use crate::crs::CRS;
-use crate::ipa::{slow_vartime_multiscalar_mul, IPAProof};
+use crate::ipa::{multi_scalar_mul_par, IPAProof};
 use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 
-use crate::math_utils::powers_of;
+use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use std::collections::HashMap;
-
 use banderwagon::{trait_defs::*, Element, Fr};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+
 pub struct MultiPoint;
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,8 @@ impl From<ProverQuery> for VerifierQuery {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VerifierQuery {
     pub commitment: Element,
     pub point: Fr,
@@ -39,16 +42,24 @@ pub struct VerifierQuery {
 }
 
 //XXX: change to group_prover_queries_by_point
+#[inline(always)]
 fn group_prover_queries<'a>(
     prover_queries: &'a [ProverQuery],
     challenges: &'a [Fr],
-) -> HashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
+) -> FxHashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
     // We want to group all of the polynomials which are evaluated at the same point together
-    use itertools::Itertools;
+    let mut res = FxHashMap::default();
+
     prover_queries
         .iter()
         .zip(challenges.iter())
-        .into_group_map_by(|x| x.0.point)
+        .for_each(|(key, val)| {
+            res.entry(key.point)
+                .or_insert_with(Vec::new)
+                .push((key, val));
+        });
+
+    res
 }
 
 impl MultiPoint {
@@ -59,75 +70,66 @@ impl MultiPoint {
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
         transcript.domain_sep(b"multiproof");
+
         // 1. Compute `r`
         //
         // Add points and evaluations
-        for query in queries.iter() {
-            transcript.append_point(b"C", &query.commitment);
-            transcript.append_scalar(b"z", &Fr::from(query.point as u128));
-            // XXX: note that since we are always opening on the domain
-            // the prover does not need to pass y_i explicitly
-            // It's just an index operation on the lagrange basis
-            transcript.append_scalar(b"y", &query.result)
-        }
+        record_query_transcript(transcript, &queries);
 
         let r = transcript.challenge_scalar(b"r");
-        let powers_of_r = powers_of(r, queries.len());
+        let powers_of_r = powers_of_par(r, queries.len());
 
         let grouped_queries = group_prover_queries(&queries, &powers_of_r);
 
+        let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
+
+        let chunk_size = (grouped_queries.len() + rayon::current_num_threads() - 1)
+            / rayon::current_num_threads();
+
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
-            .into_iter()
-            .map(|(point, queries_challenges)| {
-                let mut aggregated_polynomial = vec![Fr::zero(); crs.n];
+            .par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                chunk
+                    .into_iter()
+                    .map(|(point, queries_challenges)| {
+                        let aggregated_polynomial = queries_challenges
+                            .into_iter()
+                            .map(|(query, challenge)| query.poly.clone() * *challenge)
+                            .reduce(|acc, x| acc + x)
+                            .expect("Failed to aggregate polynomial");
 
-                let scaled_lagrange_polynomials =
-                    queries_challenges.into_iter().map(|(query, challenge)| {
-                        // scale the polynomial by the challenge
-                        query.poly.values().iter().map(move |x| *x * challenge)
-                    });
-
-                for poly_mul_challenge in scaled_lagrange_polynomials {
-                    for (result, scaled_poly) in
-                        aggregated_polynomial.iter_mut().zip(poly_mul_challenge)
-                    {
-                        *result += scaled_poly;
-                    }
-                }
-
-                (point, LagrangeBasis::new(aggregated_polynomial))
+                        (*point, aggregated_polynomial)
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         // Compute g(X)
         //
         let g_x: LagrangeBasis = aggregated_queries
-            .iter()
+            .par_iter()
             .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
-            .fold(LagrangeBasis::zero(), |mut res, val| {
-                res = res + val;
-                res
-            });
+            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
+
         transcript.append_point(b"D", &g_x_comm);
 
         // 2. Compute g_1(t)
         //
         //
         let t = transcript.challenge_scalar(b"t");
-        //
-        //
 
         let mut g1_den: Vec<_> = aggregated_queries
-            .iter()
+            .par_iter()
             .map(|(z_i, _)| t - Fr::from(*z_i as u128))
             .collect();
-        batch_inversion(&mut g1_den);
+
+        serial_batch_inversion_and_mul(&mut g1_den, &Fr::one());
 
         let g1_x = aggregated_queries
-            .into_iter()
+            .into_par_iter()
             .zip(g1_den)
             .map(|((_, agg_f_x), den_inv)| {
                 let term: Vec<_> = agg_f_x
@@ -138,12 +140,10 @@ impl MultiPoint {
 
                 LagrangeBasis::new(term)
             })
-            .fold(LagrangeBasis::zero(), |mut res, val| {
-                res = res + val;
-                res
-            });
+            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
 
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
+
         transcript.append_point(b"E", &g1_comm);
 
         //3. Compute g_1(X) - g(X)
@@ -160,6 +160,78 @@ impl MultiPoint {
         }
     }
 }
+
+/// This trait is used to abstract over the query data that is used to record the transcript
+/// in the prover and verifier.
+///
+/// It is mainly used to solve the problem that the point field types of ProverQuery and VerifierQuery are different.
+/// The trait is implemented for both the prover and verifier query types.
+trait QueryData {
+    fn commitment(&self) -> &Element;
+    fn point_as_fr(&self) -> Fr;
+    fn result(&self) -> &Fr;
+}
+
+impl QueryData for ProverQuery {
+    fn commitment(&self) -> &Element {
+        &self.commitment
+    }
+    fn point_as_fr(&self) -> Fr {
+        Fr::from(self.point as u128)
+    }
+    fn result(&self) -> &Fr {
+        &self.result
+    }
+}
+
+impl QueryData for VerifierQuery {
+    fn commitment(&self) -> &Element {
+        &self.commitment
+    }
+    fn point_as_fr(&self) -> Fr {
+        self.point
+    }
+    fn result(&self) -> &Fr {
+        &self.result
+    }
+}
+
+#[inline(always)]
+fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, queries: &[T]) {
+    const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
+    let total_size = queries.len() * BYTES_PER_QUERY;
+
+    let origin = transcript.state.len();
+    transcript.state.resize(origin + total_size, 0);
+
+    let state_slice = &mut transcript.state[origin..];
+
+    // Process chunks in parallel
+    state_slice
+        .par_chunks_mut(BYTES_PER_QUERY)
+        .zip(queries.par_iter())
+        .for_each(|(chunk_res, p)| {
+            // Commitment
+            chunk_res[0] = b'C';
+            p.commitment()
+                .serialize_compressed(&mut chunk_res[1..33])
+                .expect("Failed to serialize commitment");
+
+            // Point
+            chunk_res[33] = b'z';
+            let point_scalar = p.point_as_fr();
+            point_scalar
+                .serialize_compressed(&mut chunk_res[34..66])
+                .expect("Failed to serialize point");
+
+            // Result
+            chunk_res[66] = b'y';
+            p.result()
+                .serialize_compressed(&mut chunk_res[67..99])
+                .expect("Failed to serialize result");
+        });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiPointProof {
     open_proof: IPAProof,
@@ -203,14 +275,10 @@ impl MultiPointProof {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        for query in queries.iter() {
-            transcript.append_point(b"C", &query.commitment);
-            transcript.append_scalar(b"z", &query.point);
-            transcript.append_scalar(b"y", &query.result);
-        }
+        record_query_transcript(transcript, queries);
 
         let r = transcript.challenge_scalar(b"r");
-        let powers_of_r = powers_of(r, queries.len());
+        let powers_of_r = powers_of_par(r, queries.len());
 
         // 2. Compute `t`
         transcript.append_point(b"D", &self.g_x_comm);
@@ -218,24 +286,26 @@ impl MultiPointProof {
 
         // 3. Compute g_2(t)
         //
-        let mut g2_den: Vec<_> = queries.iter().map(|query| t - query.point).collect();
+        let mut g2_den: Vec<_> = queries.par_iter().map(|query| t - query.point).collect();
+
         batch_inversion(&mut g2_den);
 
         let helper_scalars: Vec<_> = powers_of_r
-            .iter()
+            .into_par_iter()
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
 
         let g2_t: Fr = helper_scalars
-            .iter()
-            .zip(queries.iter())
+            .par_iter()
+            .zip(queries.par_iter())
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
         //4. Compute [g_1(X)] = E
-        let comms: Vec<_> = queries.iter().map(|query| query.commitment).collect();
-        let g1_comm = slow_vartime_multiscalar_mul(helper_scalars.iter(), comms.iter());
+        let comms: Vec<_> = queries.par_iter().map(|query| query.commitment).collect();
+
+        let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -262,7 +332,9 @@ pub(crate) fn open_point_outside_of_domain(
     z_i: Fr,
 ) -> IPAProof {
     let a = polynomial.values().to_vec();
+
     let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, z_i);
+
     crate::ipa::create(transcript, crs, a, commitment, b, z_i)
 }
 
@@ -502,4 +574,94 @@ fn multiproof_consistency() {
     let got = hex::encode(bytes);
     let expected = "4f53588244efaf07a370ee3f9c467f933eed360d4fbf7a19dfc8bc49b67df4711bf1d0a720717cd6a8c75f1a668cb7cbdd63b48c676b89a7aee4298e71bd7f4013d7657146aa9736817da47051ed6a45fc7b5a61d00eb23e5df82a7f285cc10e67d444e91618465ca68d8ae4f2c916d1942201b7e2aae491ef0f809867d00e83468fb7f9af9b42ede76c1e90d89dd789ff22eb09e8b1d062d8a58b6f88b3cbe80136fc68331178cd45a1df9496ded092d976911b5244b85bc3de41e844ec194256b39aeee4ea55538a36139211e9910ad6b7a74e75d45b869d0a67aa4bf600930a5f760dfb8e4df9938d1f47b743d71c78ba8585e3b80aba26d24b1f50b36fa1458e79d54c05f58049245392bc3e2b5c5f9a1b99d43ed112ca82b201fb143d401741713188e47f1d6682b0bf496a5d4182836121efff0fd3b030fc6bfb5e21d6314a200963fe75cb856d444a813426b2084dfdc49dca2e649cb9da8bcb47859a4c629e97898e3547c591e39764110a224150d579c33fb74fa5eb96427036899c04154feab5344873d36a53a5baefd78c132be419f3f3a8dd8f60f72eb78dd5f43c53226f5ceb68947da3e19a750d760fb31fa8d4c7f53bfef11c4b89158aa56b1f4395430e16a3128f88e234ce1df7ef865f2d2c4975e8c82225f578310c31fd41d265fd530cbfa2b8895b228a510b806c31dff3b1fa5c08bffad443d567ed0e628febdd22775776e0cc9cebcaea9c6df9279a5d91dd0ee5e7a0434e989a160005321c97026cb559f71db23360105460d959bcdf74bee22c4ad8805a1d497507";
     assert_eq!(got, expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_std::{test_rng, UniformRand};
+
+    fn generate_test_queries(size: usize) -> (Vec<ProverQuery>, Vec<VerifierQuery>) {
+        let mut rng = test_rng();
+
+        let poly = LagrangeBasis::new(vec![
+            Fr::one(),
+            Fr::from(10u128),
+            Fr::from(200u128),
+            Fr::from(78u128),
+            Fr::from(400u128),
+            Fr::from(34u128),
+            Fr::from(10u128),
+        ]);
+
+        let prover_queries: Vec<_> = (0..size)
+            .map(|i| {
+                let random_scalar = Fr::rand(&mut rng);
+                let random_element = Element::prime_subgroup_generator() * random_scalar;
+
+                ProverQuery {
+                    commitment: random_element,
+                    poly: poly.clone(),
+                    point: i % 7,
+                    result: random_scalar,
+                }
+            })
+            .collect();
+
+        let verifier_queries: Vec<VerifierQuery> = prover_queries
+            .iter()
+            .map(|query| VerifierQuery {
+                commitment: query.commitment,
+                point: Fr::from(query.point as u128),
+                result: query.result,
+            })
+            .collect();
+
+        (prover_queries, verifier_queries)
+    }
+
+    fn prover_query_transcript(queries: &[ProverQuery]) -> Vec<u8> {
+        let mut transcript = Transcript { state: Vec::new() };
+
+        for query in queries.iter() {
+            transcript.append_point(b"C", &query.commitment);
+            transcript.append_scalar(b"z", &Fr::from(query.point as u128));
+            // XXX: note that since we are always opening on the domain
+            // the prover does not need to pass y_i explicitly
+            // It's just an index operation on the lagrange basis
+            transcript.append_scalar(b"y", &query.result)
+        }
+        transcript.state
+    }
+
+    fn verifier_query_transcript(queries: &[VerifierQuery]) -> Vec<u8> {
+        let mut transcript = Transcript { state: Vec::new() };
+
+        for query in queries.iter() {
+            transcript.append_point(b"C", &query.commitment);
+            transcript.append_scalar(b"z", &query.point);
+            transcript.append_scalar(b"y", &query.result);
+        }
+        transcript.state
+    }
+
+    #[test]
+    fn record_query_transcript_consistency() {
+        let (prover_queries, verifier_queries) = generate_test_queries(100);
+
+        let prover_state = prover_query_transcript(&prover_queries);
+        let verifier_state = verifier_query_transcript(&verifier_queries);
+
+        let mut transcript = Transcript::new(b"");
+        record_query_transcript(&mut transcript, &prover_queries);
+        let prover_state2 = transcript.state;
+
+        assert_eq!(prover_state, prover_state2);
+
+        let mut transcript = Transcript::new(b"");
+        record_query_transcript(&mut transcript, &verifier_queries);
+        let verifier_state2 = transcript.state;
+
+        assert_eq!(verifier_state, verifier_state2);
+    }
 }

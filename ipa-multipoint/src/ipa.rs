@@ -3,10 +3,10 @@ use crate::crs::CRS;
 use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
+use crate::{IOError, IOErrorKind, IOResult};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
 use itertools::Itertools;
-
-use crate::{IOError, IOErrorKind, IOResult};
+use rayon::prelude::*;
 
 use std::iter;
 
@@ -117,26 +117,39 @@ pub fn create(
         let (b_L, b_R) = halve(b);
         let (G_L, G_R) = halve(G);
 
-        let z_L = inner_product(a_R, b_L);
-        let z_R = inner_product(a_L, b_R);
+        let left_compute = || -> Element {
+            let z_L = inner_product(a_R, b_L);
 
-        let L = slow_vartime_multiscalar_mul(
-            a_R.iter().chain(iter::once(&z_L)),
-            G_L.iter().chain(iter::once(&Q)),
-        );
-        let R = slow_vartime_multiscalar_mul(
-            a_L.iter().chain(iter::once(&z_R)),
-            G_R.iter().chain(iter::once(&Q)),
-        );
+            let L = slow_vartime_multiscalar_mul(
+                a_R.iter().chain(iter::once(&z_L)),
+                G_L.iter().chain(iter::once(&Q)),
+            );
 
-        L_vec.push(L);
-        R_vec.push(R);
+            L_vec.push(L);
+            L
+        };
+
+        let right_compute = || -> Element {
+            let z_R = inner_product(a_L, b_R);
+
+            let R = slow_vartime_multiscalar_mul(
+                a_L.iter().chain(iter::once(&z_R)),
+                G_R.iter().chain(iter::once(&Q)),
+            );
+
+            R_vec.push(R);
+            R
+        };
+
+        let (L, R) = rayon::join(left_compute, right_compute);
 
         transcript.append_point(b"L", &L);
+
         transcript.append_point(b"R", &R);
 
         let x = transcript.challenge_scalar(b"x");
         let x_inv = x.inverse().unwrap();
+
         for i in 0..a_L.len() {
             a_L[i] += x * a_R[i];
             b_L[i] += x_inv * b_R[i];
@@ -154,6 +167,7 @@ pub fn create(
         a: a[0],
     }
 }
+
 // Halves the slice that is passed in
 // Assumes that the slice has an even length
 fn halve<T>(scalars: &mut [T]) -> (&mut [T], &mut [T]) {
@@ -386,6 +400,17 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     let scalars: Vec<_> = scalars.into_iter().copied().collect();
     let points: Vec<_> = points.into_iter().copied().collect();
     multi_scalar_mul(&points, &scalars)
+}
+
+pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
+    let chunk_size =
+        (bases.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+
+    bases
+        .par_chunks(chunk_size)
+        .zip(scalars.par_chunks(chunk_size))
+        .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
+        .sum()
 }
 
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
