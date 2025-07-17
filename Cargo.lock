@@ -79,9 +79,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-eips"
-version = "1.0.20"
+version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4134375e533d095e045982cd7684a29c37089ab7a605ecf2b4aa17a5e61d72d3"
+checksum = "f562a81278a3ed83290e68361f2d1c75d018ae3b8589a314faf9303883e18ec9"
 dependencies = [
  "alloy-eip2124",
  "alloy-eip2930",
@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-genesis"
-version = "1.0.20"
+version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d61d58e94791b74c2566a2f240f3f796366e2479d4d39b4a3ec848c733fb92ce"
+checksum = "dc41384e9ab8c9b2fb387c52774d9d432656a28edcda1c2d4083e96051524518"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -163,9 +163,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-serde"
-version = "1.0.20"
+version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06c02a06ae34d2354398dc9d2de0503129c3f0904a3eb791b5d0149f267c2688"
+checksum = "ae699248d02ade9db493bbdae61822277dc14ae0f82a5a4153203b60e34422a6"
 dependencies = [
  "alloy-primitives",
  "serde",
@@ -518,7 +518,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "ark-ec",
  "ark-ed-on-bls12-381-bandersnatch",
@@ -733,9 +733,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.27"
+version = "1.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d487aa071b5f64da6f19a3e848e3578944b726ee5a4854b82172f02aa876bfdc"
+checksum = "5c1599538de2394445747c8cf7935946e3cc27e9625f889d979bfb2aaf569362"
 dependencies = [
  "shlex",
 ]
@@ -788,18 +788,18 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.40"
+version = "4.5.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40b6887a1d8685cebccf115538db5c0efe625ccac9696ad45c409d96566e910f"
+checksum = "be92d32e80243a54711e5d7ce823c35c41c9d929dc4ab58e1276f625841aadf9"
 dependencies = [
  "clap_builder",
 ]
 
 [[package]]
 name = "clap_builder"
-version = "4.5.40"
+version = "4.5.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c66c08ce9f0c698cbce5c0279d0bb6ac936d8674174fe48f736533b964f59e"
+checksum = "707eab41e9622f9139419d573eca0900137718000c517d47da73045f54331c3d"
 dependencies = [
  "anstyle",
  "clap_lex",
@@ -1258,7 +1258,7 @@ dependencies = [
 [[package]]
 name = "ffi_interface"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "hex",
@@ -1501,7 +1501,7 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "hex",
@@ -2171,15 +2171,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.0.7"
+version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c71e83d6afe7ff64890ec6b71d6a69bb8a610ab78ce364b3352876bb4c801266"
+checksum = "11181fbabf243db407ef8df94a6ce0b2f9a733bd8be4ad02b4eda9602296cac8"
 dependencies = [
  "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2788,12 +2788,12 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "verkle-db"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 
 [[package]]
 name = "verkle-spec"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "ethereum-types",
@@ -2805,7 +2805,7 @@ dependencies = [
 [[package]]
 name = "verkle-trie"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3aab0b21e5f6c303b72cf9d7cb7b104a62a406a"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "anyhow",
  "banderwagon",
@@ -3152,9 +3152,9 @@ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
 
 [[package]]
 name = "winnow"
-version = "0.7.11"
+version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74c7b26e3480b707944fc872477815d29a8e429d2f93a1ce000f5fa84a15cbcd"
+checksum = "f3edebf492c8125044983378ecb5766203ad3b4c2f7a922bd7dd207f6d443e95"
 dependencies = [
  "memchr",
 ]

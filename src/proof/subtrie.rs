@@ -53,7 +53,7 @@ fn process_trie_queries<T: TrieReader>(
                         trie_reader.children(*logic_parent).expect("Failed to get trie children")
                     })
                     .collect::<Vec<_>>();
-                let multi_children_frs = Element::batch_map_to_scalar_field2(multi_children);
+                let multi_children_frs = Element::serial_batch_map_to_scalar_field(multi_children);
 
                 chunk
                     .iter()
