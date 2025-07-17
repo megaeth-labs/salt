@@ -169,7 +169,7 @@ impl Element {
     }
 
     // serial optimized version
-    pub fn batch_map_to_scalar_field2(elements: Vec<[u8; 64]>) -> Vec<Fr> {
+    pub fn serial_batch_map_to_scalar_field(elements: Vec<[u8; 64]>) -> Vec<Fr> {
         use ark_ff::PrimeField;
 
         let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
