@@ -518,7 +518,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "banderwagon"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "ark-ec",
  "ark-ed-on-bls12-381-bandersnatch",
@@ -1258,7 +1258,7 @@ dependencies = [
 [[package]]
 name = "ffi_interface"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "hex",
@@ -1501,7 +1501,7 @@ dependencies = [
 [[package]]
 name = "ipa-multipoint"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "hex",
@@ -2788,12 +2788,12 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "verkle-db"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 
 [[package]]
 name = "verkle-spec"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "banderwagon",
  "ethereum-types",
@@ -2805,7 +2805,7 @@ dependencies = [
 [[package]]
 name = "verkle-trie"
 version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
+source = "git+https://github.com/megaeth-labs/rust-salt.git?rev=d3bc9edc2ef051505de1fd5e41521aac535cefc8#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
 dependencies = [
  "anyhow",
  "banderwagon",
