@@ -3,7 +3,7 @@ use crate::types::{CommitmentBytes, NodeId};
 use alloy_primitives::b512;
 use banderwagon::salt_committer::Committer;
 
-/// Number of bits to represent MIN_BUCKET_SIZE.
+/// Number of bits to represent `MIN_BUCKET_SIZE`.
 pub const MIN_BUCKET_SIZE_BITS: usize = 8;
 /// Capacity of a default SALT bucket. Buckets are dynamically resized but their capacities cannot
 /// drop below this value.
@@ -13,13 +13,13 @@ pub const TRIE_LEVELS: usize = 4;
 /// Number of levels in the sub-trie of the bucket. The root node is stored in the SALT trie,
 /// while the remaining nodes are stored in the sub-trie. The node numbers of the sub-trie are
 /// generated according to the 40-bit full encoding rule.
-/// For example, if the bucket capacity is MIN_BUCKET_SIZE, the number of sub-trie nodes is 0.
-/// If the bucket capacity is 2 * MIN_BUCKET_SIZE, the number of sub-trie nodes is 2, as shown in
-/// the below:               |STARTING_NODE_ID[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
+/// For example, if the bucket capacity is `MIN_BUCKET_SIZE`, the number of sub-trie nodes is 0.
+/// If the bucket capacity is 2 * `MIN_BUCKET_SIZE`, the number of sub-trie nodes is 2, as shown in
+/// the below:               |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
 /// trie                  /                         \
-/// |STARTING_NODE_ID[SUB_TRIE_LEVELS-1]| |STARTING_NODE_ID[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
+/// |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]| |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
 pub const SUB_TRIE_LEVELS: usize = TRIE_LEVELS + 1;
-/// Number of bits to represent TRIE_WIDTH.
+/// Number of bits to represent `TRIE_WIDTH`.
 pub const TRIE_WIDTH_BITS: usize = 8;
 /// Branch factor of the SALT trie nodes. Always a power of two.
 pub const TRIE_WIDTH: usize = 1 << TRIE_WIDTH_BITS;
@@ -34,7 +34,7 @@ pub const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
 pub const ROOT_NODE_ID: NodeId = 0;
 
 /// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
-/// and access. STARTING_NODE_ID[i] indicates the ID of the leftmost node (i.e., its index in the
+/// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
 /// array) at level i.
 pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
     0,
@@ -45,17 +45,16 @@ pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
 ];
 
 /// Maximum number of bits to represent a bucket ID. Although the ID consists of only 24 bits, it
-/// will occupy the upper 32 bits of the SaltKey.
+/// will occupy the upper 32 bits of the `SaltKey`.
 pub const BUCKET_ID_BITS: usize = 24;
 /// Maximum number of bits to represent a slot index in a bucket. 2^40 slots per bucket should be
 /// more than enough.
 pub const BUCKET_SLOT_BITS: usize = 40;
-
-/// The degree of the polynomial used in the IPA proof.
-pub const POLY_DEGREE: usize = 256;
+/// Mask of the slot ID in a bucket. The slot ID is the lower 40 bits of the `SaltKey`.
+pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
 
 /// Precomputed node commitment at each level of an empty SALT trie.
-/// Refer to the test case 'trie_level_default_committment' in ../salt/src/trie/trie.rs for more
+/// Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
 /// info.
 pub static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes); TRIE_LEVELS] = [
     (STARTING_NODE_ID[0] + 1,b512!("5b61d927cf2984395c7a10a9300e6510371ff70a08b8be12d4598f2bd8212d39a480d92b37d8dea1d0f89260f9d9f0fee8164988d53c8b11c07a516afbf3dd1c").0),

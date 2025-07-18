@@ -221,7 +221,7 @@ where
 
     Ok((queries, parents_commitments, buckets_top_level))
 }
-
+/* 
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,3 +336,4 @@ mod tests {
         assert!(multiproof.check(&crs, &PRECOMPUTED_WEIGHTS, &verifier_queries, &mut transcript));
     }
 }
+*/

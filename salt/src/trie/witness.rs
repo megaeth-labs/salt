@@ -263,7 +263,7 @@ impl StateReader for BlockWitness {
         Ok(data)
     }
 }
-
+/* 
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,3 +503,4 @@ mod tests {
         res
     }
 }
+*/

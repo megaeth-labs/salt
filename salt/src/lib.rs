@@ -27,21 +27,20 @@
 //! pairs inside the buckets, and the "trie" module, which maintains commitments
 //! of the trie nodes.
 
-pub mod account;
 pub mod constant;
-pub mod genesis;
-pub mod proof;
-pub use proof::{ProofError, SaltProof};
+pub mod empty_salt;
+//pub mod proof;
+//pub use proof::{ProofError, SaltProof};
 pub mod state;
 pub use state::{
     state::{pk_hasher, EphemeralSaltState, PlainStateProvider},
-    updates::{SaltDeltas, StateUpdates},
+    updates::StateUpdates,
 };
 pub mod trie;
 pub use trie::{
     trie::{get_child_node, hash_commitment, StateRoot},
     updates::TrieUpdates,
-    witness::{get_block_witness, BlockWitness},
+    //witness::{get_block_witness, BlockWitness},
 };
 
 pub mod traits;

@@ -72,7 +72,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    StateRoot::new().update(&EmptySalt, &state_updates_vec[0]).unwrap();
+                    StateRoot::new()
+                        .update(&EmptySalt, &state_updates_vec[0])
+                        .unwrap();
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -84,7 +86,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 1_000, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    StateRoot::new().update(&EmptySalt, &state_updates_vec[0]).unwrap();
+                    StateRoot::new()
+                        .update(&EmptySalt, &state_updates_vec[0])
+                        .unwrap();
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -143,7 +147,11 @@ impl TrieReader for ExpansionSalt {
     type Error = &'static str;
 
     fn bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        Ok(if bucket_id < self.0 .0 as BucketId { self.0 .1 } else { MIN_BUCKET_SIZE as u64 })
+        Ok(if bucket_id < self.0 .0 as BucketId {
+            self.0 .1
+        } else {
+            MIN_BUCKET_SIZE as u64
+        })
     }
 
     fn get(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {

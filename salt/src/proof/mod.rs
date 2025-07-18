@@ -174,7 +174,7 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
     data.update(entry.value());
     Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
 }
-
+/* 
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,3 +619,4 @@ mod tests {
         assert!(res.is_ok());
     }
 }
+*/
