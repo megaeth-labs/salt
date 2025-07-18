@@ -105,7 +105,7 @@ fn process_trie_queries(
 
                 // Convert children commitments to frs at the same time for faster processing
                 let multi_children_frs =
-                    Element::batch_map_to_scalar_field2(multi_children_commitment);
+                    Element::serial_batch_map_to_scalar_field(multi_children_commitment);
 
                 let child_map: FxHashMap<NodeId, Fr> = multi_children_id
                     .iter()
