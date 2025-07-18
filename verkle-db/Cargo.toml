@@ -1,0 +1,21 @@
+[package]
+name = "verkle-db"
+authors = ["Kevaundray Wedderburn <kevtheappdev@gmail.com>"]
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+sled = { version = "0.34.6", optional = true }
+rocksdb = { version = "0.17", features = [
+    "snappy",
+], default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile = "3.2.0"
+
+[features]
+default = []
+sled_db = ["sled"]
+rocks_db = ["rocksdb"]

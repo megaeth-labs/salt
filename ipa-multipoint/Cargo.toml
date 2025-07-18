@@ -1,0 +1,27 @@
+[package]
+name = "ipa-multipoint"
+version = "0.1.0"
+edition = "2021"
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+banderwagon = { path = "../banderwagon" }
+itertools = "0.10.1"
+sha2 = "0.9.8"
+rayon = "1.8.0"
+hex = "0.4.3"
+
+rustc-hash = "2.1.0"
+
+[dev-dependencies]
+criterion = "0.5.1"
+rand_chacha = { version = "0.3.0", default-features = false }
+ark-poly = { version = "0.5.0", default-features = false }
+ark-std = { version = "0.5.0", default-features = false }
+
+
+[[bench]]
+name = "benchmark_main"
+harness = false
