@@ -1,7 +1,7 @@
 //! This module is the implementation of generating and verifying proofs of SALT.
 use crate::{
     constant::POLY_DEGREE,
-    traits::{BucketMetadataReader, TrieReader},
+    traits::{StateReader, TrieReader},
     types::{CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
@@ -30,8 +30,8 @@ pub struct CommitmentBytesW(
 
 impl PartialEq for CommitmentBytesW {
     fn eq(&self, other: &Self) -> bool {
-        Element::from_bytes_unchecked_uncompressed(self.0) ==
-            Element::from_bytes_unchecked_uncompressed(other.0)
+        Element::from_bytes_unchecked_uncompressed(self.0)
+            == Element::from_bytes_unchecked_uncompressed(other.0)
     }
 }
 
@@ -55,7 +55,9 @@ fn serialize_multipoint_proof<S>(proof: &MultiPointProof, serializer: S) -> Resu
 where
     S: Serializer,
 {
-    let bytes = proof.to_bytes().map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+    let bytes = proof
+        .to_bytes()
+        .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
     bytes.serialize(serializer)
 }
 
@@ -98,14 +100,16 @@ impl SaltProof {
         state_root: B256,
     ) -> Result<(), ProofError<B, T>>
     where
-        B: BucketMetadataReader,
+        B: StateReader,
         T: TrieReader,
     {
         if keys.is_empty() {
             return Err(ProofError::VerifyFailed("empty key set".to_string()));
         }
         if keys.len() != values.len() {
-            return Err(ProofError::VerifyFailed("key set and values length not match".to_string()));
+            return Err(ProofError::VerifyFailed(
+                "key set and values length not match".to_string(),
+            ));
         }
 
         let mut kvs = keys.into_iter().zip(values.into_iter()).collect::<Vec<_>>();
@@ -121,7 +125,9 @@ impl SaltProof {
         let root = self
             .parents_commitments
             .get(&0)
-            .ok_or(ProofError::VerifyFailed("lack of root commitment".to_string()))?;
+            .ok_or(ProofError::VerifyFailed(
+                "lack of root commitment".to_string(),
+            ))?;
 
         let trie_root = B256::from_slice(&ffi_interface::hash_commitment(root.0));
 
@@ -137,10 +143,15 @@ impl SaltProof {
         let crs = CRS::default();
 
         // call MultiPointProof::check to verify the proof
-        if self.proof.check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript) {
+        if self
+            .proof
+            .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
+        {
             Ok(())
         } else {
-            Err(ProofError::VerifyFailed("multi pointproof check failed".to_string()))
+            Err(ProofError::VerifyFailed(
+                "multi pointproof check failed".to_string(),
+            ))
         }
     }
 }
@@ -149,7 +160,7 @@ impl SaltProof {
 #[derive(Debug, Error)]
 pub enum ProofError<S, T>
 where
-    S: BucketMetadataReader,
+    S: StateReader,
     T: TrieReader,
 {
     /// read  state failed
@@ -174,7 +185,7 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
     data.update(entry.value());
     Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
 }
-/* 
+/*
 #[cfg(test)]
 mod tests {
     use super::*;

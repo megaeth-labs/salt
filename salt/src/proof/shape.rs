@@ -52,7 +52,7 @@ use crate::{
     trie::trie::subtrie_node_id,
     BucketId, NodeId, SaltKey, SlotId,
 };
-use itertools::Itertools;
+use iter_tools::Itertools;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -104,15 +104,28 @@ pub(crate) fn main_trie_parents_and_points(
     res.extend(l2_paths.chunk_by(|&x, &y| x.0 == y.0).map(|paths| {
         let node_id = paths[0].0 as u64 + STARTING_NODE_ID[1] as u64;
 
-        (node_id, node_id, paths.into_iter().map(|path| path.1).collect_vec())
+        (
+            node_id,
+            node_id,
+            paths.into_iter().map(|path| path.1).collect_vec(),
+        )
     }));
 
     // l2
-    res.extend(l3_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1)).map(|paths| {
-        let node_id = (((paths[0].0 as u64) << 8) | paths[0].1 as u64) + STARTING_NODE_ID[2] as u64;
+    res.extend(
+        l3_paths
+            .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1))
+            .map(|paths| {
+                let node_id =
+                    (((paths[0].0 as u64) << 8) | paths[0].1 as u64) + STARTING_NODE_ID[2] as u64;
 
-        (node_id, node_id, paths.into_iter().map(|path| path.2).collect_vec())
-    }));
+                (
+                    node_id,
+                    node_id,
+                    paths.into_iter().map(|path| path.2).collect_vec(),
+                )
+            }),
+    );
 
     res
 }
@@ -157,7 +170,10 @@ pub(crate) fn main_trie_parents_and_points(
 pub(crate) fn bucket_trie_parents_and_points(
     salt_keys: &[SaltKey],
     buckets_top_level: &FxHashMap<BucketId, u8>,
-) -> (Vec<(NodeId, NodeId, Vec<u8>)>, Vec<(BucketId, Vec<(NodeId, Vec<u8>)>)>) {
+) -> (
+    Vec<(NodeId, NodeId, Vec<u8>)>,
+    Vec<(BucketId, Vec<(NodeId, Vec<u8>)>)>,
+) {
     if salt_keys.is_empty() {
         return (vec![], vec![]);
     }
@@ -256,13 +272,17 @@ fn process_bucket_trie_nodes(
 
             // l3 and its children
             nodes.extend(
-                l4_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2)).map(
-                    |chunk| {
+                l4_paths
+                    .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2))
+                    .map(|chunk| {
                         let parent_id =
                             bucket_base + (chunk[0].2 as u64) + STARTING_NODE_ID[3] as u64;
-                        (parent_id, parent_id, chunk.iter().map(|path| path.3).collect_vec())
-                    },
-                ),
+                        (
+                            parent_id,
+                            parent_id,
+                            chunk.iter().map(|path| path.3).collect_vec(),
+                        )
+                    }),
             );
         }
         1 => {
@@ -274,22 +294,35 @@ fn process_bucket_trie_nodes(
             ));
 
             // l2 and its children
-            nodes.extend(l3_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1)).map(|chunk| {
-                let parent_id = bucket_base + (chunk[0].1 as u64) + STARTING_NODE_ID[2] as u64;
-                (parent_id, parent_id, chunk.iter().map(|path| path.2).collect_vec())
-            }));
+            nodes.extend(
+                l3_paths
+                    .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1))
+                    .map(|chunk| {
+                        let parent_id =
+                            bucket_base + (chunk[0].1 as u64) + STARTING_NODE_ID[2] as u64;
+                        (
+                            parent_id,
+                            parent_id,
+                            chunk.iter().map(|path| path.2).collect_vec(),
+                        )
+                    }),
+            );
 
             // l3 and its children
             nodes.extend(
-                l4_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2)).map(
-                    |chunk| {
-                        let parent_id = bucket_base +
-                            (chunk[0].2 as u64) +
-                            ((chunk[0].1 as u64) << TRIE_WIDTH_BITS) +
-                            STARTING_NODE_ID[3] as u64;
-                        (parent_id, parent_id, chunk.iter().map(|path| path.3).collect_vec())
-                    },
-                ),
+                l4_paths
+                    .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2))
+                    .map(|chunk| {
+                        let parent_id = bucket_base
+                            + (chunk[0].2 as u64)
+                            + ((chunk[0].1 as u64) << TRIE_WIDTH_BITS)
+                            + STARTING_NODE_ID[3] as u64;
+                        (
+                            parent_id,
+                            parent_id,
+                            chunk.iter().map(|path| path.3).collect_vec(),
+                        )
+                    }),
             );
         }
         0 => {
@@ -303,30 +336,46 @@ fn process_bucket_trie_nodes(
             // l1 and its children
             nodes.extend(l2_paths.chunk_by(|&x, &y| x.0 == y.0).map(|chunk| {
                 let parent_id = bucket_base + (chunk[0].0 as u64) + STARTING_NODE_ID[1] as u64;
-                (parent_id, parent_id, chunk.iter().map(|path| path.1).collect_vec())
+                (
+                    parent_id,
+                    parent_id,
+                    chunk.iter().map(|path| path.1).collect_vec(),
+                )
             }));
 
             // l2 and its children
-            nodes.extend(l3_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1)).map(|chunk| {
-                let parent_id = bucket_base +
-                    (chunk[0].1 as u64) +
-                    ((chunk[0].0 as u64) << TRIE_WIDTH_BITS) +
-                    STARTING_NODE_ID[2] as u64;
-                (parent_id, parent_id, chunk.iter().map(|path| path.2).collect_vec())
-            }));
+            nodes.extend(
+                l3_paths
+                    .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1))
+                    .map(|chunk| {
+                        let parent_id = bucket_base
+                            + (chunk[0].1 as u64)
+                            + ((chunk[0].0 as u64) << TRIE_WIDTH_BITS)
+                            + STARTING_NODE_ID[2] as u64;
+                        (
+                            parent_id,
+                            parent_id,
+                            chunk.iter().map(|path| path.2).collect_vec(),
+                        )
+                    }),
+            );
 
             // l3 and its children
             nodes.extend(
-                l4_paths.chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2)).map(
-                    |chunk| {
-                        let parent_id = bucket_base +
-                            (chunk[0].2 as u64) +
-                            ((chunk[0].1 as u64) << TRIE_WIDTH_BITS) +
-                            ((chunk[0].0 as u64) << (TRIE_WIDTH_BITS * 2)) +
-                            STARTING_NODE_ID[3] as u64;
-                        (parent_id, parent_id, chunk.iter().map(|path| path.3).collect_vec())
-                    },
-                ),
+                l4_paths
+                    .chunk_by(|&x, &y| (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2))
+                    .map(|chunk| {
+                        let parent_id = bucket_base
+                            + (chunk[0].2 as u64)
+                            + ((chunk[0].1 as u64) << TRIE_WIDTH_BITS)
+                            + ((chunk[0].0 as u64) << (TRIE_WIDTH_BITS * 2))
+                            + STARTING_NODE_ID[3] as u64;
+                        (
+                            parent_id,
+                            parent_id,
+                            chunk.iter().map(|path| path.3).collect_vec(),
+                        )
+                    }),
             );
         }
         _ => unreachable!(),
@@ -355,7 +404,10 @@ fn process_bucket_state_nodes(
         .chunk_by(|&x, &y| x.slot_id() >> 8 == y.slot_id() >> 8)
         .map(|chunk| {
             let subtrie_node_id = subtrie_node_id(&chunk[0]);
-            let slot_ids = chunk.iter().map(|key| (key.slot_id() & 0xFF) as u8).collect_vec();
+            let slot_ids = chunk
+                .iter()
+                .map(|key| (key.slot_id() & 0xFF) as u8)
+                .collect_vec();
             (subtrie_node_id, slot_ids)
         })
         .collect_vec();
@@ -404,9 +456,9 @@ pub const fn slot_id_to_node_path(slot: SlotId) -> [u8; SUB_TRIE_LEVELS - 1] {
 pub(crate) fn get_main_trie_child_node(parent_id: NodeId, point: u8) -> NodeId {
     let level = get_node_level(parent_id);
 
-    point as NodeId +
-        STARTING_NODE_ID[level + 1] as NodeId +
-        ((parent_id - STARTING_NODE_ID[level] as NodeId) << TRIE_WIDTH_BITS)
+    point as NodeId
+        + STARTING_NODE_ID[level + 1] as NodeId
+        + ((parent_id - STARTING_NODE_ID[level] as NodeId) << TRIE_WIDTH_BITS)
 }
 
 #[cfg(test)]
@@ -416,9 +468,9 @@ mod tests {
     use rand::Rng;
 
     const fn path_to_bucket_id(node_path: &[u8]) -> BucketId {
-        ((node_path[0] as BucketId) << 16) |
-            ((node_path[1] as BucketId) << 8) |
-            (node_path[2] as BucketId)
+        ((node_path[0] as BucketId) << 16)
+            | ((node_path[1] as BucketId) << 8)
+            | (node_path[2] as BucketId)
     }
 
     fn path_to_node_id(node_path: &[u8]) -> NodeId {
@@ -441,7 +493,11 @@ mod tests {
             let bucket_id_back = path_to_bucket_id(&node_path);
 
             // Check if the conversion is reversible
-            assert_eq!(bucket_id_back, bucket_id, "Failed for bucket_id: {}", bucket_id);
+            assert_eq!(
+                bucket_id_back, bucket_id,
+                "Failed for bucket_id: {}",
+                bucket_id
+            );
         }
     }
 
@@ -450,8 +506,9 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         // Generate 1000 random paths
-        let bucket_paths: Vec<Vec<u8>> =
-            (0..1000).map(|_| vec![rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>()]).collect();
+        let bucket_paths: Vec<Vec<u8>> = (0..1000)
+            .map(|_| vec![rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>()])
+            .collect();
 
         for path in bucket_paths {
             let bucket_id = path_to_bucket_id(&path);
@@ -520,7 +577,11 @@ mod tests {
         for (i, node_index) in node_ids.iter().enumerate() {
             let path = node_path[0..i].to_vec();
 
-            let child_index = if i < node_ids.len() - 1 { node_path[i] } else { 0 };
+            let child_index = if i < node_ids.len() - 1 {
+                node_path[i]
+            } else {
+                0
+            };
 
             assert_eq!(path, node_path_1[0..i].to_vec());
             if i < node_ids.len() - 1 {
@@ -547,8 +608,10 @@ mod tests {
             [177, 255, 255],
             [255, 7, 7],
         ];
-        let bucket_ids: Vec<BucketId> =
-            bucket_path.iter().map(|path| path_to_bucket_id(path)).collect();
+        let bucket_ids: Vec<BucketId> = bucket_path
+            .iter()
+            .map(|path| path_to_bucket_id(path))
+            .collect();
 
         let parent_nodes = main_trie_parents_and_points(&bucket_ids);
 

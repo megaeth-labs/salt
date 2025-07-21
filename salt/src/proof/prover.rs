@@ -48,5 +48,9 @@ where
 
     let proof = MultiPoint::open(crs, &PRECOMPUTED_WEIGHTS, &mut transcript, prover_queries);
 
-    Ok(SaltProof { parents_commitments, proof, buckets_top_level })
+    Ok(SaltProof {
+        parents_commitments,
+        proof,
+        buckets_top_level,
+    })
 }

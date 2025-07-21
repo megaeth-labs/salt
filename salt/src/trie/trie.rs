@@ -785,6 +785,15 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
     level
 }
 
+/// assume the node_id is subtrie_node_id()'s result;
+pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
+    let node_id = *id & ((1 << BUCKET_SLOT_BITS) - 1);
+    let bucket_id = *id - node_id;
+    let slot_id = (node_id - STARTING_NODE_ID[SUB_TRIE_LEVELS - 1] as u64) << MIN_BUCKET_SIZE_BITS;
+
+    SaltKey(bucket_id + slot_id)
+}
+
 /// The information of subtrie change.
 #[derive(Debug, Clone)]
 struct SubtrieChangeInfo {

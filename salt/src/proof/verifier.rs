@@ -8,7 +8,7 @@ use crate::{
         },
         CommitmentBytesW, ProofError,
     },
-    traits::{BucketMetadataReader, TrieReader},
+    traits::{StateReader, TrieReader},
     trie::trie::{get_child_node, subtrie_node_id},
     types::{BucketId, BucketMeta, NodeId, SaltKey, SaltValue},
 };
@@ -105,7 +105,7 @@ fn process_trie_queries(
 
                 // Convert children commitments to frs at the same time for faster processing
                 let multi_children_frs =
-                    Element::batch_map_to_scalar_field2(multi_children_commitment);
+                    Element::serial_batch_map_to_scalar_field(multi_children_commitment);
 
                 let child_map: FxHashMap<NodeId, Fr> = multi_children_id
                     .iter()
@@ -146,7 +146,7 @@ pub(crate) fn create_verifier_queries<B, T>(
     buckets_top_level: &FxHashMap<BucketId, u8>,
 ) -> Result<Vec<VerifierQuery>, ProofError<B, T>>
 where
-    B: BucketMetadataReader,
+    B: StateReader,
     T: TrieReader,
 {
     let mut bucket_ids = kvs.iter().map(|(k, _)| k.bucket_id()).collect::<Vec<_>>();
@@ -156,8 +156,11 @@ where
 
     // trie_nodes for main trie
     // kvs *1 for bucket state queries and kvs *2 > bucket trie querie' len in most cases
-    let total_len =
-        trie_nodes.iter().map(|(_, _, points)| points.len()).sum::<usize>() + kvs.len() * 3;
+    let total_len = trie_nodes
+        .iter()
+        .map(|(_, _, points)| points.len())
+        .sum::<usize>()
+        + kvs.len() * 3;
 
     let mut queries = Vec::with_capacity(total_len);
 
@@ -169,7 +172,12 @@ where
     let salt_keys = kvs.iter().map(|(k, _)| *k).collect::<Vec<_>>();
     let (bucket_trie_nodes, _) = bucket_trie_parents_and_points(&salt_keys, buckets_top_level);
 
-    process_trie_queries(bucket_trie_nodes, path_commitments, num_threads, &mut queries);
+    process_trie_queries(
+        bucket_trie_nodes,
+        path_commitments,
+        num_threads,
+        &mut queries,
+    );
 
     // process bucket state queries
     let chunk_size = (kvs.len() + num_threads - 1) / num_threads;

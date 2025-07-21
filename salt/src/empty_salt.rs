@@ -75,4 +75,30 @@ impl TrieReader for EmptySalt {
             },
         )
     }
+
+    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
+        let level = get_node_level(node_id);
+
+        if level >= TRIE_LEVELS - 1 {
+            return Err("Cannot get children: node is at the bottom level");
+        }
+
+        let next_level_default = DEFAULT_COMMITMENT_AT_LEVEL[level + 1].1;
+        let zero = zero_commitment();
+
+        let mut children = Vec::with_capacity(TRIE_WIDTH);
+
+        if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
+            if node_id == 0 {
+                children.push(next_level_default);
+                children.extend(std::iter::repeat(zero).take(TRIE_WIDTH - 1));
+            } else {
+                children.extend(std::iter::repeat(next_level_default).take(TRIE_WIDTH));
+            }
+        } else {
+            children.extend(std::iter::repeat(zero).take(TRIE_WIDTH));
+        }
+
+        Ok(children)
+    }
 }

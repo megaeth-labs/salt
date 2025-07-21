@@ -50,17 +50,21 @@ fn process_trie_queries<T: TrieReader>(
                 let multi_children = chunk
                     .iter()
                     .flat_map(|(_, logic_parent, _)| {
-                        trie_reader.children(*logic_parent).expect("Failed to get trie children")
+                        trie_reader
+                            .children(*logic_parent)
+                            .expect("Failed to get trie children")
                     })
                     .collect::<Vec<_>>();
-                let multi_children_frs = Element::batch_map_to_scalar_field2(multi_children);
+                let multi_children_frs = Element::serial_batch_map_to_scalar_field(multi_children);
 
                 chunk
                     .iter()
                     .zip(multi_children_frs.chunks(256))
                     .flat_map(|((parent, _, children), frs)| {
                         let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                            trie_reader.get(*parent).expect("Failed to get trie node"),
+                            trie_reader
+                                .get_commitment(*parent)
+                                .expect("Failed to get trie node"),
                         );
 
                         create_prover_queries(
@@ -103,7 +107,9 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                             .into_iter()
                             .flat_map(|(node_id, slot_ids)| {
                                 let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                                    trie_reader.get(*node_id).expect("Failed to get trie node"),
+                                    trie_reader
+                                        .get_commitment(*node_id)
+                                        .expect("Failed to get trie node"),
                                 );
 
                                 let salt_key_start = if node_id < &256u64.pow(5) {
@@ -146,7 +152,11 @@ pub(crate) fn create_sub_trie<S, T>(
     trie_reader: &T,
     salt_keys: &[SaltKey],
 ) -> Result<
-    (Vec<ProverQuery>, BTreeMap<NodeId, CommitmentBytesW>, FxHashMap<BucketId, u8>),
+    (
+        Vec<ProverQuery>,
+        BTreeMap<NodeId, CommitmentBytesW>,
+        FxHashMap<BucketId, u8>,
+    ),
     ProofError<S, T>,
 >
 where
@@ -172,18 +182,34 @@ where
         bucket_trie_parents_and_points(salt_keys, &buckets_top_level);
 
     let mut queries = Vec::with_capacity(
-        main_trie_nodes.iter().map(|(_, _, points)| points.len()).sum::<usize>() +
-            bucket_trie_nodes.iter().map(|(_, _, points)| points.len()).sum::<usize>() +
-            salt_keys.len(),
+        main_trie_nodes
+            .iter()
+            .map(|(_, _, points)| points.len())
+            .sum::<usize>()
+            + bucket_trie_nodes
+                .iter()
+                .map(|(_, _, points)| points.len())
+                .sum::<usize>()
+            + salt_keys.len(),
     );
 
     let num_threads = rayon::current_num_threads();
 
     // Process main queries
-    process_trie_queries(main_trie_nodes.clone(), trie_reader, num_threads, &mut queries);
+    process_trie_queries(
+        main_trie_nodes.clone(),
+        trie_reader,
+        num_threads,
+        &mut queries,
+    );
 
     // Process bucket queries
-    process_trie_queries(bucket_trie_nodes.clone(), trie_reader, num_threads, &mut queries);
+    process_trie_queries(
+        bucket_trie_nodes.clone(),
+        trie_reader,
+        num_threads,
+        &mut queries,
+    );
 
     // Process state queries
     process_bucket_state_queries(
@@ -198,39 +224,58 @@ where
     let mut parents_commitments = main_trie_nodes
         .into_iter()
         .map(|(parent, _, _)| {
-            (parent, CommitmentBytesW(trie_reader.get(parent).expect("Failed to get trie node")))
+            (
+                parent,
+                CommitmentBytesW(
+                    trie_reader
+                        .get_commitment(parent)
+                        .expect("Failed to get trie node"),
+                ),
+            )
         })
         .collect::<BTreeMap<_, _>>();
 
     // Process bucket trie nodes commitments
     parents_commitments.extend(bucket_trie_nodes.into_iter().map(|(parent, _, _)| {
-        (parent, CommitmentBytesW(trie_reader.get(parent).expect("Failed to get trie node")))
+        (
+            parent,
+            CommitmentBytesW(
+                trie_reader
+                    .get_commitment(parent)
+                    .expect("Failed to get trie node"),
+            ),
+        )
     }));
 
     // Process bucket state nodes commitments
     parents_commitments.extend(
-        bucket_state_nodes.into_iter().flat_map(|(_, state_nodes)| state_nodes).map(
-            |(node_id, _)| {
+        bucket_state_nodes
+            .into_iter()
+            .flat_map(|(_, state_nodes)| state_nodes)
+            .map(|(node_id, _)| {
                 (
                     node_id,
-                    CommitmentBytesW(trie_reader.get(node_id).expect("Failed to get trie node")),
+                    CommitmentBytesW(
+                        trie_reader
+                            .get_commitment(node_id)
+                            .expect("Failed to get trie node"),
+                    ),
                 )
-            },
-        ),
+            }),
     );
 
     Ok((queries, parents_commitments, buckets_top_level))
 }
-/* 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        formate::{PlainKey, PlainValue},
         mem_salt::MemSalt,
         proof::prover::PRECOMPUTED_WEIGHTS,
         state::state::EphemeralSaltState,
         trie::trie::StateRoot,
-        types::{PlainKey, PlainValue},
     };
     use alloy_primitives::{Address, B256};
     use ark_ff::BigInt;
@@ -240,7 +285,7 @@ mod tests {
         multiproof::{MultiPoint, VerifierQuery},
         transcript::Transcript,
     };
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
     #[test]
@@ -255,8 +300,8 @@ mod tests {
         let (slot, storage_value) = (B256::from(byte_ff), B256::from(byte_ff));
 
         let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::random_with(&mut rng), slot),
-            Some(PlainValue::Storage(storage_value.into())),
+            PlainKey::Storage(Address::from_slice(&rng.gen::<[u8; 20]>()), slot).encode(),
+            Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
         let mem_salt = MemSalt::new();
@@ -264,12 +309,12 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         let updates = state.update(&initial_key_values).unwrap();
 
-        updates.clone().write_to_store(&mem_salt).unwrap();
+        mem_salt.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
         let (_, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
 
-        trie_updates.write_to_store(&mem_salt).unwrap();
+        mem_salt.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
 
@@ -318,7 +363,12 @@ mod tests {
 
         let poly_comm = crs.commit_lagrange_poly(&poly);
 
-        let prover_query2 = ProverQuery { commitment: poly_comm, poly, point, result };
+        let prover_query2 = ProverQuery {
+            commitment: poly_comm,
+            poly,
+            point,
+            result,
+        };
 
         let mut transcript = Transcript::new(b"st");
 
@@ -333,7 +383,11 @@ mod tests {
 
         let mut transcript = Transcript::new(b"st");
 
-        assert!(multiproof.check(&crs, &PRECOMPUTED_WEIGHTS, &verifier_queries, &mut transcript));
+        assert!(multiproof.check(
+            &crs,
+            &PRECOMPUTED_WEIGHTS,
+            &verifier_queries,
+            &mut transcript
+        ));
     }
 }
-*/

@@ -21,7 +21,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// by a persistent storage backend.
     base_state: &'a BaseState,
     /// Cache the values read from `base_state` and the changes made to it.
-    cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Whether to save access records
     save_access: bool,
 }

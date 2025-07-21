@@ -53,6 +53,9 @@ pub const BUCKET_SLOT_BITS: usize = 40;
 /// Mask of the slot ID in a bucket. The slot ID is the lower 40 bits of the `SaltKey`.
 pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
 
+/// The degree of the polynomial used in the IPA proof.
+pub const POLY_DEGREE: usize = 256;
+
 /// Precomputed node commitment at each level of an empty SALT trie.
 /// Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
 /// info.

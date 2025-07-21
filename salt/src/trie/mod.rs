@@ -5,4 +5,4 @@
 pub mod trie;
 pub mod updates;
 pub use banderwagon::Element;
-//pub mod witness;
+pub mod witness;

@@ -1,6 +1,6 @@
 //! Define traits for storing salt state and salt trie.
 use crate::{
-    types::{BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
+    types::{meta_position, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
 use std::{
@@ -32,7 +32,13 @@ pub trait StateReader: Debug + Send + Sync {
     }
 
     /// Get bucket meta by bucket ID.
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error>;
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        let key = meta_position(bucket_id);
+        Ok(match self.entry(key)? {
+            Some(ref v) => v.try_into().expect("meta value error"),
+            None => BucketMeta::default(),
+        })
+    }
 }
 
 /// This trait provides functionality for reading commitments from trie nodes.
@@ -45,4 +51,7 @@ pub trait TrieReader: Sync {
     }
     /// Get node commitment by `node_id` from store.
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
+
+    /// Retrieves child nodes based on the node ID
+    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error>;
 }
