@@ -47,7 +47,7 @@ impl Drop for Committer {
 }
 
 impl Committer {
-    #[cfg(all(not(target_os = "macos"),not(feature = "disable-hugepages")))]
+    #[cfg(all(not(target_os = "macos"), not(feature = "disable-hugepages")))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         use hugepage_rs;
         use std::alloc::Layout;

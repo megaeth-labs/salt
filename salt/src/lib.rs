@@ -29,7 +29,7 @@
 
 pub mod constant;
 pub mod formate;
-pub use formate::{PlainKey, PlainValue};
+pub use formate::{Account, PlainKey, PlainValue};
 pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};

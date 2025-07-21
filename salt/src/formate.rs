@@ -17,17 +17,6 @@ const PLAIN_CONTRACT_ACCOUNT_LEN: usize = PLAIN_EOA_ACCOUNT_LEN + B256::len_byte
 /// data length of Value of Storage
 const PLAIN_STORAGE_LEN: usize = U256::BYTES;
 
-/// Local Account implementation when reth feature is disabled
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Account {
-    /// Account nonce.
-    pub nonce: u64,
-    /// Account balance.
-    pub balance: U256,
-    /// Account bytecode hash.
-    pub bytecode_hash: Option<B256>,
-}
-
 /// Key of PlainAccount/StorageState.
 #[derive(Hash, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlainKey {
@@ -166,5 +155,23 @@ impl From<PlainValue> for U256 {
             PlainValue::Storage(value) => value,
             _ => unreachable!("PlainValue is not U256"),
         }
+    }
+}
+
+/// Local Account implementation when reth feature is disabled
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Account {
+    /// Account nonce.
+    pub nonce: u64,
+    /// Account balance.
+    pub balance: U256,
+    /// Account bytecode hash.
+    pub bytecode_hash: Option<B256>,
+}
+
+impl Account {
+    /// Returns true if account is empty.
+    pub fn is_empty(&self) -> bool {
+        self.balance.is_zero() && self.nonce == 0 && self.bytecode_hash.is_none()
     }
 }
