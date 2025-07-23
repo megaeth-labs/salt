@@ -8,7 +8,7 @@ default = []
 
 [dependencies]
 # alloy dependencies
-alloy-primitives = "*"
+alloy-primitives = "0.8.20"
 
 # megaeth dependencies
 ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
