@@ -28,7 +28,7 @@ impl Drop for Committer {
             let ptr = table.as_mut_ptr() as *mut u8;
             let cap = table.capacity();
             let layout = Layout::array::<EdwardsAffine>(cap).unwrap();
-            std::mem::forget(std::mem::replace(table, Vec::new()));
+            std::mem::forget(std::mem::take(table));
             hugepage_rs::dealloc(ptr, layout);
         }
 
@@ -36,7 +36,7 @@ impl Drop for Committer {
         let ptr = self.tables.as_mut_ptr() as *mut u8;
         let cap = self.tables.capacity();
         let layout = Layout::array::<Vec<EdwardsAffine>>(cap).unwrap();
-        std::mem::forget(std::mem::replace(&mut self.tables, Vec::new()));
+        std::mem::forget(std::mem::take(&mut self.tables));
         hugepage_rs::dealloc(ptr, layout);
     }
 
@@ -80,7 +80,7 @@ impl Committer {
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
             let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
 
-            for i in 0..src_tables.len() {
+            for (i, _) in src_tables.iter().enumerate() {
                 let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
                 let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
                 if tables_ptr.is_null() || dst_ptr.is_null() {
@@ -193,7 +193,7 @@ impl Committer {
         }
         unsafe {
             _mm_prefetch(
-                precomp_table.as_ptr().add(idx_next as usize) as *const i8,
+                precomp_table.as_ptr().add(idx_next) as *const i8,
                 _MM_HINT_T0,
             );
         }
@@ -419,8 +419,9 @@ impl Element {
 
     /// Batch conversion from Element to CommitmentBytes
     #[inline]
+    #[allow(clippy::op_ref)]
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let mut commitments = vec![[0 as u8; 64]; elements.len()];
+        let mut commitments = vec![[0u8; 64]; elements.len()];
         let mut zi_mul = vec![Fq::ZERO; elements.len()];
         let mut zeroes = vec![false; elements.len()];
         let mut zs_mul = Fq::ONE;
@@ -433,7 +434,7 @@ impl Element {
                 return;
             }
             zi_mul[i] = zs_mul;
-            zs_mul = zs_mul * &element.0.z;
+            zs_mul *= &element.0.z;
         });
 
         // zs_inv = 1/zs_mul
@@ -446,7 +447,7 @@ impl Element {
             }
             // z_inv = 1/zi
             let z_inv = zi_mul[i] * &zs_inv;
-            zs_inv = zs_inv * &elements[i].0.z;
+            zs_inv *= &elements[i].0.z;
 
             let _ = (elements[i].0.x * &z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
             let _ = (elements[i].0.y * &z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
@@ -456,12 +457,13 @@ impl Element {
 
     /// Batch conversion from commitments to hash bytes
     #[inline]
+    #[allow(clippy::op_ref)]
     pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
         let elements = commitments
             .iter()
             .map(|commitment| Element::from_bytes_unchecked_uncompressed(*commitment))
             .collect::<Vec<_>>();
-        let mut hashs = vec![[0 as u8; 32]; elements.len()];
+        let mut hashs = vec![[0u8; 32]; elements.len()];
         let mut yi_mul = vec![Fq::ZERO; elements.len()];
         let mut zeroes = vec![false; elements.len()];
         let mut ys_mul = Fq::ONE;
@@ -474,7 +476,7 @@ impl Element {
                 return;
             }
             yi_mul[i] = ys_mul;
-            ys_mul = ys_mul * &elements[i].0.y;
+            ys_mul *= &elements[i].0.y;
         });
 
         // ys_inv = 1/ys_mul
@@ -486,7 +488,7 @@ impl Element {
             }
             // y_inv = 1/yi
             let y_inv = yi_mul[i] * &ys_inv;
-            ys_inv = ys_inv * &elements[i].0.y;
+            ys_inv *= &elements[i].0.y;
             let _ = (elements[i].0.x * &y_inv).serialize_uncompressed(&mut hashs[i][..]);
         }
         hashs

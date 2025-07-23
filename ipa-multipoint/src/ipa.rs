@@ -403,8 +403,7 @@ pub fn slow_vartime_multiscalar_mul<'a>(
 }
 
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    let chunk_size =
-        (bases.len() + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let chunk_size = bases.len().div_ceil(rayon::current_num_threads());
 
     bases
         .par_chunks(chunk_size)

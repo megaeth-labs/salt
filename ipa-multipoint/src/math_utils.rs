@@ -22,10 +22,10 @@ pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     let mut powers = vec![Fr::zero(); n];
 
     // Compute base powers for each chunk
-    let chunk_size = (n + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let chunk_size = n.div_ceil(rayon::current_num_threads());
 
     // to handle the case where n is not a multiple of chunk_size
-    let len = (n + chunk_size - 1) / chunk_size;
+    let len = n.div_ceil(chunk_size);
     let base_powers = powers_of(point.pow([chunk_size as u64]), len);
 
     powers

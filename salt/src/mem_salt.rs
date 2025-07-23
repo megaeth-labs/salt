@@ -103,10 +103,10 @@ impl StateReader for MemSalt {
     fn range_slot(
         &self,
         bucket_id: BucketId,
-        range: Range<u64>,
+        range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(range.end <= MIN_BUCKET_SIZE as NodeId);
+            assert!(*range.end() <= MIN_BUCKET_SIZE as SlotId);
             range
                 .into_iter()
                 .map(|slot_id| {
@@ -124,7 +124,8 @@ impl StateReader for MemSalt {
                 .read()
                 .unwrap()
                 .range(
-                    SaltKey::from((bucket_id, range.start))..SaltKey::from((bucket_id, range.end)),
+                    SaltKey::from((bucket_id, *range.start()))
+                        ..=SaltKey::from((bucket_id, *range.end())),
                 )
                 .map(|(k, v)| (*k, v.clone()))
                 .collect()
@@ -158,6 +159,14 @@ impl TrieReader for MemSalt {
                     DEFAULT_COMMITMENT_AT_LEVEL[level].1
                 }
             }))
+    }
+
+    fn get_range(
+        &self,
+        range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        let map = self.trie.read().unwrap();
+        Ok(map.range(range).map(|(k, v)| (*k, *v)).collect())
     }
 
     fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {

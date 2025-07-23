@@ -118,7 +118,7 @@ impl PlainValue {
                     bytecode_hash: Some(bytecode_hash),
                 })
             }
-            PLAIN_STORAGE_LEN => PlainValue::Storage(U256::from_be_slice(&buf)),
+            PLAIN_STORAGE_LEN => PlainValue::Storage(U256::from_be_slice(buf)),
             _ => unreachable!("unexpected length of plain value."),
         }
     }

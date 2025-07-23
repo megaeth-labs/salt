@@ -417,19 +417,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "banderwagon"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-dependencies = [
- "ark-ec",
- "ark-ed-on-bls12-381-bandersnatch",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "hugepage-rs",
- "rayon",
-]
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1112,21 +1099,10 @@ dependencies = [
 name = "ffi_interface"
 version = "0.1.0"
 dependencies = [
- "banderwagon 0.1.0",
+ "banderwagon",
  "hex",
- "ipa-multipoint 0.1.0",
- "verkle-spec 0.1.0",
-]
-
-[[package]]
-name = "ffi_interface"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-dependencies = [
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "hex",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "verkle-spec 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
+ "ipa-multipoint",
+ "verkle-spec",
 ]
 
 [[package]]
@@ -1349,24 +1325,11 @@ version = "0.1.0"
 dependencies = [
  "ark-poly 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "ark-std 0.5.0",
- "banderwagon 0.1.0",
+ "banderwagon",
  "criterion",
  "hex",
  "itertools 0.10.5",
  "rand_chacha 0.3.1",
- "rayon",
- "rustc-hash 2.1.1",
- "sha2 0.9.9",
-]
-
-[[package]]
-name = "ipa-multipoint"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-dependencies = [
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "hex",
- "itertools 0.10.5",
  "rayon",
  "rustc-hash 2.1.1",
  "sha2 0.9.9",
@@ -2153,13 +2116,13 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "ark-ff 0.5.0",
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
+ "banderwagon",
  "blake3",
  "bytes",
  "criterion",
  "derive_more",
- "ffi_interface 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
+ "ffi_interface",
+ "ipa-multipoint",
  "iter_tools",
  "modular-bitfield",
  "once_cell",
@@ -2658,31 +2621,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "verkle-db"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-
-[[package]]
 name = "verkle-spec"
 version = "0.1.0"
 dependencies = [
- "banderwagon 0.1.0",
+ "banderwagon",
  "ethereum-types",
  "hex",
- "ipa-multipoint 0.1.0",
- "verkle-trie 0.1.0",
-]
-
-[[package]]
-name = "verkle-spec"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-dependencies = [
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "ethereum-types",
- "hex",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "verkle-trie 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
+ "ipa-multipoint",
+ "verkle-trie",
 ]
 
 [[package]]
@@ -2690,10 +2636,10 @@ name = "verkle-trie"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "banderwagon 0.1.0",
+ "banderwagon",
  "criterion",
  "hex",
- "ipa-multipoint 0.1.0",
+ "ipa-multipoint",
  "itertools 0.10.5",
  "once_cell",
  "rand_chacha 0.3.1",
@@ -2702,27 +2648,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror 1.0.69",
- "verkle-db 0.1.0",
-]
-
-[[package]]
-name = "verkle-trie"
-version = "0.1.0"
-source = "git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof#d3bc9edc2ef051505de1fd5e41521aac535cefc8"
-dependencies = [
- "anyhow",
- "banderwagon 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "hex",
- "ipa-multipoint 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
- "itertools 0.10.5",
- "once_cell",
- "rand_chacha 0.3.1",
- "rayon",
- "sha2 0.9.9",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "verkle-db 0.1.0 (git+https://github.com/megaeth-labs/rust-salt.git?branch=feature%2Fpar_proof)",
+ "verkle-db",
 ]
 
 [[package]]

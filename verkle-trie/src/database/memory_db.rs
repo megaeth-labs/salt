@@ -41,6 +41,7 @@ impl ReadOnlyHigherDb for MemoryDb {
         self.stem_table.get(&stem_key).copied()
     }
 
+    #[allow(clippy::question_mark)]
     fn get_branch_meta(&self, key: &[u8]) -> Option<BranchMeta> {
         let branch_child = match self.branch_table.get(key) {
             Some(b_child) => b_child,
@@ -115,6 +116,7 @@ impl WriteOnlyHigherDb for MemoryDb {
         self.stem_table.insert(key, meta)
     }
 
+    #[allow(clippy::question_mark)]
     fn insert_branch(&mut self, key: Vec<u8>, meta: BranchMeta, _depth: u8) -> Option<BranchMeta> {
         let b_child = match self.branch_table.insert(key, BranchChild::Branch(meta)) {
             Some(b_child) => b_child,

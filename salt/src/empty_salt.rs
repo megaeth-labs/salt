@@ -32,11 +32,11 @@ impl StateReader for EmptySalt {
     fn range_slot(
         &self,
         bucket_id: BucketId,
-        range: Range<u64>,
+        range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(range.end <= MIN_BUCKET_SIZE as NodeId);
-            let data = range
+        Ok(if bucket_id < NUM_META_BUCKETS as BucketId {
+            assert!(*range.end() <= MIN_BUCKET_SIZE as NodeId);
+            range
                 .into_iter()
                 .map(|slot_id| {
                     // Return a default value for the bucket meta
@@ -45,10 +45,10 @@ impl StateReader for EmptySalt {
                         BucketMeta::default().into(),
                     )
                 })
-                .collect();
-            return Ok(data);
-        }
-        Ok(Vec::new())
+                .collect()
+        } else {
+            Vec::new()
+        })
     }
 
     fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
@@ -76,29 +76,10 @@ impl TrieReader for EmptySalt {
         )
     }
 
-    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
-        let level = get_node_level(node_id);
-
-        if level >= TRIE_LEVELS - 1 {
-            return Err("Cannot get children: node is at the bottom level");
-        }
-
-        let next_level_default = DEFAULT_COMMITMENT_AT_LEVEL[level + 1].1;
-        let zero = zero_commitment();
-
-        let mut children = Vec::with_capacity(TRIE_WIDTH);
-
-        if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
-            if node_id == 0 {
-                children.push(next_level_default);
-                children.extend(std::iter::repeat(zero).take(TRIE_WIDTH - 1));
-            } else {
-                children.extend(std::iter::repeat(next_level_default).take(TRIE_WIDTH));
-            }
-        } else {
-            children.extend(std::iter::repeat(zero).take(TRIE_WIDTH));
-        }
-
-        Ok(children)
+    fn get_range(
+        &self,
+        _range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        Ok(vec![])
     }
 }

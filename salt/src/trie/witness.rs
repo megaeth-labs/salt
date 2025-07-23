@@ -2,11 +2,10 @@
 use crate::{
     constant::{
         get_node_level, is_extension_node, zero_commitment, BUCKET_SLOT_BITS,
-        DEFAULT_COMMITMENT_AT_LEVEL, NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH,
+        DEFAULT_COMMITMENT_AT_LEVEL,
     },
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
-    trie::trie::get_child_node,
     types::*,
 };
 use alloy_primitives::{b256, B256};
@@ -21,7 +20,7 @@ pub const KECCAK_EMPTY: B256 =
     b256!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
 
 /// create a block witness from the trie
-pub fn get_block_witness<'a, S, T>(
+pub fn get_block_witness<S, T>(
     min_sub_tree: &[SaltKey],
     state_reader: &S,
     trie_reader: &T,
@@ -91,35 +90,12 @@ impl TrieReader for BlockWitness {
             .0)
     }
 
-    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
-        let zero = zero_commitment();
-        let child_start = get_child_node(&node_id, 0);
-        let mut children = vec![zero; TRIE_WIDTH];
+    fn get_range(
+        &self,
+        range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
         let map = &self.proof.parents_commitments;
-        // Fill in actual values where they exist
-        for (k, v) in map.range(child_start as NodeId..child_start + TRIE_WIDTH as NodeId) {
-            children[*k as usize - child_start as usize] = v.0;
-        }
-
-        // Because the trie did not store the default value when init,
-        // so meta nodes needs to update the default commitment.
-        if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
-            let child_level = get_node_level(node_id) + 1;
-            assert!(child_level < TRIE_LEVELS);
-            for i in child_start
-                ..std::cmp::min(
-                    DEFAULT_COMMITMENT_AT_LEVEL[child_level].0,
-                    child_start as usize + TRIE_WIDTH,
-                ) as NodeId
-            {
-                let j = (i - child_start) as usize;
-                if children[j] == zero {
-                    children[j] = DEFAULT_COMMITMENT_AT_LEVEL[child_level].1;
-                }
-            }
-        }
-
-        Ok(children)
+        Ok(map.range(range).map(|(k, v)| (*k, v.0)).collect())
     }
 }
 
@@ -130,8 +106,8 @@ impl BlockWitness {
         B: StateReader,
         T: TrieReader,
     {
-        let keys = self.kvs.keys().map(|k| *k).collect::<Vec<_>>();
-        let vals = self.kvs.values().map(|v| v.clone()).collect::<Vec<_>>();
+        let keys = self.kvs.keys().copied().collect::<Vec<_>>();
+        let vals = self.kvs.values().cloned().collect::<Vec<_>>();
         self.proof.check(keys, vals, root)?;
         Ok(())
     }
@@ -167,12 +143,15 @@ impl StateReader for BlockWitness {
     fn range_slot(
         &self,
         bucket_id: BucketId,
-        range: Range<u64>,
+        range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         let data = self
             .kvs
-            .range(SaltKey::from((bucket_id, range.start))..SaltKey::from((bucket_id, range.end)))
-            .map(|(k, v)| (k.clone(), v.clone().expect("existing key")))
+            .range(
+                SaltKey::from((bucket_id, *range.start()))
+                    ..SaltKey::from((bucket_id, *range.end())),
+            )
+            .map(|(k, v)| (*k, v.clone().expect("existing key")))
             .collect();
         Ok(data)
     }
@@ -215,7 +194,7 @@ mod tests {
         // Update the trie with the new inserts
         let (new_trie_root, mut trie_updates) = trie.update(&mem_salt, &state_updates).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().map(|k| *k).collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 
         // 3.options in prover node
@@ -273,7 +252,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         state.update(vec![(&pk, &pv)]).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().map(|k| *k).collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness_res =
             get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 
@@ -302,7 +281,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         state.update(&new_kvs).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().map(|k| *k).collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 

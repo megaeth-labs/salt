@@ -112,7 +112,7 @@ impl SaltProof {
             ));
         }
 
-        let mut kvs = keys.into_iter().zip(values.into_iter()).collect::<Vec<_>>();
+        let mut kvs = keys.into_iter().zip(values).collect::<Vec<_>>();
         kvs.sort_unstable_by_key(|a| a.0);
         kvs.dedup_by_key(|a| a.0);
 

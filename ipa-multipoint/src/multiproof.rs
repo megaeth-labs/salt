@@ -83,18 +83,17 @@ impl MultiPoint {
 
         let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
 
-        let chunk_size = (grouped_queries.len() + rayon::current_num_threads() - 1)
-            / rayon::current_num_threads();
+        let chunk_size = grouped_queries.len().div_ceil(rayon::current_num_threads());
 
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
             .par_chunks(chunk_size)
             .flat_map(|chunk| {
                 chunk
-                    .into_iter()
+                    .iter()
                     .map(|(point, queries_challenges)| {
                         let aggregated_polynomial = queries_challenges
-                            .into_iter()
+                            .iter()
                             .map(|(query, challenge)| query.poly.clone() * *challenge)
                             .reduce(|acc, x| acc + x)
                             .expect("Failed to aggregate polynomial");
@@ -110,7 +109,7 @@ impl MultiPoint {
         let g_x: LagrangeBasis = aggregated_queries
             .par_iter()
             .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
-            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
+            .reduce(LagrangeBasis::zero, |a, b| a + b);
 
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
 
@@ -140,7 +139,7 @@ impl MultiPoint {
 
                 LagrangeBasis::new(term)
             })
-            .reduce(|| LagrangeBasis::zero(), |a, b| a + b);
+            .reduce(LagrangeBasis::zero, |a, b| a + b);
 
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
 

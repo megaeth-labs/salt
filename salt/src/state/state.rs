@@ -27,7 +27,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
 }
 
 /// Implement the `Clone` trait for `EphemeralSaltState`.
-impl<'a, BaseState> Clone for EphemeralSaltState<'a, BaseState> {
+impl<BaseState> Clone for EphemeralSaltState<'_, BaseState> {
     fn clone(&self) -> Self {
         Self {
             base_state: self.base_state,
@@ -86,7 +86,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     ) -> Result<StateUpdates, BaseState::Error> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
-            let bucket_id = pk_hasher::bucket_id(&key_bytes);
+            let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
             let slot = meta_position(bucket_id);
@@ -289,7 +289,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut old_data = vec![];
         let mut new_state: HashMap<SaltKey, SaltValue> = self
             .base_state
-            .range_slot(bucket_id, 0..old_meta.capacity)?
+            .range_slot(bucket_id, 0..=old_meta.capacity - 1)?
             .into_iter()
             .filter_map(|(k, old_v)| {
                 // clear entries from cache

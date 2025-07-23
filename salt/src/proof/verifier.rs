@@ -76,7 +76,7 @@ fn process_trie_queries(
 
     queries.extend(
         trie_nodes
-            .par_chunks((trie_nodes.len() + num_threads - 1) / num_threads)
+            .par_chunks(trie_nodes.len().div_ceil(num_threads))
             .flat_map(|chunk| {
                 let (multi_children_id, multi_children_commitment) = chunk
                     .iter()
@@ -95,7 +95,9 @@ fn process_trie_queries(
                                     path_commitments
                                         .get(&child_id)
                                         .cloned()
-                                        .expect(&format!("path_commitments lack id {:?}", child_id))
+                                        .unwrap_or_else(|| {
+                                            panic!("path_commitments lack id {:?}", child_id)
+                                        })
                                         .0,
                                 )
                             })
@@ -120,14 +122,14 @@ fn process_trie_queries(
                             path_commitments
                                 .get(parent)
                                 .cloned()
-                                .expect(&format!("path_commitments lack id {:?}", parent))
+                                .unwrap_or_else(|| panic!("path_commitments lack id {:?}", parent))
                                 .0,
                         );
 
                         create_verify_queries(
                             *parent,
                             *logic_parent,
-                            &points,
+                            points,
                             commitment,
                             &child_map,
                         )
@@ -180,12 +182,12 @@ where
     );
 
     // process bucket state queries
-    let chunk_size = (kvs.len() + num_threads - 1) / num_threads;
+    let chunk_size = kvs.len().div_ceil(num_threads);
     let bucket_state_queries = kvs
         .par_chunks(chunk_size)
         .flat_map(|chunk| {
             chunk
-                .into_iter()
+                .iter()
                 .map(|(key, val)| {
                     let bucket_id = key.bucket_id();
 
@@ -194,7 +196,7 @@ where
                     let result = if bucket_id < NUM_META_BUCKETS as BucketId && val.is_none() {
                         calculate_fr_by_kv(&(BucketMeta::default().into()))
                     } else {
-                        val.as_ref().map_or(Fr::ZERO, |v| calculate_fr_by_kv(v))
+                        val.as_ref().map_or(Fr::ZERO, calculate_fr_by_kv)
                     };
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];
@@ -202,13 +204,13 @@ where
                     let parent_id = if bucket_trie_top_level == SUB_TRIE_LEVELS as u8 - 1 {
                         bucket_id as NodeId + STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId
                     } else {
-                        subtrie_node_id(&key)
+                        subtrie_node_id(key)
                     };
 
                     let l3_commitment = path_commitments
                         .get(&parent_id)
                         .cloned()
-                        .expect(&format!("path_commitments lack id {:?}", parent_id))
+                        .unwrap_or_else(|| panic!("path_commitments lack id {:?}", parent_id))
                         .0;
 
                     VerifierQuery {

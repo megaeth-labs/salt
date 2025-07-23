@@ -1,5 +1,10 @@
 //! Define traits for storing salt state and salt trie.
 use crate::{
+    constant::{
+        get_node_level, zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL, NUM_META_BUCKETS,
+        STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH,
+    },
+    trie::trie::get_child_node,
     types::{meta_position, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
@@ -26,7 +31,7 @@ pub trait StateReader: Debug + Send + Sync {
     fn range_slot(
         &self,
         _bucket_id: BucketId,
-        _range: Range<u64>,
+        _range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         unimplemented!("range_slot is not implemented for this reader")
     }
@@ -52,6 +57,41 @@ pub trait TrieReader: Sync {
     /// Get node commitment by `node_id` from store.
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 
+    /// Get node commitments by `range` from store.
+    fn get_range(
+        &self,
+        range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error>;
+
     /// Retrieves child nodes based on the node ID
-    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error>;
+    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
+        let zero = zero_commitment();
+        let child_start = get_child_node(&node_id, 0);
+        let mut children = vec![zero; TRIE_WIDTH];
+        let cache = self.get_range(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
+        // Fill in actual values where they exist
+        for (k, v) in cache {
+            children[k as usize - child_start as usize] = v;
+        }
+
+        // Because the trie did not store the default value when init,
+        // so meta nodes needs to update the default commitment.
+        if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
+            let child_level = get_node_level(node_id) + 1;
+            assert!(child_level < TRIE_LEVELS);
+            for i in child_start
+                ..std::cmp::min(
+                    DEFAULT_COMMITMENT_AT_LEVEL[child_level].0,
+                    child_start as usize + TRIE_WIDTH,
+                ) as NodeId
+            {
+                let j = (i - child_start) as usize;
+                if children[j] == zero {
+                    children[j] = DEFAULT_COMMITMENT_AT_LEVEL[child_level].1;
+                }
+            }
+        }
+
+        Ok(children)
+    }
 }

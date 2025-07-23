@@ -16,6 +16,13 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
+type SubTrieInfo = (
+    Vec<ProverQuery>,
+    BTreeMap<NodeId, CommitmentBytesW>,
+    FxHashMap<BucketId, u8>,
+);
+
+type BucketStateNode = (BucketId, Vec<(NodeId, Vec<u8>)>);
 /// Helper function to create prover queries for a given commitment and points
 fn create_prover_queries(
     commitment: Element,
@@ -45,7 +52,7 @@ fn process_trie_queries<T: TrieReader>(
 
     queries.extend(
         trie_nodes
-            .par_chunks((trie_nodes.len() + num_threads - 1) / num_threads)
+            .par_chunks(trie_nodes.len().div_ceil(num_threads))
             .flat_map(|chunk| {
                 let multi_children = chunk
                     .iter()
@@ -70,7 +77,7 @@ fn process_trie_queries<T: TrieReader>(
                         create_prover_queries(
                             parent_commitment,
                             LagrangeBasis::new(frs.to_vec()),
-                            &children,
+                            children,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -81,7 +88,7 @@ fn process_trie_queries<T: TrieReader>(
 
 /// Process bucket state queries
 fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
-    bucket_state_nodes: Vec<(BucketId, Vec<(NodeId, Vec<u8>)>)>,
+    bucket_state_nodes: Vec<BucketStateNode>,
     state_reader: &S,
     trie_reader: &T,
     num_threads: usize,
@@ -89,22 +96,24 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
 ) {
     queries.extend(
         bucket_state_nodes
-            .par_chunks((bucket_state_nodes.len() + num_threads - 1) / num_threads)
+            .par_chunks(bucket_state_nodes.len().div_ceil(num_threads))
             .flat_map(|chunk| {
                 chunk
                     .iter()
                     .flat_map(|(bucket_id, state_nodes)| {
                         let children_kvs = state_reader
                             .range_bucket(*bucket_id..=*bucket_id)
-                            .expect(&format!(
-                                "Failed to get bucket state by range_bucket: bucket_id: {:?}",
-                                bucket_id
-                            ))
+                            .unwrap_or_else(|_| {
+                                panic!(
+                                    "Failed to get bucket state by range_bucket: bucket_id: {:?}",
+                                    105 + bucket_id
+                                )
+                            })
                             .into_iter()
                             .collect::<BTreeMap<_, _>>();
 
                         state_nodes
-                            .into_iter()
+                            .iter()
                             .flat_map(|(node_id, slot_ids)| {
                                 let parent_commitment = Element::from_bytes_unchecked_uncompressed(
                                     trie_reader
@@ -128,7 +137,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                                     .range(salt_key_start..SaltKey(salt_key_start.0 + 256))
                                 {
                                     default_frs[(k.slot_id() & 0xff) as usize] =
-                                        calculate_fr_by_kv(&v);
+                                        calculate_fr_by_kv(v);
                                 }
 
                                 create_prover_queries(
@@ -151,14 +160,7 @@ pub(crate) fn create_sub_trie<S, T>(
     state_reader: &S,
     trie_reader: &T,
     salt_keys: &[SaltKey],
-) -> Result<
-    (
-        Vec<ProverQuery>,
-        BTreeMap<NodeId, CommitmentBytesW>,
-        FxHashMap<BucketId, u8>,
-    ),
-    ProofError<S, T>,
->
+) -> Result<SubTrieInfo, ProofError<S, T>>
 where
     S: StateReader,
     T: TrieReader,

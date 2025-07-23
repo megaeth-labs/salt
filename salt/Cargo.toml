@@ -12,9 +12,9 @@ alloy-primitives = "*"
 
 # megaeth dependencies
 ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
-banderwagon = { git = "https://github.com/megaeth-labs/rust-salt.git", branch = "feature/par_proof" }
-ffi_interface = { git = "https://github.com/megaeth-labs/rust-salt.git", branch = "feature/par_proof" }
-ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", branch = "feature/par_proof" }
+banderwagon = { path = "../banderwagon" }
+ffi_interface = { path = "../ffi_interface" }
+ipa-multipoint = { path = "../ipa-multipoint" }
 megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
 
 # standard dependencies

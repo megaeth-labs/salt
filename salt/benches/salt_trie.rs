@@ -1,15 +1,16 @@
 #![allow(missing_docs)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use megaeth_salt::{
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use salt::{
     constant::{zero_commitment, MIN_BUCKET_SIZE, NUM_BUCKETS, NUM_META_BUCKETS},
-    genesis::EmptySalt,
+    empty_salt::EmptySalt,
     state::updates::*,
     traits::*,
     trie::trie::{get_global_committer, StateRoot},
     types::*,
 };
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::ops::Range;
 
 /// Generates a series of fixed-size state updates.
 ///
@@ -154,12 +155,15 @@ impl TrieReader for ExpansionSalt {
         })
     }
 
-    fn get(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn get_commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
     }
 
-    fn children(&self, _node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
-        Ok(vec![zero_commitment(); 256])
+    fn get_range(
+        &self,
+        _range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        Ok(vec![])
     }
 }
 

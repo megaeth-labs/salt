@@ -72,6 +72,7 @@ use rustc_hash::FxHashMap;
 /// To be compatible with the return format of bucket trie,
 /// two parent ids are returned in a mini-tree and they are the same.
 /// see `bucket_trie_parents_and_points` for more details.
+#[allow(clippy::type_complexity)]
 pub(crate) fn main_trie_parents_and_points(
     bucket_ids: &[BucketId],
 ) -> Vec<(NodeId, NodeId, Vec<u8>)> {
@@ -107,7 +108,7 @@ pub(crate) fn main_trie_parents_and_points(
         (
             node_id,
             node_id,
-            paths.into_iter().map(|path| path.1).collect_vec(),
+            paths.iter().map(|path| path.1).collect_vec(),
         )
     }));
 
@@ -122,7 +123,7 @@ pub(crate) fn main_trie_parents_and_points(
                 (
                     node_id,
                     node_id,
-                    paths.into_iter().map(|path| path.2).collect_vec(),
+                    paths.iter().map(|path| path.2).collect_vec(),
                 )
             }),
     );
@@ -167,6 +168,7 @@ pub(crate) fn main_trie_parents_and_points(
 /// - When top_level < 4, it is necessary to build bucket trie nodes from the bucket trie root node
 ///   to the 4th level
 /// - All node IDs are calculated based on STARTING_NODE_ID and path information
+#[allow(clippy::type_complexity)]
 pub(crate) fn bucket_trie_parents_and_points(
     salt_keys: &[SaltKey],
     buckets_top_level: &FxHashMap<BucketId, u8>,
@@ -545,7 +547,7 @@ mod tests {
             vec![177, 255, 173],
             vec![177, 255, 255],
         ];
-        let node_ids = vec![
+        let node_ids = [
             0, 1, 3, 9, 178, 256, 772, 2305, 2308, 2560, 45569, 45824, 197637, 590849, 591001,
             591104, 11730945, 11731118, 11731200,
         ];
