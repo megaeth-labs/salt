@@ -7,9 +7,6 @@ edition = "2021"
 default = []
 
 [dependencies]
-# alloy dependencies
-alloy-primitives = "0.8.20"
-
 # megaeth dependencies
 ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
 banderwagon = { path = "../banderwagon" }
@@ -40,6 +37,7 @@ proptest-derive = "0.5"
 rand = "0.8.5"
 serde_json = "1.0.94"
 test-fuzz = "5"
+alloy-primitives = "0.8.20"
 
 [[bench]]
 name = "salt_trie"

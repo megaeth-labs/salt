@@ -5,7 +5,6 @@ use crate::{
     types::{CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
-use alloy_primitives::B256;
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::{crs::CRS, multiproof::MultiPointProof, transcript::Transcript};
 use rustc_hash::FxHashMap;
@@ -97,7 +96,7 @@ impl SaltProof {
         &self,
         keys: Vec<SaltKey>,
         values: Vec<Option<SaltValue>>,
-        state_root: B256,
+        state_root: [u8; 32],
     ) -> Result<(), ProofError<B, T>>
     where
         B: StateReader,
@@ -129,11 +128,11 @@ impl SaltProof {
                 "lack of root commitment".to_string(),
             ))?;
 
-        let trie_root = B256::from_slice(&ffi_interface::hash_commitment(root.0));
+        let trie_root = ffi_interface::hash_commitment(root.0);
 
         if state_root != trie_root {
             return Err(ProofError::VerifyFailed(format!(
-                "state root not match, expect: {}, got: {}",
+                "state root not match, expect: {:?}, got: {:?}",
                 trie_root, state_root
             )));
         }
@@ -185,30 +184,31 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
     data.update(entry.value());
     Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
 }
-/*
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         constant::DEFAULT_COMMITMENT_AT_LEVEL,
-        genesis::EmptySalt,
+        empty_salt::EmptySalt,
+        formate::{PlainKey, PlainValue},
         mem_salt::MemSalt,
         state::state::EphemeralSaltState,
         traits::{StateReader, TrieReader},
         trie::trie::StateRoot,
-        types::{PlainKey, PlainValue},
         BucketMeta,
     };
     use alloy_primitives::{Address, B256};
     use ark_ff::AdditiveGroup;
     use banderwagon::{CanonicalSerialize, Element, Fr};
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];
-        fr.serialize_compressed(&mut bytes[..]).expect("Failed to serialize scalar to bytes");
+        fr.serialize_compressed(&mut bytes[..])
+            .expect("Failed to serialize scalar to bytes");
         bytes
     }
 
@@ -216,8 +216,7 @@ mod tests {
     fn test_empty_trie_proof() {
         let salt = EmptySalt;
 
-        let mut salt_keys: Vec<SaltKey> = Vec::with_capacity(1);
-        salt_keys.push((0, 0).into());
+        let salt_keys: Vec<SaltKey> = vec![(0, 0).into()];
 
         let crs = CRS::default();
 
@@ -252,7 +251,7 @@ mod tests {
         );
 
         let l0_fr = l1_commitment.map_to_scalar_field();
-        let empty_root = B256::from_slice(&fr_to_le_bytes(l0_fr));
+        let empty_root = fr_to_le_bytes(l0_fr);
 
         let proof = prover::create_salt_proof(&salt_keys, &salt, &salt).unwrap();
 
@@ -275,18 +274,18 @@ mod tests {
         let (slot, storage_value) = (B256::from(bytes), B256::from(bytes));
 
         let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::random_with(&mut rng), slot),
-            Some(PlainValue::Storage(storage_value.into())),
+            PlainKey::Storage(Address::from(rng.gen::<[u8; 20]>()), slot).encode(),
+            Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
         let mem_salt = MemSalt::new();
         let mut state = EphemeralSaltState::new(&mem_salt);
         let updates = state.update(&initial_key_values).unwrap();
-        updates.clone().write_to_store(&mem_salt).unwrap();
+        mem_salt.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
         let (trie_root, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
-        trie_updates.write_to_store(&mem_salt).unwrap();
+        mem_salt.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().nth(1).unwrap();
         let value = mem_salt.entry(salt_key).unwrap();
@@ -309,22 +308,22 @@ mod tests {
         let (slot, storage_value) = (B256::from(byte_ff), B256::from(byte_ff));
 
         let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::random_with(&mut rng), slot),
-            Some(PlainValue::Storage(storage_value.into())),
+            PlainKey::Storage(Address::from(rng.gen::<[u8; 20]>()), slot).encode(),
+            Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
         let mem_salt = MemSalt::new();
         let mut state = EphemeralSaltState::new(&mem_salt);
         let updates = state.update(&initial_key_values).unwrap();
 
-        updates.clone().write_to_store(&mem_salt).unwrap();
+        mem_salt.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
         let (trie_root, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
 
-        trie_updates.write_to_store(&mem_salt).unwrap();
+        mem_salt.update_trie(trie_updates);
 
-        let trie_root_commitment = mem_salt.get(0).unwrap();
+        let trie_root_commitment = mem_salt.get_commitment(0).unwrap();
 
         let root_from_commitment = B256::from_slice(&fr_to_le_bytes(
             Element::from_bytes_unchecked_uncompressed(trie_root_commitment).map_to_scalar_field(),
@@ -339,9 +338,12 @@ mod tests {
 
         let initial_kvs = (0..30)
             .map(|_| {
-                let k =
-                    PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng));
-                let v = PlainValue::Storage(B256::random_with(&mut rng).into());
+                let k = PlainKey::Storage(
+                    Address::from(rng.gen::<[u8; 20]>()),
+                    B256::from(rng.gen::<[u8; 32]>()),
+                )
+                .encode();
+                let v = PlainValue::Storage(B256::from(rng.gen::<[u8; 32]>()).into()).encode();
                 (k, Some(v))
             })
             .collect::<HashMap<_, _>>();
@@ -350,19 +352,24 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         let updates = state.update(&initial_kvs).unwrap();
 
-        updates.clone().write_to_store(&mem_salt).unwrap();
+        mem_salt.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
         let (trie_root, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
 
-        trie_updates.clone().write_to_store(&mem_salt).unwrap();
+        mem_salt.update_trie(trie_updates.clone());
 
         let mut salt_keys = updates.data.keys().cloned().collect::<Vec<_>>();
         salt_keys.push((16777215, 1).into());
         salt_keys.push((16777215, 2).into());
         salt_keys.push((16777215, 255).into());
 
-        let mut values = updates.data.values().map(|(_, new)| new).cloned().collect::<Vec<_>>();
+        let mut values = updates
+            .data
+            .values()
+            .map(|(_, new)| new)
+            .cloned()
+            .collect::<Vec<_>>();
         values.push(None);
         values.push(None);
         values.push(None);
@@ -372,19 +379,12 @@ mod tests {
         let res = proof.check::<MemSalt, MemSalt>(salt_keys, values, trie_root);
 
         assert!(res.is_ok());
-
-        let serialized = bincode::serde::encode_to_vec(&proof, bincode::config::legacy()).unwrap();
-
-        let deserialized: (SaltProof, usize) =
-            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
-
-        assert_eq!(proof, deserialized.0);
     }
 
     #[test]
     fn test_sub_trie_top_level() {
         use crate::trie::trie::{
-            get_child_idx, get_child_node, sub_trie_top_level, subtrie_node_id, subtrie_parent_id,
+            get_child_node, sub_trie_top_level, subtrie_node_id, subtrie_parent_id,
             subtrie_salt_key_start,
         };
 
@@ -400,13 +400,19 @@ mod tests {
 
         assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256 * 256), 0); // 0
 
-        assert_eq!(get_child_idx(&72061992101282049, 4), 0);
+        //assert_eq!(get_child_idx(&72061992101282049, 4), 0);
 
-        assert_eq!(subtrie_node_id(&SaltKey(72061992084439043)), 72061992101282049);
+        assert_eq!(
+            subtrie_node_id(&SaltKey(72061992084439043)),
+            72061992101282049
+        );
 
         assert_eq!(subtrie_parent_id(&72061992101282049, 3), 72061992084504833);
 
-        assert_eq!(subtrie_salt_key_start(&72061992101282049), SaltKey(72061992084439040));
+        assert_eq!(
+            subtrie_salt_key_start(&72061992101282049),
+            SaltKey(72061992084439040)
+        );
 
         assert_eq!(get_child_node(&72061992084439041, 0), 72061992084439297);
         assert_eq!(get_child_node(&72061992084439297, 0), 72061992084504833);
@@ -430,8 +436,14 @@ mod tests {
         // initialize the trie
         let initialize_state_updates = StateUpdates {
             data: vec![
-                ((bid, 3).into(), (None, Some(SaltValue::new(&[1; 32], &[1; 32])))),
-                ((bid, 5).into(), (None, Some(SaltValue::new(&[2; 32], &[2; 32])))),
+                (
+                    (bid, 3).into(),
+                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
+                ),
+                (
+                    (bid, 5).into(),
+                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -439,34 +451,49 @@ mod tests {
 
         let (initialize_root, initialize_trie_updates) =
             trie.update(&store, &initialize_state_updates).unwrap();
-        initialize_state_updates.clone().write_to_store(&store).unwrap();
-        initialize_trie_updates.clone().write_to_store(&store).unwrap();
+        store.update_state(initialize_state_updates.clone());
+        store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates.data.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        init_trie_updates
+            .data
+            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
-        let salt_key: SaltKey =
-            (bid >> MIN_BUCKET_SIZE_BITS, bid as SlotId % MIN_BUCKET_SIZE as SlotId).into();
+        let salt_key: SaltKey = (
+            bid >> MIN_BUCKET_SIZE_BITS,
+            bid as SlotId % MIN_BUCKET_SIZE as SlotId,
+        )
+            .into();
 
         let new_capacity = 256 * 256 * 256 * 256;
         fn bucket_meta(nonce: u32, capacity: SlotId) -> BucketMeta {
-            BucketMeta { nonce, capacity, ..Default::default() }
+            BucketMeta {
+                nonce,
+                capacity,
+                ..Default::default()
+            }
         }
 
         let expand_state_updates = StateUpdates {
             data: vec![
                 (
                     salt_key,
-                    (Some(BucketMeta::default().into()), Some(bucket_meta(0, new_capacity).into())),
+                    (
+                        Some(BucketMeta::default().into()),
+                        Some(bucket_meta(0, new_capacity).into()),
+                    ),
                 ),
-                ((bid, 2049).into(), (None, Some(SaltValue::new(&[3; 32], &[3; 32])))),
+                (
+                    (bid, 2049).into(),
+                    (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
+                ),
             ]
             .into_iter()
             .collect(),
         };
         let (expansion_root, trie_updates) = trie.update(&store, &expand_state_updates).unwrap();
-        expand_state_updates.write_to_store(&store).unwrap();
-        trie_updates.write_to_store(&store).unwrap();
+        store.update_state(expand_state_updates);
+        store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
@@ -492,20 +519,33 @@ mod tests {
         const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
         fn bucket_meta(nonce: u32, capacity: SlotId) -> BucketMeta {
-            BucketMeta { nonce, capacity, ..Default::default() }
+            BucketMeta {
+                nonce,
+                capacity,
+                ..Default::default()
+            }
         }
 
         let store = MemSalt::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
-        let salt_key: SaltKey =
-            (bid >> MIN_BUCKET_SIZE_BITS, bid as SlotId % MIN_BUCKET_SIZE as SlotId).into();
+        let salt_key: SaltKey = (
+            bid >> MIN_BUCKET_SIZE_BITS,
+            bid as SlotId % MIN_BUCKET_SIZE as SlotId,
+        )
+            .into();
 
         // initialize the trie, default bucket meta
         let initialize_state_updates = StateUpdates {
             data: vec![
-                ((bid, 3).into(), (None, Some(SaltValue::new(&[1; 32], &[1; 32])))),
-                ((bid, 5).into(), (None, Some(SaltValue::new(&[2; 32], &[2; 32])))),
+                (
+                    (bid, 3).into(),
+                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
+                ),
+                (
+                    (bid, 5).into(),
+                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -513,10 +553,12 @@ mod tests {
 
         let (initialize_root, initialize_trie_updates) =
             trie.update(&store, &initialize_state_updates).unwrap();
-        initialize_state_updates.clone().write_to_store(&store).unwrap();
-        initialize_trie_updates.clone().write_to_store(&store).unwrap();
+        store.update_state(initialize_state_updates.clone());
+        store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates.data.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        init_trie_updates
+            .data
+            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
         // expand capacity and add kvs
@@ -526,21 +568,32 @@ mod tests {
             data: vec![
                 (
                     salt_key,
-                    (Some(BucketMeta::default().into()), Some(bucket_meta(0, new_capacity).into())),
+                    (
+                        Some(BucketMeta::default().into()),
+                        Some(bucket_meta(0, new_capacity).into()),
+                    ),
                 ),
-                ((bid, 2049).into(), (None, Some(SaltValue::new(&[3; 32], &[3; 32])))),
+                (
+                    (bid, 2049).into(),
+                    (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
+                ),
             ]
             .into_iter()
             .collect(),
         };
         let (expansion_root, trie_updates) = trie.update(&store, &expand_state_updates).unwrap();
-        expand_state_updates.write_to_store(&store).unwrap();
-        trie_updates.write_to_store(&store).unwrap();
+        store.update_state(expand_state_updates);
+        store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
         let proof = prover::create_salt_proof(
-            &[(bid, 3).into(), (bid, 5).into(), (bid, 2049).into(), (bid, new_capacity - 1).into()],
+            &[
+                (bid, 3).into(),
+                (bid, 5).into(),
+                (bid, 2049).into(),
+                (bid, new_capacity - 1).into(),
+            ],
             &store,
             &store,
         )
@@ -585,8 +638,8 @@ mod tests {
             .collect(),
         };
         let (expansion_root, trie_updates) = trie.update(&store, &expand_state_updates).unwrap();
-        expand_state_updates.write_to_store(&store).unwrap();
-        trie_updates.write_to_store(&store).unwrap();
+        store.update_state(expand_state_updates);
+        store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
@@ -630,4 +683,3 @@ mod tests {
         assert!(res.is_ok());
     }
 }
-*/

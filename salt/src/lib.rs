@@ -28,8 +28,6 @@
 //! of the trie nodes.
 
 pub mod constant;
-pub mod formate;
-pub use formate::{Account, PlainKey, PlainValue};
 pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
@@ -48,6 +46,8 @@ pub use trie::{
 pub mod traits;
 pub mod types;
 pub use types::*;
+pub mod mem_salt;
+pub use mem_salt::MemSalt;
 
 #[cfg(test)]
-pub mod mem_salt;
+pub mod formate;

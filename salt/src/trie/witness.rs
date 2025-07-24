@@ -8,16 +8,12 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use alloy_primitives::{b256, B256};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ops::{Bound::Included, Range, RangeInclusive},
 };
-
-pub const KECCAK_EMPTY: B256 =
-    b256!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
 
 /// create a block witness from the trie
 pub fn get_block_witness<S, T>(
@@ -101,7 +97,7 @@ impl TrieReader for BlockWitness {
 
 impl BlockWitness {
     /// Verify the block witness
-    pub fn verify_proof<B, T>(&self, root: B256) -> Result<(), ProofError<B, T>>
+    pub fn verify_proof<B, T>(&self, root: [u8; 32]) -> Result<(), ProofError<B, T>>
     where
         B: StateReader,
         T: TrieReader,
@@ -181,7 +177,6 @@ mod tests {
         let (old_trie_root, initial_trie_updates) =
             trie.update(&mem_salt, &initial_updates).unwrap();
 
-        let old_trie_root = B256::from(old_trie_root);
         mem_salt.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
@@ -238,7 +233,6 @@ mod tests {
 
         let mut trie = StateRoot::new();
         let (root, initial_trie_updates) = trie.update(&mem_salt, &initial_updates).unwrap();
-        let root = B256::from(root);
 
         mem_salt.update_trie(initial_trie_updates);
 
