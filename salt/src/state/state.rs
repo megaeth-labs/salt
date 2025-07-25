@@ -351,7 +351,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Read the bucket entry of the given SALT key. Always look up `cache` before `base_state`.
     #[inline(always)]
-    fn get_entry(&mut self, key: SaltKey) -> Result<Option<SaltValue>, BaseState::Error> {
+    pub fn get_entry(&mut self, key: SaltKey) -> Result<Option<SaltValue>, BaseState::Error> {
         let value = match self.cache.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
@@ -368,7 +368,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Updates the bucket entry and records the change in `out_updates`.
     #[inline(always)]
-    fn update_entry(
+    pub fn update_entry(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,

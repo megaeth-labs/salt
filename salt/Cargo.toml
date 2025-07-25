@@ -17,6 +17,7 @@ megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahas
 # standard dependencies
 blake3 = "1.8"
 bytes = "1.5"
+hex = "0.4"
 iter_tools = "0.30.0"
 modular-bitfield = "0.11.2"
 once_cell = "1.19"

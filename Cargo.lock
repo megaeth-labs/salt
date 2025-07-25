@@ -2122,6 +2122,7 @@ dependencies = [
  "criterion",
  "derive_more",
  "ffi_interface",
+ "hex",
  "ipa-multipoint",
  "iter_tools",
  "modular-bitfield",

@@ -1,8 +1,12 @@
 //! This module implements [`StateUpdates`].
 use crate::types::{SaltKey, SaltValue};
 use derive_more::Deref;
+use hex;
 use serde::{Deserialize, Serialize};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    fmt,
+};
 
 /// Records updates to a SALT state (including both prior and new values).
 #[derive(Clone, Debug, Deref, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -63,6 +67,41 @@ impl StateUpdates {
             std::mem::swap(old_value, new_value);
         }
         self
+    }
+}
+
+impl fmt::Display for StateUpdates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "StateUpdates {{")?;
+
+        for (salt_key, (old_value, new_value)) in &self.data {
+            writeln!(
+                f,
+                "  Entry(bucket: {}, slot: {}) {{",
+                salt_key.bucket_id(),
+                salt_key.slot_id()
+            )?;
+
+            // Helper closure to format SaltValue
+            let format_value = |value: &Option<SaltValue>| -> String {
+                match value {
+                    Some(salt_value) => {
+                        format!(
+                            "key:{:?} value:{:?}",
+                            hex::encode(salt_value.key()),
+                            hex::encode(salt_value.value())
+                        )
+                    }
+                    None => "None".to_string(),
+                }
+            };
+
+            writeln!(f, "    old: {}", format_value(old_value))?;
+            writeln!(f, "    new: {}", format_value(new_value))?;
+            writeln!(f, "  }}")?;
+        }
+
+        write!(f, "}}")
     }
 }
 

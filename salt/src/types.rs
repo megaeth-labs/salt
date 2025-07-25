@@ -72,7 +72,19 @@ impl BucketMeta {
 /// The [`SaltKey`] type, its high 20 bits are the `bucket_id`, and low 40 bits
 /// are the `slot_id`.
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Deref,
+    DerefMut,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
 pub struct SaltKey(pub u64);
 
