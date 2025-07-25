@@ -55,10 +55,19 @@ pub trait TrieReader: Sync {
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 
     /// Get node commitments by `range` from store.
+    /// This is an inefficient implementation that
+    /// needs to be re implemented in your Reader
     fn get_range(
         &self,
         range: Range<NodeId>,
-    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error>;
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        range
+            .map(|node_id| {
+                let commitment = self.get_commitment(node_id)?;
+                Ok((node_id, commitment))
+            })
+            .collect()
+    }
 
     /// Retrieves child nodes based on the node ID
     fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
