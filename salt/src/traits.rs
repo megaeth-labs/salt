@@ -50,10 +50,7 @@ pub trait StateReader: Debug + Send + Sync {
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
-    /// Get Bucket Capacity from store.
-    fn bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
-        unimplemented!("bucket_capacity is not implemented for this reader")
-    }
+
     /// Get node commitment by `node_id` from store.
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 

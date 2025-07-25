@@ -137,11 +137,6 @@ impl StateReader for MemSalt {
 impl TrieReader for MemSalt {
     type Error = &'static str;
 
-    fn bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        let meta = self.get_meta(bucket_id)?;
-        Ok(meta.capacity)
-    }
-
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
             .trie

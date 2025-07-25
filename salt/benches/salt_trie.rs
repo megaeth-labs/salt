@@ -10,7 +10,7 @@ use salt::{
     trie::trie::{get_global_committer, StateRoot},
     types::*,
 };
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 /// Generates a series of fixed-size state updates.
 ///
@@ -74,7 +74,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     StateRoot::new()
-                        .update(&EmptySalt, &state_updates_vec[0])
+                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
                         .unwrap();
                 })
             },
@@ -88,7 +88,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     StateRoot::new()
-                        .update(&EmptySalt, &state_updates_vec[0])
+                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
                         .unwrap();
                 })
             },
@@ -103,7 +103,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
                 black_box({
                     let mut trie = StateRoot::new();
                     for state_updates in state_updates_vec.iter() {
-                        trie.incremental_update(&EmptySalt, state_updates).unwrap();
+                        trie.incremental_update(&EmptySalt, &EmptySalt, state_updates)
+                            .unwrap();
                     }
                     trie.finalize(&EmptySalt).unwrap();
                 })
@@ -118,7 +119,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new().update(&EmptySalt, state_updates).unwrap();
+                        StateRoot::new()
+                            .update(&EmptySalt, &EmptySalt, state_updates)
+                            .unwrap();
                     }
                 })
             },
@@ -132,7 +135,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     StateRoot::new()
-                        .update(&ExpansionSalt((65536 * 16, 512)), &state_updates_vec[0])
+                        .update(
+                            &ExpansionSalt((65536 * 16, 512)),
+                            &ExpansionSalt((65536 * 16, 512)),
+                            &state_updates_vec[0],
+                        )
                         .unwrap();
                 })
             },
@@ -141,19 +148,14 @@ fn salt_trie_bench(_c: &mut Criterion) {
     });
 }
 
+/// This is a testing module that returns expansion information.
+/// When the bucket_id is less than the first parameter,
+/// it returns the capacity value of the second parameter
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ExpansionSalt((u64, u64));
 
 impl TrieReader for ExpansionSalt {
     type Error = &'static str;
-
-    fn bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        Ok(if bucket_id < self.0 .0 as BucketId {
-            self.0 .1
-        } else {
-            MIN_BUCKET_SIZE as u64
-        })
-    }
 
     fn get_commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
@@ -164,6 +166,33 @@ impl TrieReader for ExpansionSalt {
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
         Ok(vec![])
+    }
+}
+
+impl StateReader for ExpansionSalt {
+    type Error = &'static str;
+
+    fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+        Ok(None)
+    }
+
+    fn range_bucket(
+        &self,
+        _range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        let meta = BucketMeta {
+            capacity: if bucket_id < self.0 .0 as BucketId {
+                self.0 .1
+            } else {
+                MIN_BUCKET_SIZE as u64
+            },
+            ..Default::default()
+        };
+        Ok(meta)
     }
 }
 

@@ -59,10 +59,6 @@ impl StateReader for EmptySalt {
 impl TrieReader for EmptySalt {
     type Error = &'static str;
 
-    fn bucket_capacity(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
-        Ok(MIN_BUCKET_SIZE as u64)
-    }
-
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         let level = get_node_level(node_id);
         Ok(

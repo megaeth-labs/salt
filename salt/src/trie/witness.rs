@@ -62,11 +62,6 @@ pub struct BlockWitness {
 impl TrieReader for BlockWitness {
     type Error = &'static str;
 
-    fn bucket_capacity(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        let meta = self.get_meta(bucket_id)?;
-        Ok(meta.capacity)
-    }
-
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
             .proof
@@ -175,7 +170,7 @@ mod tests {
 
         let mut trie = StateRoot::new();
         let (old_trie_root, initial_trie_updates) =
-            trie.update(&mem_salt, &initial_updates).unwrap();
+            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
 
         mem_salt.update_trie(initial_trie_updates);
 
@@ -187,7 +182,8 @@ mod tests {
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) = trie.update(&mem_salt, &state_updates).unwrap();
+        let (new_trie_root, mut trie_updates) =
+            trie.update(&mem_salt, &mem_salt, &state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
@@ -206,8 +202,9 @@ mod tests {
         assert_eq!(state_updates, prover_updates);
 
         let mut prover_trie = StateRoot::new();
-        let (prover_trie_root, mut prover_trie_updates) =
-            prover_trie.update(&block_witness, &prover_updates).unwrap();
+        let (prover_trie_root, mut prover_trie_updates) = prover_trie
+            .update(&block_witness, &block_witness, &prover_updates)
+            .unwrap();
 
         trie_updates
             .data
@@ -232,7 +229,8 @@ mod tests {
         mem_salt.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (root, initial_trie_updates) = trie.update(&mem_salt, &initial_updates).unwrap();
+        let (root, initial_trie_updates) =
+            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
 
         mem_salt.update_trie(initial_trie_updates);
 
@@ -265,7 +263,8 @@ mod tests {
         mem_salt.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (_, initial_trie_updates) = trie.update(&mem_salt, &initial_updates).unwrap();
+        let (_, initial_trie_updates) =
+            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
 
         mem_salt.update_trie(initial_trie_updates);
 

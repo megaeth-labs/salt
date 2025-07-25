@@ -314,7 +314,7 @@ mod tests {
         mem_salt.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (_, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
+        let (_, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
 
         mem_salt.update_trie(trie_updates);
 
