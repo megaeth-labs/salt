@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 banderwagon = { path = "../banderwagon" }
 ipa-multipoint = { path = "../ipa-multipoint" }
-verkle-spec = { path = "../verkle-spec" }
 hex = "*"
 
 [features]
