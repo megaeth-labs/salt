@@ -3,7 +3,6 @@
 members = [
     "ipa-multipoint",
     "banderwagon",
-    "ffi_interface",
     "salt",
 ]
 resolver = "2"

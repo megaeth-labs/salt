@@ -1007,15 +1007,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ffi_interface"
-version = "0.1.0"
-dependencies = [
- "banderwagon",
- "hex",
- "ipa-multipoint",
-]
-
-[[package]]
 name = "fixed-hash"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1836,7 +1827,6 @@ dependencies = [
  "bytes",
  "criterion",
  "derive_more",
- "ffi_interface",
  "hex",
  "ipa-multipoint",
  "iter_tools",

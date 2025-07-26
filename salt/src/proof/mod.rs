@@ -2,7 +2,7 @@
 use crate::{
     constant::POLY_DEGREE,
     traits::{StateReader, TrieReader},
-    types::{CommitmentBytes, NodeId, SaltKey, SaltValue},
+    types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
 use banderwagon::{Element, Fr, PrimeField};
@@ -128,7 +128,7 @@ impl SaltProof {
                 "lack of root commitment".to_string(),
             ))?;
 
-        let trie_root = ffi_interface::hash_commitment(root.0);
+        let trie_root = hash_commitment(root.0);
 
         if state_root != trie_root {
             return Err(ProofError::VerifyFailed(format!(
