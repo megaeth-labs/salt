@@ -9,7 +9,10 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
-
+      - name: Configure Git credentials
+        uses: ./.github/actions/git_config
+        with:
+          github_pat: ${{ secrets.PAT_CI  }}
       - name: Install nightly toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -28,6 +31,10 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
+      - name: Configure Git credentials
+        uses: ./.github/actions/git_config
+        with:
+          github_pat: ${{ secrets.PAT_CI  }}
 
       - name: Install nightly toolchain
         uses: actions-rs/toolchain@v1
@@ -45,25 +52,29 @@ jobs:
     name: Lints
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout sources
-      uses: actions/checkout@v2
+      - name: Checkout sources
+        uses: actions/checkout@v2
+      - name: Configure Git credentials
+        uses: ./.github/actions/git_config
+        with:
+          github_pat: ${{ secrets.PAT_CI  }}
 
-    - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
-        components: rustfmt, clippy
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
 
-    - name: Run cargo fmt
-      uses: actions-rs/cargo@v1
-      with:
-        command: fmt
-        args: --all -- --check
+      - name: Run cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
 
-    - name: Run cargo clippy
-      uses: actions-rs/cargo@v1
-      with:
-        command: clippy
-        args: -- -D warnings
+      - name: Run cargo clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -- -D warnings
