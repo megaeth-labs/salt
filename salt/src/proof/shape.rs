@@ -497,8 +497,7 @@ mod tests {
             // Check if the conversion is reversible
             assert_eq!(
                 bucket_id_back, bucket_id,
-                "Failed for bucket_id: {}",
-                bucket_id
+                "Failed for bucket_id: {bucket_id}"
             );
         }
     }
@@ -518,8 +517,7 @@ mod tests {
             let reversed_path = bucket_id_to_path(bucket_id);
             assert_eq!(
                 path, reversed_path,
-                "Reversibility failed for path: {:?}. Got: {:?}",
-                path, reversed_path
+                "Reversibility failed for path: {path:?}. Got: {reversed_path:?}"
             );
         }
     }

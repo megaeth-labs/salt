@@ -13,7 +13,7 @@ fn main() {
     let committer = DefaultCommitter::new(&crs.G);
     let mut vec_len = 1;
     while vec_len <= 256 {
-        println!("\twith {} elements... ", vec_len);
+        println!("\twith {vec_len} elements... ");
 
         let mut vecs = vec![[Fr::from(0u128); 256]; N];
         for (i, vecs_i) in vecs.iter_mut().enumerate() {

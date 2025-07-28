@@ -1865,8 +1865,7 @@ mod tests {
 
             assert_eq!(
                 default_committment_vec[i], DEFAULT_COMMITMENT_AT_LEVEL[i].1,
-                "The default commitment of the level {} should be equal to the constant value",
-                i
+                "The default commitment of the level {i} should be equal to the constant value"
             )
         }
     }
