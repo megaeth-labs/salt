@@ -25,10 +25,8 @@ use std::ops::{Range, RangeInclusive};
 /// A vector of `StateUpdates` containing the generated state updates.
 fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates> {
     (0..num)
-        .into_iter()
         .map(|_| {
             let mut bids: Vec<_> = (0..l)
-                .into_iter()
                 .map(|_| rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId))
                 .collect();
             bids.sort();
@@ -72,11 +70,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
-                black_box({
+                black_box(
                     StateRoot::new()
                         .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
-                        .unwrap();
-                })
+                        .unwrap(),
+                )
             },
             criterion::BatchSize::SmallInput,
         );
@@ -86,11 +84,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(1, 1_000, &mut rng),
             |state_updates_vec| {
-                black_box({
+                black_box(
                     StateRoot::new()
                         .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
-                        .unwrap();
-                })
+                        .unwrap(),
+                )
             },
             criterion::BatchSize::SmallInput,
         );
@@ -106,7 +104,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
                         trie.incremental_update(&EmptySalt, &EmptySalt, state_updates)
                             .unwrap();
                     }
-                    trie.finalize(&EmptySalt).unwrap();
+                    trie.finalize(&EmptySalt).unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -140,7 +138,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
                             &ExpansionSalt((65536 * 16, 512)),
                             &state_updates_vec[0],
                         )
-                        .unwrap();
+                        .unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,

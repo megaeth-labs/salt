@@ -96,7 +96,7 @@ fn process_trie_queries(
                                         .get(&child_id)
                                         .cloned()
                                         .unwrap_or_else(|| {
-                                            panic!("path_commitments lack id {:?}", child_id)
+                                            panic!("path_commitments lack id {child_id:?}")
                                         })
                                         .0,
                                 )
@@ -122,7 +122,7 @@ fn process_trie_queries(
                             path_commitments
                                 .get(parent)
                                 .cloned()
-                                .unwrap_or_else(|| panic!("path_commitments lack id {:?}", parent))
+                                .unwrap_or_else(|| panic!("path_commitments lack id {parent:?}"))
                                 .0,
                         );
 
@@ -210,7 +210,7 @@ where
                     let l3_commitment = path_commitments
                         .get(&parent_id)
                         .cloned()
-                        .unwrap_or_else(|| panic!("path_commitments lack id {:?}", parent_id))
+                        .unwrap_or_else(|| panic!("path_commitments lack id {parent_id:?}"))
                         .0;
 
                     VerifierQuery {

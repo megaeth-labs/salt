@@ -132,8 +132,7 @@ impl SaltProof {
 
         if state_root != trie_root {
             return Err(ProofError::VerifyFailed(format!(
-                "state root not match, expect: {:?}, got: {:?}",
-                trie_root, state_root
+                "state root not match, expect: {trie_root:?}, got: {state_root:?}"
             )));
         }
 

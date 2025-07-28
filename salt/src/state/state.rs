@@ -989,11 +989,7 @@ mod tests {
         for slot_id in &slot_id_vec {
             let salt_id = (BUCKET_ID, *slot_id).into();
             let slot = state.get_entry(salt_id).unwrap();
-            assert_eq!(
-                slot, None,
-                "after delete slot_id: {} should be None",
-                slot_id
-            );
+            assert_eq!(slot, None, "after delete slot_id: {slot_id} should be None");
         }
     }
 
