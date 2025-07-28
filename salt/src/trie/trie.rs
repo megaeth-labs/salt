@@ -754,11 +754,6 @@ pub(crate) fn subtrie_node_id(key: &SaltKey) -> NodeId {
         + STARTING_NODE_ID[SUB_TRIE_LEVELS - 1] as NodeId
 }
 
-/// Return the hashed commitment in [u8;32] format
-pub fn hash_commitment(c: CommitmentBytes) -> [u8; 32] {
-    ffi_interface::hash_commitment(c)
-}
-
 /// Generates a 256-bit secure hash from the bucket entry.
 /// Note: as a special case, empty entries are hashed to 0.
 #[inline(always)]

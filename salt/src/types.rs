@@ -6,7 +6,21 @@ use crate::constant::{
 };
 
 use derive_more::{Deref, DerefMut};
-pub use ffi_interface::CommitmentBytes;
+/// A serialized uncompressed group element
+pub type CommitmentBytes = [u8; 64];
+
+/// A serialized scalar field element
+pub type ScalarBytes = [u8; 32];
+
+pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
+    use banderwagon::{CanonicalSerialize, Element};
+    let mut bytes = [0u8; 32];
+    Element::from_bytes_unchecked_uncompressed(commitment)
+        .map_to_scalar_field()
+        .serialize_compressed(&mut bytes[..])
+        .expect("Failed to serialize scalar to bytes");
+    bytes
+}
 
 use serde::{Deserialize, Serialize};
 
