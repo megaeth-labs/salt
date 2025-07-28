@@ -14,7 +14,7 @@ use std::{
 };
 
 /// This trait provides functionality for reading the entries of SALT buckets.
-pub trait StateReader: Debug + Send + Sync {
+pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
 

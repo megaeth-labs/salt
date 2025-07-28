@@ -19,7 +19,7 @@ use tracing::info;
 pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
-    base_state: &'a BaseState,
+    pub base_state: &'a BaseState,
     /// Cache the values read from `base_state` and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Whether to save access records
@@ -45,6 +45,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             cache: HashMap::new(),
             save_access: true,
         }
+    }
+
+    /// Return the cache of the current state.
+    pub fn cache_tx(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.cache
     }
 
     /// After calling `extend_cache`, the state will be updated to `state`.
