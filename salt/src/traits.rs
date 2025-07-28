@@ -14,6 +14,7 @@ use std::{
 };
 
 /// This trait provides functionality for reading the entries of SALT buckets.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
@@ -24,8 +25,10 @@ pub trait StateReader: Send + Sync {
     /// Retrieves all non-empty entries within the specified range of buckets.
     fn range_bucket(
         &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
+        _range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        unimplemented!("range_bucket is not implemented for this reader")
+    }
 
     /// Retrieves all non-empty entries within the specified range of slots.
     fn range_slot(
@@ -47,6 +50,7 @@ pub trait StateReader: Send + Sync {
 }
 
 /// This trait provides functionality for reading commitments from trie nodes.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;

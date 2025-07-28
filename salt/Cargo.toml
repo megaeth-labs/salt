@@ -28,6 +28,7 @@ serde_arrays = "0.1.0"
 thiserror = "1.0"
 tracing = "0.1.0"
 derive_more = { version = "2", default-features = false, features = ["full"] }
+auto_impl = "1"
 
 [dev-dependencies]
 arbitrary = "1.3"
