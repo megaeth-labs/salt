@@ -8,7 +8,7 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
-
+// TODO : msm.rs 去掉可能性调研
 ///MSM calculation for a fixed G points
 #[derive(Clone, Debug)]
 pub struct Committer {
@@ -507,6 +507,7 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    #[allow(clippy::op_ref)]
     fn batch_elements_to_hash_bytes() {
         let a_vec = vec![
             (Element::prime_subgroup_generator() * Fr::from(1111)),
@@ -529,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::op_ref)]
     fn batch_elements_to_commitments() {
         let a_vec = vec![
             (Element::prime_subgroup_generator() * Fr::from(3333)),

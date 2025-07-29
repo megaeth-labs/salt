@@ -1,8 +1,8 @@
 //! Define traits for storing salt state and salt trie.
 use crate::{
     constant::{
-        get_node_level, zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL, NUM_META_BUCKETS,
-        STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH,
+        default_commitment, get_node_level, zero_commitment, NUM_META_BUCKETS, STARTING_NODE_ID,
+        TRIE_LEVELS, TRIE_WIDTH,
     },
     trie::trie::get_child_node,
     types::{meta_position, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
@@ -85,15 +85,10 @@ pub trait TrieReader: Sync {
         if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
             let child_level = get_node_level(node_id) + 1;
             assert!(child_level < TRIE_LEVELS);
-            for i in child_start
-                ..std::cmp::min(
-                    DEFAULT_COMMITMENT_AT_LEVEL[child_level].0,
-                    child_start as usize + TRIE_WIDTH,
-                ) as NodeId
-            {
+            for i in child_start..child_start + TRIE_WIDTH as NodeId {
                 let j = (i - child_start) as usize;
                 if children[j] == zero {
-                    children[j] = DEFAULT_COMMITMENT_AT_LEVEL[child_level].1;
+                    children[j] = default_commitment(child_level, i);
                 }
             }
         }

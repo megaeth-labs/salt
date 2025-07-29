@@ -17,7 +17,7 @@ pub const TRIE_LEVELS: usize = 4;
 /// the below:               |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
 /// trie                  /                         \
 /// |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]| |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
-pub const SUB_TRIE_LEVELS: usize = TRIE_LEVELS + 1;
+pub const SUB_TRIE_LEVELS: usize = 5;
 /// Number of bits to represent `TRIE_WIDTH`.
 pub const TRIE_WIDTH_BITS: usize = 8;
 /// Branch factor of the SALT trie nodes. Always a power of two.
@@ -98,13 +98,6 @@ macro_rules! b512 {
 /// Precomputed node commitment at each level of an empty SALT trie.
 /// Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
 /// info.
-pub static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes); TRIE_LEVELS] = [
-    (STARTING_NODE_ID[0] + 1,b512!("5b61d927cf2984395c7a10a9300e6510371ff70a08b8be12d4598f2bd8212d39a480d92b37d8dea1d0f89260f9d9f0fee8164988d53c8b11c07a516afbf3dd1c")),
-    (STARTING_NODE_ID[1] + 1,b512!("ac5cefa767c0826d57a742750205fcb5d21e73b9bd9d5e1ba4ae69cfb70cd45d8bb824a8728b172cdb9759e230ce91089d139e2a1a9b277fd9aa2148492ba31b")),
-    (STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,b512!("2d6d15700368640cf2ec8f8821028a9222c45a382456adf52f142273b38415061f5b84d1426ec7cdbdf6cb58446bc4115c183514a39560205dd95f60abb6d02f")),
-    (STARTING_NODE_ID[3] + NUM_META_BUCKETS,b512!("b19f806b182b14a58e02fac5ea1325d017b058ce6dfe8926a841eb5d80776b2041b87b43527d3264923ad9806fe93e17e1366c7d161d5eac6809d06f4b0a3208")),
-];
-
 /// Calculate the level where the specified node is located.
 pub fn get_node_level(node_id: NodeId) -> usize {
     STARTING_NODE_ID
@@ -118,10 +111,33 @@ pub fn get_node_level(node_id: NodeId) -> usize {
 
 /// Get the default commitment for the specified node.
 pub fn default_commitment(level: usize, id: NodeId) -> CommitmentBytes {
+    static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
+        (
+            STARTING_NODE_ID[0] + 1,
+            b512!("5b61d927cf2984395c7a10a9300e6510371ff70a08b8be12d4598f2bd8212d39a480d92b37d8dea1d0f89260f9d9f0fee8164988d53c8b11c07a516afbf3dd1c"),
+            b512!("5b61d927cf2984395c7a10a9300e6510371ff70a08b8be12d4598f2bd8212d39a480d92b37d8dea1d0f89260f9d9f0fee8164988d53c8b11c07a516afbf3dd1c"),
+        ),
+        (
+            STARTING_NODE_ID[1] + 1,
+            b512!("ac5cefa767c0826d57a742750205fcb5d21e73b9bd9d5e1ba4ae69cfb70cd45d8bb824a8728b172cdb9759e230ce91089d139e2a1a9b277fd9aa2148492ba31b"),
+            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+        ),
+        (
+            STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,
+            b512!("2d6d15700368640cf2ec8f8821028a9222c45a382456adf52f142273b38415061f5b84d1426ec7cdbdf6cb58446bc4115c183514a39560205dd95f60abb6d02f"),
+            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+        ),
+        (
+            STARTING_NODE_ID[3] + NUM_META_BUCKETS,
+            b512!("b19f806b182b14a58e02fac5ea1325d017b058ce6dfe8926a841eb5d80776b2041b87b43527d3264923ad9806fe93e17e1366c7d161d5eac6809d06f4b0a3208"),
+            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+        ),
+    ];
+
     if id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
-        zero_commitment()
+        DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
 }
 

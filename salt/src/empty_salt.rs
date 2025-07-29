@@ -61,15 +61,11 @@ impl TrieReader for EmptySalt {
 
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         let level = get_node_level(node_id);
-        Ok(
-            if is_extension_node(node_id)
-                || node_id >= DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId
-            {
-                zero_commitment()
-            } else {
-                DEFAULT_COMMITMENT_AT_LEVEL[level].1
-            },
-        )
+        Ok(if is_extension_node(node_id) {
+            zero_commitment()
+        } else {
+            default_commitment(level, node_id)
+        })
     }
 
     fn get_range(

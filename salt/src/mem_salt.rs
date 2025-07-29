@@ -1,8 +1,6 @@
 //! This module provides a simple in-memory implementation of the SALT
 //! data structure. Only used in testing.
-use crate::{
-    constant::*, traits::*, trie::trie::get_child_node, types::*, StateUpdates, TrieUpdates,
-};
+use crate::{constant::*, traits::*, types::*, StateUpdates, TrieUpdates};
 use std::{
     collections::BTreeMap,
     ops::{Bound::Included, Range, RangeInclusive},
@@ -146,12 +144,10 @@ impl TrieReader for MemSalt {
             .copied()
             .unwrap_or_else(|| {
                 let level = get_node_level(node_id);
-                if is_extension_node(node_id)
-                    || node_id >= DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId
-                {
+                if is_extension_node(node_id) {
                     zero_commitment()
                 } else {
-                    DEFAULT_COMMITMENT_AT_LEVEL[level].1
+                    default_commitment(level, node_id)
                 }
             }))
     }
@@ -162,37 +158,6 @@ impl TrieReader for MemSalt {
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
         let map = self.trie.read().unwrap();
         Ok(map.range(range).map(|(k, v)| (*k, *v)).collect())
-    }
-
-    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
-        let zero = zero_commitment();
-        let child_start = get_child_node(&node_id, 0);
-        let mut children = vec![zero; TRIE_WIDTH];
-        let map = self.trie.read().unwrap();
-        // Fill in actual values where they exist
-        for (k, v) in map.range(child_start as NodeId..child_start + TRIE_WIDTH as NodeId) {
-            children[*k as usize - child_start as usize] = *v;
-        }
-
-        // Because the trie did not store the default value when init,
-        // so meta nodes needs to update the default commitment.
-        if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
-            let child_level = get_node_level(node_id) + 1;
-            assert!(child_level < TRIE_LEVELS);
-            for i in child_start
-                ..std::cmp::min(
-                    DEFAULT_COMMITMENT_AT_LEVEL[child_level].0,
-                    child_start as usize + TRIE_WIDTH,
-                ) as NodeId
-            {
-                let j = (i - child_start) as usize;
-                if children[j] == zero {
-                    children[j] = DEFAULT_COMMITMENT_AT_LEVEL[child_level].1;
-                }
-            }
-        }
-
-        Ok(children)
     }
 }
 

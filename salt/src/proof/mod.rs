@@ -188,7 +188,7 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
 mod tests {
     use super::*;
     use crate::{
-        constant::DEFAULT_COMMITMENT_AT_LEVEL,
+        constant::{default_commitment, STARTING_NODE_ID},
         empty_salt::EmptySalt,
         formate::{PlainKey, PlainValue},
         mem_salt::MemSalt,
@@ -224,21 +224,30 @@ mod tests {
         let bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(bucket_frs));
         assert_eq!(
             bucket_commitment,
-            Element::from_bytes_unchecked_uncompressed(DEFAULT_COMMITMENT_AT_LEVEL[3].1)
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                3,
+                STARTING_NODE_ID[3] as NodeId
+            ))
         );
 
         let l3_frs = vec![bucket_commitment.map_to_scalar_field(); 256];
         let l3_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_frs));
         assert_eq!(
             l3_commitment,
-            Element::from_bytes_unchecked_uncompressed(DEFAULT_COMMITMENT_AT_LEVEL[2].1)
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                2,
+                STARTING_NODE_ID[2] as NodeId
+            ))
         );
 
         let l2_frs = vec![l3_commitment.map_to_scalar_field(); 256];
         let l2_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_frs));
         assert_eq!(
             l2_commitment,
-            Element::from_bytes_unchecked_uncompressed(DEFAULT_COMMITMENT_AT_LEVEL[1].1)
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                1,
+                STARTING_NODE_ID[1] as NodeId
+            ))
         );
 
         let mut l1_frs = vec![Fr::ZERO; 256];
@@ -246,7 +255,10 @@ mod tests {
         let l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l1_frs));
         assert_eq!(
             l1_commitment,
-            Element::from_bytes_unchecked_uncompressed(DEFAULT_COMMITMENT_AT_LEVEL[0].1)
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                0,
+                STARTING_NODE_ID[0] as NodeId
+            ))
         );
 
         let l0_fr = l1_commitment.map_to_scalar_field();
