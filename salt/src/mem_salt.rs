@@ -84,29 +84,15 @@ impl StateReader for MemSalt {
         Ok(rs)
     }
 
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
-            .state
-            .read()
-            .unwrap()
-            .range((
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), BUCKET_SLOT_ID_MASK))),
-            ))
-            .map(|(k, v)| (*k, v.clone()))
-            .collect())
-    }
-
     fn range_slot(
         &self,
         bucket_id: BucketId,
         range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(*range.end() <= MIN_BUCKET_SIZE as SlotId);
+        let data = if bucket_id < NUM_META_BUCKETS as BucketId
+            && *range.start() < MIN_BUCKET_SIZE as u64
+        {
+            let range = *range.start()..std::cmp::min(MIN_BUCKET_SIZE as u64, *range.end());
             range
                 .into_iter()
                 .map(|slot_id| {
@@ -131,6 +117,26 @@ impl StateReader for MemSalt {
                 .collect()
         };
         Ok(data)
+    }
+}
+
+impl StateLoader for MemSalt {
+    type Error = &'static str;
+
+    fn load_range(
+        &self,
+        range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(self
+            .state
+            .read()
+            .unwrap()
+            .range((
+                Included(SaltKey::from((*range.start(), 0))),
+                Included(SaltKey::from((*range.end(), BUCKET_SLOT_ID_MASK))),
+            ))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect())
     }
 }
 

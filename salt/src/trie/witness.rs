@@ -1,9 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{
-        get_node_level, is_extension_node, zero_commitment, BUCKET_SLOT_BITS,
-        DEFAULT_COMMITMENT_AT_LEVEL,
-    },
+    constant::{get_node_level, is_extension_node, zero_commitment, DEFAULT_COMMITMENT_AT_LEVEL},
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -12,7 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ops::{Bound::Included, Range, RangeInclusive},
+    ops::{Range, RangeInclusive},
 };
 
 /// create a block witness from the trie
@@ -114,21 +111,6 @@ impl StateReader for BlockWitness {
         } else {
             result
         })
-    }
-
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
-            .kvs
-            .range((
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), (1 << BUCKET_SLOT_BITS) - 1))),
-            ))
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, v)| (*k, v.clone().unwrap())) // v is checked to be Some in the filter
-            .collect())
     }
 
     fn range_slot(

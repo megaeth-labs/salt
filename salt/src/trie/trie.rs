@@ -652,7 +652,7 @@ impl StateRoot {
 }
 
 /// Computes the state root from scratch given the SALT buckets.
-pub fn compute_from_scratch<S: StateReader>(
+pub fn compute_from_scratch<S: StateLoader>(
     reader: &S,
 ) -> Result<([u8; 32], TrieUpdates), S::Error> {
     let trie_reader = &EmptySalt;
@@ -661,6 +661,7 @@ pub fn compute_from_scratch<S: StateReader>(
 
     // Compute bucket commitments.
     const STEP_SIZE: usize = 256;
+    //TODO: Meta Get First Here
     (NUM_META_BUCKETS..NUM_BUCKETS)
         .step_by(STEP_SIZE)
         .try_for_each(|start| {
@@ -672,7 +673,7 @@ pub fn compute_from_scratch<S: StateReader>(
                 (start >> MIN_BUCKET_SIZE_BITS) as BucketId
             };
             let mut state_updates = reader
-                .range_bucket(meta_start..=(end >> MIN_BUCKET_SIZE_BITS) as BucketId)?
+                .load_range(meta_start..=(end >> MIN_BUCKET_SIZE_BITS) as BucketId)?
                 .into_iter()
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
                 .collect::<BTreeMap<_, _>>();
@@ -680,7 +681,7 @@ pub fn compute_from_scratch<S: StateReader>(
             // Read buckets key-value pairs from store
             state_updates.extend(
                 reader
-                    .range_bucket(start as BucketId..=end as BucketId)?
+                    .load_range(start as BucketId..=end as BucketId)?
                     .into_iter()
                     .map(|(k, v)| (k, (None, Some(v)))),
             );

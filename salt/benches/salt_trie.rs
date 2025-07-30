@@ -10,7 +10,7 @@ use salt::{
     trie::trie::{get_global_committer, StateRoot},
     types::*,
 };
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 
 /// Generates a series of fixed-size state updates.
 ///
@@ -174,13 +174,6 @@ impl StateReader for ExpansionSalt {
 
     fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
-    }
-
-    fn range_bucket(
-        &self,
-        _range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(Vec::new())
     }
 
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {

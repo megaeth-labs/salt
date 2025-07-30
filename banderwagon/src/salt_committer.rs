@@ -521,8 +521,8 @@ mod tests {
         let hash_bytes = Element::hash_commitments(&c_vec);
 
         for i in 0..a_vec.len() {
-            let mut bytes = [0 as u8; 32];
-            let x = a_vec[i].0.x * &a_vec[i].0.y.inverse().unwrap();
+            let mut bytes = [0u8; 32];
+            let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[..]);
             assert_eq!(bytes, hash_bytes[i]);
         }
@@ -538,9 +538,9 @@ mod tests {
         let hash_bytes = Element::batch_to_commitments(&a_vec);
 
         for i in 0..a_vec.len() {
-            let mut bytes = [0 as u8; 64];
-            let x = a_vec[i].0.x * &a_vec[i].0.z.inverse().unwrap();
-            let y = a_vec[i].0.y * &a_vec[i].0.z.inverse().unwrap();
+            let mut bytes = [0u8; 64];
+            let x = a_vec[i].0.x * a_vec[i].0.z.inverse().unwrap();
+            let y = a_vec[i].0.y * a_vec[i].0.z.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[0..32]);
             let _ = y.serialize_uncompressed(&mut bytes[32..64]);
             assert_eq!(bytes, hash_bytes[i]);
@@ -638,8 +638,7 @@ mod tests {
                 let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
                 let scalar = Fr::rand(&mut rng);
                 let got_result = precompute.mul_index(&scalar, 0);
-                let mut scalars: Vec<Fr> = Vec::with_capacity(1);
-                scalars.push(scalar);
+                let scalars: Vec<Fr> = vec![scalar];
 
                 let correct_result = multi_scalar_mul(&basic_crs, &scalars);
 

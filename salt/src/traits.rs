@@ -19,16 +19,17 @@ pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
 
+    /// Get bucket meta by bucket ID.
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        let key = meta_position(bucket_id);
+        Ok(match self.entry(key)? {
+            Some(ref v) => v.try_into().expect("meta value error"),
+            None => BucketMeta::default(),
+        })
+    }
+
     /// Get slot value by `bucket_id` and `slot_id`.
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
-
-    /// Retrieves all non-empty entries within the specified range of buckets.
-    fn range_bucket(
-        &self,
-        _range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        unimplemented!("range_bucket is not implemented for this reader")
-    }
 
     /// Retrieves all non-empty entries within the specified range of slots.
     fn range_slot(
@@ -37,15 +38,6 @@ pub trait StateReader: Send + Sync {
         _range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         unimplemented!("range_slot is not implemented for this reader")
-    }
-
-    /// Get bucket meta by bucket ID.
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        let key = meta_position(bucket_id);
-        Ok(match self.entry(key)? {
-            Some(ref v) => v.try_into().expect("meta value error"),
-            None => BucketMeta::default(),
-        })
     }
 }
 
@@ -104,4 +96,17 @@ pub trait TrieReader: Sync {
 
         Ok(children)
     }
+}
+
+#[auto_impl::auto_impl(&, Arc)]
+/// This trait provides functionality for efficiently scanning and loading buckets.
+pub trait StateLoader {
+    /// The custom error type for the trait.
+    type Error: Debug + Send;
+
+    /// Loads all non-empty entries within the specified range of buckets.
+    fn load_range(
+        &self,
+        range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
 }
