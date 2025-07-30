@@ -59,7 +59,6 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
 /// - Updating the state trie with 1,000 KVs in a single update.
 /// - Incrementally updating the state trie with 1,000 KVs in batches of 100 KVs each.
 /// - Updating the state trie 10 times with a total of 1,000 KVs.
-#[allow(clippy::unit_arg)]
 fn salt_trie_bench(_c: &mut Criterion) {
     let mut bench = Criterion::default();
 
@@ -116,13 +115,14 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
-                black_box({
+                {
                     for state_updates in state_updates_vec.iter() {
                         StateRoot::new()
                             .update(&EmptySalt, &EmptySalt, state_updates)
                             .unwrap();
                     }
-                })
+                }
+                black_box(())
             },
             criterion::BatchSize::SmallInput,
         );

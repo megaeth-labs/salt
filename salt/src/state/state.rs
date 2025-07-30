@@ -22,7 +22,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
     base_state: &'a BaseState,
     /// Cache the values of datas and bucket metas read from `base_state`
     /// and the changes made to it.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>, //(HashMap<SaltKey, Option<SaltValue>>, HashMap<BucketId, BucketMeta>)
+    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Whether to save access records
     save_access: bool,
 }

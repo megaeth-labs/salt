@@ -726,7 +726,6 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 /// creating precomputed instances.
 pub fn get_global_committer() -> &'static Committer {
     static INSTANCE_COMMITTER: OnceCell<Committer> = OnceCell::new();
-    //
     INSTANCE_COMMITTER.get_or_init(|| Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE))
 }
 
