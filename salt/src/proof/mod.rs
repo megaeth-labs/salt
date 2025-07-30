@@ -225,7 +225,6 @@ mod tests {
         assert_eq!(
             bucket_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
-                3,
                 STARTING_NODE_ID[3] as NodeId
             ))
         );
@@ -235,7 +234,6 @@ mod tests {
         assert_eq!(
             l3_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
-                2,
                 STARTING_NODE_ID[2] as NodeId
             ))
         );
@@ -245,7 +243,6 @@ mod tests {
         assert_eq!(
             l2_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
-                1,
                 STARTING_NODE_ID[1] as NodeId
             ))
         );
@@ -256,7 +253,6 @@ mod tests {
         assert_eq!(
             l1_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
-                0,
                 STARTING_NODE_ID[0] as NodeId
             ))
         );

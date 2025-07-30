@@ -110,7 +110,7 @@ pub fn get_node_level(node_id: NodeId) -> usize {
 }
 
 /// Get the default commitment for the specified node.
-pub fn default_commitment(level: usize, id: NodeId) -> CommitmentBytes {
+pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,
@@ -134,7 +134,11 @@ pub fn default_commitment(level: usize, id: NodeId) -> CommitmentBytes {
         ),
     ];
 
-    if id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
+    let level = get_node_level(node_id);
+
+    if is_extension_node(node_id) {
+        zero_commitment()
+    } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2

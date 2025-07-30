@@ -142,14 +142,7 @@ impl TrieReader for MemSalt {
             .unwrap()
             .get(&node_id)
             .copied()
-            .unwrap_or_else(|| {
-                let level = get_node_level(node_id);
-                if is_extension_node(node_id) {
-                    zero_commitment()
-                } else {
-                    default_commitment(level, node_id)
-                }
-            }))
+            .unwrap_or_else(|| default_commitment(node_id)))
     }
 
     fn get_range(

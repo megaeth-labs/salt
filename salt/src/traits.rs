@@ -1,7 +1,7 @@
 //! Define traits for storing salt state and salt trie.
 use crate::{
     constant::{
-        default_commitment, get_node_level, zero_commitment, NUM_META_BUCKETS, STARTING_NODE_ID,
+        default_commitment, get_node_level, is_extension_node, zero_commitment, STARTING_NODE_ID,
         TRIE_LEVELS, TRIE_WIDTH,
     },
     trie::trie::get_child_node,
@@ -82,13 +82,15 @@ pub trait TrieReader: Sync {
 
         // Because the trie did not store the default value when init,
         // so meta nodes needs to update the default commitment.
-        if node_id < (NUM_META_BUCKETS + STARTING_NODE_ID[TRIE_LEVELS - 1]) as NodeId {
-            let child_level = get_node_level(node_id) + 1;
-            assert!(child_level < TRIE_LEVELS);
+        let child_level = get_node_level(node_id) + 1;
+        if !is_extension_node(node_id)
+            && child_level < TRIE_LEVELS
+            && node_id < STARTING_NODE_ID[child_level] as NodeId
+        {
             for i in child_start..child_start + TRIE_WIDTH as NodeId {
                 let j = (i - child_start) as usize;
                 if children[j] == zero {
-                    children[j] = default_commitment(child_level, i);
+                    children[j] = default_commitment(i);
                 }
             }
         }

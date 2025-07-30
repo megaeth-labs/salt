@@ -1606,8 +1606,7 @@ mod tests {
             .update_leaf_nodes(&store, &store, &state_updates)
             .unwrap();
 
-        let bottom_meta_c =
-            default_commitment(bottom_level, STARTING_NODE_ID[bottom_level] as NodeId);
+        let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let c1 = committer
             .add_deltas(
                 bottom_meta_c,
@@ -1645,8 +1644,7 @@ mod tests {
         let committer = get_global_committer();
         let bottom_level = TRIE_LEVELS - 1;
         let trie = StateRoot::new();
-        let bottom_meta_c =
-            default_commitment(bottom_level, STARTING_NODE_ID[bottom_level] as NodeId);
+        let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let (zero, nonce_c) = (zero_commitment(), bottom_meta_c);
         let bottom_level_start = STARTING_NODE_ID[bottom_level] as NodeId;
         let cs = create_commitments(3);
@@ -1664,7 +1662,7 @@ mod tests {
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[zero, nonce_c, cs[0], cs[1], cs[2]]);
-        let old_c = default_commitment(cur_level, STARTING_NODE_ID[cur_level] as NodeId);
+        let old_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let c1 = committer
             .add_deltas(old_c, &[(1, bytes_indices[1], bytes_indices[2])])
             .to_bytes_uncompressed();
@@ -1696,7 +1694,7 @@ mod tests {
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[zero, old_c, c1, c2]);
-        let old_c = default_commitment(cur_level, STARTING_NODE_ID[cur_level] as NodeId);
+        let old_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let c3 = committer
             .add_deltas(old_c, &[(0, bytes_indices[1], bytes_indices[2])])
             .to_bytes_uncompressed();
@@ -1716,7 +1714,7 @@ mod tests {
             )
             .unwrap();
         let bytes_indices = Element::hash_commitments(&[zero, old_c, c3, c4]);
-        let old_c = default_commitment(cur_level, STARTING_NODE_ID[cur_level] as NodeId);
+        let old_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let c5 = committer
             .add_deltas(
                 old_c,
@@ -1825,7 +1823,7 @@ mod tests {
         let bytes_indices = Element::hash_commitments(&[zero, c5, c6]);
         let c7 = committer
             .add_deltas(
-                default_commitment(0, STARTING_NODE_ID[0] as NodeId),
+                default_commitment(STARTING_NODE_ID[0] as NodeId),
                 &[
                     (2, bytes_indices[0], bytes_indices[1]),
                     (1, bytes_indices[0], bytes_indices[2]),
@@ -1834,10 +1832,7 @@ mod tests {
             .to_bytes_uncompressed();
         assert_eq!(
             trie_updates.data[6],
-            (
-                0,
-                (default_commitment(0, STARTING_NODE_ID[0] as NodeId), c7)
-            )
+            (0, (default_commitment(STARTING_NODE_ID[0] as NodeId), c7))
         );
     }
 
@@ -1850,12 +1845,9 @@ mod tests {
 
         let store = MemSalt::new();
         let c = calculate_subtrie_with_all_kvs(260, &store);
-        assert_eq!(c, default_commitment(2, STARTING_NODE_ID[2] as NodeId));
+        assert_eq!(c, default_commitment(STARTING_NODE_ID[2] as NodeId));
         let c = calculate_subtrie_with_all_kvs(260 + STARTING_NODE_ID[2] as NodeId, &store);
-        assert_eq!(
-            c,
-            default_commitment(2, (STARTING_NODE_ID[3] - 1) as NodeId)
-        );
+        assert_eq!(c, default_commitment((STARTING_NODE_ID[3] - 1) as NodeId));
 
         // default commitments like this
         //  C0_0
@@ -1899,14 +1891,14 @@ mod tests {
 
             assert_eq!(
                 default_committment_vec[i].0,
-                default_commitment(i, STARTING_NODE_ID[i] as NodeId),
+                default_commitment(STARTING_NODE_ID[i] as NodeId),
                 "The default commitment of the level {i} should be equal to the constant value"
             );
 
             println!("{} -> {}", i, STARTING_NODE_ID[i + 1] - 1);
             assert_eq!(
                 default_committment_vec[i].1,
-                default_commitment(i, (STARTING_NODE_ID[i + 1] - 1) as NodeId),
+                default_commitment((STARTING_NODE_ID[i + 1] - 1) as NodeId),
                 "The default commitment of the level {i} should be equal to the constant value"
             )
         }
