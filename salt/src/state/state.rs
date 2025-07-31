@@ -82,6 +82,20 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
+    /// Accessing `keys` through `EphemeralSaltState`
+    pub fn travel_keys(&mut self, keys: Vec<Vec<u8>>) -> Result<(), BaseState::Error> {
+        for k in keys {
+            let bucket_id = pk_hasher::bucket_id(&k);
+            let slot = meta_position(bucket_id);
+            let value = self.get_entry(slot)?;
+            let meta = value
+                .and_then(|v| v.try_into().ok())
+                .unwrap_or_else(BucketMeta::default);
+            self.find(bucket_id, &meta, &k)?;
+        }
+        Ok(())
+    }
+
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
