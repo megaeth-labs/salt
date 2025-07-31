@@ -20,7 +20,8 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
     base_state: &'a BaseState,
-    /// Cache the values read from `base_state` and the changes made to it.
+    /// Cache the values of datas and bucket metas read from `base_state`
+    /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Whether to save access records
     save_access: bool,

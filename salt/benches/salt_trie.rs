@@ -115,13 +115,14 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
-                black_box({
+                {
                     for state_updates in state_updates_vec.iter() {
                         StateRoot::new()
                             .update(&EmptySalt, &EmptySalt, state_updates)
                             .unwrap();
                     }
-                })
+                }
+                black_box(())
             },
             criterion::BatchSize::SmallInput,
         );

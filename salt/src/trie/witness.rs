@@ -1,9 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{
-        get_node_level, is_extension_node, zero_commitment, BUCKET_SLOT_BITS,
-        DEFAULT_COMMITMENT_AT_LEVEL,
-    },
+    constant::{default_commitment, BUCKET_SLOT_BITS},
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -68,16 +65,7 @@ impl TrieReader for BlockWitness {
             .parents_commitments
             .get(&node_id)
             .cloned()
-            .unwrap_or_else(|| {
-                let level = get_node_level(node_id);
-                if is_extension_node(node_id)
-                    || node_id >= DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId
-                {
-                    CommitmentBytesW(zero_commitment())
-                } else {
-                    CommitmentBytesW(DEFAULT_COMMITMENT_AT_LEVEL[level].1)
-                }
-            })
+            .unwrap_or_else(|| CommitmentBytesW(default_commitment(node_id)))
             .0)
     }
 

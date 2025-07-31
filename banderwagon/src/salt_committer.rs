@@ -8,7 +8,6 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
-
 ///MSM calculation for a fixed G points
 #[derive(Clone, Debug)]
 pub struct Committer {
@@ -419,7 +418,6 @@ impl Element {
 
     /// Batch conversion from Element to CommitmentBytes
     #[inline]
-    #[allow(clippy::op_ref)]
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
         let mut commitments = vec![[0u8; 64]; elements.len()];
         let mut zi_mul = vec![Fq::ZERO; elements.len()];
@@ -446,18 +444,17 @@ impl Element {
                 continue;
             }
             // z_inv = 1/zi
-            let z_inv = zi_mul[i] * &zs_inv;
+            let z_inv = zi_mul[i] * zs_inv;
             zs_inv *= &elements[i].0.z;
 
-            let _ = (elements[i].0.x * &z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
-            let _ = (elements[i].0.y * &z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
+            let _ = (elements[i].0.x * z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
+            let _ = (elements[i].0.y * z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
         }
         commitments
     }
 
     /// Batch conversion from commitments to hash bytes
     #[inline]
-    #[allow(clippy::op_ref)]
     pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
         let elements = commitments
             .iter()
@@ -487,9 +484,9 @@ impl Element {
                 continue;
             }
             // y_inv = 1/yi
-            let y_inv = yi_mul[i] * &ys_inv;
+            let y_inv = yi_mul[i] * ys_inv;
             ys_inv *= &elements[i].0.y;
-            let _ = (elements[i].0.x * &y_inv).serialize_uncompressed(&mut hashs[i][..]);
+            let _ = (elements[i].0.x * y_inv).serialize_uncompressed(&mut hashs[i][..]);
         }
         hashs
     }
@@ -522,7 +519,7 @@ mod tests {
 
         for i in 0..a_vec.len() {
             let mut bytes = [0_u8; 32];
-            let x = a_vec[i].0.x * &a_vec[i].0.y.inverse().unwrap();
+            let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[..]);
             assert_eq!(bytes, hash_bytes[i]);
         }
@@ -539,8 +536,8 @@ mod tests {
 
         for i in 0..a_vec.len() {
             let mut bytes = [0_u8; 64];
-            let x = a_vec[i].0.x * &a_vec[i].0.z.inverse().unwrap();
-            let y = a_vec[i].0.y * &a_vec[i].0.z.inverse().unwrap();
+            let x = a_vec[i].0.x * a_vec[i].0.z.inverse().unwrap();
+            let y = a_vec[i].0.y * a_vec[i].0.z.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[0..32]);
             let _ = y.serialize_uncompressed(&mut bytes[32..64]);
             assert_eq!(bytes, hash_bytes[i]);
