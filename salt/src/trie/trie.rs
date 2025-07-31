@@ -1895,7 +1895,6 @@ mod tests {
                 "The default commitment of the level {i} should be equal to the constant value"
             );
 
-            println!("{} -> {}", i, STARTING_NODE_ID[i + 1] - 1);
             assert_eq!(
                 default_committment_vec[i].1,
                 default_commitment((STARTING_NODE_ID[i + 1] - 1) as NodeId),

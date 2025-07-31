@@ -95,9 +95,6 @@ macro_rules! b512 {
     }};
 }
 
-/// Precomputed node commitment at each level of an empty SALT trie.
-/// Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
-/// info.
 /// Calculate the level where the specified node is located.
 pub fn get_node_level(node_id: NodeId) -> usize {
     STARTING_NODE_ID
@@ -111,6 +108,9 @@ pub fn get_node_level(node_id: NodeId) -> usize {
 
 /// Get the default commitment for the specified node.
 pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
+    // Precomputed node commitment at each level of an empty SALT trie.
+    // Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
+    // info.
     static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,

@@ -504,7 +504,6 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    #[allow(clippy::op_ref)]
     fn batch_elements_to_hash_bytes() {
         let a_vec = vec![
             (Element::prime_subgroup_generator() * Fr::from(1111)),
@@ -520,7 +519,7 @@ mod tests {
 
         for i in 0..a_vec.len() {
             let mut bytes = [0_u8; 32];
-            let x = a_vec[i].0.x * &a_vec[i].0.y.inverse().unwrap();
+            let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[..]);
             assert_eq!(bytes, hash_bytes[i]);
         }
