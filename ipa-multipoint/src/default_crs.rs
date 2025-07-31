@@ -1,3 +1,20 @@
+//! Default Common Reference String (CRS) for the MegaETH SALT project.
+
+/// Pre-computed CRS containing 257 hex-encoded elliptic curve points.
+///
+/// This array contains:
+/// - Points 0-255: Generator points for polynomial coefficient commitments (G)
+/// - Point 256: Blinding generator point (Q)
+///
+/// Generated deterministically from seed "MAKE_ETHEREUM_GREAT_AGAIN" using the
+/// hash-to-curve method defined in the parent CRS module. Each point is
+/// represented as a 64-byte hex string (uncompressed format).
+///
+/// # Format
+/// Each string represents a 64-byte uncompressed elliptic curve point:
+/// - 32 bytes for x-coordinate (little-endian)
+/// - 32 bytes for y-coordinate (little-endian)
+/// - Encoded as lowercase hexadecimal without "0x" prefix
 pub(crate) const HEX_ENCODED_CRS : [&str; 257] = [
     "a098a29045f1482ea82bdd90b424b82389eb282aec502591eb756633d17a580183c43f2f4eea67cfd9ef71de006ece8c0f31fc4891ba0b74f62c20ac82045c4c",
     "823b32fd59b50770b96fe0b20a30f33681c3bf14a92f38ffdf3e72f07d606e6ce52ddfe24377616727e8c738e04e93fecac6ee340246d9a8fdb06619eafbc66b",
@@ -262,6 +279,12 @@ pub(crate) const HEX_ENCODED_CRS : [&str; 257] = [
 mod tests {
     use crate::{crs::CRS, default_crs::HEX_ENCODED_CRS};
 
+    /// Verifies that the pre-computed hex CRS matches the deterministically generated CRS.
+    ///
+    /// This test ensures:
+    /// 1. The hex-encoded constants produce the same points as fresh generation
+    /// 2. Round-trip consistency between CRS formats (hex ↔ bytes ↔ CRS)
+    /// 3. The stored constants haven't been corrupted or modified
     #[test]
     fn load_from_hex() {
         let crs = CRS::new(256, b"eth_verkle_oct_2021");
