@@ -226,7 +226,8 @@ impl TryFrom<SaltValue> for BucketMeta {
     }
 }
 
-/// 64-bit unique identifier used to address nodes in both the main trie and bucket subtrees.
+/// 64-bit unique identifier used to address nodes in both the main trie and
+/// bucket subtrees (note: only regular data buckets can grow dynamically).
 ///
 /// **Main trie structure (4 levels, 0-3):**
 /// - Level 0 (root): 1 node
@@ -251,7 +252,7 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// - Upper 39 bits unused
 ///
 /// *Bucket subtree nodes (24 + 33 bits):*
-/// - Highest 24 bits: bucket ID (up to ~16M buckets)
+/// - Highest 24 bits: bucket ID (must be > 65,535 since meta buckets never grow)
 /// - Lowest 40 bits: local position (33 bits needed since 2^33 > 4,311,810,305, 7 bits unused)
 /// - Each subtree uses same BFS numbering as main trie
 pub type NodeId = u64;
@@ -302,29 +303,167 @@ pub fn bucket_id_from_metadata_key(key: SaltKey) -> BucketId {
 mod tests {
     use super::*;
 
+    /// Tests the basic operations of SaltKey: construction from bucket/slot pair and
+    /// extraction of bucket ID and slot ID components. Verifies that the 64-bit layout
+    /// correctly encodes bucket ID in high 24 bits and slot ID in low 40 bits.
     #[test]
-    fn test_salt_value_and_meta() {
+    fn salt_key_operations() {
+        let bucket_id = 0x123456;
+        let slot_id = 0x789ABCDEF0;
+        let key = SaltKey::from((bucket_id, slot_id));
+
+        assert_eq!(key.bucket_id(), bucket_id);
+        assert_eq!(key.slot_id(), slot_id);
+        assert_eq!(key.0, ((bucket_id as u64) << 40) + slot_id);
+    }
+
+    /// Tests SaltKey behavior at the boundaries of its bit allocation. Verifies that
+    /// maximum values (24-bit bucket ID, 40-bit slot ID) and minimum values (0, 0)
+    /// are handled correctly without overflow or underflow issues.
+    #[test]
+    fn salt_key_boundaries() {
+        // Test maximum values - ensures no overflow in bit shifting
+        let max_bucket = (1u32 << 24) - 1; // 16,777,215 (24-bit max)
+        let max_slot = (1u64 << 40) - 1; // 1,099,511,627,775 (40-bit max)
+        let key = SaltKey::from((max_bucket, max_slot));
+
+        assert_eq!(key.bucket_id(), max_bucket);
+        assert_eq!(key.slot_id(), max_slot);
+
+        // Test minimum values - ensures correct handling of zero values
+        let key = SaltKey::from((0, 0));
+        assert_eq!(key.bucket_id(), 0);
+        assert_eq!(key.slot_id(), 0);
+    }
+
+    /// Tests the metadata bucket detection logic. SALT uses the first 65,536 buckets
+    /// as metadata storage. This test verifies that is_bucket_meta_slot() correctly
+    /// identifies whether a SaltKey points to a metadata storage location.
+    #[test]
+    fn salt_key_meta_bucket_detection() {
+        let meta_key = SaltKey::from((100, 50)); // bucket 100 < 65536 (metadata)
+        let regular_key = SaltKey::from((70000, 50)); // bucket 70000 >= 65536 (regular)
+
+        assert!(meta_key.is_bucket_meta_slot());
+        assert!(!regular_key.is_bucket_meta_slot());
+    }
+
+    /// Tests BucketMeta serialization and deserialization roundtrip. Verifies that
+    /// the 20-byte little-endian encoding (nonce:4 + capacity:8 + used:8) correctly
+    /// preserves all field values through serialize-then-deserialize operations.
+    #[test]
+    fn bucket_meta_serialization() {
         let meta = BucketMeta {
-            nonce: 1234,
-            capacity: 512,
-            used: 0,
+            nonce: 0x12345678,
+            capacity: 0x123456789ABCDEF0,
+            used: 0x987654321,
+        };
+        let bytes = meta.to_bytes();
+        let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
+
+        assert_eq!(meta, recovered);
+        assert_eq!(bytes.len(), 20);
+    }
+
+    /// Tests BucketMeta default constructor. Verifies that default values match
+    /// expected initialization: nonce=0, capacity=MIN_BUCKET_SIZE (256), used=0.
+    #[test]
+    fn bucket_meta_default() {
+        let meta = BucketMeta::default();
+        assert_eq!(meta.nonce, 0);
+        assert_eq!(meta.capacity, MIN_BUCKET_SIZE as u64);
+        assert_eq!(meta.used, 0);
+    }
+
+    /// Tests SaltValue encoding format: key_len(1) | value_len(1) | key | value.
+    /// Verifies that arbitrary key-value pairs are correctly encoded with length
+    /// prefixes and that extraction methods return the original data.
+    #[test]
+    fn salt_value_encoding() {
+        let key = b"test_key";
+        let value = b"test_value_data";
+        let salt_value = SaltValue::new(key, value);
+
+        assert_eq!(salt_value.key(), key);
+        assert_eq!(salt_value.value(), value);
+        assert_eq!(salt_value.data[0], key.len() as u8);
+        assert_eq!(salt_value.data[1], value.len() as u8);
+    }
+
+    /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
+    /// contains the 20-byte serialized BucketMeta and the value is empty. Verifies
+    /// bidirectional conversion preserves all metadata fields correctly.
+    #[test]
+    fn salt_value_bucket_meta_conversion() {
+        let meta = BucketMeta {
+            nonce: 0xDEADBEEF,
+            capacity: 1024,
+            used: 100,
         };
         let salt_value = SaltValue::from(meta);
-        assert_eq!(salt_value.data[0], 20);
-        assert_eq!(salt_value.data[1], 0);
-        assert_eq!(
-            u32::from_le_bytes(salt_value.data[2..6].try_into().unwrap()),
-            1234
-        );
-        assert_eq!(
-            u64::from_le_bytes(salt_value.data[6..14].try_into().unwrap()),
-            512
-        );
-        assert_eq!(
-            u64::from_le_bytes(salt_value.data[14..22].try_into().unwrap()),
-            0
-        );
 
-        assert_eq!(meta, BucketMeta::try_from(&salt_value).unwrap());
+        assert_eq!(salt_value.data[0], 20); // key length (BucketMeta serialized size)
+        assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)
+
+        let recovered_meta = BucketMeta::try_from(salt_value).unwrap();
+        assert_eq!(recovered_meta, meta);
+    }
+
+    /// Tests the metadata storage mapping scheme. Each metadata bucket (0-65535) stores
+    /// metadata for 256 regular buckets. bucket_metadata_key() divides bucket_id by 256
+    /// to find the metadata bucket and uses modulo 256 for the slot within that bucket.
+    #[test]
+    fn bucket_metadata_key_mapping() {
+        let test_cases = [
+            (0, 0, 0),         // bucket 0 -> meta bucket 0, slot 0
+            (255, 0, 255),     // bucket 255 -> meta bucket 0, slot 255
+            (256, 1, 0),       // bucket 256 -> meta bucket 1, slot 0
+            (512, 2, 0),       // bucket 512 -> meta bucket 2, slot 0
+            (1000, 3, 232),    // bucket 1000 -> meta bucket 3, slot 232 (1000 % 256)
+            (65535, 255, 255), // bucket 65535 -> meta bucket 255, slot 255
+        ];
+
+        for (bucket_id, expected_meta_bucket, expected_slot) in test_cases {
+            let key = bucket_metadata_key(bucket_id);
+            assert_eq!(
+                key.bucket_id(),
+                expected_meta_bucket,
+                "bucket_id={}",
+                bucket_id
+            );
+            assert_eq!(key.slot_id(), expected_slot, "bucket_id={}", bucket_id);
+        }
+    }
+
+    /// Tests the bidirectional conversion between bucket IDs and metadata storage keys.
+    /// bucket_metadata_key() and bucket_id_from_metadata_key() should be perfect inverses,
+    /// allowing any bucket ID to be mapped to a metadata key and back without loss.
+    #[test]
+    fn metadata_key_roundtrip() {
+        let test_buckets = [0, 1, 255, 256, 1000, 65535, 100000, 16777215];
+
+        for bucket_id in test_buckets {
+            let key = bucket_metadata_key(bucket_id);
+            let recovered = bucket_id_from_metadata_key(key);
+            assert_eq!(
+                bucket_id, recovered,
+                "Failed roundtrip for bucket {}",
+                bucket_id
+            );
+        }
+    }
+
+    /// Tests BucketMeta deserialization error handling. The try_from implementation
+    /// requires exactly 20 bytes minimum for proper deserialization. Tests both
+    /// insufficient data (should fail) and minimum valid data (should succeed).
+    #[test]
+    fn bucket_meta_error_handling() {
+        // Test insufficient bytes - should return error
+        let short_bytes = [1u8; 10];
+        assert!(BucketMeta::try_from(&short_bytes[..]).is_err());
+
+        // Test exactly 20 bytes (minimum required) - should succeed
+        let valid_bytes = [0u8; 20];
+        assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
     }
 }
