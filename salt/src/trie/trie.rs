@@ -1239,7 +1239,7 @@ mod tests {
         let update_bid = KV_BUCKET_OFFSET as BucketId + 2;
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
         let meta = bucket_meta(0, 65536 * 2);
-        let salt_key = meta_position(update_bid);
+        let salt_key = bucket_metadata_key(update_bid);
         store.put_state(salt_key, SaltValue::from(meta));
 
         let state_updates1 = StateUpdates {

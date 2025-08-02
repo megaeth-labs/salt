@@ -1,17 +1,25 @@
-#![allow(unexpected_cfgs)]
+//! Core data types for the SALT data structure.
+//!
+//! This module defines the fundamental types used throughout the SALT implementation:
+//! - [`SaltKey`]: 64-bit addressing for bucket slots
+//! - [`SaltValue`]: Variable-length encoding for key-value pairs
+//! - [`BucketMeta`]: Bucket metadata (nonce, capacity, usage)
+//! - [`NodeId`]: 64-bit identifiers for trie nodes
+//! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
-//! Define the types used for salt calculation and storage.
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
 };
 
 use derive_more::{Deref, DerefMut};
-/// A serialized uncompressed group element
+
+/// 64-byte uncompressed group element for cryptographic commitments.
 pub type CommitmentBytes = [u8; 64];
 
-/// A serialized scalar field element
+/// 32-byte scalar field element for cryptographic commitments.
 pub type ScalarBytes = [u8; 32];
 
+/// Hash a 64-byte commitment into its 32-byte compressed format.
 pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
     use banderwagon::{CanonicalSerialize, Element};
     let mut bytes = [0u8; 32];
@@ -24,20 +32,22 @@ pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
 
 use serde::{Deserialize, Serialize};
 
-/// Represents the ID of a bucket.
+/// 24-bit bucket identifier (up to ~16M buckets).
 pub type BucketId = u32;
 
-/// Represents the ID of a slot.
+/// 40-bit slot identifier within a bucket (up to ~1T slots).
 pub type SlotId = u64;
 
-/// This variable type is used to represent the meta value of a bucket.
+/// Metadata for a bucket containing nonce, capacity, and usage statistics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash)]
 pub struct BucketMeta {
-    /// nonce value of a bucket.
+    /// Nonce for SHI hash table operations.
     pub nonce: u32,
-    /// The capacity size of the bucket.
+    /// Total # slots of the bucket.
     pub capacity: u64,
-    /// The number of slots that are currently used.
+    /// Number of occupied slots in the bucket. This field can be inferred from
+    /// the bucket data, so it does not participate in the computation of bucket
+    /// commitment.
     pub used: u64,
 }
 
@@ -73,7 +83,9 @@ impl TryFrom<&SaltValue> for BucketMeta {
 }
 
 impl BucketMeta {
-    /// Creates a little-endian byte array from a `BucketMeta`.
+    /// Serialize bucket metadata to a 20-byte little-endian byte array.
+    ///
+    /// Layout: `nonce`(4) | `capacity`(8) | `used`(8)
     pub fn to_bytes(&self) -> [u8; 20] {
         let mut bytes = [0u8; 20];
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
@@ -83,8 +95,11 @@ impl BucketMeta {
     }
 }
 
-/// The [`SaltKey`] type, its high 20 bits are the `bucket_id`, and low 40 bits
-/// are the `slot_id`.
+/// 64-bit key encoding bucket and slot identifiers.
+///
+/// Layout: `bucket_id` (high 24 bits) | `slot_id` (low 40 bits)
+/// - Supports ~16M buckets (2^24)
+/// - Supports ~1T slots per bucket (2^40)
 #[derive(
     Clone,
     Copy,
@@ -103,19 +118,19 @@ impl BucketMeta {
 pub struct SaltKey(pub u64);
 
 impl SaltKey {
-    /// Convert [`SaltKey`] to `bucket_id`.
+    /// Extract the 24-bit bucket ID from the high bits.
     #[inline]
     pub const fn bucket_id(&self) -> BucketId {
         (self.0 >> BUCKET_SLOT_BITS) as BucketId
     }
 
-    /// Convert [`SaltKey`] to `slot_id`.
+    /// Extract the 40-bit slot ID from the low bits.
     #[inline]
     pub const fn slot_id(&self) -> SlotId {
         self.0 as SlotId & BUCKET_SLOT_ID_MASK
     }
 
-    /// Check if [`SaltKey`] is bucket meta slot.
+    /// Check if this key addresses a metadata slot (first 65,536 buckets).
     pub const fn is_bucket_meta_slot(&self) -> bool {
         self.bucket_id() < NUM_META_BUCKETS as BucketId
     }
@@ -136,8 +151,7 @@ impl From<u64> for SaltKey {
 }
 
 /// The maximum number of bytes that can be stored in a [`SaltValue`].
-/// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMetadata` (i.e.,
-/// bucket nonce & capacity).
+/// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMeta`.
 ///
 /// For `Account`, the key length is 20 bytes, and the value length is either 40
 /// (for EOA's) or 72 bytes (for smart contracts). So, encoding an `Account` requires:
@@ -147,18 +161,21 @@ impl From<u64> for SaltKey {
 /// So, encoding a `Storage` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 86 bytes.
 ///
-/// For `BucketMetadata`, the nonce and capacity are 4 and 8 bytes, respectively.
+/// For `BucketMeta`, the serialized form is 20 bytes (nonce:4 + capacity:8 + used:8).
 /// So, encoding a `BucketMetadata` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(4) + `value`(8) = 14 bytes.
+///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(0) = 22 bytes.
 ///
 /// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 94,
-/// which is the maximum of 94, 86, and 14.
+/// which is the maximum of 94, 86, and 22.
 pub const MAX_SALT_VALUE_BYTES: usize = 94;
 
-/// Encodes `PlainKey` and `PlainValue` into a single byte array.
+/// Variable-length encoding of key-value pairs with length prefixes.
+///
+/// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
+/// Supports Account, Storage, and BucketMeta types.
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
-    /// A byte array large enough to store any type of [`SaltValue`].
+    /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
     #[deref_mut]
     #[serde(with = "serde_arrays")]
@@ -166,7 +183,9 @@ pub struct SaltValue {
 }
 
 impl SaltValue {
-    /// Creates a new [`SaltValue`] instance.
+    /// Create a new encoded value from separate key and value byte slices.
+    ///
+    /// Encodes the data in the format: `key_len`(1) | `value_len`(1) | `key` | `value`
     pub fn new(key: &[u8], value: &[u8]) -> Self {
         let key_len = key.len();
         let value_len = value.len();
@@ -180,13 +199,13 @@ impl SaltValue {
         Self { data }
     }
 
-    /// Returns the plain key encoded in the SaltValue.
+    /// Extract the key portion from the encoded data.
     pub fn key(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         &self.data[2..2 + key_len]
     }
 
-    /// Returns the plain value encoded in the SaltValue.
+    /// Extract the value portion from the encoded data.
     pub fn value(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         let value_len = self.data[1] as usize;
@@ -207,22 +226,75 @@ impl TryFrom<SaltValue> for BucketMeta {
     }
 }
 
-/// The data of salt trie will be persisted in the form of [`NodeId`]
-/// and [`Commitment`].
+/// 64-bit unique identifier used to address nodes in both the main trie and bucket subtrees.
+///
+/// **Main trie structure (4 levels, 0-3):**
+/// - Level 0 (root): 1 node
+/// - Level 1: 256 nodes
+/// - Level 2: 65,536 nodes
+/// - Level 3: 16,777,216 nodes
+/// - Total: 16,843,009 nodes
+///
+/// **Bucket subtree structure (up to 5 levels, 0-4):**
+/// - Level 0: 1 node
+/// - Level 1: 256 nodes
+/// - Level 2: 65,536 nodes
+/// - Level 3: 16,777,216 nodes
+/// - Level 4: 4,294,967,296 nodes
+/// - Total: 4,311,810,305 nodes
+///
+/// **Node addressing scheme:**
+///
+/// *Main trie nodes (25 bits):*
+/// - Uses lowest 25 bits for node position (25 bits needed since 2^25 > 16,843,009)
+/// - BFS numbering: root=0, top-to-bottom, left-to-right
+/// - Upper 39 bits unused
+///
+/// *Bucket subtree nodes (24 + 33 bits):*
+/// - Highest 24 bits: bucket ID (up to ~16M buckets)
+/// - Lowest 40 bits: local position (33 bits needed since 2^33 > 4,311,810,305, 7 bits unused)
+/// - Each subtree uses same BFS numbering as main trie
 pub type NodeId = u64;
 
-/// Return the position of the bucket meta for given bucket id.
+/// Calculate the SaltKey where bucket metadata is stored.
+///
+/// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
+/// stores metadata for 256 regular buckets. Given a `bucket_id`, this function:
+/// 1. Divides by 256 (>> 8 bits) to find the metadata bucket ID
+/// 2. Takes modulo 256 to find the slot within that metadata bucket
+///
+/// This allows ~16M buckets to store their metadata in just 65,536 dedicated metadata buckets.
+///
+/// # Arguments
+/// * `bucket_id` - The regular bucket ID whose metadata location to find
+///
+/// # Returns
+/// SaltKey pointing to the metadata storage location
 #[inline]
-pub fn meta_position(bucket_id: BucketId) -> SaltKey {
+pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
     SaltKey::from((
         bucket_id >> MIN_BUCKET_SIZE_BITS,
         bucket_id as SlotId % MIN_BUCKET_SIZE as SlotId,
     ))
 }
 
-/// Return the bucket id of the bucket meta for given salt key.
+/// Extract the original bucket ID from a metadata storage key.
+///
+/// This is the inverse operation of [`bucket_metadata_key`]. Given a SaltKey that points
+/// to a metadata storage location, reconstructs the original bucket ID whose metadata
+/// is stored there.
+///
+/// The reconstruction works by:
+/// 1. Taking the metadata bucket ID and shifting left by 8 bits (multiply by 256)
+/// 2. Adding the slot ID (which represents the offset within the 256-bucket group)
+///
+/// # Arguments
+/// * `key` - SaltKey pointing to a metadata storage location
+///
+/// # Returns
+/// The original bucket ID whose metadata is stored at this key
 #[inline]
-pub fn meta_bucket_id(key: SaltKey) -> BucketId {
+pub fn bucket_id_from_metadata_key(key: SaltKey) -> BucketId {
     (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId
 }
 

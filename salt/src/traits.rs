@@ -5,7 +5,7 @@ use crate::{
         TRIE_LEVELS, TRIE_WIDTH,
     },
     trie::trie::get_child_node,
-    types::{meta_position, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
+    types::{bucket_metadata_key, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
 use std::{
@@ -38,7 +38,7 @@ pub trait StateReader: Debug + Send + Sync {
 
     /// Get bucket meta by bucket ID.
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        let key = meta_position(bucket_id);
+        let key = bucket_metadata_key(bucket_id);
         Ok(match self.entry(key)? {
             Some(ref v) => v.try_into().expect("meta value error"),
             None => BucketMeta::default(),

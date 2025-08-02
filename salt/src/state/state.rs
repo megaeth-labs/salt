@@ -90,7 +90,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let slot = meta_position(bucket_id);
+            let slot = bucket_metadata_key(bucket_id);
             let value = self.get_entry(slot)?;
             let mut meta = value
                 .and_then(|v| v.try_into().ok())
@@ -341,7 +341,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         // Add meta change to the updates
         self.update_entry(
             out_updates,
-            meta_position(bucket_id),
+            bucket_metadata_key(bucket_id),
             Some((*old_meta).into()),
             Some((*new_meta).into()),
         );
@@ -392,7 +392,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         old_meta: BucketMeta,
         new_meta: BucketMeta,
     ) {
-        let id = meta_position(bucket_id);
+        let id = bucket_metadata_key(bucket_id);
         let new_value = Some(new_meta.into());
         self.cache.insert(id, new_value.clone());
         out_updates.add(id, Some(old_meta.into()), new_value);
