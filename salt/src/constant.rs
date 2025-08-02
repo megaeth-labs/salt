@@ -43,8 +43,7 @@ pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
     TRIE_WIDTH * TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH + 1,
 ];
 
-/// Maximum number of bits to represent a bucket ID. Although the ID consists of only 24 bits, it
-/// will occupy the upper 32 bits of the `SaltKey`.
+/// Maximum number of bits to represent a bucket ID.
 pub const BUCKET_ID_BITS: usize = 24;
 /// Maximum number of bits to represent a slot index in a bucket. 2^40 slots per bucket should be
 /// more than enough.

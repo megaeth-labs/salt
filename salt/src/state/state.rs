@@ -472,7 +472,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         Self { salt_state }
     }
 
-    /// Return the SALT value associated with the given plain key.
+    /// Return the plain value associated with the given plain key.
     pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
@@ -487,6 +487,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
             if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
                 match slot_val.key().cmp(plain_key) {
                     Ordering::Less => return Ok(None),
+                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
                     Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
                     Ordering::Greater => (),
                 }

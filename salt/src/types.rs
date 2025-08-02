@@ -180,13 +180,13 @@ impl SaltValue {
         Self { data }
     }
 
-    /// Returns the key of the [`SaltValue`].
+    /// Returns the plain key encoded in the SaltValue.
     pub fn key(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         &self.data[2..2 + key_len]
     }
 
-    /// Returns the value of the [`SaltValue`].
+    /// Returns the plain value encoded in the SaltValue.
     pub fn value(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         let value_len = self.data[1] as usize;

@@ -13,7 +13,6 @@ use std::{
 pub struct StateUpdates {
     /// Stores the old and new state values for a slot, formatted as
     /// `(entry_id, (old_entry, new_entry))`.
-    /// The `salt_key` is calculated as `bucket_id << 32 + slot_id`.
     #[deref]
     pub data: BTreeMap<SaltKey, (Option<SaltValue>, Option<SaltValue>)>,
 }

@@ -55,26 +55,28 @@ Each bucket contains:
 
 ### Basic State Operations
 
-FIXME: are these executable doctest?
-FIXME: need to differentiate ops on salt state & plain state
-
 ```rust
-use salt::{EphemeralSaltState, StateUpdates, MemSalt};
+use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
 
-// Create an in-memory SALT instance
-let store = MemSalt::new();
-let mut state = EphemeralSaltState::new(&store);
+// Create a PoC in-memory SALT instance
+let mem_salt = MemSalt::new();
+let mut state = EphemeralSaltState::new(&mem_salt);
 
-// Prepare key-value updates
+// Prepare plain key-value updates (EVM account/storage data)
 let kvs = vec![
-    (b"account1".to_vec(), Some(b"balance100".to_vec())),
-    (b"storage_key".to_vec(), Some(b"storage_value".to_vec())),
+    (b"account1", Some(b"balance100")),
+    (b"storage_key", Some(b"storage_value")),
 ];
 
-// FIXME: need more examples on reads (not just writes)
-
-// Apply kv updates and get salt state changes
+// Apply kv updates and get SALT-encoded state changes
 let state_updates = state.update(&kvs)?;
+// "Persist" the state updates to storage (the "trie" remains unchanged)
+mem_salt.update_state(state_updates);
+
+// Read plain value back using PlainStateProvider
+let provider = PlainStateProvider::new(&mem_salt);
+let balance = provider.get_raw(b"account1")?;
+assert_eq!(balance, Some(b"balance100"));
 ```
 
 ### Computing State Root
@@ -82,14 +84,16 @@ let state_updates = state.update(&kvs)?;
 ```rust
 use salt::{StateRoot, compute_from_scratch};
 
-// Incremental state root computation
-let mut trie = StateRoot::new();
-// FIXME: fix this ugly api (passing &store twice); store should implement StateReader + TrieReader
-let (root_hash, trie_updates) = trie.update(&store, &state_updates)?;
-// let (root_hash, trie_updates) = trie.update(&store, &store, &state_updates)?;
+// Incremental state root computation from the SALT-encoded state changes
+let mut state_root = StateRoot::new();
+let (root_hash, trie_updates) = state_root.update(&mem_salt, &state_updates)?;
 
-// Or compute from scratch
-let (root_hash, trie_updates) = compute_from_scratch(&store)?;
+// Or compute from scratch based on the previously updated state
+let (root_hash_from_scratch, _) = compute_from_scratch(&mem_salt)?;
+assert_eq!(root_hash, root_hash_from_scratch);
+
+// "Persist" the trie updates to storage
+mem_salt.update_trie(trie_updates);
 ```
 
 ### Generating Proofs
@@ -97,31 +101,37 @@ let (root_hash, trie_updates) = compute_from_scratch(&store)?;
 ```rust
 use salt::{get_block_witness, SaltProof};
 
-// Generate witness for a block of updates
-let witness = get_block_witness(&store, &state_updates)?;
+// FIXME: the following code is fictional now; make it work!
 
-// FIXME: it's not clear to how to prove existence & non-existence
-// Create and verify proofs
-let proof = SaltProof::new(&witness, &keys_to_prove)?;
-let is_valid = proof.verify(&root_hash, &expected_values)?;
+// Define plain keys to prove (both existing and non-existing)
+let plain_keys_to_prove = vec![b"account1", b"non_existent_key"];
+let expected_values = vec![Some(b"balance100"), None];
+
+// Alice creates a cryptographic proof for plain key-value pairs
+let proof = prover::create_salt_proof(&plain_keys, &mem_salt)?;
+
+// Bob verifies the proof against its local state root
+let is_valid = proof.check::<MemSalt>(plain_keys, expected_values, root_hash);
+// FIXME: why can't is_value simply be a bool?
+assert!(is_valid.is_ok());
 ```
 
 ## Data Types
 
 ### Core Types
 
-FIXME: more core types to be covered?
-- [`SaltKey`]: 64-bit key (24-bit bucket ID + 40-bit slot ID)
+- [`SaltKey`]: 64-bit key (24-bit bucket ID + 40-bit bucket slot ID)
 - [`SaltValue`]: Variable-length encoded key-value pair
-- [`BucketMeta`]: Bucket metadata (nonce, capacity, usage)
+- [`NodeId`]: 64-bit unique ID for all trie nodes (including bucket tree nodes)
+- [`BucketMeta`]: Bucket metadata (nonce, capacity)
 - [`CommitmentBytes`]: 64-byte uncompressed group elements
 
 ### Configuration Constants
 
-- **Trie Levels**: 4 levels with 256 branch factor
+- **Main Trie**: 4 levels with 256 branch factor
+- **Maximum Bucket Tree**: 5 levels with 256 branch factor
 - **Minimum Bucket Size**: 256 slots
-- **Maximum Bucket Size**: 2^40 slots
-- **Slot Addressing**: 40-bit slot IDs within buckets
+- **Maximum Bucket Size**: 2^40 slots (i.e., 2^32 bucket segments)
 
 ## Algorithms
 
@@ -131,27 +141,24 @@ SALT uses Strongly History-Independent hash tables to ensure deterministic bucke
 
 1. **Linear Probing**: Search slots sequentially to find data items
 2. **Collision Resolution**: Swap elements upon insertion/deletion to maintain a canonical order
-3. **Manual Rehashing**: Shuffle elements to mitigate pathological cases
+3. **Manual Rehashing**: Shuffle elements upon nonce change to mitigate pathological cases
 4. **Dynamic Resizing**: Auto expansion at high load factor, manual contraction when underutilized
 
 ### Commitment Computation
 
-// FIXME: revise this subsection
-State authentication uses IPA vector commitments:
+State authentication uses IPA + Pedersen commitments:
 
-1. **Bottom-up Updates**: Compute leaf commitments first, propagate upward
-2. **Delta Optimization**: Only recompute changed commitment differences
-3. **Parallel Processing**: Multi-threaded computation with work-stealing
-4. **Precomputed Generators**: Accelerate cryptographic operations
+1. **Bottom-up Updates**: Compute bucket commitments first, propagate upward
+2. **Incremental Updates**: Only compute commitment deltas from updated child nodes
+3. **Parallel Processing**: Parallel computation at each trie level
 
 ### Bucket Management
 
-// FIXME: revise this sub section
-Large buckets use subtrie structures for efficiency:
+Large buckets use tree structures for efficiency:
 
-1. **5-Level Subtries**: Handle buckets larger than 256 slots
-2. **Dynamic Expansion**: Add subtrie levels as bucket grows
-3. **Efficient Rehashing**: Minimize data movement during resize operations
+1. **Meta Buckets**: Set aside the first 65,536 buckets to store metadata for other buckets
+2. **Dynamic Expansion**: Add subtree levels as bucket grows
+3. **5-Level Subtrees**: Handle buckets up to 1 trillion (2^40) slots
 
 ## Dependencies
 
@@ -174,7 +181,6 @@ Run benchmarks:
 cargo bench
 ```
 
-// FIXME: what are these for? is this necessary for rustdoc linking to work?
 [`state`]: crate::state
 [`trie`]: crate::trie
 [`traits`]: crate::traits
@@ -188,5 +194,6 @@ cargo bench
 [`TrieReader`]: crate::traits::TrieReader
 [`SaltKey`]: crate::types::SaltKey
 [`SaltValue`]: crate::types::SaltValue
+[`NodeId`]: crate::types::NodeId
 [`BucketMeta`]: crate::types::BucketMeta
 [`CommitmentBytes`]: crate::types::CommitmentBytes
