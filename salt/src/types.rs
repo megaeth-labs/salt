@@ -40,13 +40,13 @@ impl Default for BucketMeta {
 impl TryFrom<&[u8]> for BucketMeta {
     type Error = &'static str;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < 20 {
+        if bytes.len() < 12 {
             return Err("bytes length too short for BucketMeta");
         }
         Ok(Self {
             nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| "nonce error")?),
             capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| "capacity error")?),
-            used: u64::from_le_bytes(bytes[12..20].try_into().map_err(|_| "used error")?),
+            used: 0,
         })
     }
 }
@@ -60,11 +60,10 @@ impl TryFrom<&SaltValue> for BucketMeta {
 
 impl BucketMeta {
     /// Creates a little-endian byte array from a `BucketMeta`.
-    pub fn to_bytes(&self) -> [u8; 20] {
-        let mut bytes = [0u8; 20];
+    pub fn to_bytes(&self) -> [u8; 12] {
+        let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
         bytes[4..12].copy_from_slice(&self.capacity.to_le_bytes());
-        bytes[12..20].copy_from_slice(&self.used.to_le_bytes());
         bytes
     }
 }
@@ -224,7 +223,7 @@ mod tests {
             used: 0,
         };
         let salt_value = SaltValue::from(meta);
-        assert_eq!(salt_value.data[0], 20);
+        assert_eq!(salt_value.data[0], 12);
         assert_eq!(salt_value.data[1], 0);
         assert_eq!(
             u32::from_le_bytes(salt_value.data[2..6].try_into().unwrap()),
@@ -233,10 +232,6 @@ mod tests {
         assert_eq!(
             u64::from_le_bytes(salt_value.data[6..14].try_into().unwrap()),
             512
-        );
-        assert_eq!(
-            u64::from_le_bytes(salt_value.data[14..22].try_into().unwrap()),
-            0
         );
 
         assert_eq!(meta, BucketMeta::try_from(&salt_value).unwrap());
