@@ -9,7 +9,7 @@
 
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
-    STARTING_NODE_ID,
+    STARTING_NODE_ID, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -285,6 +285,61 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
         false // Main trie node (bucket_id = 0)
     } else {
         true // Valid subtree node (bucket_id >= 65536)
+    }
+}
+
+/// Returns the NodeId of the leftmost node at the specified level in a complete N-ary tree.
+///
+/// In a complete N-ary tree (where N is `TRIE_WIDTH`), nodes are numbered using a breadth-first
+/// search (BFS) scheme starting from 0 at the root. At each level, nodes are numbered
+/// consecutively from left to right.
+///
+/// This function calculates the NodeId of the leftmost node at the given level using the
+/// mathematical formula for the sum of a geometric series:
+///
+/// ```text
+/// f(level) = (N^level - 1) / (N - 1)
+/// ```
+///
+/// where N is `TRIE_WIDTH` (256 in this implementation).
+///
+/// # Arguments
+///
+/// * `level` - The 0-based level index. Level 0 is the root node.
+///
+/// # Returns
+///
+/// * `Some(node_id)` - The NodeId of the leftmost node at the specified level if it fits in a u64.
+/// * `None` - If the result is too large for a u64.
+///
+/// # Examples
+///
+/// ```
+/// // Level 0 (root): NodeId = 0
+/// assert_eq!(leftmost_node(0), Some(0));
+///
+/// // Level 1: NodeId = 1 (since there's 1 node at level 0)
+/// assert_eq!(leftmost_node(1), Some(1));
+///
+/// // Level 2: NodeId = 257 (since there are 1 + 256 nodes at levels 0 and 1)
+/// assert_eq!(leftmost_node(2), Some(257));
+/// ```
+pub const fn leftmost_node(level: u32) -> Option<u64> {
+    if level == 0 {
+        return Some(0);
+    }
+
+    // Compute the sum of the geometric series in an overflow-safe manner
+    let width = TRIE_WIDTH as u128;
+    let pow_result = match width.checked_pow(level) {
+        Some(p) => p,
+        None => return None,
+    };
+    let result = (pow_result - 1) / (width - 1);
+    if result > u64::MAX as u128 {
+        None // The result is valid but too large for a u64.
+    } else {
+        Some(result as u64) // It fits, so we can safely cast and return.
     }
 }
 
@@ -566,6 +621,87 @@ mod tests {
     fn node_id_last_metadata_bucket_panic() {
         let invalid_last_meta = (65535u64 << BUCKET_SLOT_BITS) | 1; // last metadata bucket with subtree bits
         is_subtree_node(invalid_last_meta);
+    }
+
+    /// Tests the leftmost_node function which calculates the NodeId of the leftmost node at a given level.
+    ///
+    /// For a complete 256-ary tree:
+    /// - Level 0: 1 node        -> leftmost node ID = 0
+    /// - Level 1: 256 nodes     -> leftmost node ID = 1
+    /// - Level 2: 65,536 nodes  -> leftmost node ID = 1 + 256 = 257
+    /// - Level 3: 16,777,216 nodes -> leftmost node ID = 1 + 256 + 65,536 = 65,793
+    /// - Level 4: 4,294,967,296 nodes -> leftmost node ID = 1 + 256 + 65,536 + 16,777,216 = 16,843,009
+    /// - ...
+    /// - Level 9 and above: Overflow u64
+    #[test]
+    fn leftmost_node_calculation() {
+        // Test level 0 (root node)
+        assert_eq!(
+            leftmost_node(0),
+            Some(0),
+            "Level 0 should have leftmost node at position 0"
+        );
+
+        // Test level 1
+        assert_eq!(
+            leftmost_node(1),
+            Some(1),
+            "Level 1 should have leftmost node at position 1"
+        );
+
+        // Test level 2: 1 + 256 = 257
+        assert_eq!(
+            leftmost_node(2),
+            Some(257),
+            "Level 2 should have leftmost node at position 257"
+        );
+
+        // Test level 3: 1 + 256 + 65536 = 65793
+        assert_eq!(
+            leftmost_node(3),
+            Some(65793),
+            "Level 3 should have leftmost node at position 65793"
+        );
+
+        // Test level 4: 1 + 256 + 65536 + 16777216 = 16843009
+        assert_eq!(
+            leftmost_node(4),
+            Some(16843009),
+            "Level 4 should have leftmost node at position 16843009"
+        );
+
+        // Test level 5: 1 + 256 + 65536 + 16777216 + 4294967296 = 4311810305
+        assert_eq!(
+            leftmost_node(5),
+            Some(4311810305),
+            "Level 5 should have leftmost node at position 4311810305"
+        );
+
+        // Test level 8: This should still fit in u64
+        // For a 256-ary tree, level 8 would be at position:
+        // (256^8 - 1) / 255 = 72340172838076673
+        assert_eq!(
+            leftmost_node(8),
+            Some(72340172838076673),
+            "Level 8 should have leftmost node at position 72340172838076673"
+        );
+
+        // Test level 9: This should overflow u64
+        // For a 256-ary tree, level 9 would be at position:
+        // (256^9 - 1) / 255 = 18519084246547628289
+        // This is larger than u64::MAX (18446744073709551615)
+        assert_eq!(
+            leftmost_node(9),
+            None,
+            "Level 9 should overflow and return None"
+        );
+
+        // Test level 10: This should also overflow u64
+        assert_eq!(
+            leftmost_node(10),
+            None,
+            "Level 10 should overflow and return None"
+        );
     }
 
     /// Tests NodeId level detection for all main trie levels. The SALT trie uses BFS numbering

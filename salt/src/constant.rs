@@ -94,7 +94,6 @@ macro_rules! b512 {
     }};
 }
 
-
 /// Get the default commitment for the specified node.
 pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     // Precomputed node commitment at each level of an empty SALT trie.
