@@ -1,5 +1,5 @@
 //! This module defines constants that determine the shape of the SALT data structure.
-use crate::types::{CommitmentBytes, NodeId};
+use crate::types::{is_subtree_node, CommitmentBytes, NodeId};
 use banderwagon::salt_committer::Committer;
 
 /// Number of bits to represent `MIN_BUCKET_SIZE`.
@@ -135,19 +135,13 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
 
     let level = get_node_level(node_id);
 
-    if is_extension_node(node_id) {
+    if is_subtree_node(node_id) {
         zero_commitment()
     } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
-}
-
-/// Determine whether to expand the node
-#[inline]
-pub fn is_extension_node(node_id: NodeId) -> bool {
-    node_id >= STARTING_NODE_ID[SUB_TRIE_LEVELS - 1] as NodeId
 }
 
 /// Return the zero commitment.

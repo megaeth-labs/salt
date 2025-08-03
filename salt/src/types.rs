@@ -257,6 +257,39 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// - Each subtree uses same BFS numbering as main trie
 pub type NodeId = u64;
 
+/// Returns true if the given NodeId addresses a node in a bucket subtree.
+///
+/// This function validates the NodeId and returns true only for valid subtree nodes:
+/// - Main trie nodes: bucket ID = 0, remaining bits represent main trie position
+/// - Metadata bucket nodes: Invalid since metadata buckets cannot grow beyond fixed size
+/// - Subtree nodes: bucket ID >= 65,536, remaining bits represent local subtree position
+///
+/// # Panics
+/// Panics if the NodeId is invalid (e.g., metadata bucket ID with non-zero remaining bits).
+#[inline]
+pub fn is_subtree_node(node_id: NodeId) -> bool {
+    let bucket_id = node_id >> BUCKET_SLOT_BITS;
+    let remaining_bits = node_id & BUCKET_SLOT_ID_MASK;
+
+    if bucket_id < NUM_META_BUCKETS as u64 {
+        // For main trie nodes (bucket_id = 0) or invalid metadata bucket references,
+        // the remaining bits should represent a valid main trie position.
+        // Metadata buckets (1-65535) cannot have subtrees, so any non-zero remaining
+        // bits with bucket_id > 0 indicates an invalid NodeId.
+        if bucket_id > 0 {
+            panic!(
+                "Invalid NodeId: metadata bucket {bucket_id} cannot have subtree nodes (remaining bits: {remaining_bits})"
+            );
+        }
+        false // Main trie node (bucket_id = 0)
+    } else {
+        true // Valid subtree node (bucket_id >= 65536)
+    }
+}
+
+// FIXME: also implement get_node_level() in constant.rs here?
+// FIXME: once done, add more unit tests!
+
 /// Calculate the SaltKey where bucket metadata is stored.
 ///
 /// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
@@ -465,5 +498,48 @@ mod tests {
         // Test exactly 20 bytes (minimum required) - should succeed
         let valid_bytes = [0u8; 20];
         assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
+    }
+
+    /// Tests NodeId subtree node detection with validation. Main trie nodes have bucket ID = 0,
+    /// while bucket subtree nodes have bucket ID >= 65,536. Metadata buckets (1-65535) cannot
+    /// have subtrees, so any NodeId with metadata bucket ID and non-zero remaining bits is invalid.
+    #[test]
+    fn node_id_subtree_detection() {
+        // Main trie nodes - should all return false
+        let main_trie_nodes = [0, 1, 256, 65536, 16777216, 16843008]; // Various main trie positions
+        for node_id in main_trie_nodes {
+            assert!(
+                !is_subtree_node(node_id),
+                "Main trie node {} incorrectly detected as subtree",
+                node_id
+            );
+        }
+
+        // Bucket subtree nodes - should all return true
+        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket 65536, position 0
+        let bucket_100000 = (100000u64 << BUCKET_SLOT_BITS) | 1000; // bucket 100000, position 1000
+        let bucket_max = (16777215u64 << BUCKET_SLOT_BITS) | 500; // max bucket (24-bit), position 500
+
+        assert!(is_subtree_node(bucket_65536));
+        assert!(is_subtree_node(bucket_100000));
+        assert!(is_subtree_node(bucket_max));
+    }
+
+    /// Tests that is_subtree_node panics on invalid NodeIds. Metadata buckets (1-65535)
+    /// cannot grow beyond their fixed size, so any NodeId with metadata bucket ID and
+    /// non-zero remaining bits represents an invalid node reference.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: metadata bucket 1000 cannot have subtree nodes")]
+    fn node_id_invalid_metadata_bucket_panic() {
+        let invalid_meta_node = (1000u64 << BUCKET_SLOT_BITS) | 100; // metadata bucket with subtree bits
+        is_subtree_node(invalid_meta_node);
+    }
+
+    /// Tests additional invalid metadata bucket cases to ensure proper validation.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: metadata bucket 65535 cannot have subtree nodes")]
+    fn node_id_last_metadata_bucket_panic() {
+        let invalid_last_meta = (65535u64 << BUCKET_SLOT_BITS) | 1; // last metadata bucket with subtree bits
+        is_subtree_node(invalid_last_meta);
     }
 }
