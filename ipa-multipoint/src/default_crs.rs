@@ -1,3 +1,20 @@
+//! Default Common Reference String (CRS) for the MegaETH SALT project.
+
+/// Pre-computed CRS containing 257 hex-encoded elliptic curve points.
+///
+/// This array contains:
+/// - Points 0-255: Generator points for polynomial coefficient commitments (G)
+/// - Point 256: Blinding generator point (Q)
+///
+/// Generated deterministically from seed "MAKE_ETHEREUM_GREAT_AGAIN" using the
+/// hash-to-curve method defined in the parent CRS module. Each point is
+/// represented as a 64-byte hex string (uncompressed format).
+///
+/// # Format
+/// Each string represents a 64-byte uncompressed elliptic curve point:
+/// - 32 bytes for x-coordinate (little-endian)
+/// - 32 bytes for y-coordinate (little-endian)
+/// - Encoded as lowercase hexadecimal without "0x" prefix
 pub(crate) const HEX_ENCODED_CRS : [&str; 257] = [
     "806be716745695e5ba076513257db8c93eec7bf99057fd31ec5525acc3c01628d39210f25ee88a0791b2ae84fc2f0b444c1cba13047b07912971648888d8c06c",
     "eef33bb1e50d0a3bc576b74e10c768d2be637b185d1a4efc594e3355bfaeb556d364e8904347d781f57f2b260243bbcacee0a28e5cf93c707d6eca450bc25947",
@@ -255,13 +272,19 @@ pub(crate) const HEX_ENCODED_CRS : [&str; 257] = [
     "df0ca0a6ee8a94b1719ae3d9088563fa3bb1a28a765fa67e8c8c95a5affd533f5891fc613104b62eb69e3919c4791369e25fc5bee273148a38cf0241accf803c",
     "2176d844d1723432651d200c809381068bdee863b5e6e9c7ca02aa29d552242d7f16a82246a72d2c9063bdec6859ed126d60ce3c763626134726808c881e3548",
     "ab7168d7d5a0c0d06c3818ce98e2ca4559307dd58375b291bbc403b4a03c6e04985c5535430e0b47260ec241ffd7afaf24152270e7036584090b8a9763f1233d",
-    "18ae52a26618e7e1658499ad22c0792bf342be7b77113774c5340b2ccc32c129664197ccb667315e6064e4ee81ad8c3586d5dcba508b7d150f3e12da9e666c2a",
+    "c1d67eecbb7e5052a75c428a0488d034d82cc7bd7017b600224db9fc116c641f41b45b39bf1dd29f72714e32035766a2a96696f6828ecbb2ff1fceb2d07e7362",
 ];
 
 #[cfg(test)]
 mod tests {
     use crate::{crs::CRS, default_crs::HEX_ENCODED_CRS};
 
+    /// Verifies that the pre-computed hex CRS matches the deterministically generated CRS.
+    ///
+    /// This test ensures:
+    /// 1. The hex-encoded constants produce the same points as fresh generation
+    /// 2. Round-trip consistency between CRS formats (hex ↔ bytes ↔ CRS)
+    /// 3. The stored constants haven't been corrupted or modified
     #[test]
     fn load_from_hex() {
         let crs = CRS::new(256, b"MAKE_ETHEREUM_GREAT_AGAIN");

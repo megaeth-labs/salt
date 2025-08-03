@@ -9,9 +9,7 @@ This library uses the banderwagon prime group (https://hackmd.io/@6iQDuIePQjyYBq
 
 ### Security 
 
-- The CRS is not being generated in a secure manner. The relative DLOG is known. In actuality, we want to use a hash_to_group algorithm. Try and increment would be the easiest one to implement as we do not care about timing attacks.
-
-- Even with this, the code has not been reviewed, so should not be used in production.
+- The code has not been reviewed, so should not be used in production.
 
 ## Efficiency
 
