@@ -459,6 +459,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     }
 }
 
+// FIXME: doesn't make sense to have a separate struct for this purpose. providing
+// access via plain kv's is one of SALT's core responsibility. Make PlainStateProvider
+// a trait and have MemSalt implement it!
+
 /// This structure enables reading EVM account & storage data from a SALT state.
 #[derive(Debug)]
 pub struct PlainStateProvider<'a, S> {
@@ -581,6 +585,10 @@ mod tests {
 
     const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
     const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
+
+    // FIXME: need a unit test to fix the hash function we used to compute bucket id; avoid accidental hash change
+
+    // FIXME: where are the unit tests that exercise SHI hashtable and SHI hashtable only? CRUD + resize, etc.
 
     // Randomly generate 'l' key-value pairs
     fn create_random_kvs(l: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {

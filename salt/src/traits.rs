@@ -31,8 +31,9 @@ pub trait StateReader: Debug + Send + Sync {
     fn range_slot(
         &self,
         _bucket_id: BucketId,
-        _range: RangeInclusive<u64>,
+        _range: RangeInclusive<u64>, // FIXME: u64 => SaltKey
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        // FIXME: don't provide a bogus implementation here
         unimplemented!("range_slot is not implemented for this reader")
     }
 
