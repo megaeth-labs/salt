@@ -3,7 +3,7 @@
 use super::updates::TrieUpdates;
 use crate::{
     constant::{
-        get_node_level, zero_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE,
+        zero_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE,
         MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
         TRIE_LEVELS, TRIE_WIDTH_BITS,
     },

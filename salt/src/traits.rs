@@ -1,12 +1,12 @@
 //! Define traits for storing salt state and salt trie.
 use crate::{
     constant::{
-        default_commitment, get_node_level, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS,
+        default_commitment, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS,
         TRIE_WIDTH,
     },
     trie::trie::get_child_node,
     types::{
-        bucket_metadata_key, is_subtree_node, BucketMeta, CommitmentBytes, NodeId, SaltKey,
+        bucket_metadata_key, get_node_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId, SaltKey,
         SaltValue,
     },
     BucketId,
