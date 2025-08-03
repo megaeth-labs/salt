@@ -1240,7 +1240,7 @@ mod tests {
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
         let meta = bucket_meta(0, 65536 * 2);
         let salt_key = bucket_metadata_key(update_bid);
-        store.put_state(salt_key, SaltValue::from(meta));
+        store.update_single(salt_key, SaltValue::from(meta));
 
         let state_updates1 = StateUpdates {
             data: vec![

@@ -459,6 +459,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     }
 }
 
+// FIXME: doesn't make sense to have a separate struct for this purpose. providing
+// access via plain kv's is one of SALT's core responsibility. Make PlainStateProvider
+// a trait and have MemSalt implement it!
+
 /// This structure enables reading EVM account & storage data from a SALT state.
 #[derive(Debug)]
 pub struct PlainStateProvider<'a, S> {
