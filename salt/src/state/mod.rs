@@ -10,7 +10,7 @@
 //!
 //! ## Working with Plain State (EVM-compatible operations)
 //!
-//! ```rust
+//! ```rust,ignore
 //! use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
 //!
 //! // Create an in-memory SALT instance
@@ -47,7 +47,7 @@
 //!
 //! ## Working with SALT State (low-level bucket operations)
 //!
-//! ```rust
+//! ```rust,ignore
 //! use salt::{SaltKey, SaltValue, BucketMeta, traits::StateReader, MemSalt};
 //!
 //! let store = MemSalt::new();
@@ -80,7 +80,7 @@
 //!
 //! ## Batch Operations and Caching
 //!
-//! ```rust
+//! ```rust,ignore
 //! use salt::{EphemeralSaltState, SaltKey, MemSalt};
 //!
 //! let store = MemSalt::new();

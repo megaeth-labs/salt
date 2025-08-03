@@ -22,7 +22,7 @@ SALT is designed to fit all intermediate commitments in memory and eliminate all
 
 ### Trie Structure
 
-```
+```text
 Level 0: Root (1 node)
 Level 1: 256 nodes
 Level 2: 65,536 nodes
@@ -55,18 +55,19 @@ Each bucket contains:
 
 ### Basic State Operations
 
-```rust
+```rust,ignore
 use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
+use std::collections::HashMap;
 
 // Create a PoC in-memory SALT instance
 let mem_salt = MemSalt::new();
 let mut state = EphemeralSaltState::new(&mem_salt);
 
 // Prepare plain key-value updates (EVM account/storage data)
-let kvs = vec![
-    (b"account1", Some(b"balance100")),
-    (b"storage_key", Some(b"storage_value")),
-];
+let kvs = HashMap::from([
+    (b"account1".to_vec(), Some(b"balance100".to_vec())),
+    (b"storage_key".to_vec(), Some(b"storage_value".to_vec())),
+]);
 
 // Apply kv updates and get SALT-encoded state changes
 let state_updates = state.update(&kvs)?;
@@ -76,12 +77,12 @@ mem_salt.update_state(state_updates);
 // Read plain value back using PlainStateProvider
 let provider = PlainStateProvider::new(&mem_salt);
 let balance = provider.get_raw(b"account1")?;
-assert_eq!(balance, Some(b"balance100"));
+assert_eq!(balance, Some(b"balance100".to_vec()));
 ```
 
 ### Computing State Root
 
-```rust
+```rust,ignore
 use salt::{StateRoot, compute_from_scratch};
 
 // Incremental state root computation from the SALT-encoded state changes
@@ -98,11 +99,12 @@ mem_salt.update_trie(trie_updates);
 
 ### Generating Proofs
 
-```rust
+```rust,ignore
 use salt::{get_block_witness, SaltProof};
 
 // FIXME: the following code is fictional now; make it work!
 
+/*
 // Define plain keys to prove (both existing and non-existing)
 let plain_keys_to_prove = vec![b"account1", b"non_existent_key"];
 let expected_values = vec![Some(b"balance100"), None];
@@ -114,6 +116,7 @@ let proof = prover::create_salt_proof(&plain_keys, &mem_salt)?;
 let is_valid = proof.check::<MemSalt>(plain_keys, expected_values, root_hash);
 // FIXME: why can't is_value simply be a bool?
 assert!(is_valid.is_ok());
+ */
 ```
 
 ## Data Types

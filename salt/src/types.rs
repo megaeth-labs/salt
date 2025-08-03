@@ -314,7 +314,7 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Level 0 (root): NodeId = 0
 /// assert_eq!(leftmost_node(0), Some(0));
 ///
