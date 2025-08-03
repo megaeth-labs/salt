@@ -9,7 +9,7 @@
 
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
-    STARTING_NODE_ID, TRIE_WIDTH,
+    TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -288,13 +288,14 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
     }
 }
 
-/// Returns the NodeId of the leftmost node at the specified level in a complete N-ary tree.
+/// Returns the BFS number of the leftmost node at the specified level in a complete N-ary tree.
 ///
-/// In a complete N-ary tree (where N is `TRIE_WIDTH`), nodes are numbered using a breadth-first
-/// search (BFS) scheme starting from 0 at the root. At each level, nodes are numbered
-/// consecutively from left to right.
+/// In a breadth-first search (BFS) numbering scheme:
+/// - The root node is numbered 0
+/// - Node numbers increase with each level from top to bottom
+/// - Within each level, nodes are numbered consecutively from left to right
 ///
-/// This function calculates the NodeId of the leftmost node at the given level using the
+/// This function calculates the number of the leftmost node at the given level using the
 /// mathematical formula for the sum of a geometric series:
 ///
 /// ```text
@@ -309,22 +310,22 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
 ///
 /// # Returns
 ///
-/// * `Some(node_id)` - The NodeId of the leftmost node at the specified level if it fits in a u64.
+/// * `Some(node_id)` - The BFS number of the leftmost node at the specified level if it fits in a u64.
 /// * `None` - If the result is too large for a u64.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// // Level 0 (root): NodeId = 0
+/// // Level 0 (root): BFS number = 0
 /// assert_eq!(leftmost_node(0), Some(0));
 ///
-/// // Level 1: NodeId = 1 (since there's 1 node at level 0)
+/// // Level 1: BFS number = 1 (since there's 1 node at level 0)
 /// assert_eq!(leftmost_node(1), Some(1));
 ///
-/// // Level 2: NodeId = 257 (since there are 1 + 256 nodes at levels 0 and 1)
+/// // Level 2: BFS number = 257 (since there are 1 + 256 nodes at levels 0 and 1)
 /// assert_eq!(leftmost_node(2), Some(257));
 /// ```
-pub const fn leftmost_node(level: u32) -> Option<u64> {
+const fn leftmost_node(level: u32) -> Option<u64> {
     if level == 0 {
         return Some(0);
     }
@@ -343,31 +344,25 @@ pub const fn leftmost_node(level: u32) -> Option<u64> {
     }
 }
 
-/// Calculate the level where the specified node is located.
+/// Calculate the BFS level where the specified node is located in a complete 256-ary tree.
 ///
-/// The SALT trie uses a breadth-first search (BFS) numbering scheme where nodes at each level
-/// are numbered consecutively. STARTING_NODE_ID[i] contains the ID of the leftmost node at level i.
-/// This function determines which level a given NodeId belongs to by finding the highest level
-/// whose starting ID is ≤ the given node_id.
+/// This function determines which level a given node belongs to by finding the highest level
+/// whose starting BFS number is ≤ that of the given node.
 ///
 /// # Arguments
-/// * `node_id` - The NodeId whose level to determine
+/// * `bfs_number` - The node whose level to determine
 ///
 /// # Returns
-/// The level (0-based) where the node is located:
-/// - Level 0: Root node (ID 0)
-/// - Level 1: 256 nodes (IDs 1-256)
-/// - Level 2: 65,536 nodes (IDs 257-65,792)
-/// - Level 3: 16,777,216 nodes (IDs 65,793-16,843,008)
-/// - Level 4+: Subtree nodes (variable IDs based on bucket)
-pub fn get_node_level(node_id: NodeId) -> usize {
-    STARTING_NODE_ID
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|&(_, &threshold)| node_id >= threshold as NodeId)
-        .unwrap()
-        .0
+/// The level (0-based) where the node is located
+pub fn get_bfs_level(bfs_number: u64) -> usize {
+    for level in (0..=8).rev() {
+        if let Some(leftmost) = leftmost_node(level) {
+            if bfs_number >= leftmost {
+                return level as usize;
+            }
+        }
+    }
+    unreachable!("n = {bfs_number} should always match at least level 0")
 }
 
 /// Calculate the SaltKey where bucket metadata is stored.
@@ -704,31 +699,32 @@ mod tests {
         );
     }
 
-    /// Tests NodeId level detection for all main trie levels. The SALT trie uses BFS numbering
-    /// where each level has a contiguous range of node IDs. This test verifies that get_node_level
-    /// correctly identifies the level for nodes at level boundaries and within each level.
+    /// Tests BFS level detection for complete 256-ary trees. Both the main trie and bucket subtrees
+    /// use BFS numbering to label its nodes. This test verifies that get_bfs_level correctly identifies
+    /// the level for nodes at level boundaries and within each level.
     #[test]
-    fn node_id_level_detection() {
+    fn bfs_level_detection() {
         // Level 0: Root node only (ID 0)
-        assert_eq!(get_node_level(0), 0, "Root node should be at level 0");
+        assert_eq!(get_bfs_level(0), 0, "Root node should be at level 0");
 
         // Level 1: Nodes 1-256 (256 nodes total)
-        assert_eq!(get_node_level(1), 1, "First level 1 node");
-        assert_eq!(get_node_level(128), 1, "Middle level 1 node");
-        assert_eq!(get_node_level(256), 1, "Last level 1 node");
+        assert_eq!(get_bfs_level(1), 1, "First level 1 node");
+        assert_eq!(get_bfs_level(128), 1, "Middle level 1 node");
+        assert_eq!(get_bfs_level(256), 1, "Last level 1 node");
 
         // Level 2: Nodes 257-65,792 (65,536 nodes total)
-        assert_eq!(get_node_level(257), 2, "First level 2 node");
-        assert_eq!(get_node_level(32000), 2, "Middle level 2 node");
-        assert_eq!(get_node_level(65792), 2, "Last level 2 node");
+        assert_eq!(get_bfs_level(257), 2, "First level 2 node");
+        assert_eq!(get_bfs_level(32000), 2, "Middle level 2 node");
+        assert_eq!(get_bfs_level(65792), 2, "Last level 2 node");
 
         // Level 3: Nodes 65,793-16,843,008 (16,777,216 nodes total)
-        assert_eq!(get_node_level(65793), 3, "First level 3 node");
-        assert_eq!(get_node_level(1000000), 3, "Middle level 3 node");
-        assert_eq!(get_node_level(16843008), 3, "Last level 3 node");
+        assert_eq!(get_bfs_level(65793), 3, "First level 3 node");
+        assert_eq!(get_bfs_level(1000000), 3, "Middle level 3 node");
+        assert_eq!(get_bfs_level(16843008), 3, "Last level 3 node");
 
-        // Level 4: Subtree nodes (bucket-dependent IDs starting from bucket offsets)
-        let subtree_node = (65536u64 << BUCKET_SLOT_BITS) + 16843009; // bucket 65536, subtree position
-        assert_eq!(get_node_level(subtree_node), 4, "Subtree node at level 4");
+        // Level 8: Nodes 72,340,172,838,076,673-18,519,084,246,547,628,288 (2^64 nodes total)
+        assert_eq!(get_bfs_level(72340172838076673), 8, "First level 8 node");
+        assert_eq!(get_bfs_level(9446744073709551615), 8, "Middle level 8 node");
+        assert_eq!(get_bfs_level(u64::MAX), 8, "Largest node number in u64");
     }
 }

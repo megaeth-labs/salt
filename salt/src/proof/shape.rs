@@ -47,7 +47,7 @@
 use crate::{
     constant::{BUCKET_SLOT_BITS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS, TRIE_WIDTH_BITS},
     trie::trie::subtrie_node_id,
-    types::get_node_level,
+    types::get_bfs_level,
     BucketId, NodeId, SaltKey, SlotId,
 };
 use iter_tools::Itertools;
@@ -454,7 +454,7 @@ pub const fn slot_id_to_node_path(slot: SlotId) -> [u8; SUB_TRIE_LEVELS - 1] {
 
 /// Get the child node of parent_id with child_index in the main trie
 pub(crate) fn get_main_trie_child_node(parent_id: NodeId, point: u8) -> NodeId {
-    let level = get_node_level(parent_id);
+    let level = get_bfs_level(parent_id);
 
     point as NodeId
         + STARTING_NODE_ID[level + 1] as NodeId

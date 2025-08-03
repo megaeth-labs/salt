@@ -713,7 +713,7 @@ fn get_child_idx(node_id: &NodeId, level: usize) -> usize {
 pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
     let node_id = *parent_id & BUCKET_SLOT_ID_MASK;
     let bucket_id = *parent_id - node_id;
-    let level = get_node_level(node_id);
+    let level = get_bfs_level(node_id);
     assert!(level < SUB_TRIE_LEVELS);
 
     bucket_id
@@ -1963,7 +1963,7 @@ mod tests {
 
     // Draw points to calculate kv
     fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemSalt) -> CommitmentBytes {
-        let level = get_node_level(node_id);
+        let level = get_bfs_level(node_id);
         let committer = get_global_committer();
         let zero = zero_commitment();
         let mut start = node_id - STARTING_NODE_ID[level] as NodeId;

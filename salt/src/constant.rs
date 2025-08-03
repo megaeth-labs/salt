@@ -1,5 +1,5 @@
 //! This module defines constants that determine the shape of the SALT data structure.
-use crate::types::{get_node_level, is_subtree_node, CommitmentBytes, NodeId};
+use crate::types::{get_bfs_level, is_subtree_node, CommitmentBytes, NodeId};
 use banderwagon::salt_committer::Committer;
 
 /// Number of bits to represent `MIN_BUCKET_SIZE`.
@@ -122,7 +122,7 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
         ),
     ];
 
-    let level = get_node_level(node_id);
+    let level = get_bfs_level(node_id);
 
     if is_subtree_node(node_id) {
         zero_commitment()

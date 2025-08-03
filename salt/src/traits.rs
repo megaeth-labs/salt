@@ -3,7 +3,7 @@ use crate::{
     constant::{default_commitment, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH},
     trie::trie::get_child_node,
     types::{
-        bucket_metadata_key, get_node_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
+        bucket_metadata_key, get_bfs_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
         SaltKey, SaltValue,
     },
     BucketId,
@@ -82,7 +82,7 @@ pub trait TrieReader: Sync {
 
         // Because the trie did not store the default value when init,
         // so meta nodes needs to update the default commitment.
-        let child_level = get_node_level(node_id) + 1;
+        let child_level = get_bfs_level(node_id) + 1;
         if !is_subtree_node(node_id)
             && child_level < TRIE_LEVELS
             && node_id < STARTING_NODE_ID[child_level] as NodeId
