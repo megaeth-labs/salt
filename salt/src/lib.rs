@@ -5,10 +5,7 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
-pub use state::{
-    state::{pk_hasher, EphemeralSaltState, PlainStateProvider},
-    updates::StateUpdates,
-};
+pub use state::{state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
     trie::{get_child_node, StateRoot},
@@ -17,6 +14,7 @@ pub use trie::{
 };
 
 pub mod traits;
+pub use traits::StateReader;
 pub mod types;
 pub use types::*;
 pub mod mem_salt;
@@ -28,7 +26,7 @@ pub mod formate;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::trie::compute_from_scratch;
+    use crate::{traits::StateReader, trie::trie::compute_from_scratch};
     use std::collections::HashMap;
 
     #[test]
@@ -49,9 +47,8 @@ mod tests {
         // "Persist" the state updates to storage (the "trie" remains unchanged)
         mem_salt.update_state(state_updates.clone());
 
-        // Read plain value back using PlainStateProvider
-        let provider = PlainStateProvider::new(&mem_salt);
-        let balance = provider.get_raw(b"account1")?;
+        // Read plain value back
+        let balance = mem_salt.get(b"account1")?;
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes

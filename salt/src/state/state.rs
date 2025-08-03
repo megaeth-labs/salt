@@ -4,7 +4,11 @@
 //! (2) Tentatively update the current state and accumulate the
 //!     resulting incremental changes in memory.
 use super::updates::StateUpdates;
-use crate::{constant::BUCKET_SLOT_BITS, traits::StateReader, types::*};
+use crate::{
+    constant::BUCKET_SLOT_BITS,
+    traits::{pk_hasher, probe, StateReader},
+    types::*,
+};
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
@@ -459,59 +463,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     }
 }
 
-// FIXME: doesn't make sense to have a separate struct for this purpose. providing
-// access via plain kv's is one of SALT's core responsibility. Make PlainStateProvider
-// a trait and have MemSalt implement it!
-
-/// This structure enables reading EVM account & storage data from a SALT state.
-#[derive(Debug)]
-pub struct PlainStateProvider<'a, S> {
-    /// The SALT state to read data from.
-    salt_state: &'a S,
-}
-
-impl<'a, S: StateReader> PlainStateProvider<'a, S> {
-    /// Create a [`SaltStateProvider`] object.
-    pub const fn new(salt_state: &'a S) -> Self {
-        Self { salt_state }
-    }
-
-    /// Return the plain value associated with the given plain key.
-    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
-        // Computes the `bucket_id` based on the `key`.
-        let bucket_id = pk_hasher::bucket_id(plain_key);
-        let meta = self.salt_state.get_meta(bucket_id)?;
-        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
-        let hashed_id = pk_hasher::hashed_key(plain_key, meta.nonce);
-
-        // Starts from the initial slot position and searches for the slot corresponding to the
-        // `key`.
-        for step in 0..meta.capacity {
-            let slot_id = probe(hashed_id, step, meta.capacity);
-            if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
-                match slot_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
-                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// Returns the i-th slot in the probe sequence of `hashed_key`. Our SHI hash table
-/// uses linear probing to address key collisions, so `i` is used as an offset. Since
-/// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
-/// the returned value must be in the range of [1, bucket size).
-#[inline(always)]
-fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
-    ((hashed_key + i) & (capacity - 1)) as SlotId
-}
-
 /// This function is the inverse of probe: i.e.,
 /// ```rank(hashed_key, slot_id, bucket_size) = i``` iff.
 /// ```probe(hashed_key, i, bucket_size) = slot_id```
@@ -525,49 +476,6 @@ fn rank(hashed_key: u64, slot_id: SlotId, capacity: u64) -> SlotId {
     }
 }
 
-/// Provides utility functions to convert plain keys to hashed keys (and eventually SALT keys).
-pub mod pk_hasher {
-    use crate::constant::{NUM_KV_BUCKETS, NUM_META_BUCKETS};
-    use megaeth_ahash::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    use super::BucketId;
-
-    /// Use the lower 32 bytes of keccak256("Make Ethereum Great Again") as the seed values.
-    const HASHER_SEED_0: u64 = 0x921321f4;
-    const HASHER_SEED_1: u64 = 0x2ccb667e;
-    const HASHER_SEED_2: u64 = 0x60d68842;
-    const HASHER_SEED_3: u64 = 0x077ada9d;
-
-    /// Hash the given byte string.
-    #[inline(always)]
-    pub(crate) fn hash(bytes: &[u8]) -> u64 {
-        static HASH_BUILDER: RandomState =
-            RandomState::with_seeds(HASHER_SEED_0, HASHER_SEED_1, HASHER_SEED_2, HASHER_SEED_3);
-
-        let mut hasher = HASH_BUILDER.build_hasher();
-        hasher.write(bytes);
-        hasher.finish()
-    }
-
-    /// Convert the plain key to a hashed key using the given bucket nonce.
-    /// The resulting hashed key will be used to search for the final bucket
-    /// location (i.e., the SALT key) where the plain key will be placed.
-    #[inline(always)]
-    pub(crate) fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
-        let mut data = plain_key.to_vec();
-        data.extend_from_slice(&nonce.to_le_bytes());
-
-        hash(&data)
-    }
-
-    /// Locate the bucket where the given plain key resides.
-    #[inline(always)]
-    pub fn bucket_id(key: &[u8]) -> BucketId {
-        (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -575,16 +483,18 @@ mod tests {
         empty_salt::EmptySalt,
         mem_salt::*,
         state::{
-            state::{pk_hasher, probe, rank, EphemeralSaltState},
+            state::{rank, EphemeralSaltState},
             updates::StateUpdates,
         },
-        traits::StateReader,
+        traits::{pk_hasher, probe, StateReader},
         types::*,
     };
     use rand::Rng;
 
     const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
     const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
+
+    // FIXME: need a unit test to fix the hash function we used to compute bucket id; avoid accidental hash change
 
     // Randomly generate 'l' key-value pairs
     fn create_random_kvs(l: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {

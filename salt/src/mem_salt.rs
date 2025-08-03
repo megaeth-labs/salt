@@ -312,7 +312,8 @@ impl TrieReader for MemSalt {
     /// # Returns
     ///
     /// Vector of node ID and commitment pairs within the range, ordered by node ID.
-    fn get_range( // FIXME: better method naming?
+    fn get_range(
+        // FIXME: better method naming?
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {

@@ -38,7 +38,6 @@ Each bucket contains:
 
 #### State Management ([`state`])
 - [`EphemeralSaltState`]: Non-persistent state snapshot with change tracking
-- [`PlainStateProvider`]: Interface for reading EVM account/storage data
 - [`StateUpdates`]: Incremental state change accumulator
 
 #### Trie Authentication ([`trie`])
@@ -56,7 +55,7 @@ Each bucket contains:
 ### Basic State Operations
 
 ```rust,ignore
-use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
+use salt::{EphemeralSaltState, MemSalt};
 use std::collections::HashMap;
 
 // Create a PoC in-memory SALT instance
@@ -74,9 +73,8 @@ let state_updates = state.update(&kvs)?;
 // "Persist" the state updates to storage (the "trie" remains unchanged)
 mem_salt.update_state(state_updates);
 
-// Read plain value back using PlainStateProvider
-let provider = PlainStateProvider::new(&mem_salt);
-let balance = provider.get_raw(b"account1")?;
+// Read plain value back using StateReader trait
+let balance = mem_salt.get(b"account1")?;
 assert_eq!(balance, Some(b"balance100".to_vec()));
 ```
 
