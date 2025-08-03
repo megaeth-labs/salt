@@ -122,18 +122,18 @@ fn crs_consistency() {
 
     use sha2::{Digest, Sha256};
 
-    let points = generate_random_elements(256, b"eth_verkle_oct_2021");
+    let points = generate_random_elements(256, b"MAKE_ETHEREUM_GREAT_AGAIN");
 
     let bytes = points[0].to_bytes();
     assert_eq!(
         hex::encode(bytes),
-        "01587ad1336675eb912550ec2a28eb8923b824b490dd2ba82e48f14590a298a0",
+        "2816c0c3ac2555ec31fd5790f97bec3ec9b87d25136507bae595567416e76b80",
         "the first point is incorrect"
     );
     let bytes = points[255].to_bytes();
     assert_eq!(
         hex::encode(bytes),
-        "3de2be346b539395b0c0de56a5ccca54a317f1b5c80107b0802af9a62276a4d8",
+        "046e3ca0b403c4bb91b27583d57d305945cae298ce18386cd0c0a0d5d76871ab",
         "the 256th (last) point is incorrect"
     );
 
@@ -145,7 +145,7 @@ fn crs_consistency() {
     let bytes = hasher.finalize().to_vec();
     assert_eq!(
         hex::encode(bytes),
-        "1fcaea10bf24f750200e06fa473c76ff0468007291fa548e2d99f09ba9256fdb",
+        "e0d59418bbe04c1f4ec7493a9ed30497982d4ab5480d68b5e8ce426dd756d136",
         "unexpected point encountered"
     );
 }
