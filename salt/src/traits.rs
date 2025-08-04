@@ -100,7 +100,7 @@ pub trait TrieReader: Sync {
 
 #[auto_impl::auto_impl(&, Arc)]
 /// This trait provides functionality for efficiently scanning and loading buckets.
-pub trait StateLoader: Send + Sync {
+pub trait StateLoader {
     /// The custom error type for the trait.
     type Error: Debug + Send;
 
