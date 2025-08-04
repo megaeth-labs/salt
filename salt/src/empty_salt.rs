@@ -3,7 +3,7 @@
 
 use crate::{
     constant::*,
-    traits::{StateReader, TrieReader},
+    traits::{StateLoader, StateReader, TrieReader},
     types::*,
 };
 use std::ops::{Range, RangeInclusive};
@@ -15,6 +15,10 @@ pub struct EmptySalt;
 impl StateReader for EmptySalt {
     type Error = &'static str;
 
+    fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        Ok(BucketMeta::default())
+    }
+
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let value = key
             .is_bucket_meta_slot()
@@ -22,37 +26,41 @@ impl StateReader for EmptySalt {
         Ok(value)
     }
 
-    fn range_bucket(
+    fn range_slot(
+        &self,
+        bucket_id: BucketId,
+        range: RangeInclusive<SlotId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(
+            if bucket_id < NUM_META_BUCKETS as BucketId
+                && *range.start() < MIN_BUCKET_SIZE as SlotId
+            {
+                let range = *range.start()..std::cmp::min(MIN_BUCKET_SIZE as u64, *range.end());
+                range
+                    .into_iter()
+                    .map(|slot_id| {
+                        // Return a default value for the bucket meta
+                        (
+                            SaltKey::from((bucket_id, slot_id)),
+                            BucketMeta::default().into(),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        )
+    }
+}
+
+impl StateLoader for EmptySalt {
+    type Error = &'static str;
+
+    fn load_range(
         &self,
         _range: RangeInclusive<BucketId>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         Ok(Vec::new())
-    }
-
-    fn range_slot(
-        &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(*range.end() <= MIN_BUCKET_SIZE as NodeId);
-            range
-                .into_iter()
-                .map(|slot_id| {
-                    // Return a default value for the bucket meta
-                    (
-                        SaltKey::from((bucket_id, slot_id)),
-                        BucketMeta::default().into(),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        })
-    }
-
-    fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(BucketMeta::default())
     }
 }
 

@@ -19,7 +19,7 @@ use tracing::info;
 pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
-    base_state: &'a BaseState,
+    pub base_state: &'a BaseState,
     /// Cache the values of datas and bucket metas read from `base_state`
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
@@ -46,6 +46,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             cache: HashMap::new(),
             save_access: true,
         }
+    }
+
+    /// Return the `cache` of the current state.
+    pub fn cache_tx(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.cache
     }
 
     /// After calling `extend_cache`, the state will be updated to `state`.
@@ -78,6 +83,16 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
+    /// Accessing `keys` through `EphemeralSaltState`
+    pub fn travel_keys(&mut self, keys: Vec<Vec<u8>>) -> Result<(), BaseState::Error> {
+        for k in keys {
+            let bucket_id = pk_hasher::bucket_id(&k);
+            let meta = self.get_meta(bucket_id)?;
+            self.find(bucket_id, &meta, &k)?;
+        }
+        Ok(())
+    }
+
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
@@ -90,11 +105,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let slot = bucket_metadata_key(bucket_id);
-            let value = self.get_entry(slot)?;
-            let mut meta = value
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(BucketMeta::default);
+            let mut meta = self.get_meta(bucket_id)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -109,6 +120,15 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             }
         }
         Ok(state_updates)
+    }
+
+    /// Get the bucket meta by bucket ID.
+    fn get_meta(&mut self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
+        let slot = bucket_metadata_key(bucket_id);
+        let value = self.get_entry(slot)?;
+        Ok(value
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(BucketMeta::default))
     }
 
     /// Inserts or updates a plain key-value pair in the given bucket. This method

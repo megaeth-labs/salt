@@ -4,7 +4,7 @@ use crate::{
     trie::trie::get_child_node,
     types::{
         bucket_metadata_key, get_bfs_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
-        SaltKey, SaltValue,
+        SaltKey, SaltValue, SlotId,
     },
     BucketId,
 };
@@ -14,27 +14,10 @@ use std::{
 };
 
 /// This trait provides functionality for reading the entries of SALT buckets.
-pub trait StateReader: Debug + Send + Sync {
+#[auto_impl::auto_impl(&, Arc)]
+pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
-
-    /// Get slot value by `bucket_id` and `slot_id`.
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
-
-    /// Retrieves all non-empty entries within the specified range of buckets.
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
-
-    /// Retrieves all non-empty entries within the specified range of slots.
-    fn range_slot(
-        &self,
-        _bucket_id: BucketId,
-        _range: RangeInclusive<u64>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        unimplemented!("range_slot is not implemented for this reader")
-    }
 
     /// Get bucket meta by bucket ID.
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
@@ -44,9 +27,22 @@ pub trait StateReader: Debug + Send + Sync {
             None => BucketMeta::default(),
         })
     }
+
+    /// Get slot value by `bucket_id` and `slot_id`.
+    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
+
+    /// Retrieves all non-empty entries within the specified range of slots.
+    fn range_slot(
+        &self,
+        _bucket_id: BucketId,
+        _range: RangeInclusive<SlotId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        unimplemented!("range_slot is not implemented for this reader")
+    }
 }
 
 /// This trait provides functionality for reading commitments from trie nodes.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
@@ -97,4 +93,17 @@ pub trait TrieReader: Sync {
 
         Ok(children)
     }
+}
+
+#[auto_impl::auto_impl(&, Arc)]
+/// This trait provides functionality for efficiently scanning and loading buckets.
+pub trait StateLoader {
+    /// The custom error type for the trait.
+    type Error: Debug + Send;
+
+    /// Loads all non-empty entries within the specified range of buckets.
+    fn load_range(
+        &self,
+        range: RangeInclusive<BucketId>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
 }

@@ -11,7 +11,7 @@ pub use state::{
 };
 pub mod trie;
 pub use trie::{
-    trie::{get_child_node, StateRoot},
+    trie::{compute_from_scratch, get_child_node, StateRoot},
     updates::TrieUpdates,
     witness::{get_block_witness, BlockWitness},
 };

@@ -1,6 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, BUCKET_SLOT_BITS},
+    constant::default_commitment,
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ops::{Bound::Included, Range, RangeInclusive},
+    ops::{Range, RangeInclusive},
 };
 
 /// create a block witness from the trie
@@ -104,21 +104,6 @@ impl StateReader for BlockWitness {
         })
     }
 
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
-            .kvs
-            .range((
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), (1 << BUCKET_SLOT_BITS) - 1))),
-            ))
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, v)| (*k, v.clone().unwrap())) // v is checked to be Some in the filter
-            .collect())
-    }
-
     fn range_slot(
         &self,
         bucket_id: BucketId,
@@ -128,7 +113,7 @@ impl StateReader for BlockWitness {
             .kvs
             .range(
                 SaltKey::from((bucket_id, *range.start()))
-                    ..SaltKey::from((bucket_id, *range.end())),
+                    ..=SaltKey::from((bucket_id, *range.end())),
             )
             .map(|(k, v)| (*k, v.clone().expect("existing key")))
             .collect();
