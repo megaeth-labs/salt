@@ -3,9 +3,9 @@
 use super::updates::TrieUpdates;
 use crate::{
     constant::{
-        get_node_level, is_extension_node, zero_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK,
-        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID,
-        SUB_TRIE_LEVELS, TRIE_LEVELS, TRIE_WIDTH_BITS,
+        zero_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE,
+        MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
+        TRIE_LEVELS, TRIE_WIDTH_BITS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -115,7 +115,7 @@ impl StateRoot {
             .data
             .iter()
             .filter_map(|(id, c)| {
-                if is_extension_node(*id) {
+                if is_subtree_node(*id) {
                     None
                 } else {
                     Some((*id, *c))
@@ -713,7 +713,7 @@ fn get_child_idx(node_id: &NodeId, level: usize) -> usize {
 pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
     let node_id = *parent_id & BUCKET_SLOT_ID_MASK;
     let bucket_id = *parent_id - node_id;
-    let level = get_node_level(node_id);
+    let level = get_bfs_level(node_id);
     assert!(level < SUB_TRIE_LEVELS);
 
     bucket_id
@@ -1239,7 +1239,7 @@ mod tests {
         let update_bid = KV_BUCKET_OFFSET as BucketId + 2;
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
         let meta = bucket_meta(0, 65536 * 2);
-        let salt_key = meta_position(update_bid);
+        let salt_key = bucket_metadata_key(update_bid);
         store.put_state(salt_key, SaltValue::from(meta));
 
         let state_updates1 = StateUpdates {
@@ -1963,7 +1963,7 @@ mod tests {
 
     // Draw points to calculate kv
     fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemSalt) -> CommitmentBytes {
-        let level = get_node_level(node_id);
+        let level = get_bfs_level(node_id);
         let committer = get_global_committer();
         let zero = zero_commitment();
         let mut start = node_id - STARTING_NODE_ID[level] as NodeId;

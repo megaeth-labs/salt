@@ -1,31 +1,4 @@
-//! This crate implements a new state trie data structure called SALT, which is
-//! used to replace MPT in megaeth. The most distinguishing feature of SALT is
-//! its memory & IO-efficiency: the trie is small enough to fit in memory and,
-//! thus, allows nodes to update their state roots w/o incuring disk IOs.
-//!
-//! Like MPT, SALT provides the interface of an authenticated KV store (AKVS).
-//! That is, it provides two basic functionalities:
-//! - Storage: store the blockchain state as a set of KV pairs.
-//! - Authentication: compute a deterministic and cryptographically secure hash value that uniquely
-//!   identifies the blockchain state.
-//!
-//! SALT has a very shallow and wide trie structure. For example, a common setup
-//! is a 4-level trie with a branch factor of 256. In this case, SALT has 256^3,
-//! or ~16 million, leaf nodes. Each leaf node is called a bucket and it stores
-//! the key-value pairs that make up the blockchain state. Internally, the bucket
-//! is implemented using a strongly history-independent (SHI) hash table; this
-//! ensures that the internal representation of SALT depends only on the set of
-//! key-value pairs (and not on the key insertion/deletion order).
-//!
-//! SALT authenticates its state recursively. At the bottom, each bucket computes
-//! a commitment of its internal key-value pairs. Then, each internal trie node
-//! computes a commitment of its child nodes. Like Ethereum Verkle tree, SALT uses
-//! IPA, a homomorphic vector commitment scheme, to compute these commitments.
-//!
-//! This crate divides the implementation of SALT into two major modules: the
-//! "state" module, which manages the storage & accesses of all the key-value
-//! pairs inside the buckets, and the "trie" module, which maintains commitments
-//! of the trie nodes.
+#![doc = include_str!("../README.md")]
 
 pub mod constant;
 pub mod empty_salt;
@@ -51,3 +24,47 @@ pub use mem_salt::MemSalt;
 
 #[cfg(test)]
 pub mod formate;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trie::trie::compute_from_scratch;
+    use std::collections::HashMap;
+
+    #[test]
+    /// A simple end-to-end test demonstrating the complete SALT workflow.
+    fn basic_integration_test() -> Result<(), Box<dyn std::error::Error>> {
+        // Create a PoC in-memory SALT instance
+        let mem_salt = MemSalt::new();
+        let mut state = EphemeralSaltState::new(&mem_salt);
+
+        // Prepare plain key-value updates (EVM account/storage data)
+        let kvs = HashMap::from([
+            (b"account1".to_vec(), Some(b"balance100".to_vec())),
+            (b"storage_key".to_vec(), Some(b"storage_value".to_vec())),
+        ]);
+
+        // Apply kv updates and get SALT-encoded state changes
+        let state_updates = state.update(&kvs)?;
+        // "Persist" the state updates to storage (the "trie" remains unchanged)
+        mem_salt.update_state(state_updates.clone());
+
+        // Read plain value back using PlainStateProvider
+        let provider = PlainStateProvider::new(&mem_salt);
+        let balance = provider.get_raw(b"account1")?;
+        assert_eq!(balance, Some(b"balance100".to_vec()));
+
+        // Incremental state root computation from the SALT-encoded state changes
+        let mut state_root = StateRoot::new();
+        let (root_hash, trie_updates) = state_root.update(&mem_salt, &mem_salt, &state_updates)?;
+
+        // Or compute from scratch based on the previously updated state
+        let (root_hash_from_scratch, _) = compute_from_scratch(&mem_salt)?;
+        assert_eq!(root_hash, root_hash_from_scratch);
+
+        // "Persist" the trie updates to storage
+        mem_salt.update_trie(trie_updates);
+
+        Ok(())
+    }
+}

@@ -29,6 +29,7 @@ impl Clone for MemSalt {
 
 impl MemSalt {
     /// Create a new [`MemSalt`] instance, and the initial value of all nonce is 0.
+    /// FIXME: what about initial capacity? 0 as well?
     pub fn new() -> Self {
         Self {
             state: RwLock::new(BTreeMap::new()),

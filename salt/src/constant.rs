@@ -1,5 +1,5 @@
 //! This module defines constants that determine the shape of the SALT data structure.
-use crate::types::{CommitmentBytes, NodeId};
+use crate::types::{get_bfs_level, is_subtree_node, CommitmentBytes, NodeId};
 use banderwagon::salt_committer::Committer;
 
 /// Number of bits to represent `MIN_BUCKET_SIZE`.
@@ -43,8 +43,7 @@ pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
     TRIE_WIDTH * TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH + 1,
 ];
 
-/// Maximum number of bits to represent a bucket ID. Although the ID consists of only 24 bits, it
-/// will occupy the upper 32 bits of the `SaltKey`.
+/// Maximum number of bits to represent a bucket ID.
 pub const BUCKET_ID_BITS: usize = 24;
 /// Maximum number of bits to represent a slot index in a bucket. 2^40 slots per bucket should be
 /// more than enough.
@@ -95,17 +94,6 @@ macro_rules! b512 {
     }};
 }
 
-/// Calculate the level where the specified node is located.
-pub fn get_node_level(node_id: NodeId) -> usize {
-    STARTING_NODE_ID
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|&(_, &threshold)| node_id >= threshold as NodeId)
-        .unwrap()
-        .0
-}
-
 /// Get the default commitment for the specified node.
 pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     // Precomputed node commitment at each level of an empty SALT trie.
@@ -134,21 +122,15 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
         ),
     ];
 
-    let level = get_node_level(node_id);
+    let level = get_bfs_level(node_id);
 
-    if is_extension_node(node_id) {
+    if is_subtree_node(node_id) {
         zero_commitment()
     } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
-}
-
-/// Determine whether to expand the node
-#[inline]
-pub fn is_extension_node(node_id: NodeId) -> bool {
-    node_id >= STARTING_NODE_ID[SUB_TRIE_LEVELS - 1] as NodeId
 }
 
 /// Return the zero commitment.

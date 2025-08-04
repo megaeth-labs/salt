@@ -1,17 +1,26 @@
-#![allow(unexpected_cfgs)]
+//! Core data types for the SALT data structure.
+//!
+//! This module defines the fundamental types used throughout the SALT implementation:
+//! - [`SaltKey`]: 64-bit addressing for bucket slots
+//! - [`SaltValue`]: Variable-length encoding for key-value pairs
+//! - [`BucketMeta`]: Bucket metadata (nonce, capacity, usage)
+//! - [`NodeId`]: 64-bit identifiers for trie nodes
+//! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
-//! Define the types used for salt calculation and storage.
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
+    TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
-/// A serialized uncompressed group element
+
+/// 64-byte uncompressed group element for cryptographic commitments.
 pub type CommitmentBytes = [u8; 64];
 
-/// A serialized scalar field element
+/// 32-byte scalar field element for cryptographic commitments.
 pub type ScalarBytes = [u8; 32];
 
+/// Hash a 64-byte commitment into its 32-byte compressed format.
 pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
     use banderwagon::{CanonicalSerialize, Element};
     let mut bytes = [0u8; 32];
@@ -24,20 +33,22 @@ pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
 
 use serde::{Deserialize, Serialize};
 
-/// Represents the ID of a bucket.
+/// 24-bit bucket identifier (up to ~16M buckets).
 pub type BucketId = u32;
 
-/// Represents the ID of a slot.
+/// 40-bit slot identifier within a bucket (up to ~1T slots).
 pub type SlotId = u64;
 
-/// This variable type is used to represent the meta value of a bucket.
+/// Metadata for a bucket containing nonce, capacity, and usage statistics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash)]
 pub struct BucketMeta {
-    /// nonce value of a bucket.
+    /// Nonce for SHI hash table operations.
     pub nonce: u32,
-    /// The capacity size of the bucket.
+    /// Total # slots of the bucket.
     pub capacity: u64,
-    /// The number of slots that are currently used.
+    /// Number of occupied slots in the bucket. This field can be inferred from
+    /// the bucket data, so it does not participate in the computation of bucket
+    /// commitment.
     pub used: u64,
 }
 
@@ -73,7 +84,9 @@ impl TryFrom<&SaltValue> for BucketMeta {
 }
 
 impl BucketMeta {
-    /// Creates a little-endian byte array from a `BucketMeta`.
+    /// Serialize bucket metadata to a 20-byte little-endian byte array.
+    ///
+    /// Layout: `nonce`(4) | `capacity`(8) | `used`(8)
     pub fn to_bytes(&self) -> [u8; 20] {
         let mut bytes = [0u8; 20];
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
@@ -83,8 +96,11 @@ impl BucketMeta {
     }
 }
 
-/// The [`SaltKey`] type, its high 20 bits are the `bucket_id`, and low 40 bits
-/// are the `slot_id`.
+/// 64-bit key encoding bucket and slot identifiers.
+///
+/// Layout: `bucket_id` (high 24 bits) | `slot_id` (low 40 bits)
+/// - Supports ~16M buckets (2^24)
+/// - Supports ~1T slots per bucket (2^40)
 #[derive(
     Clone,
     Copy,
@@ -103,19 +119,19 @@ impl BucketMeta {
 pub struct SaltKey(pub u64);
 
 impl SaltKey {
-    /// Convert [`SaltKey`] to `bucket_id`.
+    /// Extract the 24-bit bucket ID from the high bits.
     #[inline]
     pub const fn bucket_id(&self) -> BucketId {
         (self.0 >> BUCKET_SLOT_BITS) as BucketId
     }
 
-    /// Convert [`SaltKey`] to `slot_id`.
+    /// Extract the 40-bit slot ID from the low bits.
     #[inline]
     pub const fn slot_id(&self) -> SlotId {
         self.0 as SlotId & BUCKET_SLOT_ID_MASK
     }
 
-    /// Check if [`SaltKey`] is bucket meta slot.
+    /// Check if this key addresses a metadata slot (first 65,536 buckets).
     pub const fn is_bucket_meta_slot(&self) -> bool {
         self.bucket_id() < NUM_META_BUCKETS as BucketId
     }
@@ -136,8 +152,7 @@ impl From<u64> for SaltKey {
 }
 
 /// The maximum number of bytes that can be stored in a [`SaltValue`].
-/// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMetadata` (i.e.,
-/// bucket nonce & capacity).
+/// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMeta`.
 ///
 /// For `Account`, the key length is 20 bytes, and the value length is either 40
 /// (for EOA's) or 72 bytes (for smart contracts). So, encoding an `Account` requires:
@@ -147,18 +162,21 @@ impl From<u64> for SaltKey {
 /// So, encoding a `Storage` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 86 bytes.
 ///
-/// For `BucketMetadata`, the nonce and capacity are 4 and 8 bytes, respectively.
+/// For `BucketMeta`, the serialized form is 20 bytes (nonce:4 + capacity:8 + used:8).
 /// So, encoding a `BucketMetadata` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(4) + `value`(8) = 14 bytes.
+///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(0) = 22 bytes.
 ///
 /// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 94,
-/// which is the maximum of 94, 86, and 14.
+/// which is the maximum of 94, 86, and 22.
 pub const MAX_SALT_VALUE_BYTES: usize = 94;
 
-/// Encodes `PlainKey` and `PlainValue` into a single byte array.
+/// Variable-length encoding of key-value pairs with length prefixes.
+///
+/// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
+/// Supports Account, Storage, and BucketMeta types.
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
-    /// A byte array large enough to store any type of [`SaltValue`].
+    /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
     #[deref_mut]
     #[serde(with = "serde_arrays")]
@@ -166,7 +184,9 @@ pub struct SaltValue {
 }
 
 impl SaltValue {
-    /// Creates a new [`SaltValue`] instance.
+    /// Create a new encoded value from separate key and value byte slices.
+    ///
+    /// Encodes the data in the format: `key_len`(1) | `value_len`(1) | `key` | `value`
     pub fn new(key: &[u8], value: &[u8]) -> Self {
         let key_len = key.len();
         let value_len = value.len();
@@ -180,13 +200,13 @@ impl SaltValue {
         Self { data }
     }
 
-    /// Returns the key of the [`SaltValue`].
+    /// Extract the key portion from the encoded data.
     pub fn key(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         &self.data[2..2 + key_len]
     }
 
-    /// Returns the value of the [`SaltValue`].
+    /// Extract the value portion from the encoded data.
     pub fn value(&self) -> &[u8] {
         let key_len = self.data[0] as usize;
         let value_len = self.data[1] as usize;
@@ -207,22 +227,183 @@ impl TryFrom<SaltValue> for BucketMeta {
     }
 }
 
-/// The data of salt trie will be persisted in the form of [`NodeId`]
-/// and [`Commitment`].
+/// 64-bit unique identifier used to address nodes in both the main trie and
+/// bucket subtrees (note: only regular data buckets can grow dynamically).
+///
+/// **Main trie structure (4 levels, 0-3):**
+/// - Level 0 (root): 1 node
+/// - Level 1: 256 nodes
+/// - Level 2: 65,536 nodes
+/// - Level 3: 16,777,216 nodes
+/// - Total: 16,843,009 nodes
+///
+/// **Bucket subtree structure (up to 5 levels, 0-4):**
+/// - Level 0: 1 node
+/// - Level 1: 256 nodes
+/// - Level 2: 65,536 nodes
+/// - Level 3: 16,777,216 nodes
+/// - Level 4: 4,294,967,296 nodes
+/// - Total: 4,311,810,305 nodes
+///
+/// **Node addressing scheme:**
+///
+/// *Main trie nodes (25 bits):*
+/// - Uses lowest 25 bits for node position (25 bits needed since 2^25 > 16,843,009)
+/// - BFS numbering: root=0, top-to-bottom, left-to-right
+/// - Upper 39 bits unused
+///
+/// *Bucket subtree nodes (24 + 33 bits):*
+/// - Highest 24 bits: bucket ID (must be > 65,535 since meta buckets never grow)
+/// - Lowest 40 bits: local position (33 bits needed since 2^33 > 4,311,810,305, 7 bits unused)
+/// - Each subtree uses same BFS numbering as main trie
 pub type NodeId = u64;
 
-/// Return the position of the bucket meta for given bucket id.
+/// Returns true if the given NodeId addresses a node in a bucket subtree.
+///
+/// This function validates the NodeId and returns true only for valid subtree nodes:
+/// - Main trie nodes: bucket ID = 0, remaining bits represent main trie position
+/// - Metadata bucket nodes: Invalid since metadata buckets cannot grow beyond fixed size
+/// - Subtree nodes: bucket ID >= 65,536, remaining bits represent local subtree position
+///
+/// # Panics
+/// Panics if the NodeId is invalid (e.g., metadata bucket ID with non-zero remaining bits).
 #[inline]
-pub fn meta_position(bucket_id: BucketId) -> SaltKey {
+pub fn is_subtree_node(node_id: NodeId) -> bool {
+    let bucket_id = node_id >> BUCKET_SLOT_BITS;
+    let remaining_bits = node_id & BUCKET_SLOT_ID_MASK;
+
+    if bucket_id < NUM_META_BUCKETS as u64 {
+        // For main trie nodes (bucket_id = 0) or invalid metadata bucket references,
+        // the remaining bits should represent a valid main trie position.
+        // Metadata buckets (1-65535) cannot have subtrees, so any non-zero remaining
+        // bits with bucket_id > 0 indicates an invalid NodeId.
+        if bucket_id > 0 {
+            panic!(
+                "Invalid NodeId: metadata bucket {bucket_id} cannot have subtree nodes (remaining bits: {remaining_bits})"
+            );
+        }
+        false // Main trie node (bucket_id = 0)
+    } else {
+        true // Valid subtree node (bucket_id >= 65536)
+    }
+}
+
+/// Returns the BFS number of the leftmost node at the specified level in a complete N-ary tree.
+///
+/// In a breadth-first search (BFS) numbering scheme:
+/// - The root node is numbered 0
+/// - Node numbers increase with each level from top to bottom
+/// - Within each level, nodes are numbered consecutively from left to right
+///
+/// This function calculates the number of the leftmost node at the given level using the
+/// mathematical formula for the sum of a geometric series:
+///
+/// ```text
+/// f(level) = (N^level - 1) / (N - 1)
+/// ```
+///
+/// where N is `TRIE_WIDTH` (256 in this implementation).
+///
+/// # Arguments
+///
+/// * `level` - The 0-based level index. Level 0 is the root node.
+///
+/// # Returns
+///
+/// * `Some(node_id)` - The BFS number of the leftmost node at the specified level if it fits in a u64.
+/// * `None` - If the result is too large for a u64.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Level 0 (root): BFS number = 0
+/// assert_eq!(leftmost_node(0), Some(0));
+///
+/// // Level 1: BFS number = 1 (since there's 1 node at level 0)
+/// assert_eq!(leftmost_node(1), Some(1));
+///
+/// // Level 2: BFS number = 257 (since there are 1 + 256 nodes at levels 0 and 1)
+/// assert_eq!(leftmost_node(2), Some(257));
+/// ```
+const fn leftmost_node(level: u32) -> Option<u64> {
+    if level == 0 {
+        return Some(0);
+    }
+
+    // Compute the sum of the geometric series in an overflow-safe manner
+    let width = TRIE_WIDTH as u128;
+    let pow_result = match width.checked_pow(level) {
+        Some(p) => p,
+        None => return None,
+    };
+    let result = (pow_result - 1) / (width - 1);
+    if result > u64::MAX as u128 {
+        None // The result is valid but too large for a u64.
+    } else {
+        Some(result as u64) // It fits, so we can safely cast and return.
+    }
+}
+
+/// Calculate the BFS level where the specified node is located in a complete 256-ary tree.
+///
+/// This function determines which level a given node belongs to by finding the highest level
+/// whose starting BFS number is ≤ that of the given node.
+///
+/// # Arguments
+/// * `bfs_number` - The node whose level to determine
+///
+/// # Returns
+/// The level (0-based) where the node is located
+pub fn get_bfs_level(bfs_number: u64) -> usize {
+    for level in (0..=8).rev() {
+        if let Some(leftmost) = leftmost_node(level) {
+            if bfs_number >= leftmost {
+                return level as usize;
+            }
+        }
+    }
+    unreachable!("n = {bfs_number} should always match at least level 0")
+}
+
+/// Calculate the SaltKey where bucket metadata is stored.
+///
+/// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
+/// stores metadata for 256 regular buckets. Given a `bucket_id`, this function:
+/// 1. Divides by 256 (>> 8 bits) to find the metadata bucket ID
+/// 2. Takes modulo 256 to find the slot within that metadata bucket
+///
+/// This allows ~16M buckets to store their metadata in just 65,536 dedicated metadata buckets.
+///
+/// # Arguments
+/// * `bucket_id` - The regular bucket ID whose metadata location to find
+///
+/// # Returns
+/// SaltKey pointing to the metadata storage location
+#[inline]
+pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
     SaltKey::from((
         bucket_id >> MIN_BUCKET_SIZE_BITS,
         bucket_id as SlotId % MIN_BUCKET_SIZE as SlotId,
     ))
 }
 
-/// Return the bucket id of the bucket meta for given salt key.
+/// Extract the original bucket ID from a metadata storage key.
+///
+/// This is the inverse operation of [`bucket_metadata_key`]. Given a SaltKey that points
+/// to a metadata storage location, reconstructs the original bucket ID whose metadata
+/// is stored there.
+///
+/// The reconstruction works by:
+/// 1. Taking the metadata bucket ID and shifting left by 8 bits (multiply by 256)
+/// 2. Adding the slot ID (which represents the offset within the 256-bucket group)
+///
+/// # Arguments
+/// * `key` - SaltKey pointing to a metadata storage location
+///
+/// # Returns
+/// The original bucket ID whose metadata is stored at this key
 #[inline]
-pub fn meta_bucket_id(key: SaltKey) -> BucketId {
+pub fn bucket_id_from_metadata_key(key: SaltKey) -> BucketId {
     (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId
 }
 
@@ -230,29 +411,320 @@ pub fn meta_bucket_id(key: SaltKey) -> BucketId {
 mod tests {
     use super::*;
 
+    /// Tests the basic operations of SaltKey: construction from bucket/slot pair and
+    /// extraction of bucket ID and slot ID components. Verifies that the 64-bit layout
+    /// correctly encodes bucket ID in high 24 bits and slot ID in low 40 bits.
     #[test]
-    fn test_salt_value_and_meta() {
+    fn salt_key_operations() {
+        let bucket_id = 0x123456;
+        let slot_id = 0x789ABCDEF0;
+        let key = SaltKey::from((bucket_id, slot_id));
+
+        assert_eq!(key.bucket_id(), bucket_id);
+        assert_eq!(key.slot_id(), slot_id);
+        assert_eq!(key.0, ((bucket_id as u64) << 40) + slot_id);
+    }
+
+    /// Tests SaltKey behavior at the boundaries of its bit allocation. Verifies that
+    /// maximum values (24-bit bucket ID, 40-bit slot ID) and minimum values (0, 0)
+    /// are handled correctly without overflow or underflow issues.
+    #[test]
+    fn salt_key_boundaries() {
+        // Test maximum values - ensures no overflow in bit shifting
+        let max_bucket = (1u32 << 24) - 1; // 16,777,215 (24-bit max)
+        let max_slot = (1u64 << 40) - 1; // 1,099,511,627,775 (40-bit max)
+        let key = SaltKey::from((max_bucket, max_slot));
+
+        assert_eq!(key.bucket_id(), max_bucket);
+        assert_eq!(key.slot_id(), max_slot);
+
+        // Test minimum values - ensures correct handling of zero values
+        let key = SaltKey::from((0, 0));
+        assert_eq!(key.bucket_id(), 0);
+        assert_eq!(key.slot_id(), 0);
+    }
+
+    /// Tests the metadata bucket detection logic. SALT uses the first 65,536 buckets
+    /// as metadata storage. This test verifies that is_bucket_meta_slot() correctly
+    /// identifies whether a SaltKey points to a metadata storage location.
+    #[test]
+    fn salt_key_meta_bucket_detection() {
+        let meta_key = SaltKey::from((100, 50)); // bucket 100 < 65536 (metadata)
+        let regular_key = SaltKey::from((70000, 50)); // bucket 70000 >= 65536 (regular)
+
+        assert!(meta_key.is_bucket_meta_slot());
+        assert!(!regular_key.is_bucket_meta_slot());
+    }
+
+    /// Tests BucketMeta serialization and deserialization roundtrip. Verifies that
+    /// the 20-byte little-endian encoding (nonce:4 + capacity:8 + used:8) correctly
+    /// preserves all field values through serialize-then-deserialize operations.
+    #[test]
+    fn bucket_meta_serialization() {
         let meta = BucketMeta {
-            nonce: 1234,
-            capacity: 512,
-            used: 0,
+            nonce: 0x12345678,
+            capacity: 0x123456789ABCDEF0,
+            used: 0x987654321,
+        };
+        let bytes = meta.to_bytes();
+        let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
+
+        assert_eq!(meta, recovered);
+        assert_eq!(bytes.len(), 20);
+    }
+
+    /// Tests BucketMeta default constructor. Verifies that default values match
+    /// expected initialization: nonce=0, capacity=MIN_BUCKET_SIZE (256), used=0.
+    #[test]
+    fn bucket_meta_default() {
+        let meta = BucketMeta::default();
+        assert_eq!(meta.nonce, 0);
+        assert_eq!(meta.capacity, MIN_BUCKET_SIZE as u64);
+        assert_eq!(meta.used, 0);
+    }
+
+    /// Tests SaltValue encoding format: key_len(1) | value_len(1) | key | value.
+    /// Verifies that arbitrary key-value pairs are correctly encoded with length
+    /// prefixes and that extraction methods return the original data.
+    #[test]
+    fn salt_value_encoding() {
+        let key = b"test_key";
+        let value = b"test_value_data";
+        let salt_value = SaltValue::new(key, value);
+
+        assert_eq!(salt_value.key(), key);
+        assert_eq!(salt_value.value(), value);
+        assert_eq!(salt_value.data[0], key.len() as u8);
+        assert_eq!(salt_value.data[1], value.len() as u8);
+    }
+
+    /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
+    /// contains the 20-byte serialized BucketMeta and the value is empty. Verifies
+    /// bidirectional conversion preserves all metadata fields correctly.
+    #[test]
+    fn salt_value_bucket_meta_conversion() {
+        let meta = BucketMeta {
+            nonce: 0xDEADBEEF,
+            capacity: 1024,
+            used: 100,
         };
         let salt_value = SaltValue::from(meta);
-        assert_eq!(salt_value.data[0], 20);
-        assert_eq!(salt_value.data[1], 0);
+
+        assert_eq!(salt_value.data[0], 20); // key length (BucketMeta serialized size)
+        assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)
+
+        let recovered_meta = BucketMeta::try_from(salt_value).unwrap();
+        assert_eq!(recovered_meta, meta);
+    }
+
+    /// Tests the metadata storage mapping scheme. Each metadata bucket (0-65535) stores
+    /// metadata for 256 regular buckets. bucket_metadata_key() divides bucket_id by 256
+    /// to find the metadata bucket and uses modulo 256 for the slot within that bucket.
+    #[test]
+    fn bucket_metadata_key_mapping() {
+        let test_cases = [
+            (0, 0, 0),         // bucket 0 -> meta bucket 0, slot 0
+            (255, 0, 255),     // bucket 255 -> meta bucket 0, slot 255
+            (256, 1, 0),       // bucket 256 -> meta bucket 1, slot 0
+            (512, 2, 0),       // bucket 512 -> meta bucket 2, slot 0
+            (1000, 3, 232),    // bucket 1000 -> meta bucket 3, slot 232 (1000 % 256)
+            (65535, 255, 255), // bucket 65535 -> meta bucket 255, slot 255
+        ];
+
+        for (bucket_id, expected_meta_bucket, expected_slot) in test_cases {
+            let key = bucket_metadata_key(bucket_id);
+            assert_eq!(
+                key.bucket_id(),
+                expected_meta_bucket,
+                "bucket_id={}",
+                bucket_id
+            );
+            assert_eq!(key.slot_id(), expected_slot, "bucket_id={}", bucket_id);
+        }
+    }
+
+    /// Tests the bidirectional conversion between bucket IDs and metadata storage keys.
+    /// bucket_metadata_key() and bucket_id_from_metadata_key() should be perfect inverses,
+    /// allowing any bucket ID to be mapped to a metadata key and back without loss.
+    #[test]
+    fn metadata_key_roundtrip() {
+        let test_buckets = [0, 1, 255, 256, 1000, 65535, 100000, 16777215];
+
+        for bucket_id in test_buckets {
+            let key = bucket_metadata_key(bucket_id);
+            let recovered = bucket_id_from_metadata_key(key);
+            assert_eq!(
+                bucket_id, recovered,
+                "Failed roundtrip for bucket {}",
+                bucket_id
+            );
+        }
+    }
+
+    /// Tests BucketMeta deserialization error handling. The try_from implementation
+    /// requires exactly 20 bytes minimum for proper deserialization. Tests both
+    /// insufficient data (should fail) and minimum valid data (should succeed).
+    #[test]
+    fn bucket_meta_error_handling() {
+        // Test insufficient bytes - should return error
+        let short_bytes = [1u8; 10];
+        assert!(BucketMeta::try_from(&short_bytes[..]).is_err());
+
+        // Test exactly 20 bytes (minimum required) - should succeed
+        let valid_bytes = [0u8; 20];
+        assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
+    }
+
+    /// Tests NodeId subtree node detection with validation. Main trie nodes have bucket ID = 0,
+    /// while bucket subtree nodes have bucket ID >= 65,536. Metadata buckets (1-65535) cannot
+    /// have subtrees, so any NodeId with metadata bucket ID and non-zero remaining bits is invalid.
+    #[test]
+    fn node_id_subtree_detection() {
+        // Main trie nodes - should all return false
+        let main_trie_nodes = [0, 1, 256, 65536, 16777216, 16843008]; // Various main trie positions
+        for node_id in main_trie_nodes {
+            assert!(
+                !is_subtree_node(node_id),
+                "Main trie node {} incorrectly detected as subtree",
+                node_id
+            );
+        }
+
+        // Bucket subtree nodes - should all return true
+        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket 65536, position 0
+        let bucket_100000 = (100000u64 << BUCKET_SLOT_BITS) | 1000; // bucket 100000, position 1000
+        let bucket_max = (16777215u64 << BUCKET_SLOT_BITS) | 500; // max bucket (24-bit), position 500
+
+        assert!(is_subtree_node(bucket_65536));
+        assert!(is_subtree_node(bucket_100000));
+        assert!(is_subtree_node(bucket_max));
+    }
+
+    /// Tests that is_subtree_node panics on invalid NodeIds. Metadata buckets (1-65535)
+    /// cannot grow beyond their fixed size, so any NodeId with metadata bucket ID and
+    /// non-zero remaining bits represents an invalid node reference.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: metadata bucket 1000 cannot have subtree nodes")]
+    fn node_id_invalid_metadata_bucket_panic() {
+        let invalid_meta_node = (1000u64 << BUCKET_SLOT_BITS) | 100; // metadata bucket with subtree bits
+        is_subtree_node(invalid_meta_node);
+    }
+
+    /// Tests additional invalid metadata bucket cases to ensure proper validation.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: metadata bucket 65535 cannot have subtree nodes")]
+    fn node_id_last_metadata_bucket_panic() {
+        let invalid_last_meta = (65535u64 << BUCKET_SLOT_BITS) | 1; // last metadata bucket with subtree bits
+        is_subtree_node(invalid_last_meta);
+    }
+
+    /// Tests the leftmost_node function which calculates the NodeId of the leftmost node at a given level.
+    ///
+    /// For a complete 256-ary tree:
+    /// - Level 0: 1 node        -> leftmost node ID = 0
+    /// - Level 1: 256 nodes     -> leftmost node ID = 1
+    /// - Level 2: 65,536 nodes  -> leftmost node ID = 1 + 256 = 257
+    /// - Level 3: 16,777,216 nodes -> leftmost node ID = 1 + 256 + 65,536 = 65,793
+    /// - Level 4: 4,294,967,296 nodes -> leftmost node ID = 1 + 256 + 65,536 + 16,777,216 = 16,843,009
+    /// - ...
+    /// - Level 9 and above: Overflow u64
+    #[test]
+    fn leftmost_node_calculation() {
+        // Test level 0 (root node)
         assert_eq!(
-            u32::from_le_bytes(salt_value.data[2..6].try_into().unwrap()),
-            1234
-        );
-        assert_eq!(
-            u64::from_le_bytes(salt_value.data[6..14].try_into().unwrap()),
-            512
-        );
-        assert_eq!(
-            u64::from_le_bytes(salt_value.data[14..22].try_into().unwrap()),
-            0
+            leftmost_node(0),
+            Some(0),
+            "Level 0 should have leftmost node at position 0"
         );
 
-        assert_eq!(meta, BucketMeta::try_from(&salt_value).unwrap());
+        // Test level 1
+        assert_eq!(
+            leftmost_node(1),
+            Some(1),
+            "Level 1 should have leftmost node at position 1"
+        );
+
+        // Test level 2: 1 + 256 = 257
+        assert_eq!(
+            leftmost_node(2),
+            Some(257),
+            "Level 2 should have leftmost node at position 257"
+        );
+
+        // Test level 3: 1 + 256 + 65536 = 65793
+        assert_eq!(
+            leftmost_node(3),
+            Some(65793),
+            "Level 3 should have leftmost node at position 65793"
+        );
+
+        // Test level 4: 1 + 256 + 65536 + 16777216 = 16843009
+        assert_eq!(
+            leftmost_node(4),
+            Some(16843009),
+            "Level 4 should have leftmost node at position 16843009"
+        );
+
+        // Test level 5: 1 + 256 + 65536 + 16777216 + 4294967296 = 4311810305
+        assert_eq!(
+            leftmost_node(5),
+            Some(4311810305),
+            "Level 5 should have leftmost node at position 4311810305"
+        );
+
+        // Test level 8: This should still fit in u64
+        // For a 256-ary tree, level 8 would be at position:
+        // (256^8 - 1) / 255 = 72340172838076673
+        assert_eq!(
+            leftmost_node(8),
+            Some(72340172838076673),
+            "Level 8 should have leftmost node at position 72340172838076673"
+        );
+
+        // Test level 9: This should overflow u64
+        // For a 256-ary tree, level 9 would be at position:
+        // (256^9 - 1) / 255 = 18519084246547628289
+        // This is larger than u64::MAX (18446744073709551615)
+        assert_eq!(
+            leftmost_node(9),
+            None,
+            "Level 9 should overflow and return None"
+        );
+
+        // Test level 10: This should also overflow u64
+        assert_eq!(
+            leftmost_node(10),
+            None,
+            "Level 10 should overflow and return None"
+        );
+    }
+
+    /// Tests BFS level detection for complete 256-ary trees. Both the main trie and bucket subtrees
+    /// use BFS numbering to label its nodes. This test verifies that get_bfs_level correctly identifies
+    /// the level for nodes at level boundaries and within each level.
+    #[test]
+    fn bfs_level_detection() {
+        // Level 0: Root node only (ID 0)
+        assert_eq!(get_bfs_level(0), 0, "Root node should be at level 0");
+
+        // Level 1: Nodes 1-256 (256 nodes total)
+        assert_eq!(get_bfs_level(1), 1, "First level 1 node");
+        assert_eq!(get_bfs_level(128), 1, "Middle level 1 node");
+        assert_eq!(get_bfs_level(256), 1, "Last level 1 node");
+
+        // Level 2: Nodes 257-65,792 (65,536 nodes total)
+        assert_eq!(get_bfs_level(257), 2, "First level 2 node");
+        assert_eq!(get_bfs_level(32000), 2, "Middle level 2 node");
+        assert_eq!(get_bfs_level(65792), 2, "Last level 2 node");
+
+        // Level 3: Nodes 65,793-16,843,008 (16,777,216 nodes total)
+        assert_eq!(get_bfs_level(65793), 3, "First level 3 node");
+        assert_eq!(get_bfs_level(1000000), 3, "Middle level 3 node");
+        assert_eq!(get_bfs_level(16843008), 3, "Last level 3 node");
+
+        // Level 8: Nodes 72,340,172,838,076,673-18,519,084,246,547,628,288 (2^64 nodes total)
+        assert_eq!(get_bfs_level(72340172838076673), 8, "First level 8 node");
+        assert_eq!(get_bfs_level(9446744073709551615), 8, "Middle level 8 node");
+        assert_eq!(get_bfs_level(u64::MAX), 8, "Largest node number in u64");
     }
 }

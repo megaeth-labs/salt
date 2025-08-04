@@ -90,7 +90,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let slot = meta_position(bucket_id);
+            let slot = bucket_metadata_key(bucket_id);
             let value = self.get_entry(slot)?;
             let mut meta = value
                 .and_then(|v| v.try_into().ok())
@@ -341,7 +341,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         // Add meta change to the updates
         self.update_entry(
             out_updates,
-            meta_position(bucket_id),
+            bucket_metadata_key(bucket_id),
             Some((*old_meta).into()),
             Some((*new_meta).into()),
         );
@@ -392,7 +392,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         old_meta: BucketMeta,
         new_meta: BucketMeta,
     ) {
-        let id = meta_position(bucket_id);
+        let id = bucket_metadata_key(bucket_id);
         let new_value = Some(new_meta.into());
         self.cache.insert(id, new_value.clone());
         out_updates.add(id, Some(old_meta.into()), new_value);
@@ -472,7 +472,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         Self { salt_state }
     }
 
-    /// Return the SALT value associated with the given plain key.
+    /// Return the plain value associated with the given plain key.
     pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
@@ -487,6 +487,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
             if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
                 match slot_val.key().cmp(plain_key) {
                     Ordering::Less => return Ok(None),
+                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
                     Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
                     Ordering::Greater => (),
                 }
