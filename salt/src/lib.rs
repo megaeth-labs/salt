@@ -6,7 +6,7 @@ pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
 pub use state::{
-    state::{pk_hasher, EphemeralSaltState, PlainStateProvider},
+    state::{pk_hasher, EphemeralSaltState},
     updates::StateUpdates,
 };
 pub mod trie;
@@ -49,9 +49,8 @@ mod tests {
         // "Persist" the state updates to storage (the "trie" remains unchanged)
         mem_salt.update_state(state_updates.clone());
 
-        // Read plain value back using PlainStateProvider
-        let provider = PlainStateProvider::new(&mem_salt);
-        let balance = provider.get_raw(b"account1")?;
+        // Read plain value back
+        let balance = state.get_raw(b"account1")?;
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes

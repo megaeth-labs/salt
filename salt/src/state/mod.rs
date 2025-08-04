@@ -5,13 +5,13 @@
 //! # State Management in SALT
 //!
 //! The state module provides two main interfaces for working with blockchain state:
-//! 1. **Plain State Operations**: EVM-compatible key-value operations using [`PlainStateProvider`] and [`EphemeralSaltState`]
+//! 1. **Plain State Operations**: EVM-compatible key-value operations using [`EphemeralSaltState`]
 //! 2. **SALT State Operations**: Low-level bucket operations using [`StateReader`] trait
 //!
 //! ## Working with Plain State (EVM-compatible operations)
 //!
 //! ```rust,ignore
-//! use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
+//! use salt::{EphemeralSaltState, MemSalt};
 //!
 //! // Create an in-memory SALT instance
 //! let store = MemSalt::new();
@@ -31,17 +31,17 @@
 //! store.update_state(state_updates);
 //!
 //! // Reading plain state back
-//! let provider = PlainStateProvider::new(&store);
+//! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Read individual values by plain key
-//! let balance = provider.get_raw(b"account_address_1").unwrap();
+//! let balance = state.get_raw(b"account_address_1").unwrap();
 //! assert_eq!(balance, Some(b"balance_100_eth".to_vec()));
 //!
-//! let storage_val = provider.get_raw(b"storage_slot_key").unwrap();
+//! let storage_val = state.get_raw(b"storage_slot_key").unwrap();
 //! assert_eq!(storage_val, Some(b"storage_value_data".to_vec()));
 //!
 //! // Check for non-existent key
-//! let missing = provider.get_raw(b"non_existent_key").unwrap();
+//! let missing = state.get_raw(b"non_existent_key").unwrap();
 //! assert_eq!(missing, None);
 //! ```
 //!

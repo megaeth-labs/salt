@@ -78,6 +78,36 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
+    /// Return the plain value associated with the given plain key.
+    pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = pk_hasher::bucket_id(plain_key);
+        let metadata = self
+            .get_entry(bucket_metadata_key(bucket_id))?
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(BucketMeta::default);
+        // let meta = self.salt_state.get_meta(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..metadata.capacity {
+            let slot_id = probe(hashed_id, step, metadata.capacity);
+            if let Some(slot_val) = self.get_entry((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
@@ -453,50 +483,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     }
                 }
                 None => return Ok(None),
-            }
-        }
-        Ok(None)
-    }
-}
-
-// FIXME: doesn't make sense to have a separate struct for this purpose. providing
-// access via plain kv's is one of SALT's core responsibility. Make PlainStateProvider
-// a trait and have MemSalt implement it!
-
-/// This structure enables reading EVM account & storage data from a SALT state.
-#[derive(Debug)]
-pub struct PlainStateProvider<'a, S> {
-    /// The SALT state to read data from.
-    salt_state: &'a S,
-}
-
-impl<'a, S: StateReader> PlainStateProvider<'a, S> {
-    /// Create a [`SaltStateProvider`] object.
-    pub const fn new(salt_state: &'a S) -> Self {
-        Self { salt_state }
-    }
-
-    /// Return the plain value associated with the given plain key.
-    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
-        // Computes the `bucket_id` based on the `key`.
-        let bucket_id = pk_hasher::bucket_id(plain_key);
-        let meta = self.salt_state.get_meta(bucket_id)?;
-        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
-        let hashed_id = pk_hasher::hashed_key(plain_key, meta.nonce);
-
-        // Starts from the initial slot position and searches for the slot corresponding to the
-        // `key`.
-        for step in 0..meta.capacity {
-            let slot_id = probe(hashed_id, step, meta.capacity);
-            if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
-                match slot_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
-                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
             }
         }
         Ok(None)
