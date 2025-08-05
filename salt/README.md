@@ -100,23 +100,22 @@ store.update_trie(trie_updates);
 ### Generating Proofs
 
 ```rust,ignore
-use salt::{get_block_witness, SaltProof};
+use salt::trie::proof::create_proof;
 
-// FIXME: the following code is fictional now; make it work!
-
-/*
 // Define plain keys to prove (both existing and non-existing)
 let plain_keys_to_prove = vec![b"account1", b"non_existent_key"];
 let expected_values = vec![Some(b"balance100"), None];
 
 // Alice creates a cryptographic proof for plain key-value pairs
-let proof = prover::create_salt_proof(&plain_keys, &store)?;
+let proof = create_proof(&plain_keys, &store)?;
 
 // Bob verifies the proof against its local state root
-let is_valid = proof.check::<MemStore>(plain_keys, expected_values, root_hash);
-// FIXME: why can't is_value simply be a bool?
+let is_valid = proof.check::<MemStore>(root_hash);
 assert!(is_valid.is_ok());
- */
+
+let proved_plain_values = proof.get_values();
+
+assert_eq!(proved_plain_values, expected_values);
 ```
 
 ## Data Types
