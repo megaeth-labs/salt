@@ -1,6 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, BUCKET_SLOT_BITS},
+    constant::{default_commitment, BUCKET_SLOT_BITS, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -32,27 +32,54 @@ where
     }
     keys.dedup();
 
-    let kvs = keys
-        .iter()
-        .map(|salt_key| {
-            let entry = state_reader
-                .entry(*salt_key)
+    // Split the sorted keys into two vectors based on threshold
+    let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
+    // Since keys is already sorted, we can use binary search to find the split point
+    let split_index = match keys.binary_search(&threshold) {
+        Ok(index) => index,  // Exact match found
+        Err(index) => index, // Would be inserted at this index
+    };
+    let (meta_keys, data_keys) = keys.split_at(split_index);
+
+    let metadata = meta_keys
+        .par_iter()
+        .map(|&salt_key| {
+            let bucket_id = bucket_id_from_metadata_key(salt_key);
+            let meta = state_reader
+                .get_meta(bucket_id)
                 .map_err(ProofError::ReadStateFailed)?;
-            Ok((*salt_key, entry))
+
+            Ok((bucket_id, meta))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+    let kvs = data_keys
+        .par_iter()
+        .map(|&salt_key| {
+            let entry = state_reader
+                .entry(salt_key)
+                .map_err(ProofError::ReadStateFailed)?;
+            Ok((salt_key, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     let proof = prover::create_salt_proof(&keys, state_reader, trie_reader)?;
 
-    Ok(BlockWitness { kvs, proof })
+    Ok(BlockWitness {
+        metadata,
+        kvs,
+        proof,
+    })
 }
 
 /// Data structure used to re-execute the block in prover client
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
+    /// bucket metadata in sub state
+    pub metadata: BTreeMap<BucketId, BucketMeta>,
     /// kvs in sub state
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
-    /// salt proof to prove the metas + kvs
+    /// salt proof to prove the metadata + kvs
     pub proof: SaltProof,
 }
 
@@ -85,8 +112,21 @@ impl BlockWitness {
         B: StateReader,
         T: TrieReader,
     {
-        let keys = self.kvs.keys().copied().collect::<Vec<_>>();
-        let vals = self.kvs.values().cloned().collect::<Vec<_>>();
+        let mut keys = self
+            .metadata
+            .keys()
+            .map(|&bucket_id| bucket_metadata_key(bucket_id))
+            .collect::<Vec<_>>();
+        keys.extend(self.kvs.keys().copied());
+
+        let mut vals = self
+            .metadata
+            .values()
+            .cloned()
+            .map(|v| Some(SaltValue::from(v)))
+            .collect::<Vec<_>>();
+        vals.extend(self.kvs.values().cloned());
+
         self.proof.check(keys, vals, root)?;
         Ok(())
     }
@@ -96,14 +136,15 @@ impl StateReader for BlockWitness {
     type Error = &'static str;
 
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        let result = self.kvs.get(&key).cloned().flatten();
-        Ok(if result.is_none() && key.is_bucket_meta_slot() {
-            Some(BucketMeta::default().into())
+        if key.is_bucket_meta_slot() {
+            let bucket_id = bucket_id_from_metadata_key(key);
+            Ok(Some(self.get_meta(bucket_id)?.into()))
         } else {
-            result
-        })
+            Ok(self.kvs.get(&key).cloned().flatten())
+        }
     }
 
+    // only handle data bucket
     fn range_bucket(
         &self,
         range: RangeInclusive<BucketId>,
@@ -124,15 +165,38 @@ impl StateReader for BlockWitness {
         bucket_id: BucketId,
         range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let data = self
-            .kvs
-            .range(
-                SaltKey::from((bucket_id, *range.start()))
-                    ..SaltKey::from((bucket_id, *range.end())),
-            )
-            .map(|(k, v)| (*k, v.clone().expect("existing key")))
-            .collect();
+        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
+            assert!(*range.end() <= MIN_BUCKET_SIZE as NodeId);
+            range
+                .into_iter()
+                .map(|slot_id| {
+                    let salt_key = SaltKey::from((bucket_id, slot_id));
+
+                    let value = self
+                        .metadata
+                        .get(&bucket_id_from_metadata_key(salt_key))
+                        .copied()
+                        .unwrap_or_default()
+                        .into();
+
+                    (salt_key, value)
+                })
+                .collect()
+        } else {
+            self.kvs
+                .range((
+                    Included(SaltKey::from((bucket_id, *range.start()))),
+                    Included(SaltKey::from((bucket_id, *range.end()))),
+                ))
+                .filter(|(_, v)| v.is_some())
+                .map(|(&k, v)| (k, v.clone().unwrap())) // v is checked to be Some in the filter
+                .collect()
+        };
         Ok(data)
+    }
+
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        Ok(self.metadata.get(&bucket_id).copied().unwrap_or_default())
     }
 }
 
