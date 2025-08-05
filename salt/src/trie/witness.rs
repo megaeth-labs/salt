@@ -166,17 +166,16 @@ impl StateReader for BlockWitness {
             range
                 .into_iter()
                 .map(|slot_id| {
-                    let data_bucket_id =
-                        bucket_id_from_metadata_key(SaltKey::from((bucket_id, slot_id)));
+                    let salt_key = SaltKey::from((bucket_id, slot_id));
 
                     let value = self
                         .metas
-                        .get(&data_bucket_id)
+                        .get(&bucket_id_from_metadata_key(salt_key))
                         .copied()
                         .unwrap_or_default()
                         .into();
 
-                    (SaltKey::from((bucket_id, slot_id)), value)
+                    (salt_key, value)
                 })
                 .collect()
         } else {
@@ -186,7 +185,7 @@ impl StateReader for BlockWitness {
                     Included(SaltKey::from((bucket_id, *range.end()))),
                 ))
                 .filter(|(_, v)| v.is_some())
-                .map(|(&k, v)| (k, v.clone().unwrap()))
+                .map(|(&k, v)| (k, v.clone().unwrap())) // v is checked to be Some in the filter
                 .collect()
         };
         Ok(data)
