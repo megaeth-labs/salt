@@ -41,7 +41,7 @@ where
     };
     let (meta_keys, data_keys) = keys.split_at(split_index);
 
-    let metas = meta_keys
+    let metadata = meta_keys
         .par_iter()
         .map(|&salt_key| {
             let bucket_id = bucket_id_from_metadata_key(salt_key);
@@ -65,17 +65,21 @@ where
 
     let proof = prover::create_salt_proof(&keys, state_reader, trie_reader)?;
 
-    Ok(BlockWitness { metas, kvs, proof })
+    Ok(BlockWitness {
+        metadata,
+        kvs,
+        proof,
+    })
 }
 
 /// Data structure used to re-execute the block in prover client
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
-    /// bucket meta in sub state
-    pub metas: BTreeMap<BucketId, BucketMeta>,
+    /// bucket metadata in sub state
+    pub metadata: BTreeMap<BucketId, BucketMeta>,
     /// kvs in sub state
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
-    /// salt proof to prove the metas + kvs
+    /// salt proof to prove the metadata + kvs
     pub proof: SaltProof,
 }
 
@@ -109,14 +113,14 @@ impl BlockWitness {
         T: TrieReader,
     {
         let mut keys = self
-            .metas
+            .metadata
             .keys()
             .map(|&bucket_id| bucket_metadata_key(bucket_id))
             .collect::<Vec<_>>();
         keys.extend(self.kvs.keys().copied());
 
         let mut vals = self
-            .metas
+            .metadata
             .values()
             .cloned()
             .map(|v| Some(SaltValue::from(v)))
@@ -169,7 +173,7 @@ impl StateReader for BlockWitness {
                     let salt_key = SaltKey::from((bucket_id, slot_id));
 
                     let value = self
-                        .metas
+                        .metadata
                         .get(&bucket_id_from_metadata_key(salt_key))
                         .copied()
                         .unwrap_or_default()
@@ -192,7 +196,7 @@ impl StateReader for BlockWitness {
     }
 
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(self.metas.get(&bucket_id).copied().unwrap_or_default())
+        Ok(self.metadata.get(&bucket_id).copied().unwrap_or_default())
     }
 }
 
