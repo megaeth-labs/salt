@@ -17,7 +17,7 @@ pub type BucketId = u32;
 pub type SlotId = u64;
 
 /// This variable type is used to represent the meta value of a bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BucketMeta {
     /// nonce value of a bucket.
     pub nonce: u32,
@@ -65,6 +65,14 @@ impl BucketMeta {
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
         bytes[4..12].copy_from_slice(&self.capacity.to_le_bytes());
         bytes
+    }
+
+    /// Updates the current `BucketMeta` using the values from [`SaltValue`].
+    pub fn update(&mut self, value: &SaltValue) -> Result<(), &'static str> {
+        let meta: Self = value.try_into()?;
+        self.capacity = meta.capacity;
+        self.nonce = meta.nonce;
+        Ok(())
     }
 }
 

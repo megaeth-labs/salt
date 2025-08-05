@@ -11,7 +11,7 @@ use std::{
 };
 use tracing::info;
 
-type EphemeralSaltStateCache = (
+pub type EphemeralSaltStateCache = (
     HashMap<SaltKey, Option<SaltValue>>,
     HashMap<BucketId, BucketMeta>,
 );
@@ -499,7 +499,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 #[derive(Debug)]
 pub struct PlainStateProvider<'a, S> {
     /// The SALT state to read data from.
-    salt_state: &'a S,
+    pub salt_state: &'a S,
 }
 
 impl<'a, S: StateReader> PlainStateProvider<'a, S> {
@@ -512,6 +512,15 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
     pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
+        self.get_raw_with_bucket(bucket_id, plain_key)
+    }
+
+    /// Returns the SALT value associated with the given plain key using a precomputed Salt key.
+    pub fn get_raw_with_bucket(
+        &self,
+        bucket_id: BucketId,
+        plain_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, S::Error> {
         let meta = self.salt_state.get_meta(bucket_id)?;
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, meta.nonce);
