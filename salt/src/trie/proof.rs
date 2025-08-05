@@ -262,8 +262,7 @@ impl PlainKeysProof {
                     let plain_key = salt_value.key();
                     if plain_key != pkey {
                         return Err(ProofError::VerifyFailed(format!(
-                            "key mismatch: expected {:?}, got {:?}",
-                            pkey, plain_key
+                            "key mismatch: expected {pkey:?}, got {plain_key:?}"
                         )));
                     }
                 }
