@@ -11,6 +11,10 @@ use std::{
 };
 use tracing::info;
 
+pub type EphemeralSaltStateCache = (
+    HashMap<SaltKey, Option<SaltValue>>,
+    HashMap<BucketId, BucketMeta>,
+);
 /// A non-persistent SALT state snapshot.
 ///
 /// This allows users to tentatively update some SALT state without actually
@@ -22,7 +26,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
     base_state: &'a BaseState,
     /// Cache the values of datas and bucket metas read from `base_state`
     /// and the changes made to it.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub(crate) cache: EphemeralSaltStateCache,
     /// Whether to save access records
     save_access: bool,
 }
@@ -43,7 +47,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn new(reader: &'a BaseState) -> Self {
         Self {
             base_state: reader,
-            cache: HashMap::new(),
+            cache: (HashMap::new(), HashMap::new()),
             save_access: true,
         }
     }
@@ -52,6 +56,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn extend_cache(mut self, state_updates: &StateUpdates) -> Self {
         for (k, (_, v)) in &state_updates.data {
             self.cache
+                .0
                 .entry(*k)
                 .and_modify(|change| *change = v.clone())
                 .or_insert_with(|| v.clone());
@@ -60,7 +65,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     }
 
     /// Create a [`EphemeralSaltState`] object with the given cache.
-    pub fn with_cache(self, cache: HashMap<SaltKey, Option<SaltValue>>) -> Self {
+    pub fn with_cache(self, cache: EphemeralSaltStateCache) -> Self {
         Self { cache, ..self }
     }
 
@@ -74,8 +79,31 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Consumes the state and returns the underlying cache containing all changes made to the base
     /// state.
-    pub fn consume_cache(self) -> HashMap<SaltKey, Option<SaltValue>> {
+    pub fn consume_cache(self) -> EphemeralSaltStateCache {
         self.cache
+    }
+
+    // get bucket meta from cache or base state
+    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
+        let meta = if let Some(meta) = self.cache.1.get(&bucket_id) {
+            meta.clone()
+        } else {
+            let base_meta = self.base_state.get_meta(bucket_id)?;
+            let slot = bucket_metadata_key(bucket_id);
+            if let Some(value) = self.cache.0.get(&slot) {
+                // SaltValue not has meta used info, so update from `base_state`
+                let mut meta = value
+                    .clone()
+                    .and_then(|v| v.try_into().ok())
+                    .unwrap_or_else(BucketMeta::default);
+                meta.used = base_meta.used;
+                meta
+            } else {
+                base_meta
+            }
+        };
+
+        Ok(meta)
     }
 
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
@@ -90,11 +118,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let slot = bucket_metadata_key(bucket_id);
-            let value = self.get_entry(slot)?;
-            let mut meta = value
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(BucketMeta::default);
+            let mut meta = self.get_meta(bucket_id)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -192,15 +216,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
                     meta.capacity <<= 1;
                 } else {
-                    self.update_meta(
-                        out_updates,
-                        bucket_id,
-                        BucketMeta {
-                            used: meta.used - 1,
-                            ..*meta
-                        },
-                        *meta,
-                    );
+                    self.cache
+                        .1
+                        .entry(bucket_id)
+                        .and_modify(|old_meta| *old_meta = meta.clone())
+                        .or_insert(meta.clone());
                 }
                 return Ok(());
             }
@@ -221,17 +241,13 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let find_slot = self.find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
-            // used decreases by 1 and save the new meta in the state_updates.
+            // used decreases by 1 and save the new meta to cache.
             meta.used -= 1;
-            self.update_meta(
-                out_updates,
-                bucket_id,
-                BucketMeta {
-                    used: meta.used + 1,
-                    ..*meta
-                },
-                *meta,
-            );
+            self.cache
+                .1
+                .entry(bucket_id)
+                .and_modify(|old_meta| *old_meta = meta.clone())
+                .or_insert(meta.clone());
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -294,7 +310,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             .into_iter()
             .filter_map(|(k, old_v)| {
                 // clear entries from cache
-                self.cache.remove(&k);
+                self.cache.0.remove(&k);
                 old_data.push((k, old_v.clone()));
 
                 // Update new_state based on the change records in out_updates
@@ -308,7 +324,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
         // After clear entries by old bucket state, clear new entries from the cache and
         // out_updates, update these changes to new state.
-        self.cache.retain(|k, _| {
+        self.cache.0.retain(|k, _| {
             if k.bucket_id() == bucket_id {
                 if let Some((_, Some(new_v))) = out_updates.data.remove(k) {
                     new_state.insert(*k, new_v);
@@ -322,12 +338,13 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         // Updating the state cache's value to None is equivalent to clearing the bucket,
         // so that during the next access, it can directly get None from the cache
         for (k, old_v) in old_data {
-            self.cache.insert(k, None);
+            self.cache.0.insert(k, None);
             out_updates.data.insert(k, (Some(old_v), None));
         }
 
         // update the state with the new entry
         new_meta.used = 0;
+        self.cache.1.remove(&bucket_id);
         new_state.into_iter().try_for_each(|(_, v)| {
             self.upsert(
                 bucket_id,
@@ -353,7 +370,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     /// Read the bucket entry of the given SALT key. Always look up `cache` before `base_state`.
     #[inline(always)]
     pub fn get_entry(&mut self, key: SaltKey) -> Result<Option<SaltValue>, BaseState::Error> {
-        let value = match self.cache.entry(key) {
+        let value = match self.cache.0.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
                 let value = self.base_state.entry(key)?;
@@ -380,7 +397,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         // will be empty salt deltas.
         if old_value != new_value {
             out_updates.add(key, old_value, new_value.clone());
-            self.cache.insert(key, new_value);
+            self.cache.0.insert(key, new_value);
         }
     }
 
@@ -392,9 +409,14 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         old_meta: BucketMeta,
         new_meta: BucketMeta,
     ) {
+        self.cache
+            .1
+            .entry(bucket_id)
+            .and_modify(|old_meta| *old_meta = new_meta.clone())
+            .or_insert(new_meta.clone());
         let id = bucket_metadata_key(bucket_id);
         let new_value = Some(new_meta.into());
-        self.cache.insert(id, new_value.clone());
+        self.cache.0.insert(id, new_value.clone());
         out_updates.add(id, Some(old_meta.into()), new_value);
     }
 
@@ -780,7 +802,7 @@ mod tests {
             "The default slot should be None",
         );
 
-        state.cache.insert(salt_id, salt_val.clone());
+        state.cache.0.insert(salt_id, salt_val.clone());
         assert_eq!(
             state.get_entry(salt_id).unwrap(),
             salt_val,
@@ -823,7 +845,7 @@ mod tests {
         let salt_id = (BUCKET_ID, slot_id).into();
 
         // Insert the key-value pair into the position of slot_id
-        state.cache.insert(salt_id, Some(salt_val1.clone()));
+        state.cache.0.insert(salt_id, Some(salt_val1.clone()));
 
         // Find key1 in the state
         let find_slot = state.find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
@@ -838,10 +860,14 @@ mod tests {
 
         // Create a table 0 with entries like [...(key1_slot_id, (key1, val1)), (key1_slot_id + 1,
         // (key3, val3)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key3 > key1
-        state.cache.insert(salt_id, Some(salt_val3));
-        state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val2));
+        state.cache.0.insert(salt_id, Some(salt_val3));
         state
             .cache
+            .0
+            .insert(SaltKey(salt_id.0 + 1), Some(salt_val2));
+        state
+            .cache
+            .0
             .insert(SaltKey(salt_id.0 + 2), Some(salt_val1.clone()));
         let find_slot = state.find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
         assert_eq!(
@@ -852,14 +878,17 @@ mod tests {
 
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), None,
         // , (key1_slot_id + 2, (key1, val1))...], and key2 > key1
-        state.cache.insert(SaltKey(salt_id.0 + 1), None);
+        state.cache.0.insert(SaltKey(salt_id.0 + 1), None);
         let find_slot = state.find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
 
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), (key1_slot_id + 1,
         // (key4, val4)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key4 < key1
         let salt_val4 = SaltValue::new(&[0; 32], &[0; 32]);
-        state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
+        state
+            .cache
+            .0
+            .insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
         let find_slot = state.find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
     }
@@ -887,12 +916,14 @@ mod tests {
         // (slot_id_vec[0] + 1, (key_array[1], val)), (slot_id_vec[0] + 2, (key_array[2],
         // val))...]
         let salt_id = (BUCKET_ID, slot_id_vec[0]).into();
-        state.cache.insert(salt_id, Some(salt_array[0].clone()));
+        state.cache.0.insert(salt_id, Some(salt_array[0].clone()));
         state
             .cache
+            .0
             .insert(SaltKey(salt_id.0 + 1), Some(salt_array[1].clone()));
         state
             .cache
+            .0
             .insert(SaltKey(salt_id.0 + 2), Some(salt_array[2].clone()));
 
         // Find the next suitable slot for the position slot_id_vec[0]

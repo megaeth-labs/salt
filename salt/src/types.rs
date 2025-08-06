@@ -65,13 +65,13 @@ impl Default for BucketMeta {
 impl TryFrom<&[u8]> for BucketMeta {
     type Error = &'static str;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < 20 {
+        if bytes.len() < 12 {
             return Err("bytes length too short for BucketMeta");
         }
         Ok(Self {
             nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| "nonce error")?),
             capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| "capacity error")?),
-            used: u64::from_le_bytes(bytes[12..20].try_into().map_err(|_| "used error")?),
+            used: 0,
         })
     }
 }
@@ -84,15 +84,22 @@ impl TryFrom<&SaltValue> for BucketMeta {
 }
 
 impl BucketMeta {
-    /// Serialize bucket metadata to a 20-byte little-endian byte array.
+    /// Serialize bucket metadata to a 12-byte little-endian byte array.
     ///
-    /// Layout: `nonce`(4) | `capacity`(8) | `used`(8)
-    pub fn to_bytes(&self) -> [u8; 20] {
-        let mut bytes = [0u8; 20];
+    /// Layout: `nonce`(4) | `capacity`(8)
+    pub fn to_bytes(&self) -> [u8; 12] {
+        let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
         bytes[4..12].copy_from_slice(&self.capacity.to_le_bytes());
-        bytes[12..20].copy_from_slice(&self.used.to_le_bytes());
         bytes
+    }
+
+    /// Updates the current `BucketMeta` using the values from [`SaltValue`].
+    pub fn update(&mut self, value: &SaltValue) -> Result<(), &'static str> {
+        let meta: Self = value.try_into()?;
+        self.capacity = meta.capacity;
+        self.nonce = meta.nonce;
+        Ok(())
     }
 }
 
@@ -162,12 +169,12 @@ impl From<u64> for SaltKey {
 /// So, encoding a `Storage` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 86 bytes.
 ///
-/// For `BucketMeta`, the serialized form is 20 bytes (nonce:4 + capacity:8 + used:8).
+/// For `BucketMeta`, the serialized form is 12 bytes (nonce:4 + capacity:8).
 /// So, encoding a `BucketMetadata` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(0) = 22 bytes.
+///     `key_len`(1) + `value_len`(1) + `key`(12) + `value`(0) = 14 bytes.
 ///
 /// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 94,
-/// which is the maximum of 94, 86, and 22.
+/// which is the maximum of 94, 86, and 14.
 pub const MAX_SALT_VALUE_BYTES: usize = 94;
 
 /// Variable-length encoding of key-value pairs with length prefixes.
@@ -467,10 +474,13 @@ mod tests {
             used: 0x987654321,
         };
         let bytes = meta.to_bytes();
-        let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
+        let mut recovered = BucketMeta::try_from(&bytes[..]).unwrap();
+
+        assert_eq!(0, recovered.used);
+        recovered.used = 0x987654321;
 
         assert_eq!(meta, recovered);
-        assert_eq!(bytes.len(), 20);
+        assert_eq!(bytes.len(), 12);
     }
 
     /// Tests BucketMeta default constructor. Verifies that default values match
@@ -510,10 +520,11 @@ mod tests {
         };
         let salt_value = SaltValue::from(meta);
 
-        assert_eq!(salt_value.data[0], 20); // key length (BucketMeta serialized size)
+        assert_eq!(salt_value.data[0], 12); // key length (BucketMeta serialized size)
         assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)
 
-        let recovered_meta = BucketMeta::try_from(salt_value).unwrap();
+        let mut recovered_meta = BucketMeta::try_from(salt_value).unwrap();
+        recovered_meta.used = 100;
         assert_eq!(recovered_meta, meta);
     }
 
@@ -570,8 +581,8 @@ mod tests {
         let short_bytes = [1u8; 10];
         assert!(BucketMeta::try_from(&short_bytes[..]).is_err());
 
-        // Test exactly 20 bytes (minimum required) - should succeed
-        let valid_bytes = [0u8; 20];
+        // Test exactly 12 bytes (minimum required) - should succeed
+        let valid_bytes = [0u8; 12];
         assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
     }
 

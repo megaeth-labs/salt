@@ -294,7 +294,7 @@ mod tests {
         let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
         mem_salt.update_trie(trie_updates);
 
-        let salt_key = *updates.data.keys().nth(1).unwrap();
+        let salt_key = *updates.data.keys().nth(0).unwrap();
         let value = mem_salt.entry(salt_key).unwrap();
 
         let proof = prover::create_salt_proof(&[salt_key], &mem_salt, &mem_salt).unwrap();

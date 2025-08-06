@@ -237,7 +237,7 @@ mod tests {
         let (new_trie_root, mut trie_updates) =
             trie.update(&mem_salt, &mem_salt, &state_updates).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.0.keys().copied().collect::<Vec<_>>();
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 
         // 3.options in prover node
@@ -296,7 +296,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         state.update(vec![(&pk, &pv)]).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.0.keys().copied().collect::<Vec<_>>();
         let block_witness_res =
             get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 
@@ -326,7 +326,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mem_salt);
         state.update(&new_kvs).unwrap();
 
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
+        let min_sub_tree_keys = state.cache.0.keys().copied().collect::<Vec<_>>();
 
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
 
