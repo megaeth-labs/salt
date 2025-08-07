@@ -86,7 +86,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     // get bucket meta from cache or base state
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
         let meta = if let Some(meta) = self.cache.1.get(&bucket_id) {
-            meta.clone()
+            *meta
         } else {
             let base_meta = self.base_state.get_meta(bucket_id)?;
             let slot = bucket_metadata_key(bucket_id);
@@ -219,8 +219,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     self.cache
                         .1
                         .entry(bucket_id)
-                        .and_modify(|old_meta| *old_meta = meta.clone())
-                        .or_insert(meta.clone());
+                        .and_modify(|old_meta| *old_meta = *meta)
+                        .or_insert(*meta);
                 }
                 return Ok(());
             }
@@ -246,8 +246,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             self.cache
                 .1
                 .entry(bucket_id)
-                .and_modify(|old_meta| *old_meta = meta.clone())
-                .or_insert(meta.clone());
+                .and_modify(|old_meta| *old_meta = *meta)
+                .or_insert(*meta);
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -412,8 +412,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
             .1
             .entry(bucket_id)
-            .and_modify(|old_meta| *old_meta = new_meta.clone())
-            .or_insert(new_meta.clone());
+            .and_modify(|old_meta| *old_meta = new_meta)
+            .or_insert(new_meta);
         let id = bucket_metadata_key(bucket_id);
         let new_value = Some(new_meta.into());
         self.cache.0.insert(id, new_value.clone());
@@ -601,7 +601,7 @@ mod tests {
     };
     use rand::Rng;
 
-    const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
+    const KEYS_NUM: usize = 3 * MIN_BUCKET_SIZE - 1;
     const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
 
     // Randomly generate 'l' key-value pairs
