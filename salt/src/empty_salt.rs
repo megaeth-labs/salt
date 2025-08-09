@@ -24,24 +24,30 @@ impl StateReader for EmptySalt {
 
     fn entries(
         &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
+        range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(if bucket_id < NUM_META_BUCKETS as BucketId {
-            let clamped_range = *range.start()..=(*range.end()).min((MIN_BUCKET_SIZE - 1) as u64);
-            clamped_range
-                .into_iter()
-                .map(|slot_id| {
-                    // Return a default value for the bucket meta
-                    (
-                        SaltKey::from((bucket_id, slot_id)),
-                        BucketMeta::default().into(),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        })
+        let mut result = Vec::new();
+
+        // Find the last metadata key
+        let last_metadata_key = bucket_metadata_key(NUM_KV_BUCKETS as BucketId - 1);
+
+        // Only handle metadata keys in the range
+        if *range.start() <= last_metadata_key {
+            let split_point = std::cmp::min(*range.end(), last_metadata_key);
+            let start_bucket = range.start().bucket_id();
+            let end_bucket = split_point.bucket_id();
+
+            for bucket_id in start_bucket..=end_bucket {
+                for slot_id in 0..=(MIN_BUCKET_SIZE - 1) as SlotId {
+                    let meta_key = SaltKey::from((bucket_id, slot_id));
+                    if meta_key >= *range.start() && meta_key <= split_point {
+                        result.push((meta_key, BucketMeta::default().into()));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     fn meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {

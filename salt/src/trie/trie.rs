@@ -671,23 +671,24 @@ pub fn compute_from_scratch<S: StateReader>(
             } else {
                 (start >> MIN_BUCKET_SIZE_BITS) as BucketId
             };
-            let mut state_updates = (meta_start..=(end >> MIN_BUCKET_SIZE_BITS) as BucketId)
-                .flat_map(|bucket_id| {
-                    reader
-                        .entries(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
-                        .unwrap_or_else(|_| Vec::new())
-                })
+            let meta_range_start = SaltKey::from((meta_start, 0));
+            let meta_range_end = SaltKey::from((
+                (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
+                BUCKET_SLOT_ID_MASK,
+            ));
+            let mut state_updates = reader
+                .entries(meta_range_start..=meta_range_end)?
+                .into_iter()
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
                 .collect::<BTreeMap<_, _>>();
 
             // Read buckets key-value pairs from store
+            let data_range_start = SaltKey::from((start as BucketId, 0));
+            let data_range_end = SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK));
             state_updates.extend(
-                (start as BucketId..=end as BucketId)
-                    .flat_map(|bucket_id| {
-                        reader
-                            .entries(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
-                            .unwrap_or_else(|_| Vec::new())
-                    })
+                reader
+                    .entries(data_range_start..=data_range_end)?
+                    .into_iter()
                     .map(|(k, v)| (k, (None, Some(v)))),
             );
 

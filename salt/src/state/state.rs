@@ -320,7 +320,9 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut old_data = vec![];
         let mut new_state: HashMap<SaltKey, SaltValue> = self
             .base_state
-            .entries(bucket_id, 0..=old_meta.capacity - 1)?
+            .entries(
+                SaltKey::from((bucket_id, 0))..=SaltKey::from((bucket_id, old_meta.capacity - 1)),
+            )?
             .into_iter()
             .filter_map(|(k, old_v)| {
                 // clear entries from cache

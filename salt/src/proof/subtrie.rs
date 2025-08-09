@@ -103,10 +103,13 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                     .iter()
                     .flat_map(|(bucket_id, state_nodes)| {
                         let children_kvs = state_reader
-                            .entries(*bucket_id, 0..=BUCKET_SLOT_ID_MASK)
+                            .entries(
+                                SaltKey::from((*bucket_id, 0))
+                                    ..=SaltKey::from((*bucket_id, BUCKET_SLOT_ID_MASK)),
+                            )
                             .unwrap_or_else(|_| {
                                 panic!(
-                                    "Failed to get bucket state by range_slot: bucket_id: {:?}",
+                                    "Failed to get bucket state by entries: bucket_id: {:?}",
                                     105 + bucket_id
                                 )
                             })

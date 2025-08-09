@@ -183,55 +183,62 @@ impl StateReader for MemSalt {
         Ok(rs)
     }
 
-    /// Retrieves state entries within a slot range for a specific bucket.
+    /// Retrieves all non-empty entries within the specified range of SaltKeys.
     ///
-    /// Returns all key-value pairs for the specified bucket where the slot ID
-    /// falls within the given range. Special handling for metadata buckets ensures
-    /// default values are returned for unset slots.
+    /// # Behavior
+    ///
+    /// - **Metadata keys**: Returns stored values or [`BucketMeta::default()`] for missing keys
+    /// - **Data keys**: Returns only explicitly stored values
     ///
     /// # Arguments
     ///
-    /// * `bucket_id` - The bucket to query
-    /// * `range` - Inclusive range of slot IDs within the bucket
+    /// * `range` - Inclusive range of SaltKeys to query
     ///
     /// # Returns
     ///
-    /// Vector of matching key-value pairs for the bucket and slot range.
-    ///
-    /// # Panics
-    ///
-    /// Panics if querying a metadata bucket with slot IDs exceeding `MIN_BUCKET_SIZE`.
+    /// Vector of all matching key-value pairs, ordered by key.
     fn entries(
         &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
+        range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            let clamped_range = *range.start()..=(*range.end()).min((MIN_BUCKET_SIZE - 1) as u64);
-            clamped_range
-                .into_iter()
-                .map(|slot_id| {
-                    let key = SaltKey::from((bucket_id, slot_id));
-                    (
-                        key,
-                        self.entry(key)
-                            .expect("slot should exist")
-                            .expect("metadata should exist"),
-                    )
-                })
-                .collect()
-        } else {
-            self.state
-                .read()
-                .unwrap()
-                .range(
-                    SaltKey::from((bucket_id, *range.start()))
-                        ..=SaltKey::from((bucket_id, *range.end())),
-                )
-                .map(|(k, v)| (*k, v.clone()))
-                .collect()
-        };
-        Ok(data)
+        let state = self.state.read().unwrap();
+        let mut result = Vec::new();
+
+        // Find the last metadata key
+        let last_metadata_key = bucket_metadata_key(NUM_KV_BUCKETS as BucketId - 1);
+
+        // Split range at last_metadata_key
+        let split_point = std::cmp::min(*range.end(), last_metadata_key);
+
+        // For keys in metadata range: iterate through all valid metadata keys and
+        // return defaults for missing ones
+        if *range.start() <= split_point {
+            let start_bucket = range.start().bucket_id();
+            let end_bucket = split_point.bucket_id();
+
+            for bucket_id in start_bucket..=end_bucket {
+                for slot_id in 0..=(MIN_BUCKET_SIZE - 1) as SlotId {
+                    let meta_key = SaltKey::from((bucket_id, slot_id));
+                    if meta_key >= *range.start() && meta_key <= split_point {
+                        if let Some(value) = state.get(&meta_key) {
+                            result.push((meta_key, value.clone()));
+                        } else if meta_key.is_bucket_meta_slot() {
+                            result.push((meta_key, BucketMeta::default().into()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // For keys beyond metadata range: return only explicitly stored values
+        if *range.end() > split_point {
+            let data_key_start = SaltKey(split_point.0 + 1);
+            for (key, value) in state.range(data_key_start..=*range.end()) {
+                result.push((*key, value.clone()));
+            }
+        }
+
+        Ok(result)
     }
 }
 
