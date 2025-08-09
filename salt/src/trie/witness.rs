@@ -113,7 +113,7 @@ impl StateReader for BlockWitness {
             .kvs
             .range(
                 SaltKey::from((bucket_id, *range.start()))
-                    ..SaltKey::from((bucket_id, *range.end())),
+                    ..=SaltKey::from((bucket_id, *range.end())),
             )
             .map(|(k, v)| (*k, v.clone().expect("existing key")))
             .collect();
