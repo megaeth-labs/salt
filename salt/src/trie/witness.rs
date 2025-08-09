@@ -1,6 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, MIN_BUCKET_SIZE, NUM_KV_BUCKETS},
+    constant::{default_commitment, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -111,7 +111,10 @@ impl StateReader for BlockWitness {
         let mut result = Vec::new();
 
         // Find the last metadata key
-        let last_metadata_key = bucket_metadata_key(NUM_KV_BUCKETS as BucketId - 1);
+        let last_metadata_key = SaltKey::from((
+            (NUM_META_BUCKETS - 1) as BucketId,
+            (MIN_BUCKET_SIZE - 1) as SlotId,
+        ));
 
         // Split range at last_metadata_key
         let split_point = std::cmp::min(*range.end(), last_metadata_key);

@@ -29,7 +29,10 @@ impl StateReader for EmptySalt {
         let mut result = Vec::new();
 
         // Find the last metadata key
-        let last_metadata_key = bucket_metadata_key(NUM_KV_BUCKETS as BucketId - 1);
+        let last_metadata_key = SaltKey::from((
+            (NUM_META_BUCKETS - 1) as BucketId,
+            (MIN_BUCKET_SIZE - 1) as SlotId,
+        ));
 
         // Only handle metadata keys in the range
         if *range.start() <= last_metadata_key {
