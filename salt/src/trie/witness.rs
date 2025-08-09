@@ -109,6 +109,8 @@ impl StateReader for BlockWitness {
         bucket_id: BucketId,
         range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        // FIXME: this implementation doesn't handle meta buckets correctly;
+        // check MemSalt's implementation instead
         let data = self
             .kvs
             .range(
