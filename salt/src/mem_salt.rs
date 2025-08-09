@@ -207,8 +207,8 @@ impl StateReader for MemSalt {
         range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(*range.end() <= MIN_BUCKET_SIZE as SlotId);
-            range
+            let clamped_range = *range.start()..=(*range.end()).min((MIN_BUCKET_SIZE - 1) as u64);
+            clamped_range
                 .into_iter()
                 .map(|slot_id| {
                     let key = SaltKey::from((bucket_id, slot_id));

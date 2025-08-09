@@ -28,8 +28,8 @@ impl StateReader for EmptySalt {
         range: RangeInclusive<u64>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         Ok(if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(*range.end() <= MIN_BUCKET_SIZE as NodeId);
-            range
+            let clamped_range = *range.start()..=(*range.end()).min((MIN_BUCKET_SIZE - 1) as u64);
+            clamped_range
                 .into_iter()
                 .map(|slot_id| {
                     // Return a default value for the bucket meta
