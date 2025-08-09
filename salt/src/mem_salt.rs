@@ -19,7 +19,7 @@
 use crate::{constant::*, traits::*, types::*, StateUpdates, TrieUpdates};
 use std::{
     collections::BTreeMap,
-    ops::{Bound::Included, Range, RangeInclusive},
+    ops::{Range, RangeInclusive},
     sync::RwLock,
 };
 
@@ -181,36 +181,6 @@ impl StateReader for MemSalt {
             return Ok(Some(BucketMeta::default().into()));
         }
         Ok(rs)
-    }
-
-    /// Retrieves all state entries within a range of bucket IDs.
-    ///
-    /// Returns all key-value pairs where the key's bucket ID falls within the
-    /// specified range (inclusive). Results are ordered by key.
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Inclusive range of bucket IDs to query
-    ///
-    /// # Returns
-    ///
-    /// Vector of all matching key-value pairs, ordered by key.
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        // FIXME: why not delete the implementation to range_slot, which is a
-        // more generalized api
-        Ok(self
-            .state
-            .read()
-            .unwrap()
-            .range((
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), BUCKET_SLOT_ID_MASK))),
-            ))
-            .map(|(k, v)| (*k, v.clone()))
-            .collect())
     }
 
     /// Retrieves state entries within a slot range for a specific bucket.

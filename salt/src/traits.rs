@@ -21,12 +21,6 @@ pub trait StateReader: Debug + Send + Sync {
     /// Get slot value by `bucket_id` and `slot_id`.
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
 
-    /// Retrieves all non-empty entries within the specified range of buckets.
-    fn range_bucket(
-        &self,
-        range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
-
     /// Retrieves all non-empty entries within the specified range of slots.
     fn range_slot(
         &self,

@@ -175,13 +175,6 @@ impl StateReader for ExpansionSalt {
         Ok(None)
     }
 
-    fn range_bucket(
-        &self,
-        _range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(Vec::new())
-    }
-
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let meta = BucketMeta {
             capacity: if bucket_id < self.0 .0 as BucketId {

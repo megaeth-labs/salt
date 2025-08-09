@@ -1,5 +1,6 @@
 //! This module return all-needed queries for a given kv list by create_sub_trie()
 use crate::{
+    constant::BUCKET_SLOT_ID_MASK,
     proof::{
         calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
@@ -102,10 +103,10 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                     .iter()
                     .flat_map(|(bucket_id, state_nodes)| {
                         let children_kvs = state_reader
-                            .range_bucket(*bucket_id..=*bucket_id)
+                            .range_slot(*bucket_id, 0..=BUCKET_SLOT_ID_MASK)
                             .unwrap_or_else(|_| {
                                 panic!(
-                                    "Failed to get bucket state by range_bucket: bucket_id: {:?}",
+                                    "Failed to get bucket state by range_slot: bucket_id: {:?}",
                                     105 + bucket_id
                                 )
                             })

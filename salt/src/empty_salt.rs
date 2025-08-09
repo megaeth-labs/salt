@@ -22,13 +22,6 @@ impl StateReader for EmptySalt {
         Ok(value)
     }
 
-    fn range_bucket(
-        &self,
-        _range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(Vec::new())
-    }
-
     fn range_slot(
         &self,
         bucket_id: BucketId,
