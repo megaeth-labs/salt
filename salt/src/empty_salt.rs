@@ -17,7 +17,7 @@ impl StateReader for EmptySalt {
 
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let value = key
-            .is_bucket_meta_slot()
+            .is_in_meta_bucket()
             .then(|| BucketMeta::default().into());
         Ok(value)
     }

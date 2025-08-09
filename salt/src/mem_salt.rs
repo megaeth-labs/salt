@@ -177,7 +177,7 @@ impl StateReader for MemSalt {
     /// - `Err(_)` should not occur in this implementation
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let rs = self.state.read().unwrap().get(&key).cloned();
-        if rs.is_none() && key.is_bucket_meta_slot() {
+        if rs.is_none() && key.is_in_meta_bucket() {
             return Ok(Some(BucketMeta::default().into()));
         }
         Ok(rs)

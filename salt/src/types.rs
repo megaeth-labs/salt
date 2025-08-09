@@ -131,8 +131,8 @@ impl SaltKey {
         self.0 as SlotId & BUCKET_SLOT_ID_MASK
     }
 
-    /// Check if this key addresses a metadata slot (first 65,536 buckets).
-    pub const fn is_bucket_meta_slot(&self) -> bool {
+    /// Check if this key belongs to a metadata bucket (first 65,536 buckets).
+    pub const fn is_in_meta_bucket(&self) -> bool {
         self.bucket_id() < NUM_META_BUCKETS as BucketId
     }
 }
@@ -452,8 +452,8 @@ mod tests {
         let meta_key = SaltKey::from((100, 50)); // bucket 100 < 65536 (metadata)
         let regular_key = SaltKey::from((70000, 50)); // bucket 70000 >= 65536 (regular)
 
-        assert!(meta_key.is_bucket_meta_slot());
-        assert!(!regular_key.is_bucket_meta_slot());
+        assert!(meta_key.is_in_meta_bucket());
+        assert!(!regular_key.is_in_meta_bucket());
     }
 
     /// Tests BucketMeta serialization and deserialization roundtrip. Verifies that
