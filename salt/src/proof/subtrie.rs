@@ -71,7 +71,7 @@ fn process_trie_queries<T: TrieReader>(
                     .flat_map(|((parent, _, children), frs)| {
                         let parent_commitment = Element::from_bytes_unchecked_uncompressed(
                             trie_reader
-                                .get_commitment(*parent)
+                                .commitment(*parent)
                                 .expect("Failed to get trie node"),
                         );
 
@@ -103,7 +103,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                     .iter()
                     .flat_map(|(bucket_id, state_nodes)| {
                         let children_kvs = state_reader
-                            .range_slot(*bucket_id, 0..=BUCKET_SLOT_ID_MASK)
+                            .entries(*bucket_id, 0..=BUCKET_SLOT_ID_MASK)
                             .unwrap_or_else(|_| {
                                 panic!(
                                     "Failed to get bucket state by range_slot: bucket_id: {:?}",
@@ -118,7 +118,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                             .flat_map(|(node_id, slot_ids)| {
                                 let parent_commitment = Element::from_bytes_unchecked_uncompressed(
                                     trie_reader
-                                        .get_commitment(*node_id)
+                                        .commitment(*node_id)
                                         .expect("Failed to get trie node"),
                                 );
 
@@ -174,7 +174,7 @@ where
     let buckets_top_level = bucket_ids
         .into_iter()
         .map(|bucket_id| {
-            let meta = state_reader.get_meta(bucket_id)?;
+            let meta = state_reader.meta(bucket_id)?;
             let bucket_trie_top_level = sub_trie_top_level(meta.capacity);
             Ok((bucket_id, bucket_trie_top_level as u8))
         })
@@ -231,7 +231,7 @@ where
                 parent,
                 CommitmentBytesW(
                     trie_reader
-                        .get_commitment(parent)
+                        .commitment(parent)
                         .expect("Failed to get trie node"),
                 ),
             )
@@ -244,7 +244,7 @@ where
             parent,
             CommitmentBytesW(
                 trie_reader
-                    .get_commitment(parent)
+                    .commitment(parent)
                     .expect("Failed to get trie node"),
             ),
         )
@@ -260,7 +260,7 @@ where
                     node_id,
                     CommitmentBytesW(
                         trie_reader
-                            .get_commitment(node_id)
+                            .commitment(node_id)
                             .expect("Failed to get trie node"),
                     ),
                 )

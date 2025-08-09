@@ -22,7 +22,7 @@ pub trait StateReader: Debug + Send + Sync {
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
 
     /// Retrieves all non-empty entries within the specified range of slots.
-    fn range_slot(
+    fn entries(
         &self,
         _bucket_id: BucketId,
         _range: RangeInclusive<u64>, // FIXME: u64 => SaltKey
@@ -32,7 +32,7 @@ pub trait StateReader: Debug + Send + Sync {
     }
 
     /// Get bucket meta by bucket ID.
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
         Ok(match self.entry(key)? {
             Some(ref v) => v.try_into().expect("meta value error"),
@@ -47,18 +47,18 @@ pub trait TrieReader: Sync {
     type Error: Debug + Send;
 
     /// Get node commitment by `node_id` from store.
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 
     /// Get node commitments by `range` from store.
     /// This is an inefficient implementation that
     /// needs to be re implemented in your Reader
-    fn get_range(
+    fn commitments(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
         range
             .map(|node_id| {
-                let commitment = self.get_commitment(node_id)?;
+                let commitment = self.commitment(node_id)?;
                 Ok((node_id, commitment))
             })
             .collect()
@@ -69,7 +69,7 @@ pub trait TrieReader: Sync {
         let zero = zero_commitment();
         let child_start = get_child_node(&node_id, 0);
         let mut children = vec![zero; TRIE_WIDTH];
-        let cache = self.get_range(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
+        let cache = self.commitments(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
         // Fill in actual values where they exist
         for (k, v) in cache {
             children[k as usize - child_start as usize] = v;

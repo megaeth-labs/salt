@@ -201,7 +201,7 @@ impl StateReader for MemSalt {
     /// # Panics
     ///
     /// Panics if querying a metadata bucket with slot IDs exceeding `MIN_BUCKET_SIZE`.
-    fn range_slot(
+    fn entries(
         &self,
         bucket_id: BucketId,
         range: RangeInclusive<u64>,
@@ -254,7 +254,7 @@ impl TrieReader for MemSalt {
     /// # Returns
     ///
     /// The commitment bytes for the node, either stored or computed as default.
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         // FIXME: but what if the given node_id is not valid (i.e., doesn't exist in
         // the current SALT structure)!? there is no error checking at all! Even worse,
         // instead of returning None, it returns a default commitment!
@@ -282,7 +282,7 @@ impl TrieReader for MemSalt {
     /// # Returns
     ///
     /// Vector of node ID and commitment pairs within the range, ordered by node ID.
-    fn get_range(
+    fn commitments(
         // FIXME: better method naming?
         &self,
         range: Range<NodeId>,
@@ -311,13 +311,13 @@ mod tests {
             (bucket_id % MIN_BUCKET_SIZE as BucketId) as SlotId,
         )
             .into();
-        let mut meta = store.get_meta(bucket_id).unwrap();
+        let mut meta = store.meta(bucket_id).unwrap();
         assert_eq!(meta, BucketMeta::default());
         let v = store.entry(salt_key).unwrap().unwrap();
         assert_eq!(meta, BucketMeta::try_from(&v).unwrap());
         meta.capacity = 1024;
         store.update_single(salt_key, SaltValue::from(meta));
-        assert_eq!(store.get_meta(bucket_id).unwrap(), meta);
+        assert_eq!(store.meta(bucket_id).unwrap(), meta);
     }
 
     // FIXME: no tests for bucket expansion??

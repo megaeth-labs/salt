@@ -59,7 +59,7 @@ pub struct BlockWitness {
 impl TrieReader for BlockWitness {
     type Error = &'static str;
 
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
             .proof
             .parents_commitments
@@ -69,7 +69,7 @@ impl TrieReader for BlockWitness {
             .0)
     }
 
-    fn get_range(
+    fn commitments(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
@@ -104,7 +104,7 @@ impl StateReader for BlockWitness {
         })
     }
 
-    fn range_slot(
+    fn entries(
         &self,
         bucket_id: BucketId,
         range: RangeInclusive<u64>,

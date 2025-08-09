@@ -330,7 +330,7 @@ mod tests {
 
         mem_salt.update_trie(trie_updates);
 
-        let trie_root_commitment = mem_salt.get_commitment(0).unwrap();
+        let trie_root_commitment = mem_salt.commitment(0).unwrap();
 
         let root_from_commitment = B256::from_slice(&fr_to_le_bytes(
             Element::from_bytes_unchecked_uncompressed(trie_root_commitment).map_to_scalar_field(),

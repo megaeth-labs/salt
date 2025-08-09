@@ -134,7 +134,7 @@ impl StateRoot {
         let root_commitment = if let Some(c) = trie_updates.data.last() {
             c.1 .1
         } else {
-            trie.get_commitment(0)?
+            trie.commitment(0)?
         };
 
         Ok((hash_commitment(root_commitment), trie_updates))
@@ -277,7 +277,7 @@ impl StateRoot {
                     (old_capacity, new_capacity) =
                         capacity_changes.remove(&bid).unwrap_or_else(|| {
                             let bucket_capacity = state
-                                .get_meta(bid)
+                                .meta(bid)
                                 .expect("bucket capacity should exist")
                                 .capacity;
                             (bucket_capacity, bucket_capacity)
@@ -646,7 +646,7 @@ impl StateRoot {
         if let Some(c) = self.cache.get(&node_id) {
             Ok(*c)
         } else {
-            trie.get_commitment(node_id)
+            trie.commitment(node_id)
         }
     }
 }
@@ -674,7 +674,7 @@ pub fn compute_from_scratch<S: StateReader>(
             let mut state_updates = (meta_start..=(end >> MIN_BUCKET_SIZE_BITS) as BucketId)
                 .flat_map(|bucket_id| {
                     reader
-                        .range_slot(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
+                        .entries(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
                         .unwrap_or_else(|_| Vec::new())
                 })
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
@@ -685,7 +685,7 @@ pub fn compute_from_scratch<S: StateReader>(
                 (start as BucketId..=end as BucketId)
                     .flat_map(|bucket_id| {
                         reader
-                            .range_slot(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
+                            .entries(bucket_id, 0..=BUCKET_SLOT_ID_MASK)
                             .unwrap_or_else(|_| Vec::new())
                     })
                     .map(|(k, v)| (k, (None, Some(v)))),
@@ -1478,7 +1478,7 @@ mod tests {
         mock_db.update_trie(trie_updates);
         assert_eq!(
             hash_commitment(c),
-            hash_commitment(mock_db.get_commitment(node_id).unwrap())
+            hash_commitment(mock_db.commitment(node_id).unwrap())
         );
 
         assert_eq!(root0, root1);
@@ -1563,7 +1563,7 @@ mod tests {
             .zip(exp_id_vec.iter())
             .for_each(|((id, (old_c, new_c)), exp_id)| {
                 assert_eq!(*id, *exp_id);
-                let cmp_old_c = store.get_commitment(*id).unwrap();
+                let cmp_old_c = store.commitment(*id).unwrap();
                 assert_eq!(cmp_old_c, *old_c);
 
                 let delta: Element = c_deltas

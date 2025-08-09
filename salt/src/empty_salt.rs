@@ -22,7 +22,7 @@ impl StateReader for EmptySalt {
         Ok(value)
     }
 
-    fn range_slot(
+    fn entries(
         &self,
         bucket_id: BucketId,
         range: RangeInclusive<u64>,
@@ -44,7 +44,7 @@ impl StateReader for EmptySalt {
         })
     }
 
-    fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(BucketMeta::default())
     }
 }
@@ -52,11 +52,11 @@ impl StateReader for EmptySalt {
 impl TrieReader for EmptySalt {
     type Error = &'static str;
 
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(default_commitment(node_id))
     }
 
-    fn get_range(
+    fn commitments(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
