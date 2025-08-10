@@ -236,11 +236,11 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// - Level 0 (root): 1 node
 /// - Level 1: 256 nodes
 /// - Level 2: 65,536 nodes
-/// - Level 3: 16,777,216 nodes
+/// - Level 3: 16,777,216 nodes (bucket roots)
 /// - Total: 16,843,009 nodes
 ///
 /// **Bucket subtree structure (up to 5 levels, 0-4):**
-/// - Level 0: 1 node
+/// - Level 0: 1 node (the root, addressed via main trie)
 /// - Level 1: 256 nodes
 /// - Level 2: 65,536 nodes
 /// - Level 3: 16,777,216 nodes
@@ -252,23 +252,45 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// *Main trie nodes (25 bits):*
 /// - Uses lowest 25 bits for node position (25 bits needed since 2^25 > 16,843,009)
 /// - BFS numbering: root=0, top-to-bottom, left-to-right
-/// - Upper 39 bits unused
+/// - Upper 39 bits unused (always 0)
+/// - **Important**: Bucket roots are addressed as main trie nodes at level 3
 ///
 /// *Bucket subtree nodes (24 + 33 bits):*
 /// - Highest 24 bits: bucket ID (must be > 65,535 since meta buckets never grow)
 /// - Lowest 40 bits: local position (33 bits needed since 2^33 > 4,311,810,305, 7 bits unused)
-/// - Each subtree uses same BFS numbering as main trie
+/// - Each subtree uses same BFS numbering starting from 0
+/// - **Important**: Only used for internal subtree nodes (position > 0), never for roots
+///
+/// **Addressing bucket roots:**
+/// Bucket roots can theoretically be addressed in two ways:
+/// 1. As leaf nodes in the main trie (level 3) - e.g., bucket 0's root is at main trie position 16,843,008
+/// 2. As position 0 in their own subtree - e.g., (bucket_id << 40 | 0)
+///
+/// To avoid ambiguity, **we always use the main trie addressing scheme (option 1)** for bucket roots.
+/// This means a bucket root's NodeId has upper 39 bits = 0 and lower 25 bits = its main trie position.
+///
+/// **Examples:**
+/// - Main trie root: NodeId = 0
+/// - Bucket 0's root: NodeId = 16,777,216 (main trie level 3, position 0)
+/// - Bucket 100000's root: NodeId = 16,877,216 (main trie level 3, position 100000)
+/// - Bucket 100000's internal node at position 256: NodeId = (100000 << 40) | 256
 pub type NodeId = u64;
 
 /// Returns true if the given NodeId addresses a node in a bucket subtree.
 ///
 /// This function validates the NodeId and returns true only for valid subtree nodes:
-/// - Main trie nodes: bucket ID = 0, remaining bits represent main trie position
-/// - Metadata bucket nodes: Invalid since metadata buckets cannot grow beyond fixed size
-/// - Subtree nodes: bucket ID >= 65,536, remaining bits represent local subtree position
+/// - Main trie nodes (including bucket roots): bucket ID = 0, remaining bits represent main trie position - returns false
+/// - Metadata bucket nodes: Invalid since metadata buckets cannot grow beyond fixed size - panics
+/// - Subtree nodes: bucket ID >= 65,536, remaining bits > 0 represent local subtree position - returns true
+/// - Invalid bucket root via subtree: bucket ID >= 65,536, remaining bits = 0 - panics
+///
+/// **Important**: This function enforces the convention that bucket roots must be addressed
+/// using the main trie scheme (as level 3 nodes). Only internal nodes within bucket subtrees
+/// (with local position > 0) return true.
 ///
 /// # Panics
-/// Panics if the NodeId is invalid (e.g., metadata bucket ID with non-zero remaining bits).
+/// - If the NodeId has a metadata bucket ID (1-65,535) with non-zero remaining bits
+/// - If the NodeId attempts to address a bucket root via subtree mode (bucket ID >= 65,536 with position 0)
 #[inline]
 pub fn is_subtree_node(node_id: NodeId) -> bool {
     let bucket_id = node_id >> BUCKET_SLOT_BITS;
@@ -286,7 +308,15 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
         }
         false // Main trie node (bucket_id = 0)
     } else {
-        true // Valid subtree node (bucket_id >= 65536)
+        // For regular data buckets (bucket_id >= 65536)
+        if remaining_bits == 0 {
+            // Position 0 in a subtree would be the bucket root, but bucket roots
+            // must be addressed using the main trie scheme, not subtree addressing.
+            panic!(
+                "Invalid NodeId: bucket {bucket_id} root must be addressed via main trie, not as subtree position 0"
+            );
+        }
+        true // Valid subtree internal node (position > 0)
     }
 }
 
@@ -624,8 +654,8 @@ mod tests {
             );
         }
 
-        // Bucket subtree nodes - should all return true
-        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket 65536, position 0
+        // Bucket subtree nodes - should all return true (position > 0)
+        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 1; // bucket 65536, position 1
         let bucket_100000 = (100000u64 << BUCKET_SLOT_BITS) | 1000; // bucket 100000, position 1000
         let bucket_max = (16777215u64 << BUCKET_SLOT_BITS) | 500; // max bucket (24-bit), position 500
 
@@ -650,6 +680,22 @@ mod tests {
     fn node_id_last_metadata_bucket_panic() {
         let invalid_last_meta = (65535u64 << BUCKET_SLOT_BITS) | 1; // last metadata bucket with subtree bits
         is_subtree_node(invalid_last_meta);
+    }
+
+    /// Tests that is_subtree_node panics when attempting to address bucket root via subtree mode.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: bucket 65536 root must be addressed via main trie")]
+    fn node_id_bucket_root_subtree_panic() {
+        let invalid_root = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket root via subtree addressing
+        is_subtree_node(invalid_root);
+    }
+
+    /// Tests that is_subtree_node panics for various bucket roots addressed via subtree mode.
+    #[test]
+    #[should_panic(expected = "Invalid NodeId: bucket 100000 root must be addressed via main trie")]
+    fn node_id_bucket_root_subtree_panic_100000() {
+        let invalid_root = (100000u64 << BUCKET_SLOT_BITS) | 0; // bucket 100000 root via subtree
+        is_subtree_node(invalid_root);
     }
 
     /// Tests the leftmost_node function which calculates the NodeId of the leftmost node at a given level.
