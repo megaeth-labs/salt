@@ -86,7 +86,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             .get_entry(bucket_metadata_key(bucket_id))?
             .and_then(|v| v.try_into().ok())
             .unwrap_or_else(BucketMeta::default);
-        // let meta = self.salt_state.get_meta(bucket_id)?;
+        // let meta = self.salt_state.meta(bucket_id)?;
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
 

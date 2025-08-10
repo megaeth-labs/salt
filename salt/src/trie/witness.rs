@@ -1,6 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+    constant::default_commitment,
     proof::{prover, CommitmentBytesW, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -108,47 +108,12 @@ impl StateReader for BlockWitness {
         &self,
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let mut result = Vec::new();
-
-        // Find the last metadata key
-        let last_metadata_key = SaltKey::from((
-            (NUM_META_BUCKETS - 1) as BucketId,
-            (MIN_BUCKET_SIZE - 1) as SlotId,
-        ));
-
-        // Split range at last_metadata_key
-        let split_point = std::cmp::min(*range.end(), last_metadata_key);
-
-        // For keys in metadata range: return stored values or defaults for missing ones
-        if *range.start() <= split_point {
-            let start_bucket = range.start().bucket_id();
-            let end_bucket = split_point.bucket_id();
-
-            for bucket_id in start_bucket..=end_bucket {
-                for slot_id in 0..=(MIN_BUCKET_SIZE - 1) as SlotId {
-                    let meta_key = SaltKey::from((bucket_id, slot_id));
-                    if meta_key >= *range.start() && meta_key <= split_point {
-                        if let Some(Some(value)) = self.kvs.get(&meta_key) {
-                            result.push((meta_key, value.clone()));
-                        } else if meta_key.is_bucket_meta_slot() {
-                            result.push((meta_key, BucketMeta::default().into()));
-                        }
-                    }
-                }
-            }
-        }
-
-        // For keys beyond metadata range: return only explicitly stored values
-        if *range.end() > split_point {
-            let data_key_start = SaltKey(split_point.0 + 1);
-            for (key, value) in self.kvs.range(data_key_start..=*range.end()) {
-                if let Some(v) = value {
-                    result.push((*key, v.clone()));
-                }
-            }
-        }
-
-        Ok(result)
+        let data = self
+            .kvs
+            .range(*range.start()..=*range.end())
+            .map(|(k, v)| (*k, v.clone().expect("existing key")))
+            .collect();
+        Ok(data)
     }
 }
 

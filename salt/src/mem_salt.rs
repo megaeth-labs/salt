@@ -60,8 +60,8 @@ pub struct MemSalt {
 impl Clone for MemSalt {
     fn clone(&self) -> Self {
         Self {
-            state: RwLock::new(self.state.read().expect("read lock poisoned").clone()),
-            trie: RwLock::new(self.trie.read().expect("read lock poisoned").clone()),
+            state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
+            trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
         }
     }
 }
@@ -70,50 +70,23 @@ impl MemSalt {
     /// Creates a new empty `MemSalt` instance.
     ///
     /// Both the state and trie stores are initialized as empty [`BTreeMap`]s.
-    /// All bucket metadata will return default values until explicitly set.
+    ///
+    /// # Lazy Initialization Optimization
+    ///
+    /// This implementation uses lazy initialization for bucket metadata to avoid
+    /// pre-populating tens of millions of metadata entries during unit testing.
+    /// When [`StateReader::get_meta`] is called for a bucket whose metadata entry
+    /// doesn't exist, it returns [`BucketMeta::default()`] instead of an empty value.
+    ///
+    /// This optimization reduces memory usage and initialization time for this
+    /// in-memory implementation, but adds code complexity. Production disk-based
+    /// implementations shall choose explicit initialization instead because the
+    /// storage savings don't justify the added complexity.
     pub fn new() -> Self {
-        // FIXME: this implementation is flawed. While the regular data buckets
-        // are empty initially, the meta buckets are not. In particular, the capacity
-        // starts at [`crate::constant::MIN_BUCKET_SIZE`].
-        // TODO: hmm, maybe it's OK; BucketMeta::default() is returned when an empty MemSalt is read.
         Self {
             state: RwLock::new(BTreeMap::new()),
             trie: RwLock::new(BTreeMap::new()),
         }
-    }
-
-    /// Returns all state key-value pairs.
-    ///
-    /// Retrieves a snapshot of all current state data as a vector of
-    /// [`SaltKey`], [`SaltValue`] tuples. The order is determined by
-    /// the [`BTreeMap`] key ordering.
-    ///
-    /// # Returns
-    ///
-    /// A vector containing all state entries. May be empty if no state
-    /// has been stored.
-    pub fn get_all(&self) -> Vec<(SaltKey, SaltValue)> {
-        // FIXME: it appears that this method will also return entries in the
-        // metadata buckets.
-        self.state
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
-    }
-
-    /// Inserts or updates a single state entry.
-    ///
-    /// Stores the provided key-value pair in the state storage, replacing any
-    /// existing value for the same key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The state key to store
-    /// * `val` - The state value to associate with the key
-    pub fn update_single(&self, key: SaltKey, val: SaltValue) {
-        self.state.write().unwrap().insert(key, val);
     }
 
     /// Applies a batch of state updates.
@@ -176,11 +149,11 @@ impl StateReader for MemSalt {
     /// - `Ok(None)` if the key doesn't exist and is not a metadata slot
     /// - `Err(_)` should not occur in this implementation
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        let rs = self.state.read().unwrap().get(&key).cloned();
-        if rs.is_none() && key.is_in_meta_bucket() {
+        let val = self.state.read().unwrap().get(&key).cloned();
+        if val.is_none() && key.is_in_meta_bucket() {
             return Ok(Some(BucketMeta::default().into()));
         }
-        Ok(rs)
+        Ok(val)
     }
 
     /// Retrieves all non-empty entries within the specified range of SaltKeys.
@@ -259,7 +232,6 @@ impl TrieReader for MemSalt {
     ///
     /// Vector of node ID and commitment pairs within the range, ordered by node ID.
     fn commitments(
-        // FIXME: better method naming?
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
@@ -292,7 +264,10 @@ mod tests {
         let v = store.entry(salt_key).unwrap().unwrap();
         assert_eq!(meta, BucketMeta::try_from(&v).unwrap());
         meta.capacity = 1024;
-        store.update_single(salt_key, SaltValue::from(meta));
+        let updates = StateUpdates {
+            data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
+        };
+        store.update_state(updates);
         assert_eq!(store.meta(bucket_id).unwrap(), meta);
     }
 

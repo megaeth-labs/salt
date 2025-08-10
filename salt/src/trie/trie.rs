@@ -671,23 +671,25 @@ pub fn compute_from_scratch<S: StateReader>(
             } else {
                 (start >> MIN_BUCKET_SIZE_BITS) as BucketId
             };
-            let meta_range_start = SaltKey::from((meta_start, 0));
-            let meta_range_end = SaltKey::from((
-                (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
-                BUCKET_SLOT_ID_MASK,
-            ));
             let mut state_updates = reader
-                .entries(meta_range_start..=meta_range_end)?
+                .entries(
+                    SaltKey::from((meta_start, 0))
+                        ..=SaltKey::from((
+                            (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
+                            BUCKET_SLOT_ID_MASK,
+                        )),
+                )?
                 .into_iter()
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
                 .collect::<BTreeMap<_, _>>();
 
             // Read buckets key-value pairs from store
-            let data_range_start = SaltKey::from((start as BucketId, 0));
-            let data_range_end = SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK));
             state_updates.extend(
                 reader
-                    .entries(data_range_start..=data_range_end)?
+                    .entries(
+                        SaltKey::from((start as BucketId, 0))
+                            ..=SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK)),
+                    )?
                     .into_iter()
                     .map(|(k, v)| (k, (None, Some(v)))),
             );
@@ -1247,7 +1249,10 @@ mod tests {
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
         let meta = bucket_meta(0, 65536 * 2);
         let salt_key = bucket_metadata_key(update_bid);
-        store.update_single(salt_key, SaltValue::from(meta));
+        let updates = StateUpdates {
+            data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
+        };
+        store.update_state(updates);
 
         let state_updates1 = StateUpdates {
             data: vec![
@@ -1991,7 +1996,7 @@ mod tests {
                 .collect();
             datas.insert(bid as BucketId, ds);
         }
-        for (k, v) in store.get_all() {
+        for (k, v) in store.entries(SaltKey(0)..=SaltKey(u64::MAX)).unwrap() {
             let bucket_id = k.bucket_id();
             if bucket_id >= start as BucketId && bucket_id < end as BucketId {
                 let ds = datas.entry(bucket_id).or_default();

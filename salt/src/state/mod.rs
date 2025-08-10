@@ -68,11 +68,11 @@
 //! assert_eq!(retrieved, Some(salt_value));
 //!
 //! // Read bucket metadata
-//! let meta = store.get_meta(bucket_id).unwrap();
+//! let meta = store.meta(bucket_id).unwrap();
 //! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used);
 //!
 //! // Read range of entries from a bucket
-//! let entries = store.range_slot(bucket_id, 0..=100).unwrap();
+//! let entries = store.entries(bucket_id, 0..=100).unwrap();
 //! for (key, value) in entries {
 //!     println!("Key: {:?}, Value: {:?}", key, value);
 //! }
