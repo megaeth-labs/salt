@@ -69,7 +69,7 @@ impl TrieReader for BlockWitness {
             .0)
     }
 
-    fn commitments(
+    fn node_entries(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {

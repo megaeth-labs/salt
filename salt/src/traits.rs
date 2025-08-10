@@ -73,7 +73,7 @@ pub trait StateReader: Debug + Send + Sync {
     /// # Behavior
     ///
     /// This method looks up the bucket's metadata using the bucket ID. If no metadata
-    /// entry exists (common for lightly used buckets), it returns a default [`BucketMeta`]
+    /// entry exists, it returns a default [`BucketMeta`]
     /// with:
     /// - `nonce`: 0
     /// - `capacity`: MIN_BUCKET_SIZE (256)
@@ -105,28 +105,54 @@ pub trait StateReader: Debug + Send + Sync {
     }
 }
 
-/// Provides read-only access to SALT trie storage.
+/// Provides read-only access to SALT trie commitments.
+///
+/// SALT uses a two-tier architecture to authenticate state data:
+/// - **Main trie**: A static 4-level, 256-ary complete trie where each leaf represents
+///   a bucket (first 65K are metadata buckets, remainder are data buckets)
+/// - **Bucket subtrees**: Dynamic 256-ary complete trees that extend from data bucket
+///   leaves, growing as buckets expand beyond their initial capacity
+///
+/// This trait provides a uniform interface for reading commitments from both tiers.
+/// Methods return deterministic default commitments for nodes that haven't been
+/// explicitly stored, ensuring the trie behaves as if fully materialized.
 ///
 /// See [`MemSalt`](crate::MemSalt) for a reference in-memory implementation.
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
 
-    /// Get node commitment by `node_id` from store.
+    /// Retrieves the commitment for a specific trie node.
+    ///
+    /// If no commitment has been explicitly stored, returns a default commitment
+    /// pre-computed from the node ID.
+    ///
+    /// # Arguments
+    /// * `node_id` - The unique identifier for the trie node
+    ///
+    /// # Returns
+    /// The 64-byte cryptographic commitment for the node
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 
-    /// Get node commitments by `range` from store.
-    fn commitments(
-        &self,
-        range: Range<NodeId>,
-    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error>;
+    // FIXME: both the doc and the implementation need to be reworked!!!
 
-    /// Retrieves child nodes based on the node ID
-    fn children(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
+    /// Retrieves all [`TRIE_WIDTH`] child commitments for a given parent node.
+    ///
+    /// This method ensures all children have valid commitments by:
+    /// - Fetching stored commitments for children that have been modified
+    /// - Computing default commitments for unmodified children in the main trie
+    /// - Returning zero commitments for missing children in bucket subtrees
+    ///
+    /// # Arguments
+    /// * `node_id` - The parent node whose children to retrieve
+    ///
+    /// # Returns
+    /// Vector of exactly [`TRIE_WIDTH`] commitments, one for each child position
+    fn child_commitments(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
         let zero = zero_commitment();
         let child_start = get_child_node(&node_id, 0);
         let mut children = vec![zero; TRIE_WIDTH];
-        let cache = self.commitments(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
+        let cache = self.node_entries(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
         // Fill in actual values where they exist
         for (k, v) in cache {
             children[k as usize - child_start as usize] = v;
@@ -149,4 +175,19 @@ pub trait TrieReader: Sync {
 
         Ok(children)
     }
+
+    /// Retrieves commitments for a range of trie nodes.
+    ///
+    /// Returns only explicitly stored commitments within the range. Nodes with
+    /// default commitments are not included in the results.
+    ///
+    /// # Arguments
+    /// * `range` - Half-open range [start, end) of node IDs to query
+    ///
+    /// # Returns
+    /// Vector of (node_id, commitment) pairs ordered by node ID
+    fn node_entries(
+        &self,
+        range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error>;
 }

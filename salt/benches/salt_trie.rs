@@ -160,7 +160,7 @@ impl TrieReader for ExpansionSalt {
         Ok(zero_commitment())
     }
 
-    fn commitments(
+    fn node_entries(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {

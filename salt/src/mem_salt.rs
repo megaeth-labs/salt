@@ -158,19 +158,6 @@ impl TrieReader for MemSalt {
     /// Uses static string references for simplicity in this in-memory implementation.
     type Error = &'static str;
 
-    /// Retrieves the commitment for a trie node.
-    ///
-    /// Returns the cryptographic commitment associated with the given node ID.
-    /// If no commitment has been explicitly stored, returns a default commitment
-    /// computed from the node ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `node_id` - The trie node ID to look up
-    ///
-    /// # Returns
-    ///
-    /// The commitment bytes for the node, either stored or computed as default.
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         // FIXME: but what if the given node_id is not valid (i.e., doesn't exist in
         // the current SALT structure)!? there is no error checking at all! Even worse,
@@ -186,25 +173,17 @@ impl TrieReader for MemSalt {
             .unwrap_or_else(|| default_commitment(node_id)))
     }
 
-    /// Retrieves commitments for a range of trie nodes.
-    ///
-    /// Returns all stored node ID and commitment pairs where the node ID falls
-    /// within the specified range. Only explicitly stored commitments are returned;
-    /// default commitments for missing nodes are not included.
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Half-open range of node IDs to query
-    ///
-    /// # Returns
-    ///
-    /// Vector of node ID and commitment pairs within the range, ordered by node ID.
-    fn commitments(
+    fn node_entries(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        let map = self.trie.read().unwrap();
-        Ok(map.range(range).map(|(k, v)| (*k, *v)).collect())
+        Ok(self
+            .trie
+            .read()
+            .unwrap()
+            .range(range)
+            .map(|(k, v)| (*k, *v))
+            .collect())
     }
 }
 

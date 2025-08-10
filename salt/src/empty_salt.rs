@@ -41,7 +41,7 @@ impl TrieReader for EmptySalt {
         Ok(default_commitment(node_id))
     }
 
-    fn commitments(
+    fn node_entries(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {

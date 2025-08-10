@@ -59,7 +59,7 @@ fn process_trie_queries<T: TrieReader>(
                     .iter()
                     .flat_map(|(_, logic_parent, _)| {
                         trie_reader
-                            .children(*logic_parent)
+                            .child_commitments(*logic_parent)
                             .expect("Failed to get trie children")
                     })
                     .collect::<Vec<_>>();
