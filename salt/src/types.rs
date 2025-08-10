@@ -8,8 +8,8 @@
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
-    TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
+    NUM_META_BUCKETS, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -377,12 +377,23 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
 /// This allows ~16M buckets to store their metadata in just 65,536 dedicated metadata buckets.
 ///
 /// # Arguments
-/// * `bucket_id` - The regular bucket ID whose metadata location to find
+/// * `bucket_id` - The bucket ID whose metadata location to find. Must be a valid data
+///   bucket ID (NUM_META_BUCKETS <= bucket_id < NUM_BUCKETS).
 ///
 /// # Returns
 /// SaltKey pointing to the metadata storage location
+///
+/// # Panics
+/// Panics if `bucket_id` is not a valid data bucket:
+/// - Meta buckets (0 to NUM_META_BUCKETS-1) don't have their own metadata
+/// - Invalid bucket IDs (>= NUM_BUCKETS)
 #[inline]
 pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
+    assert!(
+        bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId,
+        "bucket_id {bucket_id} must be a valid data bucket ID (range: {NUM_META_BUCKETS}..{NUM_BUCKETS})"
+    );
+
     SaltKey::from((
         bucket_id >> MIN_BUCKET_SIZE_BITS,
         bucket_id as SlotId % MIN_BUCKET_SIZE as SlotId,
@@ -525,12 +536,13 @@ mod tests {
     #[test]
     fn bucket_metadata_key_mapping() {
         let test_cases = [
-            (0, 0, 0),         // bucket 0 -> meta bucket 0, slot 0
-            (255, 0, 255),     // bucket 255 -> meta bucket 0, slot 255
-            (256, 1, 0),       // bucket 256 -> meta bucket 1, slot 0
-            (512, 2, 0),       // bucket 512 -> meta bucket 2, slot 0
-            (1000, 3, 232),    // bucket 1000 -> meta bucket 3, slot 232 (1000 % 256)
-            (65535, 255, 255), // bucket 65535 -> meta bucket 255, slot 255
+            // Only test valid data bucket IDs (>= NUM_META_BUCKETS)
+            (NUM_META_BUCKETS as BucketId, 256, 0), // first data bucket -> meta bucket 256, slot 0
+            (NUM_META_BUCKETS as BucketId + 1, 256, 1), // second data bucket -> meta bucket 256, slot 1
+            (NUM_META_BUCKETS as BucketId + 255, 256, 255), // last slot in meta bucket 256
+            (NUM_META_BUCKETS as BucketId + 256, 257, 0), // first slot in meta bucket 257
+            (100000, 390, 160), // bucket 100000 -> meta bucket 390, slot 160 (100000 % 256)
+            (NUM_BUCKETS as BucketId - 1, 65535, 255), // max bucket -> meta bucket 65535, slot 255
         ];
 
         for (bucket_id, expected_meta_bucket, expected_slot) in test_cases {
@@ -545,12 +557,32 @@ mod tests {
         }
     }
 
+    /// Tests that bucket_metadata_key correctly panics for meta bucket IDs.
+    #[test]
+    #[should_panic]
+    fn bucket_metadata_key_meta_bucket_panic() {
+        let last_meta_bucket = NUM_META_BUCKETS as BucketId - 1;
+        bucket_metadata_key(last_meta_bucket); // Last meta bucket
+    }
+
+    /// Tests that bucket_metadata_key correctly panics for invalid bucket IDs.
+    #[test]
+    #[should_panic]
+    fn bucket_metadata_key_invalid_bucket_panic() {
+        bucket_metadata_key(NUM_BUCKETS as BucketId); // >= NUM_BUCKETS
+    }
+
     /// Tests the bidirectional conversion between bucket IDs and metadata storage keys.
     /// bucket_metadata_key() and bucket_id_from_metadata_key() should be perfect inverses,
     /// allowing any bucket ID to be mapped to a metadata key and back without loss.
     #[test]
     fn metadata_key_roundtrip() {
-        let test_buckets = [0, 1, 255, 256, 1000, 65535, 100000, 16777215];
+        let test_buckets = [
+            NUM_META_BUCKETS as BucketId,     // First data bucket
+            NUM_META_BUCKETS as BucketId + 1, // Second data bucket
+            100000,                           // Arbitrary data bucket
+            NUM_BUCKETS as BucketId - 1,      // Last valid bucket
+        ];
 
         for bucket_id in test_buckets {
             let key = bucket_metadata_key(bucket_id);

@@ -50,7 +50,7 @@ pub trait StateReader: Debug + Send + Sync {
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error>;
 
-    /// Retrieves metadata for a specific bucket.
+    /// Retrieves metadata for a specific data bucket.
     ///
     /// Bucket metadata contains essential information about a bucket's configuration
     /// and usage, including:
@@ -60,16 +60,17 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// # Behavior
     ///
-    /// This method looks up the bucket's metadata using a special metadata key
-    /// derived from the bucket ID. If no metadata entry exists (common for
-    /// uninitialized buckets), it returns a default [`BucketMeta`] with:
+    /// This method looks up the bucket's metadata using the bucket ID. If no metadata
+    /// entry exists (common for lightly used buckets), it returns a default [`BucketMeta`]
+    /// with:
     /// - `nonce`: 0
     /// - `capacity`: MIN_BUCKET_SIZE (256)
     /// - `used`: 0
     ///
     /// # Arguments
     ///
-    /// * `bucket_id` - The ID of the bucket whose metadata to retrieve
+    /// * `bucket_id` - The ID of the data bucket whose metadata to retrieve. Must be
+    ///   a valid data bucket ID (NUM_META_BUCKETS <= bucket_id < NUM_BUCKETS).
     ///
     /// # Returns
     ///
@@ -78,15 +79,15 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// # Panics
     ///
-    /// Panics if the stored metadata value cannot be decoded into a valid
-    /// [`BucketMeta`] structure. This indicates data corruption.
+    /// - Panics if `bucket_id` refers to a meta bucket or is invalid (>= NUM_BUCKETS)
+    /// - Panics if the stored metadata value cannot be decoded into a valid
+    ///   [`BucketMeta`] structure (indicates data corruption)
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
         Ok(match self.entry(key)? {
             Some(ref v) => v
                 .try_into()
                 .expect("Failed to decode bucket metadata: stored value is corrupted"),
-            // Return default metadata for uninitialized buckets
             None => BucketMeta::default(),
         })
     }
