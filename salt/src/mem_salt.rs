@@ -83,7 +83,11 @@ impl MemSalt {
     }
 
     pub fn put_state(&self, key: SaltKey, val: SaltValue) {
-        self.state.write().unwrap().kvs.insert(key, val);
+        let mut state = self.state.write().unwrap();
+        if !state.kvs.contains_key(&key) {
+            *state.metas_used.entry(key.bucket_id()).or_default() += 1;
+        }
+        state.kvs.insert(key, val);
     }
 }
 
