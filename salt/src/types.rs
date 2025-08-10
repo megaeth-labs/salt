@@ -96,7 +96,9 @@ impl BucketMeta {
     }
 }
 
-/// 64-bit key encoding bucket and slot identifiers.
+/// 64-bit storage key encoding bucket and slot identifiers.
+///
+/// This is the key used by the underlying database to store SALT state.
 ///
 /// Layout: `bucket_id` (high 24 bits) | `slot_id` (low 40 bits)
 /// - Supports ~16M buckets (2^24)

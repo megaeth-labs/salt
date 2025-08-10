@@ -177,7 +177,7 @@ where
     let buckets_top_level = bucket_ids
         .into_iter()
         .map(|bucket_id| {
-            let meta = state_reader.meta(bucket_id)?;
+            let meta = state_reader.metadata(bucket_id)?;
             let bucket_trie_top_level = sub_trie_top_level(meta.capacity);
             Ok((bucket_id, bucket_trie_top_level as u8))
         })

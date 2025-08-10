@@ -277,7 +277,7 @@ impl StateRoot {
                     (old_capacity, new_capacity) =
                         capacity_changes.remove(&bid).unwrap_or_else(|| {
                             let bucket_capacity = state
-                                .meta(bid)
+                                .metadata(bid)
                                 .expect("bucket capacity should exist")
                                 .capacity;
                             (bucket_capacity, bucket_capacity)

@@ -175,7 +175,7 @@ impl StateReader for ExpansionSalt {
         Ok(None)
     }
 
-    fn meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let meta = BucketMeta {
             capacity: if bucket_id < self.0 .0 as BucketId {
                 self.0 .1

@@ -133,43 +133,11 @@ impl StateReader for MemSalt {
     /// Uses static string references for simplicity in this in-memory implementation.
     type Error = &'static str;
 
-    /// Retrieves a state value by key.
-    ///
-    /// Returns the state value associated with the given key, or `None` if the key
-    /// doesn't exist. For bucket metadata slots that don't exist, returns a default
-    /// [`BucketMeta`] value instead of `None`.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The state key to look up
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(Some(value))` if the key exists or is a bucket metadata slot
-    /// - `Ok(None)` if the key doesn't exist and is not a metadata slot
-    /// - `Err(_)` should not occur in this implementation
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let val = self.state.read().unwrap().get(&key).cloned();
-        if val.is_none() && key.is_in_meta_bucket() {
-            return Ok(Some(BucketMeta::default().into()));
-        }
         Ok(val)
     }
 
-    /// Retrieves all non-empty entries within the specified range of SaltKeys.
-    ///
-    /// # Behavior
-    ///
-    /// - **Metadata keys**: Returns stored values or [`BucketMeta::default()`] for missing keys
-    /// - **Data keys**: Returns only explicitly stored values
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Inclusive range of SaltKeys to query
-    ///
-    /// # Returns
-    ///
-    /// Vector of all matching key-value pairs, ordered by key.
     fn entries(
         &self,
         range: RangeInclusive<SaltKey>,
@@ -259,16 +227,15 @@ mod tests {
             (bucket_id % MIN_BUCKET_SIZE as BucketId) as SlotId,
         )
             .into();
-        let mut meta = store.meta(bucket_id).unwrap();
+        let mut meta = store.metadata(bucket_id).unwrap();
         assert_eq!(meta, BucketMeta::default());
-        let v = store.entry(salt_key).unwrap().unwrap();
-        assert_eq!(meta, BucketMeta::try_from(&v).unwrap());
+        assert!(store.entry(salt_key).unwrap().is_none());
         meta.capacity = 1024;
         let updates = StateUpdates {
             data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.meta(bucket_id).unwrap(), meta);
+        assert_eq!(store.metadata(bucket_id).unwrap(), meta);
     }
 
     // FIXME: no tests for bucket expansion??

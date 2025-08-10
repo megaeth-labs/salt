@@ -97,11 +97,7 @@ impl StateReader for BlockWitness {
 
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let result = self.kvs.get(&key).cloned().flatten();
-        Ok(if result.is_none() && key.is_in_meta_bucket() {
-            Some(BucketMeta::default().into())
-        } else {
-            result
-        })
+        Ok(result)
     }
 
     fn entries(

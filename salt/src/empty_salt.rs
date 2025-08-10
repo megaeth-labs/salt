@@ -29,7 +29,7 @@ impl StateReader for EmptySalt {
         Ok(Vec::new())
     }
 
-    fn meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(BucketMeta::default())
     }
 }
