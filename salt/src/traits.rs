@@ -1,4 +1,4 @@
-//! Define traits for storing salt state and salt trie.
+//! Core traits for SALT state and trie storage.
 use crate::{
     constant::{default_commitment, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH},
     trie::trie::get_child_node,
@@ -13,7 +13,19 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
-/// This trait provides functionality for reading the entries of SALT buckets.
+/// Provides read-only access to SALT state storage.
+///
+/// SALT organizes state data into buckets (0..16M), where the first 65K are metadata
+/// buckets storing configuration for data buckets. Each bucket contains slots addressed
+/// by [`SaltKey`] (bucket_id, slot_id) pairs.
+///
+/// This trait defines a consistent interface for reading state data. Low-level methods
+/// like `value()` returns `None` for missing keys without interpretation. Higher-level
+/// methods like `metadata()` provide semantic meaning - returning default values where
+/// appropriate (e.g., default bucket metadata for buckets that haven't been resized or
+/// rehashed).
+///
+/// See [`MemSalt`](crate::MemSalt) for a reference in-memory implementation.
 pub trait StateReader: Debug + Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
@@ -34,7 +46,7 @@ pub trait StateReader: Debug + Send + Sync {
     /// - `Ok(Some(value))` if the key exists
     /// - `Ok(None)` if the key doesn't exist
     /// - `Err(_)` on storage errors
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
 
     /// Retrieves all non-empty entries within the specified range of SaltKeys.
     ///
@@ -84,7 +96,7 @@ pub trait StateReader: Debug + Send + Sync {
     ///   [`BucketMeta`] structure (indicates data corruption)
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
-        Ok(match self.entry(key)? {
+        Ok(match self.value(key)? {
             Some(ref v) => v
                 .try_into()
                 .expect("Failed to decode bucket metadata: stored value is corrupted"),
@@ -93,7 +105,9 @@ pub trait StateReader: Debug + Send + Sync {
     }
 }
 
-/// This trait provides functionality for reading commitments from trie nodes.
+/// Provides read-only access to SALT trie storage.
+///
+/// See [`MemSalt`](crate::MemSalt) for a reference in-memory implementation.
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;

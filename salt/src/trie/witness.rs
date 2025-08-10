@@ -36,7 +36,7 @@ where
         .iter()
         .map(|salt_key| {
             let entry = state_reader
-                .entry(*salt_key)
+                .value(*salt_key)
                 .map_err(ProofError::ReadStateFailed)?;
             Ok((*salt_key, entry))
         })
@@ -95,7 +95,7 @@ impl BlockWitness {
 impl StateReader for BlockWitness {
     type Error = &'static str;
 
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let result = self.kvs.get(&key).cloned().flatten();
         Ok(result)
     }
@@ -245,8 +245,8 @@ mod tests {
 
         // use the old state
         for key in min_sub_tree_keys {
-            let witness_value = block_witness.entry(key).unwrap();
-            let state_value = mem_salt.entry(key).unwrap();
+            let witness_value = block_witness.value(key).unwrap();
+            let state_value = mem_salt.value(key).unwrap();
             assert_eq!(witness_value, state_value);
         }
     }

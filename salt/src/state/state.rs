@@ -388,7 +388,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let value = match self.cache.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
-                let value = self.base_state.entry(key)?;
+                let value = self.base_state.value(key)?;
                 if self.save_access {
                     entry.insert(value.clone());
                 }

@@ -262,7 +262,7 @@ mod tests {
 
         let proof = prover::create_salt_proof(&salt_keys, &salt, &salt).unwrap();
 
-        let value = salt.entry(salt_keys[0]).unwrap();
+        let value = salt.value(salt_keys[0]).unwrap();
 
         let res = proof.check::<EmptySalt, EmptySalt>(salt_keys, vec![value], empty_root);
 
@@ -295,7 +295,7 @@ mod tests {
         mem_salt.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().nth(1).unwrap();
-        let value = mem_salt.entry(salt_key).unwrap();
+        let value = mem_salt.value(salt_key).unwrap();
 
         let proof = prover::create_salt_proof(&[salt_key], &mem_salt, &mem_salt).unwrap();
 

@@ -15,7 +15,7 @@ pub struct EmptySalt;
 impl StateReader for EmptySalt {
     type Error = &'static str;
 
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let value = key
             .is_in_meta_bucket()
             .then(|| BucketMeta::default().into());

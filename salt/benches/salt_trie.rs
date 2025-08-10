@@ -171,7 +171,7 @@ impl TrieReader for ExpansionSalt {
 impl StateReader for ExpansionSalt {
     type Error = &'static str;
 
-    fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
     }
 

@@ -133,7 +133,7 @@ impl StateReader for MemSalt {
     /// Uses static string references for simplicity in this in-memory implementation.
     type Error = &'static str;
 
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let val = self.state.read().unwrap().get(&key).cloned();
         Ok(val)
     }
@@ -229,7 +229,7 @@ mod tests {
             .into();
         let mut meta = store.metadata(bucket_id).unwrap();
         assert_eq!(meta, BucketMeta::default());
-        assert!(store.entry(salt_key).unwrap().is_none());
+        assert!(store.value(salt_key).unwrap().is_none());
         meta.capacity = 1024;
         let updates = StateUpdates {
             data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
