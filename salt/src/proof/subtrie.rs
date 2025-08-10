@@ -1,6 +1,6 @@
 //! This module return all-needed queries for a given kv list by create_sub_trie()
 use crate::{
-    constant::BUCKET_SLOT_ID_MASK,
+    constant::{BUCKET_SLOT_ID_MASK, NUM_META_BUCKETS},
     proof::{
         calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
@@ -177,6 +177,10 @@ where
     let buckets_top_level = bucket_ids
         .into_iter()
         .map(|bucket_id| {
+            if bucket_id < NUM_META_BUCKETS as BucketId {
+                return Ok((bucket_id, 4u8));
+            }
+
             let meta = state_reader.metadata(bucket_id)?;
             let bucket_trie_top_level = sub_trie_top_level(meta.capacity);
             Ok((bucket_id, bucket_trie_top_level as u8))
