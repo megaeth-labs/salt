@@ -11,10 +11,18 @@ use std::{
 };
 use tracing::info;
 
-pub type EphemeralSaltStateCache = (
-    HashMap<SaltKey, Option<SaltValue>>,
-    HashMap<BucketId, BucketMeta>,
+/// EphemeralSaltStateCache is used to cache temporary SALT state.
+/// It contains two hash maps:
+/// - The first HashMap<SaltKey, Option<SaltValue>> caches the value for each
+/// SALT key (Option, None means deleted or missed)
+/// - The second HashMap<BucketId, BucketMeta> caches metadata for each bucket
+///  (such as capacity, usage, etc.)
+#[derive(Debug, Default, Clone)]
+pub struct EphemeralSaltStateCache(
+    pub HashMap<SaltKey, Option<SaltValue>>,
+    pub HashMap<BucketId, BucketMeta>,
 );
+
 /// A non-persistent SALT state snapshot.
 ///
 /// This allows users to tentatively update some SALT state without actually
@@ -46,7 +54,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn new(reader: &'a BaseState) -> Self {
         Self {
             base_state: reader,
-            cache: (HashMap::new(), HashMap::new()),
+            cache: EphemeralSaltStateCache::default(),
             save_access: true,
         }
     }
