@@ -1,7 +1,7 @@
 //! This module export block witness's interfaces.
 use crate::{
     constant::{default_commitment, NUM_META_BUCKETS},
-    proof::{prover, CommitmentBytesW, ProofError, SaltProof},
+    proof::{prover, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -24,42 +24,35 @@ where
 {
     let mut keys = min_sub_tree.to_vec();
 
-    // Check if the array is already sorted - returns true if sorted, false otherwise
-    // Using any() to find the first out-of-order pair for efficiency
-    let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
-    if needs_sorting {
+    // Sort only if needed
+    if keys.windows(2).any(|w| w[0] > w[1]) {
         keys.par_sort_unstable();
     }
     keys.dedup();
 
-    // Split the sorted keys into two vectors based on threshold
+    // Separate meta keys from data keys
     let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
-    // Since keys is already sorted, we can use binary search to find the split point
-    let split_index = match keys.binary_search(&threshold) {
-        Ok(index) => index,  // Exact match found
-        Err(index) => index, // Would be inserted at this index
-    };
+    let split_index = keys.partition_point(|&k| k < threshold);
     let (meta_keys, data_keys) = keys.split_at(split_index);
 
     let metadata = meta_keys
         .par_iter()
-        .map(|&salt_key| {
+        .filter_map(|&salt_key| {
             let bucket_id = bucket_id_from_metadata_key(salt_key);
-            let meta = state_reader
+            state_reader
                 .metadata(bucket_id)
-                .map_err(ProofError::ReadStateFailed)?;
-
-            Ok((bucket_id, meta))
+                .ok()
+                .map(|meta| (bucket_id, (meta != BucketMeta::default()).then_some(meta)))
         })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+        .collect();
 
     let kvs = data_keys
         .par_iter()
         .map(|&salt_key| {
-            let entry = state_reader
+            state_reader
                 .value(salt_key)
-                .map_err(ProofError::ReadStateFailed)?;
-            Ok((salt_key, entry))
+                .map_err(ProofError::ReadStateFailed)
+                .map(|entry| (salt_key, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
@@ -76,7 +69,7 @@ where
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
     /// bucket metadata in sub state
-    pub metadata: BTreeMap<BucketId, BucketMeta>,
+    pub metadata: BTreeMap<BucketId, Option<BucketMeta>>,
     /// kvs in sub state
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
     /// salt proof to prove the metadata + kvs
@@ -91,17 +84,20 @@ impl TrieReader for BlockWitness {
             .proof
             .parents_commitments
             .get(&node_id)
-            .cloned()
-            .unwrap_or_else(|| CommitmentBytesW(default_commitment(node_id)))
-            .0)
+            .map(|c| c.0)
+            .unwrap_or_else(|| default_commitment(node_id)))
     }
 
     fn node_entries(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        let map = &self.proof.parents_commitments;
-        Ok(map.range(range).map(|(k, v)| (*k, v.0)).collect())
+        Ok(self
+            .proof
+            .parents_commitments
+            .range(range)
+            .map(|(&k, v)| (k, v.0))
+            .collect())
     }
 }
 
@@ -122,8 +118,7 @@ impl BlockWitness {
         let mut vals = self
             .metadata
             .values()
-            .cloned()
-            .map(|v| Some(SaltValue::from(v)))
+            .map(|&meta_opt| Some(meta_opt.unwrap_or_default().into()))
             .collect::<Vec<_>>();
         vals.extend(self.kvs.values().cloned());
 
@@ -138,7 +133,11 @@ impl StateReader for BlockWitness {
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         if key.is_in_meta_bucket() {
             let bucket_id = bucket_id_from_metadata_key(key);
-            Ok(Some(self.metadata(bucket_id)?.into()))
+            Ok(self
+                .metadata
+                .get(&bucket_id)
+                .and_then(|&opt| opt)
+                .map(Into::into))
         } else {
             Ok(self.kvs.get(&key).cloned().flatten())
         }
@@ -154,18 +153,25 @@ impl StateReader for BlockWitness {
                 bucket_id_from_metadata_key(*range.start())
                     ..=bucket_id_from_metadata_key(*range.end()),
             )
-            .map(|(bucket_id, meta)| (bucket_metadata_key(*bucket_id), (*meta).into()))
+            .filter_map(|(bucket_id, meta)| {
+                meta.as_ref()
+                    .map(|m| (bucket_metadata_key(*bucket_id), (*m).into()))
+            })
             .collect();
         result.extend(
             self.kvs
                 .range(*range.start()..=*range.end())
-                .map(|(k, v)| (*k, v.clone().expect("existing key"))),
+                .filter_map(|(k, v)| v.as_ref().map(|val| (*k, val.clone()))),
         );
         Ok(result)
     }
 
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(self.metadata.get(&bucket_id).copied().unwrap_or_default())
+        Ok(self
+            .metadata
+            .get(&bucket_id)
+            .and_then(|&opt| opt)
+            .unwrap_or_default())
     }
 }
 
@@ -291,7 +297,7 @@ mod tests {
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
-        let new_kvs = create_random_kv_pairs(10);
+        let new_kvs = create_random_kv_pairs(100);
         let mut state = EphemeralSaltState::new(&mem_salt);
         state.update(&new_kvs).unwrap();
 
