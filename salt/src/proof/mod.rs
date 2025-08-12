@@ -190,8 +190,8 @@ mod tests {
     use crate::{
         constant::{default_commitment, STARTING_NODE_ID},
         empty_salt::EmptySalt,
-        formate::{PlainKey, PlainValue},
         mem_store::MemStore,
+        mock_evm_types::{PlainKey, PlainValue},
         state::state::EphemeralSaltState,
         traits::{StateReader, TrieReader},
         trie::trie::StateRoot,

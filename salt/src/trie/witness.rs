@@ -179,7 +179,8 @@ impl StateReader for BlockWitness {
 mod tests {
     use super::*;
     use crate::{
-        formate::*, mem_store::MemStore, state::state::EphemeralSaltState, trie::trie::StateRoot,
+        mem_store::MemStore, mock_evm_types::*, state::state::EphemeralSaltState,
+        trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};

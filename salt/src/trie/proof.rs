@@ -439,8 +439,8 @@ impl StateReader for PlainKeysProof {
 mod tests {
     use super::*;
     use crate::{
-        formate::{Account, PlainKey, PlainValue},
         mem_store::MemStore,
+        mock_evm_types::{Account, PlainKey, PlainValue},
         state::state::EphemeralSaltState,
         trie::trie::StateRoot,
     };
