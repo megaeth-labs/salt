@@ -156,11 +156,11 @@ pub struct ExpansionSalt((u64, u64));
 impl TrieReader for ExpansionSalt {
     type Error = &'static str;
 
-    fn get_commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
     }
 
-    fn get_range(
+    fn node_entries(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
@@ -171,18 +171,11 @@ impl TrieReader for ExpansionSalt {
 impl StateReader for ExpansionSalt {
     type Error = &'static str;
 
-    fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
     }
 
-    fn range_bucket(
-        &self,
-        _range: RangeInclusive<BucketId>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(Vec::new())
-    }
-
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let meta = BucketMeta {
             capacity: if bucket_id < self.0 .0 as BucketId {
                 self.0 .1

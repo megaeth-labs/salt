@@ -134,7 +134,7 @@ impl StateRoot {
         let root_commitment = if let Some(c) = trie_updates.data.last() {
             c.1 .1
         } else {
-            trie.get_commitment(0)?
+            trie.commitment(0)?
         };
 
         Ok((hash_commitment(root_commitment), trie_updates))
@@ -277,7 +277,7 @@ impl StateRoot {
                     (old_capacity, new_capacity) =
                         capacity_changes.remove(&bid).unwrap_or_else(|| {
                             let bucket_capacity = state
-                                .get_meta(bid)
+                                .metadata(bid)
                                 .expect("bucket capacity should exist")
                                 .capacity;
                             (bucket_capacity, bucket_capacity)
@@ -646,7 +646,7 @@ impl StateRoot {
         if let Some(c) = self.cache.get(&node_id) {
             Ok(*c)
         } else {
-            trie.get_commitment(node_id)
+            trie.commitment(node_id)
         }
     }
 }
@@ -672,7 +672,13 @@ pub fn compute_from_scratch<S: StateReader>(
                 (start >> MIN_BUCKET_SIZE_BITS) as BucketId
             };
             let mut state_updates = reader
-                .range_bucket(meta_start..=(end >> MIN_BUCKET_SIZE_BITS) as BucketId)?
+                .entries(
+                    SaltKey::from((meta_start, 0))
+                        ..=SaltKey::from((
+                            (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
+                            BUCKET_SLOT_ID_MASK,
+                        )),
+                )?
                 .into_iter()
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
                 .collect::<BTreeMap<_, _>>();
@@ -680,7 +686,10 @@ pub fn compute_from_scratch<S: StateReader>(
             // Read buckets key-value pairs from store
             state_updates.extend(
                 reader
-                    .range_bucket(start as BucketId..=end as BucketId)?
+                    .entries(
+                        SaltKey::from((start as BucketId, 0))
+                            ..=SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK)),
+                    )?
                     .into_iter()
                     .map(|(k, v)| (k, (None, Some(v)))),
             );
@@ -838,7 +847,7 @@ impl SubtrieChangeInfo {
 mod tests {
     use super::*;
     use crate::{
-        mem_salt::MemSalt,
+        mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::{kv_hash, StateRoot},
     };
@@ -906,7 +915,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_no_kvchanges() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key: SaltKey = (
@@ -963,7 +972,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_small() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key: SaltKey = (
@@ -1112,7 +1121,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_large() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1234,13 +1243,16 @@ mod tests {
     #[test]
     fn incremental_update_small() {
         let mut state_updates = StateUpdates::default();
-        let store = MemSalt::new();
+        let store = MemStore::new();
         // set expansion bucket metadata and check update with expanded bucket
         let update_bid = KV_BUCKET_OFFSET as BucketId + 2;
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
         let meta = bucket_meta(0, 65536 * 2);
         let salt_key = bucket_metadata_key(update_bid);
-        store.put_state(salt_key, SaltValue::from(meta));
+        let updates = StateUpdates {
+            data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
+        };
+        store.update_state(updates);
 
         let state_updates1 = StateUpdates {
             data: vec![
@@ -1380,7 +1392,7 @@ mod tests {
     #[test]
     fn increment_updates_large() {
         let kvs = create_random_account(10000);
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new();
         let total_state_updates = state.update(&kvs).unwrap();
@@ -1427,7 +1439,7 @@ mod tests {
 
     #[test]
     fn compute_from_scratch_small() {
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1472,7 +1484,7 @@ mod tests {
         mock_db.update_trie(trie_updates);
         assert_eq!(
             hash_commitment(c),
-            hash_commitment(mock_db.get_commitment(node_id).unwrap())
+            hash_commitment(mock_db.commitment(node_id).unwrap())
         );
 
         assert_eq!(root0, root1);
@@ -1480,7 +1492,7 @@ mod tests {
 
     #[test]
     fn compute_from_scratch_large() {
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1557,7 +1569,7 @@ mod tests {
             .zip(exp_id_vec.iter())
             .for_each(|((id, (old_c, new_c)), exp_id)| {
                 assert_eq!(*id, *exp_id);
-                let cmp_old_c = store.get_commitment(*id).unwrap();
+                let cmp_old_c = store.commitment(*id).unwrap();
                 assert_eq!(cmp_old_c, *old_c);
 
                 let delta: Element = c_deltas
@@ -1575,7 +1587,7 @@ mod tests {
     #[test]
     fn trie_update_leaf_nodes() {
         let committer = get_global_committer();
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
@@ -1843,7 +1855,7 @@ mod tests {
         let mut default_committment_vec = vec![(zero, zero); TRIE_LEVELS];
         let len_vec = [1, 256, 256, 256];
 
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let c = calculate_subtrie_with_all_kvs(260, &store);
         assert_eq!(c, default_commitment(STARTING_NODE_ID[2] as NodeId));
         let c = calculate_subtrie_with_all_kvs(260 + STARTING_NODE_ID[2] as NodeId, &store);
@@ -1962,7 +1974,7 @@ mod tests {
     }
 
     // Draw points to calculate kv
-    fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemSalt) -> CommitmentBytes {
+    fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemStore) -> CommitmentBytes {
         let level = get_bfs_level(node_id);
         let committer = get_global_committer();
         let zero = zero_commitment();
@@ -1984,7 +1996,7 @@ mod tests {
                 .collect();
             datas.insert(bid as BucketId, ds);
         }
-        for (k, v) in store.get_all() {
+        for (k, v) in store.entries(SaltKey(0)..=SaltKey(u64::MAX)).unwrap() {
             let bucket_id = k.bucket_id();
             if bucket_id >= start as BucketId && bucket_id < end as BucketId {
                 let ds = datas.entry(bucket_id).or_default();

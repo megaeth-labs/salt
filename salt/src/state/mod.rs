@@ -5,16 +5,16 @@
 //! # State Management in SALT
 //!
 //! The state module provides two main interfaces for working with blockchain state:
-//! 1. **Plain State Operations**: EVM-compatible key-value operations using [`PlainStateProvider`] and [`EphemeralSaltState`]
+//! 1. **Plain State Operations**: EVM-compatible key-value operations using [`EphemeralSaltState`]
 //! 2. **SALT State Operations**: Low-level bucket operations using [`StateReader`] trait
 //!
 //! ## Working with Plain State (EVM-compatible operations)
 //!
 //! ```rust,ignore
-//! use salt::{EphemeralSaltState, PlainStateProvider, MemSalt};
+//! use salt::{EphemeralSaltState, MemStore};
 //!
 //! // Create an in-memory SALT instance
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Update plain key-value pairs (like EVM account/storage data)
@@ -31,26 +31,26 @@
 //! store.update_state(state_updates);
 //!
 //! // Reading plain state back
-//! let provider = PlainStateProvider::new(&store);
+//! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Read individual values by plain key
-//! let balance = provider.get_raw(b"account_address_1").unwrap();
+//! let balance = state.get_raw(b"account_address_1").unwrap();
 //! assert_eq!(balance, Some(b"balance_100_eth".to_vec()));
 //!
-//! let storage_val = provider.get_raw(b"storage_slot_key").unwrap();
+//! let storage_val = state.get_raw(b"storage_slot_key").unwrap();
 //! assert_eq!(storage_val, Some(b"storage_value_data".to_vec()));
 //!
 //! // Check for non-existent key
-//! let missing = provider.get_raw(b"non_existent_key").unwrap();
+//! let missing = state.get_raw(b"non_existent_key").unwrap();
 //! assert_eq!(missing, None);
 //! ```
 //!
 //! ## Working with SALT State (low-level bucket operations)
 //!
 //! ```rust,ignore
-//! use salt::{SaltKey, SaltValue, BucketMeta, traits::StateReader, MemSalt};
+//! use salt::{SaltKey, SaltValue, BucketMeta, traits::StateReader, MemStore};
 //!
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //!
 //! // Direct SALT key-value operations (bypassing plain key mapping)
 //! let bucket_id = 65538; // Specific bucket in the trie
@@ -68,11 +68,11 @@
 //! assert_eq!(retrieved, Some(salt_value));
 //!
 //! // Read bucket metadata
-//! let meta = store.get_meta(bucket_id).unwrap();
+//! let meta = store.meta(bucket_id).unwrap();
 //! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used);
 //!
 //! // Read range of entries from a bucket
-//! let entries = store.range_slot(bucket_id, 0..=100).unwrap();
+//! let entries = store.entries(bucket_id, 0..=100).unwrap();
 //! for (key, value) in entries {
 //!     println!("Key: {:?}, Value: {:?}", key, value);
 //! }
@@ -81,9 +81,9 @@
 //! ## Batch Operations and Caching
 //!
 //! ```rust,ignore
-//! use salt::{EphemeralSaltState, SaltKey, MemSalt};
+//! use salt::{EphemeralSaltState, SaltKey, MemStore};
 //!
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //!
 //! // Create ephemeral state for batch operations with caching
 //! let mut ephemeral_state = EphemeralSaltState::new(&store);

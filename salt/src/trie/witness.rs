@@ -1,7 +1,7 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, BUCKET_SLOT_BITS, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
-    proof::{prover, CommitmentBytesW, ProofError, SaltProof},
+    constant::{default_commitment, NUM_META_BUCKETS},
+    proof::{prover, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ops::{Bound::Included, Range, RangeInclusive},
+    ops::{Range, RangeInclusive},
 };
 
 /// create a block witness from the trie
@@ -24,42 +24,35 @@ where
 {
     let mut keys = min_sub_tree.to_vec();
 
-    // Check if the array is already sorted - returns true if sorted, false otherwise
-    // Using any() to find the first out-of-order pair for efficiency
-    let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
-    if needs_sorting {
+    // Sort only if needed
+    if keys.windows(2).any(|w| w[0] > w[1]) {
         keys.par_sort_unstable();
     }
     keys.dedup();
 
-    // Split the sorted keys into two vectors based on threshold
+    // Separate meta keys from data keys
     let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
-    // Since keys is already sorted, we can use binary search to find the split point
-    let split_index = match keys.binary_search(&threshold) {
-        Ok(index) => index,  // Exact match found
-        Err(index) => index, // Would be inserted at this index
-    };
+    let split_index = keys.partition_point(|&k| k < threshold);
     let (meta_keys, data_keys) = keys.split_at(split_index);
 
     let metadata = meta_keys
         .par_iter()
-        .map(|&salt_key| {
+        .filter_map(|&salt_key| {
             let bucket_id = bucket_id_from_metadata_key(salt_key);
-            let meta = state_reader
-                .get_meta(bucket_id)
-                .map_err(ProofError::ReadStateFailed)?;
-
-            Ok((bucket_id, meta))
+            state_reader
+                .metadata(bucket_id)
+                .ok()
+                .map(|meta| (bucket_id, (meta != BucketMeta::default()).then_some(meta)))
         })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+        .collect();
 
     let kvs = data_keys
         .par_iter()
         .map(|&salt_key| {
-            let entry = state_reader
-                .entry(salt_key)
-                .map_err(ProofError::ReadStateFailed)?;
-            Ok((salt_key, entry))
+            state_reader
+                .value(salt_key)
+                .map_err(ProofError::ReadStateFailed)
+                .map(|entry| (salt_key, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
@@ -76,7 +69,7 @@ where
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
     /// bucket metadata in sub state
-    pub metadata: BTreeMap<BucketId, BucketMeta>,
+    pub metadata: BTreeMap<BucketId, Option<BucketMeta>>,
     /// kvs in sub state
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
     /// salt proof to prove the metadata + kvs
@@ -86,22 +79,25 @@ pub struct BlockWitness {
 impl TrieReader for BlockWitness {
     type Error = &'static str;
 
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
             .proof
             .parents_commitments
             .get(&node_id)
-            .cloned()
-            .unwrap_or_else(|| CommitmentBytesW(default_commitment(node_id)))
-            .0)
+            .map(|c| c.0)
+            .unwrap_or_else(|| default_commitment(node_id)))
     }
 
-    fn get_range(
+    fn node_entries(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        let map = &self.proof.parents_commitments;
-        Ok(map.range(range).map(|(k, v)| (*k, v.0)).collect())
+        Ok(self
+            .proof
+            .parents_commitments
+            .range(range)
+            .map(|(&k, v)| (k, v.0))
+            .collect())
     }
 }
 
@@ -122,8 +118,7 @@ impl BlockWitness {
         let mut vals = self
             .metadata
             .values()
-            .cloned()
-            .map(|v| Some(SaltValue::from(v)))
+            .map(|&meta_opt| Some(meta_opt.unwrap_or_default().into()))
             .collect::<Vec<_>>();
         vals.extend(self.kvs.values().cloned());
 
@@ -135,68 +130,48 @@ impl BlockWitness {
 impl StateReader for BlockWitness {
     type Error = &'static str;
 
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        if key.is_bucket_meta_slot() {
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+        if key.is_in_meta_bucket() {
             let bucket_id = bucket_id_from_metadata_key(key);
-            Ok(Some(self.get_meta(bucket_id)?.into()))
+            Ok(self
+                .metadata
+                .get(&bucket_id)
+                .and_then(|&opt| opt)
+                .map(Into::into))
         } else {
             Ok(self.kvs.get(&key).cloned().flatten())
         }
     }
 
-    // only handle data bucket
-    fn range_bucket(
+    fn entries(
         &self,
-        range: RangeInclusive<BucketId>,
+        range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
-            .kvs
-            .range((
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), (1 << BUCKET_SLOT_BITS) - 1))),
-            ))
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, v)| (*k, v.clone().unwrap())) // v is checked to be Some in the filter
-            .collect())
-    }
-
-    fn range_slot(
-        &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            assert!(*range.end() <= MIN_BUCKET_SIZE as NodeId);
-            range
-                .into_iter()
-                .map(|slot_id| {
-                    let salt_key = SaltKey::from((bucket_id, slot_id));
-
-                    let value = self
-                        .metadata
-                        .get(&bucket_id_from_metadata_key(salt_key))
-                        .copied()
-                        .unwrap_or_default()
-                        .into();
-
-                    (salt_key, value)
-                })
-                .collect()
-        } else {
+        let mut result: Vec<_> = self
+            .metadata
+            .range(
+                bucket_id_from_metadata_key(*range.start())
+                    ..=bucket_id_from_metadata_key(*range.end()),
+            )
+            .filter_map(|(bucket_id, meta)| {
+                meta.as_ref()
+                    .map(|m| (bucket_metadata_key(*bucket_id), (*m).into()))
+            })
+            .collect();
+        result.extend(
             self.kvs
-                .range((
-                    Included(SaltKey::from((bucket_id, *range.start()))),
-                    Included(SaltKey::from((bucket_id, *range.end()))),
-                ))
-                .filter(|(_, v)| v.is_some())
-                .map(|(&k, v)| (k, v.clone().unwrap())) // v is checked to be Some in the filter
-                .collect()
-        };
-        Ok(data)
+                .range(*range.start()..=*range.end())
+                .filter_map(|(k, v)| v.as_ref().map(|val| (*k, val.clone()))),
+        );
+        Ok(result)
     }
 
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(self.metadata.get(&bucket_id).copied().unwrap_or_default())
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        Ok(self
+            .metadata
+            .get(&bucket_id)
+            .and_then(|&opt| opt)
+            .unwrap_or_default())
     }
 }
 
@@ -204,7 +179,7 @@ impl StateReader for BlockWitness {
 mod tests {
     use super::*;
     use crate::{
-        formate::*, mem_salt::MemSalt, state::state::EphemeralSaltState, trie::trie::StateRoot,
+        formate::*, mem_store::MemStore, state::state::EphemeralSaltState, trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -214,35 +189,36 @@ mod tests {
     fn get_mini_trie() {
         let kvs = create_random_kv_pairs(1000);
 
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
         // 1. Initialize the state & trie to represent the origin state.
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (old_trie_root, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (old_trie_root, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
         let (new_trie_root, mut trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &state_updates).unwrap();
+            trie.update(&mem_store, &mem_store, &state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
         // 3.options in prover node
         // 3.1 verify the block witness
-        let res = block_witness.verify_proof::<MemSalt, MemSalt>(old_trie_root);
+        let res = block_witness.verify_proof::<MemStore, MemStore>(old_trie_root);
         assert!(res.is_ok());
 
         // 3.2 create EphemeralSaltState from block witness
@@ -275,16 +251,17 @@ mod tests {
         let kvs = create_random_kv_pairs(100);
 
         // 1. Initialize the state & trie to represent the origin state.
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (root, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (root, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
@@ -293,14 +270,14 @@ mod tests {
 
         let pv = Some(PlainValue::Storage(B256::ZERO.into()).encode());
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness_res =
-            get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+            get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
-        let res = block_witness_res.verify_proof::<MemSalt, MemSalt>(root);
+        let res = block_witness_res.verify_proof::<MemStore, MemStore>(root);
         assert!(res.is_ok());
     }
 
@@ -309,31 +286,32 @@ mod tests {
         let kvs = create_random_kv_pairs(1000);
 
         // 1. Initialize the state & trie to represent the origin state.
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (_, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (_, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
-        let new_kvs = create_random_kv_pairs(10);
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let new_kvs = create_random_kv_pairs(100);
+        let mut state = EphemeralSaltState::new(&mem_store);
         state.update(&new_kvs).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
-            let witness_value = block_witness.entry(key).unwrap();
-            let state_value = mem_salt.entry(key).unwrap();
+            let witness_value = block_witness.value(key).unwrap();
+            let state_value = mem_store.value(key).unwrap();
             assert_eq!(witness_value, state_value);
         }
     }

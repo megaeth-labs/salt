@@ -78,6 +78,36 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
+    /// Return the plain value associated with the given plain key.
+    pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = pk_hasher::bucket_id(plain_key);
+        let metadata = self
+            .get_entry(bucket_metadata_key(bucket_id))?
+            .and_then(|v| v.try_into().ok())
+            .unwrap_or_else(BucketMeta::default);
+        // let meta = self.salt_state.meta(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..metadata.capacity {
+            let slot_id = probe(hashed_id, step, metadata.capacity);
+            if let Some(slot_val) = self.get_entry((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
@@ -290,7 +320,9 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut old_data = vec![];
         let mut new_state: HashMap<SaltKey, SaltValue> = self
             .base_state
-            .range_slot(bucket_id, 0..=old_meta.capacity - 1)?
+            .entries(
+                SaltKey::from((bucket_id, 0))..=SaltKey::from((bucket_id, old_meta.capacity - 1)),
+            )?
             .into_iter()
             .filter_map(|(k, old_v)| {
                 // clear entries from cache
@@ -356,7 +388,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let value = match self.cache.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
-                let value = self.base_state.entry(key)?;
+                let value = self.base_state.value(key)?;
                 if self.save_access {
                     entry.insert(value.clone());
                 }
@@ -459,46 +491,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     }
 }
 
-/// This structure enables reading EVM account & storage data from a SALT state.
-#[derive(Debug)]
-pub struct PlainStateProvider<'a, S> {
-    /// The SALT state to read data from.
-    salt_state: &'a S,
-}
-
-impl<'a, S: StateReader> PlainStateProvider<'a, S> {
-    /// Create a [`SaltStateProvider`] object.
-    pub const fn new(salt_state: &'a S) -> Self {
-        Self { salt_state }
-    }
-
-    /// Return the plain value associated with the given plain key.
-    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
-        // Computes the `bucket_id` based on the `key`.
-        let bucket_id = pk_hasher::bucket_id(plain_key);
-        let meta = self.salt_state.get_meta(bucket_id)?;
-        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
-        let hashed_id = pk_hasher::hashed_key(plain_key, meta.nonce);
-
-        // Starts from the initial slot position and searches for the slot corresponding to the
-        // `key`.
-        for step in 0..meta.capacity {
-            let slot_id = probe(hashed_id, step, meta.capacity);
-            if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
-                match slot_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
-                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-        Ok(None)
-    }
-}
-
 /// Returns the i-th slot in the probe sequence of `hashed_key`. Our SHI hash table
 /// uses linear probing to address key collisions, so `i` is used as an offset. Since
 /// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
@@ -569,7 +561,7 @@ mod tests {
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         empty_salt::EmptySalt,
-        mem_salt::*,
+        mem_store::*,
         state::{
             state::{pk_hasher, probe, rank, EphemeralSaltState},
             updates::StateUpdates,
@@ -581,6 +573,10 @@ mod tests {
 
     const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
     const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
+
+    // FIXME: need a unit test to fix the hash function we used to compute bucket id; avoid accidental hash change
+
+    // FIXME: where are the unit tests that exercise SHI hashtable and SHI hashtable only? CRUD + resize, etc.
 
     // Randomly generate 'l' key-value pairs
     fn create_random_kvs(l: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -628,7 +624,7 @@ mod tests {
     #[test]
     fn check_extend_cache() {
         let reader = EmptySalt;
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&reader);
         let mut meta = BucketMeta::default();
 
@@ -1036,7 +1032,7 @@ mod tests {
     }
 
     fn check_rehash(mut old_meta: BucketMeta, mut new_meta: BucketMeta, l: usize) {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut rehash_state = EphemeralSaltState::new(&store);
         let mut rehash_updates = StateUpdates::default();
 

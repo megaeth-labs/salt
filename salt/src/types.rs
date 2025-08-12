@@ -8,8 +8,8 @@
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
-    TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
+    NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -96,7 +96,9 @@ impl BucketMeta {
     }
 }
 
-/// 64-bit key encoding bucket and slot identifiers.
+/// 64-bit storage key encoding bucket and slot identifiers.
+///
+/// This is the key used by the underlying database to store SALT state.
 ///
 /// Layout: `bucket_id` (high 24 bits) | `slot_id` (low 40 bits)
 /// - Supports ~16M buckets (2^24)
@@ -131,8 +133,8 @@ impl SaltKey {
         self.0 as SlotId & BUCKET_SLOT_ID_MASK
     }
 
-    /// Check if this key addresses a metadata slot (first 65,536 buckets).
-    pub const fn is_bucket_meta_slot(&self) -> bool {
+    /// Check if this key belongs to a metadata bucket (first 65,536 buckets).
+    pub const fn is_in_meta_bucket(&self) -> bool {
         self.bucket_id() < NUM_META_BUCKETS as BucketId
     }
 }
@@ -234,11 +236,11 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// - Level 0 (root): 1 node
 /// - Level 1: 256 nodes
 /// - Level 2: 65,536 nodes
-/// - Level 3: 16,777,216 nodes
+/// - Level 3: 16,777,216 nodes (bucket roots)
 /// - Total: 16,843,009 nodes
 ///
 /// **Bucket subtree structure (up to 5 levels, 0-4):**
-/// - Level 0: 1 node
+/// - Level 0: 1 node (the root, addressed via main trie)
 /// - Level 1: 256 nodes
 /// - Level 2: 65,536 nodes
 /// - Level 3: 16,777,216 nodes
@@ -250,41 +252,146 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// *Main trie nodes (25 bits):*
 /// - Uses lowest 25 bits for node position (25 bits needed since 2^25 > 16,843,009)
 /// - BFS numbering: root=0, top-to-bottom, left-to-right
-/// - Upper 39 bits unused
+/// - Upper 39 bits unused (always 0)
+/// - **Important**: Bucket roots are addressed as main trie nodes at level 3
 ///
 /// *Bucket subtree nodes (24 + 33 bits):*
 /// - Highest 24 bits: bucket ID (must be > 65,535 since meta buckets never grow)
 /// - Lowest 40 bits: local position (33 bits needed since 2^33 > 4,311,810,305, 7 bits unused)
-/// - Each subtree uses same BFS numbering as main trie
+/// - Each subtree uses same BFS numbering starting from 0
+/// - **Important**: Only used for internal subtree nodes (position > 0), never for roots
+///
+/// **Addressing bucket roots:**
+/// Bucket roots can theoretically be addressed in two ways:
+/// 1. As leaf nodes in the main trie (level 3) - e.g., bucket 0's root is at main trie position 16,843,008
+/// 2. As position 0 in their own subtree - e.g., (bucket_id << 40 | 0)
+///
+/// To avoid ambiguity, **we always use the main trie addressing scheme (option 1)** for bucket roots.
+/// This means a bucket root's NodeId has upper 39 bits = 0 and lower 25 bits = its main trie position.
+///
+/// **Examples:**
+/// - Main trie root: NodeId = 0
+/// - Bucket 0's root: NodeId = 65,793 (main trie level 3, position 0)
+/// - Bucket 100000's root: NodeId = 165,793 (main trie level 3, position 100000)
+/// - Bucket 100000's internal node at position 256: NodeId = (100000 << 40) | 256
 pub type NodeId = u64;
 
 /// Returns true if the given NodeId addresses a node in a bucket subtree.
 ///
-/// This function validates the NodeId and returns true only for valid subtree nodes:
-/// - Main trie nodes: bucket ID = 0, remaining bits represent main trie position
-/// - Metadata bucket nodes: Invalid since metadata buckets cannot grow beyond fixed size
-/// - Subtree nodes: bucket ID >= 65,536, remaining bits represent local subtree position
+/// This is a convenience wrapper around [`parse_node_id`] that returns `true` only for
+/// `NodeType::SubtreeNode` variants and `false` for all valid node types.
 ///
 /// # Panics
-/// Panics if the NodeId is invalid (e.g., metadata bucket ID with non-zero remaining bits).
+/// Panics if the NodeId is invalid, with the specific error message from [`NodeType::InvalidNode`].
+/// See [`NodeType`] documentation for details on invalid addressing patterns.
 #[inline]
 pub fn is_subtree_node(node_id: NodeId) -> bool {
+    match parse_node_id(node_id) {
+        NodeType::SubtreeNode { .. } => true,
+        NodeType::InvalidNode { error } => panic!("{}", error),
+        _ => false,
+    }
+}
+
+/// Represents the different types of nodes in the SALT trie structure.
+///
+/// This enum categorizes all possible NodeId values according to SALT's addressing conventions:
+///
+/// **Valid Node Types:**
+/// - **Main trie nodes** (levels 0-2): Internal nodes in the main trie structure
+/// - **Metadata bucket roots**: Bucket roots for buckets 0-65535 (addressed via main trie level 3)
+/// - **Data bucket roots**: Bucket roots for buckets 65536+ (addressed via main trie level 3)
+/// - **Subtree nodes**: Internal nodes within bucket subtrees (position > 0)
+///
+/// **Invalid Node Types:**
+/// - Attempts to address bucket roots via subtree mode (bucket_id >= 65536, position = 0)
+/// - Attempts to address metadata bucket subtree nodes (bucket_id 1-65535, position > 0)
+///
+/// **Important Addressing Convention:**
+/// Bucket roots are always addressed using the main trie scheme (as level 3 nodes), never
+/// as position 0 in their own subtree. This eliminates ambiguity in the addressing system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeType {
+    /// Any node in the main trie (levels 0-2)
+    MainTrieNode { level: usize, position: u64 },
+
+    /// Metadata bucket root (main trie level 3, buckets 0-65535)
+    MetaBucketRoot { bucket_id: BucketId },
+
+    /// Data bucket root (main trie level 3, buckets 65536+)
+    DataBucketRoot { bucket_id: BucketId },
+
+    /// Internal node within a bucket subtree (level > 0)
+    SubtreeNode {
+        bucket_id: BucketId,
+        level: usize,
+        local_position: u64,
+    },
+
+    /// Invalid node with error message
+    InvalidNode { error: &'static str },
+}
+
+impl NodeType {
+    /// Returns the bucket ID if this node is associated with a bucket
+    pub fn bucket_id(&self) -> Option<BucketId> {
+        match self {
+            NodeType::MetaBucketRoot { bucket_id }
+            | NodeType::DataBucketRoot { bucket_id }
+            | NodeType::SubtreeNode { bucket_id, .. } => Some(*bucket_id),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a valid node
+    pub fn is_valid(&self) -> bool {
+        !matches!(self, NodeType::InvalidNode { .. })
+    }
+}
+
+/// Parses a NodeId into its corresponding NodeType.
+pub fn parse_node_id(node_id: NodeId) -> NodeType {
     let bucket_id = node_id >> BUCKET_SLOT_BITS;
     let remaining_bits = node_id & BUCKET_SLOT_ID_MASK;
 
-    if bucket_id < NUM_META_BUCKETS as u64 {
-        // For main trie nodes (bucket_id = 0) or invalid metadata bucket references,
-        // the remaining bits should represent a valid main trie position.
-        // Metadata buckets (1-65535) cannot have subtrees, so any non-zero remaining
-        // bits with bucket_id > 0 indicates an invalid NodeId.
-        if bucket_id > 0 {
-            panic!(
-                "Invalid NodeId: metadata bucket {bucket_id} cannot have subtree nodes (remaining bits: {remaining_bits})"
-            );
+    if bucket_id == 0 {
+        // Main trie node
+        let level = get_bfs_level(node_id);
+        if level < TRIE_LEVELS - 1 {
+            NodeType::MainTrieNode {
+                level,
+                position: node_id,
+            }
+        } else {
+            // Level 3 - bucket roots
+            let bucket_level_start = leftmost_node((TRIE_LEVELS - 1) as u32).unwrap();
+            let bucket_id = (node_id - bucket_level_start) as BucketId;
+            if bucket_id < NUM_META_BUCKETS as BucketId {
+                NodeType::MetaBucketRoot { bucket_id }
+            } else {
+                NodeType::DataBucketRoot { bucket_id }
+            }
         }
-        false // Main trie node (bucket_id = 0)
+    // FIXME: the following check is turned off for now because the rest of
+    // the codebase is written in a way that allows temporary "illegal" NodeIds.
+    // } else if remaining_bits == 0 {
+    //     // Invalid: bucket root via subtree addressing
+    //     NodeType::InvalidNode {
+    //         error: "Bucket roots must be addressed via main trie",
+    //     }
+    } else if bucket_id < NUM_META_BUCKETS as u64 {
+        // Invalid: metadata buckets cannot have subtrees
+        NodeType::InvalidNode {
+            error: "Metadata buckets cannot have subtree nodes",
+        }
     } else {
-        true // Valid subtree node (bucket_id >= 65536)
+        // Valid subtree node
+        let level = get_bfs_level(remaining_bits);
+        NodeType::SubtreeNode {
+            bucket_id: bucket_id as BucketId,
+            level,
+            local_position: remaining_bits,
+        }
     }
 }
 
@@ -375,12 +482,23 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
 /// This allows ~16M buckets to store their metadata in just 65,536 dedicated metadata buckets.
 ///
 /// # Arguments
-/// * `bucket_id` - The regular bucket ID whose metadata location to find
+/// * `bucket_id` - The bucket ID whose metadata location to find. Must be a valid data
+///   bucket ID (NUM_META_BUCKETS <= bucket_id < NUM_BUCKETS).
 ///
 /// # Returns
 /// SaltKey pointing to the metadata storage location
+///
+/// # Panics
+/// Panics if `bucket_id` is not a valid data bucket:
+/// - Meta buckets (0 to NUM_META_BUCKETS-1) don't have their own metadata
+/// - Invalid bucket IDs (>= NUM_BUCKETS)
 #[inline]
 pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
+    assert!(
+        bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId,
+        "bucket_id {bucket_id} must be a valid data bucket ID (range: {NUM_META_BUCKETS}..{NUM_BUCKETS})"
+    );
+
     SaltKey::from((
         bucket_id >> MIN_BUCKET_SIZE_BITS,
         bucket_id as SlotId % MIN_BUCKET_SIZE as SlotId,
@@ -452,8 +570,8 @@ mod tests {
         let meta_key = SaltKey::from((100, 50)); // bucket 100 < 65536 (metadata)
         let regular_key = SaltKey::from((70000, 50)); // bucket 70000 >= 65536 (regular)
 
-        assert!(meta_key.is_bucket_meta_slot());
-        assert!(!regular_key.is_bucket_meta_slot());
+        assert!(meta_key.is_in_meta_bucket());
+        assert!(!regular_key.is_in_meta_bucket());
     }
 
     /// Tests BucketMeta serialization and deserialization roundtrip. Verifies that
@@ -523,12 +641,13 @@ mod tests {
     #[test]
     fn bucket_metadata_key_mapping() {
         let test_cases = [
-            (0, 0, 0),         // bucket 0 -> meta bucket 0, slot 0
-            (255, 0, 255),     // bucket 255 -> meta bucket 0, slot 255
-            (256, 1, 0),       // bucket 256 -> meta bucket 1, slot 0
-            (512, 2, 0),       // bucket 512 -> meta bucket 2, slot 0
-            (1000, 3, 232),    // bucket 1000 -> meta bucket 3, slot 232 (1000 % 256)
-            (65535, 255, 255), // bucket 65535 -> meta bucket 255, slot 255
+            // Only test valid data bucket IDs (>= NUM_META_BUCKETS)
+            (NUM_META_BUCKETS as BucketId, 256, 0), // first data bucket -> meta bucket 256, slot 0
+            (NUM_META_BUCKETS as BucketId + 1, 256, 1), // second data bucket -> meta bucket 256, slot 1
+            (NUM_META_BUCKETS as BucketId + 255, 256, 255), // last slot in meta bucket 256
+            (NUM_META_BUCKETS as BucketId + 256, 257, 0), // first slot in meta bucket 257
+            (100000, 390, 160), // bucket 100000 -> meta bucket 390, slot 160 (100000 % 256)
+            (NUM_BUCKETS as BucketId - 1, 65535, 255), // max bucket -> meta bucket 65535, slot 255
         ];
 
         for (bucket_id, expected_meta_bucket, expected_slot) in test_cases {
@@ -543,12 +662,32 @@ mod tests {
         }
     }
 
+    /// Tests that bucket_metadata_key correctly panics for meta bucket IDs.
+    #[test]
+    #[should_panic]
+    fn bucket_metadata_key_meta_bucket_panic() {
+        let last_meta_bucket = NUM_META_BUCKETS as BucketId - 1;
+        bucket_metadata_key(last_meta_bucket); // Last meta bucket
+    }
+
+    /// Tests that bucket_metadata_key correctly panics for invalid bucket IDs.
+    #[test]
+    #[should_panic]
+    fn bucket_metadata_key_invalid_bucket_panic() {
+        bucket_metadata_key(NUM_BUCKETS as BucketId); // >= NUM_BUCKETS
+    }
+
     /// Tests the bidirectional conversion between bucket IDs and metadata storage keys.
     /// bucket_metadata_key() and bucket_id_from_metadata_key() should be perfect inverses,
     /// allowing any bucket ID to be mapped to a metadata key and back without loss.
     #[test]
     fn metadata_key_roundtrip() {
-        let test_buckets = [0, 1, 255, 256, 1000, 65535, 100000, 16777215];
+        let test_buckets = [
+            NUM_META_BUCKETS as BucketId,     // First data bucket
+            NUM_META_BUCKETS as BucketId + 1, // Second data bucket
+            100000,                           // Arbitrary data bucket
+            NUM_BUCKETS as BucketId - 1,      // Last valid bucket
+        ];
 
         for bucket_id in test_buckets {
             let key = bucket_metadata_key(bucket_id);
@@ -590,8 +729,8 @@ mod tests {
             );
         }
 
-        // Bucket subtree nodes - should all return true
-        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket 65536, position 0
+        // Bucket subtree nodes - should all return true (position > 0)
+        let bucket_65536 = (65536u64 << BUCKET_SLOT_BITS) | 1; // bucket 65536, position 1
         let bucket_100000 = (100000u64 << BUCKET_SLOT_BITS) | 1000; // bucket 100000, position 1000
         let bucket_max = (16777215u64 << BUCKET_SLOT_BITS) | 500; // max bucket (24-bit), position 500
 
@@ -604,7 +743,7 @@ mod tests {
     /// cannot grow beyond their fixed size, so any NodeId with metadata bucket ID and
     /// non-zero remaining bits represents an invalid node reference.
     #[test]
-    #[should_panic(expected = "Invalid NodeId: metadata bucket 1000 cannot have subtree nodes")]
+    #[should_panic(expected = "Metadata buckets cannot have subtree nodes")]
     fn node_id_invalid_metadata_bucket_panic() {
         let invalid_meta_node = (1000u64 << BUCKET_SLOT_BITS) | 100; // metadata bucket with subtree bits
         is_subtree_node(invalid_meta_node);
@@ -612,10 +751,199 @@ mod tests {
 
     /// Tests additional invalid metadata bucket cases to ensure proper validation.
     #[test]
-    #[should_panic(expected = "Invalid NodeId: metadata bucket 65535 cannot have subtree nodes")]
+    #[should_panic(expected = "Metadata buckets cannot have subtree nodes")]
     fn node_id_last_metadata_bucket_panic() {
         let invalid_last_meta = (65535u64 << BUCKET_SLOT_BITS) | 1; // last metadata bucket with subtree bits
         is_subtree_node(invalid_last_meta);
+    }
+
+    /// Tests that is_subtree_node panics when attempting to address bucket root via subtree mode.
+    #[test]
+    #[ignore]
+    #[should_panic(expected = "Bucket roots must be addressed via main trie")]
+    fn node_id_bucket_root_subtree_panic() {
+        let invalid_root = (65536u64 << BUCKET_SLOT_BITS) | 0; // bucket root via subtree addressing
+        is_subtree_node(invalid_root);
+    }
+
+    /// Tests that is_subtree_node panics for various bucket roots addressed via subtree mode.
+    #[test]
+    #[ignore]
+    #[should_panic(expected = "Bucket roots must be addressed via main trie")]
+    fn node_id_bucket_root_subtree_panic_100000() {
+        let invalid_root = (100000u64 << BUCKET_SLOT_BITS) | 0; // bucket 100000 root via subtree
+        is_subtree_node(invalid_root);
+    }
+
+    /// Tests the parse_node_id function for main trie nodes.
+    #[test]
+    fn parse_node_id_main_trie_nodes() {
+        // Test root node (level 0)
+        match parse_node_id(0) {
+            NodeType::MainTrieNode { level, position } => {
+                assert_eq!(level, 0);
+                assert_eq!(position, 0);
+            }
+            _ => panic!("Expected MainTrieNode for root"),
+        }
+
+        // Test level 1 node
+        match parse_node_id(100) {
+            NodeType::MainTrieNode { level, position } => {
+                assert_eq!(level, 1);
+                assert_eq!(position, 100);
+            }
+            _ => panic!("Expected MainTrieNode for level 1"),
+        }
+
+        // Test level 2 node
+        match parse_node_id(10000) {
+            NodeType::MainTrieNode { level, position } => {
+                assert_eq!(level, 2);
+                assert_eq!(position, 10000);
+            }
+            _ => panic!("Expected MainTrieNode for level 2"),
+        }
+    }
+
+    /// Tests the parse_node_id function for bucket root nodes.
+    #[test]
+    fn parse_node_id_bucket_roots() {
+        let bucket_level_start = leftmost_node((TRIE_LEVELS - 1) as u32).unwrap();
+
+        // Test metadata bucket root (bucket 0)
+        match parse_node_id(bucket_level_start) {
+            NodeType::MetaBucketRoot { bucket_id } => {
+                assert_eq!(bucket_id, 0);
+            }
+            _ => panic!("Expected MetaBucketRoot for bucket 0"),
+        }
+
+        // Test metadata bucket root (bucket 65535)
+        match parse_node_id(bucket_level_start + 65535) {
+            NodeType::MetaBucketRoot { bucket_id } => {
+                assert_eq!(bucket_id, 65535);
+            }
+            _ => panic!("Expected MetaBucketRoot for bucket 65535"),
+        }
+
+        // Test data bucket root (bucket 65536)
+        match parse_node_id(bucket_level_start + 65536) {
+            NodeType::DataBucketRoot { bucket_id } => {
+                assert_eq!(bucket_id, 65536);
+            }
+            _ => panic!("Expected DataBucketRoot for bucket 65536"),
+        }
+
+        // Test data bucket root (bucket 100000)
+        match parse_node_id(bucket_level_start + 100000) {
+            NodeType::DataBucketRoot { bucket_id } => {
+                assert_eq!(bucket_id, 100000);
+            }
+            _ => panic!("Expected DataBucketRoot for bucket 100000"),
+        }
+    }
+
+    /// Tests the parse_node_id function for subtree nodes.
+    #[test]
+    fn parse_node_id_subtree_nodes() {
+        // Test subtree node at position 1
+        let subtree_id = (65536u64 << BUCKET_SLOT_BITS) | 1;
+        match parse_node_id(subtree_id) {
+            NodeType::SubtreeNode {
+                bucket_id,
+                level,
+                local_position,
+            } => {
+                assert_eq!(bucket_id, 65536);
+                assert_eq!(level, 1); // Position 1 is at level 1 (root is at level 0)
+                assert_eq!(local_position, 1);
+            }
+            _ => panic!("Expected SubtreeNode"),
+        }
+
+        // Test subtree node at position 257 (level 2)
+        let subtree_id = (100000u64 << BUCKET_SLOT_BITS) | 257;
+        match parse_node_id(subtree_id) {
+            NodeType::SubtreeNode {
+                bucket_id,
+                level,
+                local_position,
+            } => {
+                assert_eq!(bucket_id, 100000);
+                assert_eq!(level, 2); // Position 257 is at level 2
+                assert_eq!(local_position, 257);
+            }
+            _ => panic!("Expected SubtreeNode"),
+        }
+    }
+
+    /// Tests the parse_node_id function for invalid nodes.
+    #[test]
+    #[ignore]
+    fn parse_node_id_invalid_nodes() {
+        // Test metadata bucket with subtree bits
+        let invalid_meta = (1000u64 << BUCKET_SLOT_BITS) | 100;
+        match parse_node_id(invalid_meta) {
+            NodeType::InvalidNode { error } => {
+                assert_eq!(error, "Metadata buckets cannot have subtree nodes");
+            }
+            _ => panic!("Expected InvalidNode for metadata bucket subtree"),
+        }
+
+        // Test bucket root via subtree addressing
+        let invalid_root = (65536u64 << BUCKET_SLOT_BITS) | 0;
+        match parse_node_id(invalid_root) {
+            NodeType::InvalidNode { error } => {
+                assert_eq!(error, "Bucket roots must be addressed via main trie");
+            }
+            _ => panic!("Expected InvalidNode for bucket root via subtree"),
+        }
+
+        // Test that metadata bucket root via subtree gets the more specific error
+        let invalid_meta_root = (100u64 << BUCKET_SLOT_BITS) | 0;
+        match parse_node_id(invalid_meta_root) {
+            NodeType::InvalidNode { error } => {
+                assert_eq!(error, "Bucket roots must be addressed via main trie");
+            }
+            _ => panic!("Expected InvalidNode for metadata bucket root via subtree"),
+        }
+    }
+
+    /// Tests NodeType convenience methods.
+    #[test]
+    fn node_type_convenience_methods() {
+        // Test bucket_id() method
+        let meta_root = NodeType::MetaBucketRoot { bucket_id: 100 };
+        assert_eq!(meta_root.bucket_id(), Some(100));
+
+        let data_root = NodeType::DataBucketRoot { bucket_id: 70000 };
+        assert_eq!(data_root.bucket_id(), Some(70000));
+
+        let subtree = NodeType::SubtreeNode {
+            bucket_id: 80000,
+            level: 1,
+            local_position: 256,
+        };
+        assert_eq!(subtree.bucket_id(), Some(80000));
+
+        let main_trie = NodeType::MainTrieNode {
+            level: 1,
+            position: 100,
+        };
+        assert_eq!(main_trie.bucket_id(), None);
+
+        let invalid = NodeType::InvalidNode {
+            error: "test error",
+        };
+        assert_eq!(invalid.bucket_id(), None);
+
+        // Test is_valid() method
+        assert!(meta_root.is_valid());
+        assert!(data_root.is_valid());
+        assert!(subtree.is_valid());
+        assert!(main_trie.is_valid());
+        assert!(!invalid.is_valid());
     }
 
     /// Tests the leftmost_node function which calculates the NodeId of the leftmost node at a given level.
