@@ -11,6 +11,7 @@ pub use state::{
 };
 pub mod trie;
 pub use trie::{
+    proof::PlainKeysProof,
     trie::{get_child_node, StateRoot},
     updates::TrieUpdates,
     witness::{get_block_witness, BlockWitness},
@@ -63,6 +64,20 @@ mod tests {
 
         // "Persist" the trie updates to storage
         store.update_trie(trie_updates);
+
+        let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
+        let expected_values = vec![Some(b"balance100".to_vec()), None];
+
+        // Alice creates a cryptographic proof for plain key-value pairs
+        let proof = trie::proof::create_proof(&plain_keys_to_prove, &store, &store)?;
+
+        // Bob verifies the proof against its local state root
+        let is_valid = proof.verify::<MemStore, MemStore>(root_hash);
+        assert!(is_valid.is_ok());
+
+        let proof_plain_values = proof.get_values();
+
+        assert_eq!(proof_plain_values, expected_values);
 
         Ok(())
     }

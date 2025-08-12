@@ -432,7 +432,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
     /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if
     /// any.
-    fn find(
+    pub(crate) fn find(
         &mut self,
         bucket_id: BucketId,
         meta: &BucketMeta,
@@ -496,7 +496,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 /// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
 /// the returned value must be in the range of [1, bucket size).
 #[inline(always)]
-fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
+pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
     ((hashed_key + i) & (capacity - 1)) as SlotId
 }
 
