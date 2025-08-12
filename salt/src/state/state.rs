@@ -561,7 +561,7 @@ mod tests {
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         empty_salt::EmptySalt,
-        mem_salt::*,
+        mem_store::*,
         state::{
             state::{pk_hasher, probe, rank, EphemeralSaltState},
             updates::StateUpdates,
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn check_extend_cache() {
         let reader = EmptySalt;
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&reader);
         let mut meta = BucketMeta::default();
 
@@ -1032,7 +1032,7 @@ mod tests {
     }
 
     fn check_rehash(mut old_meta: BucketMeta, mut new_meta: BucketMeta, l: usize) {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut rehash_state = EphemeralSaltState::new(&store);
         let mut rehash_updates = StateUpdates::default();
 

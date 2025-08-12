@@ -179,7 +179,7 @@ impl StateReader for BlockWitness {
 mod tests {
     use super::*;
     use crate::{
-        formate::*, mem_salt::MemSalt, state::state::EphemeralSaltState, trie::trie::StateRoot,
+        formate::*, mem_store::MemStore, state::state::EphemeralSaltState, trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -189,35 +189,36 @@ mod tests {
     fn get_mini_trie() {
         let kvs = create_random_kv_pairs(1000);
 
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
         // 1. Initialize the state & trie to represent the origin state.
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (old_trie_root, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (old_trie_root, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
         let (new_trie_root, mut trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &state_updates).unwrap();
+            trie.update(&mem_store, &mem_store, &state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
         // 3.options in prover node
         // 3.1 verify the block witness
-        let res = block_witness.verify_proof::<MemSalt, MemSalt>(old_trie_root);
+        let res = block_witness.verify_proof::<MemStore, MemStore>(old_trie_root);
         assert!(res.is_ok());
 
         // 3.2 create EphemeralSaltState from block witness
@@ -250,16 +251,17 @@ mod tests {
         let kvs = create_random_kv_pairs(100);
 
         // 1. Initialize the state & trie to represent the origin state.
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (root, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (root, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
@@ -268,14 +270,14 @@ mod tests {
 
         let pv = Some(PlainValue::Storage(B256::ZERO.into()).encode());
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness_res =
-            get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+            get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
-        let res = block_witness_res.verify_proof::<MemSalt, MemSalt>(root);
+        let res = block_witness_res.verify_proof::<MemStore, MemStore>(root);
         assert!(res.is_ok());
     }
 
@@ -284,31 +286,32 @@ mod tests {
         let kvs = create_random_kv_pairs(1000);
 
         // 1. Initialize the state & trie to represent the origin state.
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_salt).update(&kvs).unwrap();
-        mem_salt.update_state(initial_updates.clone());
+        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (_, initial_trie_updates) =
-            trie.update(&mem_salt, &mem_salt, &initial_updates).unwrap();
+        let (_, initial_trie_updates) = trie
+            .update(&mem_store, &mem_store, &initial_updates)
+            .unwrap();
 
-        mem_salt.update_trie(initial_trie_updates);
+        mem_store.update_trie(initial_trie_updates);
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         state.update(&new_kvs).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_salt, &mem_salt).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
             let witness_value = block_witness.value(key).unwrap();
-            let state_value = mem_salt.value(key).unwrap();
+            let state_value = mem_store.value(key).unwrap();
             assert_eq!(witness_value, state_value);
         }
     }

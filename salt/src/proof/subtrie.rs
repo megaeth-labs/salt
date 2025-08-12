@@ -282,7 +282,7 @@ mod tests {
     use super::*;
     use crate::{
         formate::{PlainKey, PlainValue},
-        mem_salt::MemSalt,
+        mem_store::MemStore,
         proof::prover::PRECOMPUTED_WEIGHTS,
         state::state::EphemeralSaltState,
         trie::trie::StateRoot,
@@ -314,23 +314,23 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_salt = MemSalt::new();
+        let mem_store = MemStore::new();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_key_values).unwrap();
 
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (_, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
+        let (_, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates);
+        mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
 
         let keys = vec![salt_key];
 
-        let (prover_queries, _, _) = create_sub_trie(&mem_salt, &mem_salt, &keys).unwrap();
+        let (prover_queries, _, _) = create_sub_trie(&mem_store, &mem_store, &keys).unwrap();
 
         let crs = CRS::default();
 

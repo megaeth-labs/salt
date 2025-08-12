@@ -57,12 +57,12 @@ provides an interface for reading EVM account/storage data.
 ### Basic State Operations
 
 ```rust,ignore
-use salt::{EphemeralSaltState, MemSalt};
+use salt::{EphemeralSaltState, MemStore};
 use std::collections::HashMap;
 
 // Create a PoC in-memory SALT instance
-let mem_salt = MemSalt::new();
-let mut state = EphemeralSaltState::new(&mem_salt);
+let store = MemStore::new();
+let mut state = EphemeralSaltState::new(&store);
 
 // Prepare plain key-value updates (EVM account/storage data)
 let kvs = HashMap::from([
@@ -73,7 +73,7 @@ let kvs = HashMap::from([
 // Apply kv updates and get SALT-encoded state changes
 let state_updates = state.update(&kvs)?;
 // "Persist" the state updates to storage (the "trie" remains unchanged)
-mem_salt.update_state(state_updates);
+store.update_state(state_updates);
 
 // Read plain value back
 let balance = state.get_raw(b"account1")?;
@@ -87,14 +87,14 @@ use salt::{StateRoot, compute_from_scratch};
 
 // Incremental state root computation from the SALT-encoded state changes
 let mut state_root = StateRoot::new();
-let (root_hash, trie_updates) = state_root.update(&mem_salt, &state_updates)?;
+let (root_hash, trie_updates) = state_root.update(&store, &state_updates)?;
 
 // Or compute from scratch based on the previously updated state
-let (root_hash_from_scratch, _) = compute_from_scratch(&mem_salt)?;
+let (root_hash_from_scratch, _) = compute_from_scratch(&store)?;
 assert_eq!(root_hash, root_hash_from_scratch);
 
 // "Persist" the trie updates to storage
-mem_salt.update_trie(trie_updates);
+store.update_trie(trie_updates);
 ```
 
 ### Generating Proofs
@@ -110,10 +110,10 @@ let plain_keys_to_prove = vec![b"account1", b"non_existent_key"];
 let expected_values = vec![Some(b"balance100"), None];
 
 // Alice creates a cryptographic proof for plain key-value pairs
-let proof = prover::create_salt_proof(&plain_keys, &mem_salt)?;
+let proof = prover::create_salt_proof(&plain_keys, &store)?;
 
 // Bob verifies the proof against its local state root
-let is_valid = proof.check::<MemSalt>(plain_keys, expected_values, root_hash);
+let is_valid = proof.check::<MemStore>(plain_keys, expected_values, root_hash);
 // FIXME: why can't is_value simply be a bool?
 assert!(is_valid.is_ok());
  */

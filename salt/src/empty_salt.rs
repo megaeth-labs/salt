@@ -1,5 +1,8 @@
-//! This module provides a standalone method for computing the
-//! SALT state root for the genesis block with minimal dependency.
+//! Empty storage backend for SALT.
+//!
+//! This module provides [`EmptySalt`], a minimal and immutable storage backend
+//! that returns default values for all queries. Useful for computing the initial
+//! state root of an empty SALT trie and testing scenarios.
 
 use crate::{
     constant::*,
@@ -8,7 +11,7 @@ use crate::{
 };
 use std::ops::{Range, RangeInclusive};
 
-/// An empty SALT structure that contains no account or storage.
+/// Represents an empty SALT structure that contains no account or storage.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct EmptySalt;
 

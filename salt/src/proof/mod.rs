@@ -191,7 +191,7 @@ mod tests {
         constant::{default_commitment, STARTING_NODE_ID},
         empty_salt::EmptySalt,
         formate::{PlainKey, PlainValue},
-        mem_salt::MemSalt,
+        mem_store::MemStore,
         state::state::EphemeralSaltState,
         traits::{StateReader, TrieReader},
         trie::trie::StateRoot,
@@ -285,21 +285,21 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_salt = MemSalt::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_key_values).unwrap();
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
-        mem_salt.update_trie(trie_updates);
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().nth(1).unwrap();
-        let value = mem_salt.value(salt_key).unwrap();
+        let value = mem_store.value(salt_key).unwrap();
 
-        let proof = prover::create_salt_proof(&[salt_key], &mem_salt, &mem_salt).unwrap();
+        let proof = prover::create_salt_proof(&[salt_key], &mem_store, &mem_store).unwrap();
 
-        let res = proof.check::<MemSalt, MemSalt>(vec![salt_key], vec![value], trie_root);
+        let res = proof.check::<MemStore, MemStore>(vec![salt_key], vec![value], trie_root);
         assert!(res.is_ok());
     }
 
@@ -319,18 +319,18 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_salt = MemSalt::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_key_values).unwrap();
 
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates);
+        mem_store.update_trie(trie_updates);
 
-        let trie_root_commitment = mem_salt.commitment(0).unwrap();
+        let trie_root_commitment = mem_store.commitment(0).unwrap();
 
         let root_from_commitment = B256::from_slice(&fr_to_le_bytes(
             Element::from_bytes_unchecked_uncompressed(trie_root_commitment).map_to_scalar_field(),
@@ -355,16 +355,16 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
 
-        let mem_salt = MemSalt::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_kvs).unwrap();
 
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates.clone());
+        mem_store.update_trie(trie_updates.clone());
 
         let mut salt_keys = updates.data.keys().cloned().collect::<Vec<_>>();
         salt_keys.push((16777215, 1).into());
@@ -381,9 +381,9 @@ mod tests {
         values.push(None);
         values.push(None);
 
-        let proof = prover::create_salt_proof(&salt_keys, &mem_salt, &mem_salt).unwrap();
+        let proof = prover::create_salt_proof(&salt_keys, &mem_store, &mem_store).unwrap();
 
-        let res = proof.check::<MemSalt, MemSalt>(salt_keys, values, trie_root);
+        let res = proof.check::<MemStore, MemStore>(salt_keys, values, trie_root);
 
         assert!(res.is_ok());
     }
@@ -436,7 +436,7 @@ mod tests {
         };
         const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
 
@@ -508,7 +508,7 @@ mod tests {
 
         let proof = prover::create_salt_proof(&[(bid, 3).into()], &store, &store).unwrap();
 
-        let res = proof.check::<MemSalt, MemSalt>(
+        let res = proof.check::<MemStore, MemStore>(
             vec![(bid, 3).into()],
             vec![Some(SaltValue::new(&[1; 32], &[1; 32]))],
             expansion_root,
@@ -535,7 +535,7 @@ mod tests {
             }
         }
 
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let salt_key: SaltKey = (
@@ -610,7 +610,7 @@ mod tests {
         )
         .unwrap();
 
-        let res = proof.check::<MemSalt, MemSalt>(
+        let res = proof.check::<MemStore, MemStore>(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -670,7 +670,7 @@ mod tests {
         )
         .unwrap();
 
-        let res = proof.check::<MemSalt, MemSalt>(
+        let res = proof.check::<MemStore, MemStore>(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),

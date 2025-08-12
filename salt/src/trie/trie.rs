@@ -847,7 +847,7 @@ impl SubtrieChangeInfo {
 mod tests {
     use super::*;
     use crate::{
-        mem_salt::MemSalt,
+        mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::{kv_hash, StateRoot},
     };
@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_no_kvchanges() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key: SaltKey = (
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_small() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key: SaltKey = (
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[test]
     fn expansion_and_contraction_large() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn incremental_update_small() {
         let mut state_updates = StateUpdates::default();
-        let store = MemSalt::new();
+        let store = MemStore::new();
         // set expansion bucket metadata and check update with expanded bucket
         let update_bid = KV_BUCKET_OFFSET as BucketId + 2;
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     fn increment_updates_large() {
         let kvs = create_random_account(10000);
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new();
         let total_state_updates = state.update(&kvs).unwrap();
@@ -1439,7 +1439,7 @@ mod tests {
 
     #[test]
     fn compute_from_scratch_small() {
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1492,7 +1492,7 @@ mod tests {
 
     #[test]
     fn compute_from_scratch_large() {
-        let mock_db = MemSalt::new();
+        let mock_db = MemStore::new();
         let mut trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
 
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn trie_update_leaf_nodes() {
         let committer = get_global_committer();
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let trie = StateRoot::new();
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
@@ -1855,7 +1855,7 @@ mod tests {
         let mut default_committment_vec = vec![(zero, zero); TRIE_LEVELS];
         let len_vec = [1, 256, 256, 256];
 
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let c = calculate_subtrie_with_all_kvs(260, &store);
         assert_eq!(c, default_commitment(STARTING_NODE_ID[2] as NodeId));
         let c = calculate_subtrie_with_all_kvs(260 + STARTING_NODE_ID[2] as NodeId, &store);
@@ -1974,7 +1974,7 @@ mod tests {
     }
 
     // Draw points to calculate kv
-    fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemSalt) -> CommitmentBytes {
+    fn calculate_subtrie_with_all_kvs(node_id: NodeId, store: &MemStore) -> CommitmentBytes {
         let level = get_bfs_level(node_id);
         let committer = get_global_committer();
         let zero = zero_commitment();

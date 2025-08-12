@@ -25,7 +25,7 @@ use std::{
 /// appropriate (e.g., default bucket metadata for buckets that haven't been resized or
 /// rehashed).
 ///
-/// See [`MemSalt`](crate::MemSalt) for a reference in-memory implementation.
+/// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
 pub trait StateReader: Debug + Send + Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
@@ -117,12 +117,15 @@ pub trait StateReader: Debug + Send + Sync {
 /// Methods return deterministic default commitments for nodes that haven't been
 /// explicitly stored, ensuring the trie behaves as if fully materialized.
 ///
-/// See [`MemSalt`](crate::MemSalt) for a reference in-memory implementation.
+/// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;
 
     /// Retrieves the commitment for a specific trie node.
+    ///
+    /// **Note**: This method assumes the NodeId is valid and does no error checking.
+    /// Invalid NodeIds will return a default commitment rather than an error.
     ///
     /// If no commitment has been explicitly stored, returns a default commitment
     /// pre-computed from the node ID.
@@ -135,6 +138,7 @@ pub trait TrieReader: Sync {
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
 
     // FIXME: both the doc and the implementation need to be reworked!!!
+    // e.g., the input node_id must be valid and actually have child commitments
 
     /// Retrieves all [`TRIE_WIDTH`] child commitments for a given parent node.
     ///

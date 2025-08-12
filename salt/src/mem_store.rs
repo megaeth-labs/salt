@@ -1,17 +1,24 @@
-//! In-memory SALT reference implementation for testing and development.
+//! In-memory storage backend for the SALT data structure.
 //!
-//! This module provides [`MemSalt`], a simple in-memory implementation of the SALT
-//! data structure. It stores both blockchain state data and trie node commitments
-//! in memory using [`BTreeMap`] collections.
+//! This module provides [`MemStore`], a simple in-memory storage backend that implements
+//! the [`StateReader`] and [`TrieReader`] traits. It stores blockchain state data and
+//! trie node commitments in memory using [`BTreeMap`] collections.
+//!
+//! # Note
+//!
+//! `MemStore` is **not** an implementation of the SALT data structure itself. It is merely
+//! a storage backend that provides the underlying key-value storage required by SALT. The
+//! actual SALT logic and algorithms are implemented in the `state` and `trie` modules.
 //!
 //! # Usage
 //!
-//! `MemSalt` is primarily intended for:
+//! `MemStore` is primarily intended for:
 //! - Unit testing and integration testing
 //! - Development and debugging
+//! - Serving as a reference implementation of the storage traits
 //!
-//! For production use cases requiring persistence, use a database-backed implementation
-//! instead of this in-memory version.
+//! For production use cases requiring persistence, use a database-backed storage
+//! implementation instead of this in-memory version.
 //!
 //! # Thread Safety
 //!
@@ -23,10 +30,10 @@ use std::{
     sync::RwLock,
 };
 
-/// In-memory SALT data structure implementation.
+/// In-memory storage backend for SALT.
 ///
-/// `MemSalt` provides a simple, thread-safe implementation for storing SALT data
-/// entirely in memory. It maintains two primary data stores:
+/// `MemStore` provides a simple, thread-safe storage backend that stores
+/// state and trie data entirely in memory. It maintains two primary data stores:
 ///
 /// 1. **State storage**: Key-value pairs representing blockchain state
 /// 2. **Trie storage**: Node commitments for the Merkle trie structure
@@ -41,7 +48,7 @@ use std::{
 /// All data access is protected by [`RwLock`], allowing multiple concurrent readers
 /// or a single writer per data store.
 #[derive(Debug, Default)]
-pub struct MemSalt {
+pub struct MemStore {
     /// Blockchain state storage.
     ///
     /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
@@ -57,7 +64,7 @@ pub struct MemSalt {
     pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
 }
 
-impl Clone for MemSalt {
+impl Clone for MemStore {
     fn clone(&self) -> Self {
         Self {
             state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
@@ -66,8 +73,8 @@ impl Clone for MemSalt {
     }
 }
 
-impl MemSalt {
-    /// Creates a new empty `MemSalt` instance.
+impl MemStore {
+    /// Creates a new empty `MemStore` instance.
     ///
     /// Both the state and trie stores are initialized as empty [`BTreeMap`]s.
     ///
@@ -127,7 +134,7 @@ impl MemSalt {
     }
 }
 
-impl StateReader for MemSalt {
+impl StateReader for MemStore {
     /// Error type for state read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
@@ -152,18 +159,13 @@ impl StateReader for MemSalt {
     }
 }
 
-impl TrieReader for MemSalt {
+impl TrieReader for MemStore {
     /// Error type for trie read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
     type Error = &'static str;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        // FIXME: but what if the given node_id is not valid (i.e., doesn't exist in
-        // the current SALT structure)!? there is no error checking at all! Even worse,
-        // instead of returning None, it returns a default commitment!
-        // FIXME: don't you have to read the metadata first to determine whether the
-        // given node_id is legit?
         Ok(self
             .trie
             .read()
@@ -199,7 +201,7 @@ mod tests {
     /// - The metadata slot key mapping works as expected
     #[test]
     fn get_meta() {
-        let store = MemSalt::new();
+        let store = MemStore::new();
         let bucket_id = (NUM_META_BUCKETS + 400) as BucketId;
         let salt_key: SaltKey = (
             (bucket_id >> MIN_BUCKET_SIZE_BITS),

@@ -11,10 +11,10 @@
 //! ## Working with Plain State (EVM-compatible operations)
 //!
 //! ```rust,ignore
-//! use salt::{EphemeralSaltState, MemSalt};
+//! use salt::{EphemeralSaltState, MemStore};
 //!
 //! // Create an in-memory SALT instance
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Update plain key-value pairs (like EVM account/storage data)
@@ -48,9 +48,9 @@
 //! ## Working with SALT State (low-level bucket operations)
 //!
 //! ```rust,ignore
-//! use salt::{SaltKey, SaltValue, BucketMeta, traits::StateReader, MemSalt};
+//! use salt::{SaltKey, SaltValue, BucketMeta, traits::StateReader, MemStore};
 //!
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //!
 //! // Direct SALT key-value operations (bypassing plain key mapping)
 //! let bucket_id = 65538; // Specific bucket in the trie
@@ -81,9 +81,9 @@
 //! ## Batch Operations and Caching
 //!
 //! ```rust,ignore
-//! use salt::{EphemeralSaltState, SaltKey, MemSalt};
+//! use salt::{EphemeralSaltState, SaltKey, MemStore};
 //!
-//! let store = MemSalt::new();
+//! let store = MemStore::new();
 //!
 //! // Create ephemeral state for batch operations with caching
 //! let mut ephemeral_state = EphemeralSaltState::new(&store);
