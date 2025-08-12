@@ -23,6 +23,14 @@ pub struct EphemeralSaltStateCache(
     pub HashMap<BucketId, BucketMeta>,
 );
 
+impl EphemeralSaltStateCache {
+    /// Clears all cached state.
+    pub fn clear(&mut self) {
+        self.0.clear();
+        self.1.clear();
+    }
+}
+
 /// A non-persistent SALT state snapshot.
 ///
 /// This allows users to tentatively update some SALT state without actually
