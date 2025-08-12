@@ -5,17 +5,14 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
-    constant::{BUCKET_SLOT_BITS, MIN_BUCKET_SIZE, NUM_META_BUCKETS, TRIE_WIDTH_BITS},
+    constant::{NUM_META_BUCKETS, TRIE_WIDTH_BITS},
     proof::{prover, ProofError, SaltProof},
     state::state::{pk_hasher, probe, EphemeralSaltState},
     traits::{StateReader, TrieReader},
     types::*,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    ops::{Bound::Included, RangeInclusive},
-};
+use std::{collections::BTreeMap, ops::RangeInclusive};
 
 /// Creates cryptographic proofs for the given plain keys.
 ///
@@ -69,7 +66,7 @@ where
 
         // Retrieve the bucket's metadata (capacity, nonce, etc.)
         let meta = state_reader
-            .get_meta(bucket_id)
+            .metadata(bucket_id)
             .map_err(ProofError::ReadStateFailed)?;
 
         // Attempt to find the key in the Salt storage using the insertion algorithm
@@ -357,7 +354,7 @@ impl PlainKeysProof {
 
         match self.status[idx] {
             PlainKeyStatus::Existed(salt_key) => {
-                let opt_salt_value = self.entry(salt_key).map_err(|e| e.to_string())?;
+                let opt_salt_value = self.value(salt_key).map_err(|e| e.to_string())?;
                 Ok(opt_salt_value.map(|salt_val| salt_val.value().to_vec()))
             }
             PlainKeyStatus::NotExisted(_) => Ok(None),
@@ -396,11 +393,11 @@ impl StateReader for PlainKeysProof {
     /// This method handles two types of keys:
     /// 1. Metadata keys (bucket_id < NUM_META_BUCKETS): Returns bucket metadata
     /// 2. Data keys: Returns the salt value if it was accessed during proof generation
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
         if key.bucket_id() < NUM_META_BUCKETS as BucketId {
             // This is a metadata key - extract the actual bucket_id and return its metadata
             let bucket_id = bucket_id_from_metadata_key(key);
-            Ok(Some(self.get_meta(bucket_id)?.into()))
+            Ok(Some(self.metadata(bucket_id)?.into()))
         } else {
             // This is a data key - return the value if it was included in the proof
             // The flatten() converts Option<Option<SaltValue>> to Option<SaltValue>
@@ -408,57 +405,29 @@ impl StateReader for PlainKeysProof {
         }
     }
 
-    /// Returns all salt key-value pairs within a range of bucket IDs.
-    /// Only includes values that were accessed during proof generation.
-    fn range_bucket(
+    fn entries(
         &self,
-        range: RangeInclusive<BucketId>,
+        range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
-            .sub_state
-            .range((
-                // Create range bounds covering all slots in the bucket range
-                Included(SaltKey::from((*range.start(), 0))),
-                Included(SaltKey::from((*range.end(), (1 << BUCKET_SLOT_BITS) - 1))),
-            ))
-            .filter(|(_, v)| v.is_some()) // Only include non-empty slots
-            .map(|(k, v)| (*k, v.clone().unwrap())) // Safe unwrap due to filter above
-            .collect())
-    }
-
-    /// Returns salt key-value pairs within a specific bucket and slot range.
-    /// Handles both metadata buckets and regular data buckets differently.
-    fn range_slot(
-        &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let data = if bucket_id < NUM_META_BUCKETS as BucketId {
-            // Handle metadata bucket: convert slot range to actual bucket_ids
-            assert!(*range.end() <= MIN_BUCKET_SIZE as SlotId);
-            let start = bucket_id_from_metadata_key(SaltKey::from((bucket_id, *range.start())));
-            let end = bucket_id_from_metadata_key(SaltKey::from((bucket_id, *range.end())));
-            self.metas
-                .range((Included(start), Included(end)))
-                .map(|(k, v)| (bucket_metadata_key(*k), (*v).into()))
-                .collect()
-        } else {
-            // Handle regular data bucket: return values in the specified slot range
+        let mut result: Vec<_> = self
+            .metas
+            .range(
+                bucket_id_from_metadata_key(*range.start())
+                    ..=bucket_id_from_metadata_key(*range.end()),
+            )
+            .map(|(bucket_id, meta)| (bucket_metadata_key(*bucket_id), (*meta).into()))
+            .collect();
+        result.extend(
             self.sub_state
-                .range((
-                    Included(SaltKey::from((bucket_id, *range.start()))),
-                    Included(SaltKey::from((bucket_id, *range.end()))),
-                ))
-                .filter(|(_, v)| v.is_some()) // Only include non-empty slots
-                .map(|(k, v)| (*k, v.clone().unwrap()))
-                .collect()
-        };
-        Ok(data)
+                .range(*range.start()..=*range.end())
+                .filter_map(|(k, v)| v.as_ref().map(|val| (*k, val.clone()))),
+        );
+        Ok(result)
     }
 
     /// Returns the metadata for a specific bucket.
     /// Returns default metadata if the bucket wasn't accessed during proof generation.
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(self
             .metas
             .get(&bucket_id)
@@ -471,7 +440,7 @@ mod tests {
     use super::*;
     use crate::{
         formate::{Account, PlainKey, PlainValue},
-        mem_salt::MemSalt,
+        mem_store::MemStore,
         state::state::EphemeralSaltState,
         trie::trie::StateRoot,
     };
@@ -497,22 +466,18 @@ mod tests {
         )]);
 
         // Insert the account into Salt storage and update the trie
-        let mem_salt = MemSalt::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
         let state_updates = state.update(&kvs).unwrap();
-        mem_salt.update_state(state_updates.clone());
+        store.update_state(state_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (root, trie_updates) = trie.update(&mem_salt, &mem_salt, &state_updates).unwrap();
-        mem_salt.update_trie(trie_updates);
+        let (root, trie_updates) = trie.update(&store, &store, &state_updates).unwrap();
+        store.update_trie(trie_updates);
 
         // Generate a proof for the inserted key
-        let plain_keys_proof = create_proof(
-            &vec![kvs.keys().next().unwrap().clone()],
-            &mem_salt,
-            &mem_salt,
-        )
-        .unwrap();
+        let plain_keys_proof =
+            create_proof(&vec![kvs.keys().next().unwrap().clone()], &store, &store).unwrap();
 
         // Test serialization round-trip
         let serialized =
@@ -522,7 +487,7 @@ mod tests {
 
         // Verify the deserialized proof is identical and still valid
         assert_eq!(plain_keys_proof, deserialized.0);
-        plain_keys_proof.verify::<MemSalt, MemSalt>(root).unwrap()
+        plain_keys_proof.verify::<MemStore, MemStore>(root).unwrap()
     }
 
     #[test]
@@ -542,32 +507,31 @@ mod tests {
         // Test 3.2: Insert keys [0..=5], prove key [6] (lands in empty slot)
 
         // case 1
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
-        let proof =
-            create_proof(&[get_plain_keys(vec![6])[0].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[get_plain_keys(vec![6])[0].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(key) => key,
             PlainKeyStatus::NotExisted(_) => panic!("plain_keys()[6] should be existed"),
         };
 
-        let proof_value = proof.entry(*salt_key).unwrap().unwrap();
-        let plain_value = mem_salt.entry(*salt_key).unwrap().unwrap();
+        let proof_value = proof.value(*salt_key).unwrap().unwrap();
+        let plain_value = store.value(*salt_key).unwrap().unwrap();
 
         assert_eq!(plain_value, proof_value);
 
         // case 2.1
-        let mem_salt = MemSalt::new();
+        let store = MemStore::new();
         // Insert plain_keys()[6]
-        let root = insert_kvs(get_plain_keys(vec![6]), &mem_salt);
+        let root = insert_kvs(get_plain_keys(vec![6]), &store);
         // generate proof for plain_keys()[0]
-        let proof = create_proof(&[plain_keys()[0].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[plain_keys()[0].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         // plain_keys()[0] is not existed
         let salt_key = match proof.status.first().unwrap() {
@@ -576,12 +540,12 @@ mod tests {
         };
 
         // the salt_key stores the plain_keys()[6]'s salt_value
-        let salt_value = proof.entry(*salt_key).unwrap().unwrap();
+        let salt_value = proof.value(*salt_key).unwrap().unwrap();
 
         let bucket_id = 2448221;
-        let meta = mem_salt.get_meta(bucket_id).unwrap();
+        let meta = store.metadata(bucket_id).unwrap();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[0]
         let find_res = state.find(bucket_id, &meta, &plain_keys()[0]).unwrap();
 
@@ -591,12 +555,12 @@ mod tests {
         assert!(plain_keys()[0] > salt_value.key().to_vec());
 
         // case 2.2
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![6, 0]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
 
-        let proof = create_proof(&[plain_keys()[1].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[plain_keys()[1].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[1] should be not existed"),
@@ -604,12 +568,12 @@ mod tests {
         };
 
         // the salt_key stores the plain_keys()[6]'s salt_value
-        let salt_value = proof.entry(*salt_key).unwrap().unwrap();
+        let salt_value = proof.value(*salt_key).unwrap().unwrap();
 
         let bucket_id = 2448221;
-        let meta = mem_salt.get_meta(bucket_id).unwrap();
+        let meta = store.metadata(bucket_id).unwrap();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[1]
         let find_res = state.find(bucket_id, &meta, &plain_keys()[1]).unwrap();
 
@@ -617,15 +581,15 @@ mod tests {
 
         // plain_keys()[1] has a high priority than the plain_keys()[6]
         assert!(plain_keys()[1] > salt_value.key().to_vec());
-        assert_eq!(salt_value, mem_salt.entry(*salt_key).unwrap().unwrap());
+        assert_eq!(salt_value, store.value(*salt_key).unwrap().unwrap());
 
         // case 2.3
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
 
-        let proof = create_proof(&[plain_keys()[1].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[plain_keys()[1].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[1] should be not existed"),
@@ -633,64 +597,64 @@ mod tests {
         };
 
         // the salt_key stores the plain_keys()[2]'s salt_value
-        let salt_value = proof.entry(*salt_key).unwrap().unwrap();
+        let salt_value = proof.value(*salt_key).unwrap().unwrap();
 
         let bucket_id = 2448221;
-        let meta = mem_salt.get_meta(bucket_id).unwrap();
+        let meta = store.metadata(bucket_id).unwrap();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&store);
         let find_res = state.find(bucket_id, &meta, &plain_keys()[1]).unwrap();
 
         assert!(find_res.is_none());
 
         // plain_keys()[1] has a high priority than the plain_keys()[2]
         assert!(plain_keys()[1] > salt_value.key().to_vec());
-        assert_eq!(salt_value, mem_salt.entry(*salt_key).unwrap().unwrap());
+        assert_eq!(salt_value, store.value(*salt_key).unwrap().unwrap());
 
         // case 3.1
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![]), &store);
 
-        let proof = create_proof(&[plain_keys()[0].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[plain_keys()[0].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[0] should be not existed"),
             PlainKeyStatus::NotExisted(key) => key,
         };
 
-        let salt_value = proof.entry(*salt_key).unwrap();
+        let salt_value = proof.value(*salt_key).unwrap();
         assert!(salt_value.is_none());
 
         let bucket_id = 2448221;
-        let meta = mem_salt.get_meta(bucket_id).unwrap();
+        let meta = store.metadata(bucket_id).unwrap();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&store);
         let find_res = state.find(bucket_id, &meta, &plain_keys()[0]).unwrap();
 
         assert!(find_res.is_none());
 
         // case 3.2
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
-        let proof = create_proof(&[plain_keys()[6].clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[plain_keys()[6].clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[6] should be not existed"),
             PlainKeyStatus::NotExisted(key) => key,
         };
 
-        let salt_value = proof.entry(*salt_key).unwrap();
+        let salt_value = proof.value(*salt_key).unwrap();
         assert!(salt_value.is_none());
 
         let bucket_id = 2448221;
-        let meta = mem_salt.get_meta(bucket_id).unwrap();
+        let meta = store.metadata(bucket_id).unwrap();
 
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mut state = EphemeralSaltState::new(&store);
         let find_res = state.find(bucket_id, &meta, &plain_keys()[6]).unwrap();
 
         assert!(find_res.is_none());
@@ -698,14 +662,14 @@ mod tests {
 
     #[test]
     fn test_plain_key_proof_in_loop_slot_id() {
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![9]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![9]), &store);
 
         let key = plain_keys()[7].clone();
 
-        let proof = create_proof(&[key], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[key], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(key) => key,
@@ -713,18 +677,18 @@ mod tests {
         };
 
         assert_eq!(salt_key.slot_id(), 0);
-        let salt_value = proof.entry(*salt_key).unwrap();
+        let salt_value = proof.value(*salt_key).unwrap();
         assert!(salt_value.is_none());
 
         // another case
-        let mem_salt = MemSalt::new();
-        let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &mem_salt);
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &store);
 
         let key = plain_keys()[8].clone();
 
-        let proof = create_proof(&[key.clone()], &mem_salt, &mem_salt).unwrap();
+        let proof = create_proof(&[key.clone()], &store, &store).unwrap();
 
-        assert!(proof.verify::<MemSalt, MemSalt>(root).is_ok());
+        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
 
         assert_eq!(proof.keys.first().unwrap(), &key);
 
@@ -734,9 +698,9 @@ mod tests {
         };
 
         assert_eq!(salt_key.slot_id(), 1);
-        let salt_value = proof.entry(*salt_key).unwrap().unwrap();
+        let salt_value = proof.value(*salt_key).unwrap().unwrap();
 
-        let salt_val = mem_salt.entry(*salt_key).unwrap().unwrap();
+        let salt_val = store.value(*salt_key).unwrap().unwrap();
 
         assert_eq!(salt_value, salt_val);
     }
@@ -771,21 +735,19 @@ mod tests {
             kvs.insert(pk, pv);
         });
 
-        let mem_salt = MemSalt::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
         let updates = state.update(&kvs).unwrap();
-        mem_salt.update_state(updates.clone());
+        store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new()
-            .update(&mem_salt, &mem_salt, &updates)
-            .unwrap();
+        let (_, trie_updates) = StateRoot::new().update(&store, &store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates);
+        store.update_trie(trie_updates);
 
         let plain_keys_proof = create_proof(
             &kvs.keys().map(|k| k.clone()).collect::<Vec<_>>(),
-            &mem_salt,
-            &mem_salt,
+            &store,
+            &store,
         )
         .unwrap();
 
@@ -804,7 +766,7 @@ mod tests {
         meta_keys.extend_from_slice(&data_keys);
 
         for key in meta_keys {
-            let proof_value = plain_keys_proof.entry(key).unwrap();
+            let proof_value = plain_keys_proof.value(key).unwrap();
             let state_value = state.get_entry(key).unwrap();
 
             assert_eq!(proof_value, state_value);
@@ -820,20 +782,20 @@ mod tests {
     }
 
     /// Helper function to insert key-value pairs and return the resulting state root.
-    fn insert_kvs(plain_keys: Vec<Vec<u8>>, mem_salt: &MemSalt) -> [u8; 32] {
+    fn insert_kvs(plain_keys: Vec<Vec<u8>>, store: &MemStore) -> [u8; 32] {
         let kvs = plain_keys
             .iter()
             .map(|k| (k.clone(), Some(k[0..20].to_vec())))
             .collect::<HashMap<_, _>>();
 
-        let state_updates = EphemeralSaltState::new(mem_salt).update(&kvs).unwrap();
+        let state_updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
 
-        mem_salt.update_state(state_updates.clone());
+        store.update_state(state_updates.clone());
 
         let mut trie = StateRoot::new();
-        let (root, trie_updates) = trie.update(mem_salt, mem_salt, &state_updates).unwrap();
+        let (root, trie_updates) = trie.update(store, store, &state_updates).unwrap();
 
-        mem_salt.update_trie(trie_updates);
+        store.update_trie(trie_updates);
         root
     }
 
@@ -848,7 +810,7 @@ mod tests {
     ///
     /// Insertion conflicts (keys that need comparison during insertion):
     /// - key[2]: compares with slots 2,3
-    /// - key[4]: compares with slots 4,5  
+    /// - key[4]: compares with slots 4,5
     /// - key[6]: compares with slots 1,2,3,4,5,6,7
     /// - key[7]: compares with slots 255,0
     /// - key[8]: compares with slots 255,0,1
