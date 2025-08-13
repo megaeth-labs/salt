@@ -13,7 +13,7 @@ use std::ops::{Range, RangeInclusive};
 pub struct EmptySalt;
 
 impl StateReader for EmptySalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(BucketMeta::default())
@@ -52,7 +52,7 @@ impl StateReader for EmptySalt {
 }
 
 impl StateLoader for EmptySalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn load_range(
         &self,
@@ -63,7 +63,7 @@ impl StateLoader for EmptySalt {
 }
 
 impl TrieReader for EmptySalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         let level = get_node_level(node_id);

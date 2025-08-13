@@ -16,6 +16,21 @@ pub type BucketId = u32;
 /// Represents the ID of a slot.
 pub type SlotId = u64;
 
+/// Errors related to salt operations.
+///
+/// TODO: Use more specific error types for different error cases.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum SaltError {
+    #[error("salt error: {0}")]
+    Common(&'static str),
+}
+
+impl From<&'static str> for SaltError {
+    fn from(s: &'static str) -> Self {
+        SaltError::Common(s)
+    }
+}
+
 /// This variable type is used to represent the meta value of a bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BucketMeta {
@@ -38,10 +53,10 @@ impl Default for BucketMeta {
 }
 
 impl TryFrom<&[u8]> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() < 12 {
-            return Err("bytes length too short for BucketMeta");
+            return Err("bytes length too short for BucketMeta".into());
         }
         Ok(Self {
             nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| "nonce error")?),
@@ -52,7 +67,7 @@ impl TryFrom<&[u8]> for BucketMeta {
 }
 
 impl TryFrom<&SaltValue> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(value: &SaltValue) -> Result<Self, Self::Error> {
         Self::try_from(value.key())
     }
@@ -68,7 +83,7 @@ impl BucketMeta {
     }
 
     /// Updates the current `BucketMeta` using the values from [`SaltValue`].
-    pub fn update(&mut self, value: &SaltValue) -> Result<(), &'static str> {
+    pub fn update(&mut self, value: &SaltValue) -> Result<(), SaltError> {
         let meta: Self = value.try_into()?;
         self.capacity = meta.capacity;
         self.nonce = meta.nonce;
@@ -194,7 +209,7 @@ impl From<BucketMeta> for SaltValue {
 }
 
 impl TryFrom<SaltValue> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(value: SaltValue) -> Result<Self, Self::Error> {
         Self::try_from(value.key())
     }

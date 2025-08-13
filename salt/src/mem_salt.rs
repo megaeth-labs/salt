@@ -91,7 +91,7 @@ impl MemSalt {
 }
 
 impl StateReader for MemSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Get bucket meta by bucket ID.
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
@@ -155,7 +155,7 @@ impl StateReader for MemSalt {
 }
 
 impl StateLoader for MemSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn load_range(
         &self,
@@ -176,7 +176,7 @@ impl StateLoader for MemSalt {
 }
 
 impl TrieReader for MemSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self

@@ -155,7 +155,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
 pub struct ExpansionSalt((u64, u64));
 
 impl TrieReader for ExpansionSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn get_commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
@@ -170,7 +170,7 @@ impl TrieReader for ExpansionSalt {
 }
 
 impl StateReader for ExpansionSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)

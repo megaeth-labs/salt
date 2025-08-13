@@ -8,6 +8,7 @@ use crate::{
     types::{meta_position, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
+use core::error::Error;
 use std::{
     fmt::Debug,
     ops::{Range, RangeInclusive},
@@ -17,7 +18,7 @@ use std::{
 #[auto_impl::auto_impl(&, Arc)]
 pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Error + Send + Sync + 'static;
 
     /// Get bucket meta by bucket ID.
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {

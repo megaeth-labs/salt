@@ -57,7 +57,7 @@ pub struct BlockWitness {
 }
 
 impl TrieReader for BlockWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
@@ -102,7 +102,7 @@ impl BlockWitness {
 }
 
 impl StateReader for BlockWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let result = self.kvs.get(&key).cloned().flatten();
