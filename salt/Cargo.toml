@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+disable-hugepages = ["banderwagon/disable-hugepages"]
 
 [dependencies]
 # megaeth dependencies
