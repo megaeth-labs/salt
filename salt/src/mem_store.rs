@@ -54,6 +54,10 @@ pub struct MemStore {
     /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
     /// of the blockchain. Keys encode bucket and slot information, while values
     /// contain the actual state data including account information, storage, etc.
+    ///
+    /// **Note**: Default bucket metadata entries are not stored in this map. When
+    /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
+    /// present, it returns [`BucketMeta::default()`] values automatically.
     pub state: RwLock<BTreeMap<SaltKey, SaltValue>>,
 
     /// Trie node commitment storage.
@@ -67,6 +71,10 @@ pub struct MemStore {
     ///
     /// Maps [`BucketId`] to the number of occupied slots in that bucket.
     /// This cache improves performance by avoiding repeated scans of bucket entries.
+    ///
+    /// **Interpretation**: If a bucket ID is not present in this map, it means
+    /// the bucket has not been updated since the creation of this `MemStore`.
+    /// For such buckets, the number of used slots is guaranteed to be zero.
     pub used_slots: RwLock<BTreeMap<BucketId, u64>>,
 }
 

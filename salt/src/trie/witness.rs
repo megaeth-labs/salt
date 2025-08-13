@@ -167,11 +167,16 @@ impl StateReader for BlockWitness {
     }
 
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(self
-            .metadata
-            .get(&bucket_id)
-            .and_then(|&opt| opt)
-            .unwrap_or_default())
+        match self.metadata.get(&bucket_id).and_then(|&opt| opt) {
+            Some(meta) => Ok(meta),
+            None => {
+                let meta = BucketMeta {
+                    used: Some(self.bucket_used_slots(bucket_id)?),
+                    ..Default::default()
+                };
+                Ok(meta)
+            }
+        }
     }
 }
 

@@ -428,10 +428,16 @@ impl StateReader for PlainKeysProof {
     /// Returns the metadata for a specific bucket.
     /// Returns default metadata if the bucket wasn't accessed during proof generation.
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(self
-            .metas
-            .get(&bucket_id)
-            .map_or(BucketMeta::default(), |v| *v))
+        match self.metas.get(&bucket_id) {
+            Some(meta) => Ok(*meta),
+            None => {
+                let meta = BucketMeta {
+                    used: Some(self.bucket_used_slots(bucket_id)?),
+                    ..Default::default()
+                };
+                Ok(meta)
+            }
+        }
     }
 }
 

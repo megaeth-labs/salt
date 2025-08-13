@@ -76,11 +76,9 @@ pub trait StateReader: Debug + Send + Sync {
     /// # Behavior
     ///
     /// This method looks up the bucket's metadata using the bucket ID. If no metadata
-    /// entry exists, it returns a default [`BucketMeta`]
-    /// with:
-    /// - `nonce`: 0
-    /// - `capacity`: MIN_BUCKET_SIZE (256)
-    /// - `used`: 0
+    /// entry exists, it uses default values for `nonce` (0) and `capacity` (MIN_BUCKET_SIZE).
+    /// Regardless of whether metadata is stored or default, the `used` field is **always**
+    /// populated with the actual number of occupied slots.
     ///
     /// # Arguments
     ///

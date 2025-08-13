@@ -32,12 +32,8 @@ impl StateReader for EmptySalt {
         Ok(Vec::new())
     }
 
-    fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(BucketMeta::default())
-    }
-
     fn bucket_used_slots(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
-        Ok(0) // Empty SALT has no occupied slots
+        Ok(0)
     }
 }
 
