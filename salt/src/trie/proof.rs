@@ -409,14 +409,19 @@ impl StateReader for PlainKeysProof {
         &self,
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let mut result: Vec<_> = self
-            .metas
-            .range(
-                bucket_id_from_metadata_key(*range.start())
-                    ..=bucket_id_from_metadata_key(*range.end()),
-            )
-            .map(|(bucket_id, meta)| (bucket_metadata_key(*bucket_id), (*meta).into()))
-            .collect();
+        let mut result: Vec<(SaltKey, SaltValue)> = Vec::new();
+        if range.start().is_in_meta_bucket() {
+            result.extend(
+                self.metas
+                    .range(
+                        bucket_id_from_metadata_key(*range.start())
+                            ..=bucket_id_from_metadata_key(
+                                *range.end().min(METADATA_KEYS_RANGE.end()),
+                            ),
+                    )
+                    .map(|(bucket_id, meta)| (bucket_metadata_key(*bucket_id), (*meta).into())),
+            );
+        }
         result.extend(
             self.sub_state
                 .range(*range.start()..=*range.end())

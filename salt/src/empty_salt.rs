@@ -19,8 +19,6 @@ impl StateReader for EmptySalt {
     type Error = &'static str;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        // Return None for all keys - both metadata and data
-        // Default metadata should be provided by the metadata() method, not value()
         Ok(None)
     }
 

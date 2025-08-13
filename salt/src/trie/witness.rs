@@ -147,17 +147,22 @@ impl StateReader for BlockWitness {
         &self,
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let mut result: Vec<_> = self
-            .metadata
-            .range(
-                bucket_id_from_metadata_key(*range.start())
-                    ..=bucket_id_from_metadata_key(*range.end()),
-            )
-            .filter_map(|(bucket_id, meta)| {
-                meta.as_ref()
-                    .map(|m| (bucket_metadata_key(*bucket_id), (*m).into()))
-            })
-            .collect();
+        let mut result: Vec<(SaltKey, SaltValue)> = Vec::new();
+        if range.start().is_in_meta_bucket() {
+            result.extend(
+                self.metadata
+                    .range(
+                        bucket_id_from_metadata_key(*range.start())
+                            ..=bucket_id_from_metadata_key(
+                                *range.end().min(METADATA_KEYS_RANGE.end()),
+                            ),
+                    )
+                    .filter_map(|(bucket_id, meta)| {
+                        meta.as_ref()
+                            .map(|m| (bucket_metadata_key(*bucket_id), (*m).into()))
+                    }),
+            );
+        }
         result.extend(
             self.kvs
                 .range(*range.start()..=*range.end())

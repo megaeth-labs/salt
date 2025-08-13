@@ -7,6 +7,8 @@
 //! - [`NodeId`]: 64-bit identifiers for trie nodes
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
+use std::ops::RangeInclusive;
+
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
     NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
@@ -500,6 +502,11 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
     unreachable!("n = {bfs_number} should always match at least level 0")
 }
 
+/// The valid range of metadata keys. Metadata keys span from bucket 0 slot 0
+/// to bucket (NUM_META_BUCKETS-1) slot BUCKET_SLOT_ID_MASK.
+pub const METADATA_KEYS_RANGE: RangeInclusive<SaltKey> =
+    SaltKey(0)..=SaltKey(((NUM_META_BUCKETS - 1) as u64) << BUCKET_SLOT_BITS | BUCKET_SLOT_ID_MASK);
+
 /// Calculate the SaltKey where bucket metadata is stored.
 ///
 /// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
@@ -544,12 +551,20 @@ pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
 /// 2. Adding the slot ID (which represents the offset within the 256-bucket group)
 ///
 /// # Arguments
-/// * `key` - SaltKey pointing to a metadata storage location
+/// * `key` - SaltKey pointing to a metadata storage location. Must be within
+///   [`METADATA_KEYS_RANGE`] (i.e., a valid metadata key for a data bucket).
 ///
 /// # Returns
 /// The original bucket ID whose metadata is stored at this key
+///
+/// # Panics
+/// Panics if the provided key is not within the valid metadata key range.
 #[inline]
 pub fn bucket_id_from_metadata_key(key: SaltKey) -> BucketId {
+    assert!(
+        METADATA_KEYS_RANGE.contains(&key),
+        "SaltKey {key:?} is not in valid metadata key range"
+    );
     (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId
 }
 
@@ -730,6 +745,18 @@ mod tests {
                 bucket_id
             );
         }
+    }
+
+    /// Tests that bucket_id_from_metadata_key correctly panics for keys outside the valid
+    /// metadata key range. Only keys that correspond to actual data bucket metadata should
+    /// be accepted.
+    #[test]
+    #[should_panic(expected = "SaltKey")]
+    fn bucket_id_from_metadata_key_invalid_range_panic() {
+        // Test with a key that's outside the valid metadata range
+        // Use a key from a bucket beyond NUM_META_BUCKETS-1, which is outside metadata buckets
+        let invalid_key = SaltKey::from((NUM_META_BUCKETS as u32, 0u64));
+        bucket_id_from_metadata_key(invalid_key);
     }
 
     /// Tests BucketMeta deserialization error handling. The try_from implementation
