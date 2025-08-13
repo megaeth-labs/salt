@@ -62,6 +62,12 @@ pub struct MemStore {
     /// for nodes in the SALT trie. These commitments are used for state proofs
     /// and verification.
     pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
+
+    /// Cache for bucket used slot counts.
+    ///
+    /// Maps [`BucketId`] to the number of occupied slots in that bucket.
+    /// This cache improves performance by avoiding repeated scans of bucket entries.
+    pub used_slots: RwLock<BTreeMap<BucketId, u64>>,
 }
 
 impl Clone for MemStore {
@@ -69,6 +75,12 @@ impl Clone for MemStore {
         Self {
             state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
             trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
+            used_slots: RwLock::new(
+                self.used_slots
+                    .read()
+                    .expect("bucket_used_slots_cache lock poisoned")
+                    .clone(),
+            ),
         }
     }
 }
@@ -93,6 +105,7 @@ impl MemStore {
         Self {
             state: RwLock::new(BTreeMap::new()),
             trie: RwLock::new(BTreeMap::new()),
+            used_slots: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -103,12 +116,47 @@ impl MemStore {
     /// - If the new value is `Some`, the key-value pair is inserted/updated
     /// - If the new value is `None`, the key is removed from the state
     ///
+    /// This method also updates the bucket used slots cache to reflect changes
+    /// in bucket occupancy.
+    ///
     /// # Arguments
     ///
     /// * `updates` - Batch of state changes to apply
     pub fn update_state(&self, updates: StateUpdates) {
         let mut state = self.state.write().unwrap();
+        let mut cache = self.used_slots.write().unwrap();
+
         for (key, value) in updates.data {
+            let bucket_id = key.bucket_id();
+
+            // Skip metadata buckets - they don't track used slots
+            if key.is_in_meta_bucket() {
+                if let Some(new_val) = value.1 {
+                    state.insert(key, new_val);
+                } else {
+                    state.remove(&key);
+                }
+                continue;
+            }
+
+            // Update the cache based on the change
+            match (value.0.is_some(), value.1.is_some()) {
+                (false, true) => {
+                    // Adding a new entry
+                    *cache.entry(bucket_id).or_insert(0) += 1;
+                }
+                (true, false) => {
+                    // Removing an entry
+                    if let Some(count) = cache.get_mut(&bucket_id) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+                _ => {
+                    // No change in count (update or no-op)
+                }
+            }
+
+            // Apply the actual state change
             if let Some(new_val) = value.1 {
                 state.insert(key, new_val);
             } else {
@@ -156,6 +204,16 @@ impl StateReader for MemStore {
             .range(range)
             .map(|(k, v)| (*k, v.clone()))
             .collect())
+    }
+
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        // Return the cached count, defaulting to 0 for buckets that haven't been accessed
+        Ok(*self
+            .used_slots
+            .read()
+            .unwrap()
+            .get(&bucket_id)
+            .unwrap_or(&0))
     }
 }
 
@@ -209,14 +267,23 @@ mod tests {
         )
             .into();
         let mut meta = store.metadata(bucket_id).unwrap();
-        assert_eq!(meta, BucketMeta::default());
+        // The metadata() method now populates the used field
+        let expected_meta = BucketMeta {
+            used: Some(0), // populated by metadata()
+            ..BucketMeta::default()
+        };
+        assert_eq!(meta, expected_meta);
         assert!(store.value(salt_key).unwrap().is_none());
         meta.capacity = 1024;
         let updates = StateUpdates {
             data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.metadata(bucket_id).unwrap(), meta);
+        // After update, used field should still be populated correctly
+        let updated_meta = store.metadata(bucket_id).unwrap();
+        assert_eq!(updated_meta.nonce, meta.nonce);
+        assert_eq!(updated_meta.capacity, meta.capacity);
+        assert_eq!(updated_meta.used, Some(0)); // Still 0 since we didn't add any entries
     }
 
     // FIXME: no tests for bucket expansion??

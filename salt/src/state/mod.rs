@@ -69,7 +69,7 @@
 //!
 //! // Read bucket metadata
 //! let meta = store.meta(bucket_id).unwrap();
-//! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used);
+//! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used.unwrap_or(0));
 //!
 //! // Read range of entries from a bucket
 //! let entries = store.entries(bucket_id, 0..=100).unwrap();

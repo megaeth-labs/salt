@@ -35,6 +35,10 @@ impl StateReader for EmptySalt {
     fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(BucketMeta::default())
     }
+
+    fn bucket_used_slots(&self, _bucket_id: BucketId) -> Result<u64, Self::Error> {
+        Ok(0) // Empty SALT has no occupied slots
+    }
 }
 
 impl TrieReader for EmptySalt {

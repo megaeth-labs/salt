@@ -200,9 +200,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     Some(SaltValue::new(&pending_key, &pending_value)),
                 );
 
-                meta.used += 1;
+                meta.used = Some(meta.used.unwrap_or(0) + 1);
                 // if the used of the bucket exceeds 4/5 of the capacity, resize the bucket.
-                if meta.used > meta.capacity * 4 / 5 && meta.capacity < (1 << BUCKET_SLOT_BITS) {
+                if meta.used.unwrap_or(0) > meta.capacity * 4 / 5
+                    && meta.capacity < (1 << BUCKET_SLOT_BITS)
+                {
                     // double the capacity of the bucket.
                     info!(
                         "bucket_id {} capacity extend from {} to {}",
@@ -226,7 +228,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                         out_updates,
                         bucket_id,
                         BucketMeta {
-                            used: meta.used - 1,
+                            used: Some(meta.used.unwrap_or(1).saturating_sub(1)),
                             ..*meta
                         },
                         *meta,
@@ -252,12 +254,13 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
         if let Some((slot_id, slot_val)) = find_slot {
             // used decreases by 1 and save the new meta in the state_updates.
-            meta.used -= 1;
+            let old_used = meta.used.unwrap_or(0);
+            meta.used = Some(old_used.saturating_sub(1));
             self.update_meta(
                 out_updates,
                 bucket_id,
                 BucketMeta {
-                    used: meta.used + 1,
+                    used: Some(old_used),
                     ..*meta
                 },
                 *meta,
@@ -359,7 +362,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         }
 
         // update the state with the new entry
-        new_meta.used = 0;
+        new_meta.used = Some(0);
         new_state.into_iter().try_for_each(|(_, v)| {
             self.upsert(
                 bucket_id,
@@ -744,7 +747,7 @@ mod tests {
         let reader = EmptySalt;
         let mut cmp_state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        meta.used = 0;
+        meta.used = Some(0);
 
         for j in del_num..rand_keys.len() {
             cmp_state

@@ -1,6 +1,9 @@
 //! Core traits for SALT state and trie storage.
 use crate::{
-    constant::{default_commitment, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS, TRIE_WIDTH},
+    constant::{
+        default_commitment, zero_commitment, BUCKET_SLOT_ID_MASK, STARTING_NODE_ID, TRIE_LEVELS,
+        TRIE_WIDTH,
+    },
     trie::trie::get_child_node,
     types::{
         bucket_metadata_key, get_bfs_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
@@ -96,12 +99,38 @@ pub trait StateReader: Debug + Send + Sync {
     ///   [`BucketMeta`] structure (indicates data corruption)
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
-        Ok(match self.value(key)? {
+        let mut meta = match self.value(key)? {
             Some(ref v) => v
                 .try_into()
                 .expect("Failed to decode bucket metadata: stored value is corrupted"),
             None => BucketMeta::default(),
-        })
+        };
+        // Populate the used field by counting actual entries
+        meta.used = Some(self.bucket_used_slots(bucket_id)?);
+        Ok(meta)
+    }
+
+    /// Returns the number of occupied slots in a bucket.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation scans all entries in the bucket and counts
+    /// non-empty slots. Implementations should override this with a more
+    /// efficient approach (e.g., caching the count in memory).
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The ID of the bucket whose occupied slots to count
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)` - The number of occupied slots in the bucket
+    /// - `Err(_)` - If there's an error reading from storage
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        let start_key = SaltKey::from((bucket_id, 0u64));
+        let end_key = SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK));
+        let entries = self.entries(start_key..=end_key)?;
+        Ok(entries.len() as u64)
     }
 }
 
