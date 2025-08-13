@@ -42,7 +42,7 @@ where
             state_reader
                 .metadata(bucket_id)
                 .ok()
-                .map(|meta| (bucket_id, (meta != BucketMeta::default()).then_some(meta)))
+                .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
         })
         .collect();
 

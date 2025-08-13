@@ -106,6 +106,22 @@ impl BucketMeta {
         bytes[4..12].copy_from_slice(&self.capacity.to_le_bytes());
         bytes
     }
+
+    /// Checks if this bucket metadata represents default values.
+    ///
+    /// A bucket has default metadata when:
+    /// - `nonce` is 0 (no rehashing operations performed)
+    /// - `capacity` is `MIN_BUCKET_SIZE` (256 slots)
+    ///
+    /// The `used` field is ignored since it's computed dynamically and may vary
+    /// even for buckets with otherwise default metadata.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this metadata has default `nonce` and `capacity` values, `false` otherwise.
+    pub fn is_default(&self) -> bool {
+        self.nonce == 0 && self.capacity == MIN_BUCKET_SIZE as u64
+    }
 }
 
 /// 64-bit storage key encoding bucket and slot identifiers.
