@@ -24,7 +24,7 @@ pub mod mem_store;
 pub use mem_store::MemStore;
 
 #[cfg(test)]
-pub mod formate;
+pub mod mock_evm_types;
 
 #[cfg(test)]
 mod tests {
