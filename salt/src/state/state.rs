@@ -223,16 +223,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     )?;
 
                     meta.capacity <<= 1;
-                } else {
-                    self.update_meta(
-                        out_updates,
-                        bucket_id,
-                        BucketMeta {
-                            used: Some(meta.used.unwrap_or(1).saturating_sub(1)),
-                            ..*meta
-                        },
-                        *meta,
-                    );
                 }
                 return Ok(());
             }
@@ -253,18 +243,9 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let find_slot = self.find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
-            // used decreases by 1 and save the new meta in the state_updates.
+            // used decreases by 1 but no need to record in state_updates
             let old_used = meta.used.unwrap_or(0);
             meta.used = Some(old_used.saturating_sub(1));
-            self.update_meta(
-                out_updates,
-                bucket_id,
-                BucketMeta {
-                    used: Some(old_used),
-                    ..*meta
-                },
-                *meta,
-            );
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -380,7 +361,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             Some((*old_meta).into()),
             Some((*new_meta).into()),
         );
-        self.update_meta(out_updates, bucket_id, *old_meta, *new_meta);
 
         Ok(())
     }
@@ -417,20 +397,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
-    }
-
-    /// Updates the bucket metadata and records the change in `out_updates`.
-    fn update_meta(
-        &mut self,
-        out_updates: &mut StateUpdates,
-        bucket_id: BucketId,
-        old_meta: BucketMeta,
-        new_meta: BucketMeta,
-    ) {
-        let id = bucket_metadata_key(bucket_id);
-        let new_value = Some(new_meta.into());
-        self.cache.insert(id, new_value.clone());
-        out_updates.add(id, Some(old_meta.into()), new_value);
     }
 
     /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if

@@ -134,42 +134,26 @@ impl MemStore {
         let mut state = self.state.write().unwrap();
         let mut cache = self.used_slots.write().unwrap();
 
-        for (key, value) in updates.data {
-            let bucket_id = key.bucket_id();
-
-            // Skip metadata buckets - they don't track used slots
-            if key.is_in_meta_bucket() {
-                if let Some(new_val) = value.1 {
-                    state.insert(key, new_val);
-                } else {
-                    state.remove(&key);
-                }
-                continue;
-            }
-
-            // Update the cache based on the change
-            match (value.0.is_some(), value.1.is_some()) {
-                (false, true) => {
-                    // Adding a new entry
-                    *cache.entry(bucket_id).or_insert(0) += 1;
-                }
-                (true, false) => {
-                    // Removing an entry
-                    if let Some(count) = cache.get_mut(&bucket_id) {
-                        *count = count.saturating_sub(1);
+        for (key, (old_value, new_value)) in updates.data {
+            // Update used_slot information for data buckets only
+            if !key.is_in_meta_bucket() {
+                let bucket_id = key.bucket_id();
+                match (old_value.is_some(), new_value.is_some()) {
+                    (false, true) => *cache.entry(bucket_id).or_insert(0) += 1,
+                    (true, false) => {
+                        if let Some(count) = cache.get_mut(&bucket_id) {
+                            *count = count.saturating_sub(1);
+                        }
                     }
-                }
-                _ => {
-                    // No change in count (update or no-op)
+                    _ => {} // No change in count (update or no-op)
                 }
             }
 
-            // Apply the actual state change
-            if let Some(new_val) = value.1 {
-                state.insert(key, new_val);
-            } else {
-                state.remove(&key);
-            }
+            // Apply the state change
+            match new_value {
+                Some(new_val) => state.insert(key, new_val),
+                None => state.remove(&key),
+            };
         }
     }
 
