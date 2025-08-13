@@ -433,6 +433,8 @@ impl StateReader for PlainKeysProof {
     /// Returns the metadata for a specific bucket.
     /// Returns default metadata if the bucket wasn't accessed during proof generation.
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        // FIXME: the following code is buggy; see BlockWitness::metadata()
+        // for the correct implementation
         match self.metas.get(&bucket_id) {
             Some(meta) => Ok(*meta),
             None => {

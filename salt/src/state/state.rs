@@ -243,7 +243,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let find_slot = self.find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
-            // used decreases by 1 but no need to record in state_updates
             let old_used = meta.used.unwrap_or(0);
             meta.used = Some(old_used.saturating_sub(1));
             let mut delete_slot = (slot_id, slot_val);
