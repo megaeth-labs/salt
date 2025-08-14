@@ -14,9 +14,9 @@ use tracing::info;
 /// EphemeralSaltStateCache is used to cache temporary SALT state.
 /// It contains two hash maps:
 /// - The first HashMap<SaltKey, Option<SaltValue>> caches the value for each
-/// SALT key (Option, None means deleted or missed)
+///   SALT key (Option, None means deleted or missed)
 /// - The second HashMap<BucketId, BucketMeta> caches metadata for each bucket
-///  (such as capacity, usage, etc.)
+///   (such as capacity, usage, etc.)
 #[derive(Debug, Default, Clone)]
 pub struct EphemeralSaltStateCache(
     pub HashMap<SaltKey, Option<SaltValue>>,
@@ -106,7 +106,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     // get bucket meta from cache or base state
     fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
         let meta = if let Some(meta) = self.cache.1.get(&bucket_id) {
-            meta.clone()
+            *meta
         } else {
             let base_meta = self.base_state.get_meta(bucket_id)?;
             let slot = meta_position(bucket_id);
@@ -249,8 +249,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     self.cache
                         .1
                         .entry(bucket_id)
-                        .and_modify(|old_meta| *old_meta = meta.clone())
-                        .or_insert(meta.clone());
+                        .and_modify(|old_meta| *old_meta = *meta)
+                        .or_insert(*meta);
                 }
                 return Ok(());
             }
@@ -276,8 +276,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             self.cache
                 .1
                 .entry(bucket_id)
-                .and_modify(|old_meta| *old_meta = meta.clone())
-                .or_insert(meta.clone());
+                .and_modify(|old_meta| *old_meta = *meta)
+                .or_insert(*meta);
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -442,8 +442,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
             .1
             .entry(bucket_id)
-            .and_modify(|old_meta| *old_meta = new_meta.clone())
-            .or_insert(new_meta.clone());
+            .and_modify(|old_meta| *old_meta = new_meta)
+            .or_insert(new_meta);
         let id = meta_position(bucket_id);
         let new_value = Some(new_meta.into());
         self.cache.0.insert(id, new_value.clone());
