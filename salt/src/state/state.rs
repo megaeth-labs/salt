@@ -82,10 +82,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
-        let metadata = self
-            .get_entry(bucket_metadata_key(bucket_id))?
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or_else(BucketMeta::default);
+        let metadata = match self.get_entry(bucket_metadata_key(bucket_id))? {
+            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+            None => self.base_state.metadata(bucket_id)?,
+        };
         // let meta = self.salt_state.meta(bucket_id)?;
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
@@ -120,11 +120,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let slot = bucket_metadata_key(bucket_id);
-            let value = self.get_entry(slot)?;
-            let mut meta = value
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(BucketMeta::default);
+            let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
+                Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+                None => self.base_state.metadata(bucket_id)?,
+            };
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -200,11 +199,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     Some(SaltValue::new(&pending_key, &pending_value)),
                 );
 
-                meta.used = Some(meta.used.unwrap_or(0) + 1);
+                let used = meta
+                    .used
+                    .expect("BucketMeta.used should always be populated");
                 // if the used of the bucket exceeds 4/5 of the capacity, resize the bucket.
-                if meta.used.unwrap_or(0) > meta.capacity * 4 / 5
-                    && meta.capacity < (1 << BUCKET_SLOT_BITS)
-                {
+                if used >= meta.capacity * 4 / 5 && meta.capacity < (1 << BUCKET_SLOT_BITS) {
                     // double the capacity of the bucket.
                     info!(
                         "bucket_id {} capacity extend from {} to {}",
@@ -224,6 +223,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
 
                     meta.capacity <<= 1;
                 }
+                meta.used = Some(used + 1);
                 return Ok(());
             }
         }
@@ -243,7 +243,9 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let find_slot = self.find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
-            let old_used = meta.used.unwrap_or(0);
+            let old_used = meta
+                .used
+                .expect("BucketMeta.used should always be populated");
             meta.used = Some(old_used.saturating_sub(1));
             let mut delete_slot = (slot_id, slot_val);
 
@@ -596,7 +598,10 @@ mod tests {
         let reader = EmptySalt;
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&reader);
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
 
         for _ in 0..3 {
             let mut state1 = EphemeralSaltState::new(&mock_db);
@@ -632,7 +637,10 @@ mod tests {
     fn insert_with_diff_order() {
         let (keys, vals) = create_random_kvs(KEYS_NUM);
         let reader = EmptySalt;
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
         //Insert KEYS_NUM key-value pairs into table 0 of state
@@ -654,7 +662,10 @@ mod tests {
             let mut out_updates = StateUpdates::default();
             // Rearrange the order of keys and vals
             let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals.clone());
-            let mut meta = BucketMeta::default();
+            let mut meta = BucketMeta {
+                used: Some(0),
+                ..BucketMeta::default()
+            };
 
             // Insert the reordered keys and vals into table 0
             (0..rand_keys.len()).for_each(|i| {
@@ -683,7 +694,10 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
 
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
@@ -780,7 +794,10 @@ mod tests {
     fn find_key() {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
-        let meta = BucketMeta::default();
+        let meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let salt_val1 = SaltValue::new(&[1; 32], &[1; 32]);
 
         // Calculate the initial slot_id of the key
@@ -910,7 +927,10 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let salt_array = [
             SaltValue::new(&[1u8; 32], &[1u8; 32]),
             SaltValue::new(&[2u8; 32], &[1u8; 32]),
@@ -1245,6 +1265,7 @@ mod tests {
             hex::decode("33e5dc632f7e9c1f5f5d1665f2f3500850368ad2").unwrap(),
             hex::decode("00797d9c751a1e633b3d9d0711469026d8c84278").unwrap(),
         ];
+        let num_keys = keys.len() as u64;
         let bucket_id = pk_hasher::bucket_id(&keys[0]);
         let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
             keys.into_iter().map(|x| (x.clone(), Some(x))).collect();
@@ -1257,7 +1278,8 @@ mod tests {
         );
         let new_meta = BucketMeta {
             capacity: 512,
-            ..BucketMeta::default()
+            used: Some(num_keys),
+            nonce: 0,
         };
         assert_eq!(
             state_updates.data.get(&meta_key).unwrap(),
@@ -1268,7 +1290,10 @@ mod tests {
 
     #[test]
     fn extension_rehash() {
-        let old_meta = BucketMeta::default();
+        let old_meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let new_meta = BucketMeta {
             capacity: 2 * old_meta.capacity,
             ..old_meta
@@ -1280,6 +1305,7 @@ mod tests {
     fn contraction_rehash() {
         let old_meta = BucketMeta {
             capacity: 512,
+            used: Some(0),
             ..BucketMeta::default()
         };
         let new_meta = BucketMeta {
