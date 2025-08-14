@@ -6,8 +6,8 @@ use crate::{
     },
     trie::trie::get_child_node,
     types::{
-        bucket_metadata_key, get_bfs_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
-        SaltKey, SaltValue,
+        bucket_metadata_key, get_bfs_level, is_subtree_node, is_valid_data_bucket, BucketMeta,
+        CommitmentBytes, NodeId, SaltKey, SaltValue,
     },
     BucketId,
 };
@@ -108,7 +108,11 @@ pub trait StateReader: Debug + Send + Sync {
         Ok(meta)
     }
 
-    /// Returns the number of occupied slots in a bucket.
+    /// Returns the number of occupied slots in a data bucket.
+    ///
+    /// This method is intended for data buckets only. While meta bucket IDs are
+    /// accepted for completeness, they will always return 0 since meta buckets
+    /// don't store regular key-value data that would be counted as "used slots".
     ///
     /// # Default Implementation
     ///
@@ -122,9 +126,13 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// - `Ok(count)` - The number of occupied slots in the bucket
+    /// - `Ok(count)` - The number of occupied slots in the bucket (0 for meta buckets)
     /// - `Err(_)` - If there's an error reading from storage
     fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
         let start_key = SaltKey::from((bucket_id, 0u64));
         let end_key = SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK));
         let entries = self.entries(start_key..=end_key)?;

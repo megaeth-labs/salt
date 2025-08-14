@@ -507,6 +507,12 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
 pub const METADATA_KEYS_RANGE: RangeInclusive<SaltKey> =
     SaltKey(0)..=SaltKey(((NUM_META_BUCKETS - 1) as u64) << BUCKET_SLOT_BITS | BUCKET_SLOT_ID_MASK);
 
+/// Checks if a bucket ID refers to a valid data bucket.
+#[inline]
+pub fn is_valid_data_bucket(bucket_id: BucketId) -> bool {
+    bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId
+}
+
 /// Calculate the SaltKey where bucket metadata is stored.
 ///
 /// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
@@ -530,7 +536,7 @@ pub const METADATA_KEYS_RANGE: RangeInclusive<SaltKey> =
 #[inline]
 pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
     assert!(
-        bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId,
+        is_valid_data_bucket(bucket_id),
         "bucket_id {bucket_id} must be a valid data bucket ID (range: {NUM_META_BUCKETS}..{NUM_BUCKETS})"
     );
 

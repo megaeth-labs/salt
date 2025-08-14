@@ -200,6 +200,10 @@ impl StateReader for MemStore {
     }
 
     fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
         // Return the cached count, defaulting to 0 for buckets that haven't been accessed
         Ok(*self
             .state
