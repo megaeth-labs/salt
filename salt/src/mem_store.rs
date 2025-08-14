@@ -30,6 +30,32 @@ use std::{
     sync::RwLock,
 };
 
+/// Groups blockchain state storage and bucket usage cache together to ensure
+/// atomic consistency between the two related data structures.
+#[derive(Debug, Default, Clone)]
+struct StateStore {
+    /// The actual key-value state storage.
+    ///
+    /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
+    /// of the blockchain. Keys encode bucket and slot information, while values
+    /// contain the actual state data including account information, storage, etc.
+    ///
+    /// **Note**: Default bucket metadata entries are not stored in this map. When
+    /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
+    /// present, it returns [`BucketMeta::default()`] values automatically.
+    kvs: BTreeMap<SaltKey, SaltValue>,
+
+    /// Cache for bucket used slot counts.
+    ///
+    /// Maps [`BucketId`] to the number of occupied slots in that bucket.
+    /// This cache improves performance by avoiding repeated scans of bucket entries.
+    ///
+    /// **Interpretation**: If a bucket ID is not present in this map, it means
+    /// the bucket has not been updated since the creation of this `MemStore`.
+    /// For such buckets, the number of used slots is guaranteed to be zero.
+    used_slots: BTreeMap<BucketId, u64>,
+}
+
 /// In-memory storage backend for SALT.
 ///
 /// `MemStore` provides a simple, thread-safe storage backend that stores
@@ -50,32 +76,14 @@ use std::{
 #[derive(Debug, Default)]
 pub struct MemStore {
     /// Blockchain state storage.
-    ///
-    /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
-    /// of the blockchain. Keys encode bucket and slot information, while values
-    /// contain the actual state data including account information, storage, etc.
-    ///
-    /// **Note**: Default bucket metadata entries are not stored in this map. When
-    /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
-    /// present, it returns [`BucketMeta::default()`] values automatically.
-    pub state: RwLock<BTreeMap<SaltKey, SaltValue>>,
+    state: RwLock<StateStore>,
 
     /// Trie node commitment storage.
     ///
     /// Maps [`NodeId`] to [`CommitmentBytes`] representing cryptographic commitments
     /// for nodes in the SALT trie. These commitments are used for state proofs
     /// and verification.
-    pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
-
-    /// Cache for bucket used slot counts.
-    ///
-    /// Maps [`BucketId`] to the number of occupied slots in that bucket.
-    /// This cache improves performance by avoiding repeated scans of bucket entries.
-    ///
-    /// **Interpretation**: If a bucket ID is not present in this map, it means
-    /// the bucket has not been updated since the creation of this `MemStore`.
-    /// For such buckets, the number of used slots is guaranteed to be zero.
-    pub used_slots: RwLock<BTreeMap<BucketId, u64>>,
+    trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
 }
 
 impl Clone for MemStore {
@@ -83,12 +91,6 @@ impl Clone for MemStore {
         Self {
             state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
             trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
-            used_slots: RwLock::new(
-                self.used_slots
-                    .read()
-                    .expect("bucket_used_slots_cache lock poisoned")
-                    .clone(),
-            ),
         }
     }
 }
@@ -111,9 +113,8 @@ impl MemStore {
     /// storage savings don't justify the added complexity.
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(BTreeMap::new()),
+            state: RwLock::new(StateStore::default()),
             trie: RwLock::new(BTreeMap::new()),
-            used_slots: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -132,16 +133,15 @@ impl MemStore {
     /// * `updates` - Batch of state changes to apply
     pub fn update_state(&self, updates: StateUpdates) {
         let mut state = self.state.write().unwrap();
-        let mut cache = self.used_slots.write().unwrap();
 
         for (key, (old_value, new_value)) in updates.data {
             // Update used_slot information for data buckets only
             if !key.is_in_meta_bucket() {
                 let bucket_id = key.bucket_id();
                 match (old_value.is_some(), new_value.is_some()) {
-                    (false, true) => *cache.entry(bucket_id).or_insert(0) += 1,
+                    (false, true) => *state.used_slots.entry(bucket_id).or_insert(0) += 1,
                     (true, false) => {
-                        if let Some(count) = cache.get_mut(&bucket_id) {
+                        if let Some(count) = state.used_slots.get_mut(&bucket_id) {
                             *count = count.saturating_sub(1);
                         }
                     }
@@ -151,8 +151,8 @@ impl MemStore {
 
             // Apply the state change
             match new_value {
-                Some(new_val) => state.insert(key, new_val),
-                None => state.remove(&key),
+                Some(new_val) => state.kvs.insert(key, new_val),
+                None => state.kvs.remove(&key),
             };
         }
     }
@@ -181,7 +181,7 @@ impl StateReader for MemStore {
     type Error = &'static str;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        let val = self.state.read().unwrap().get(&key).cloned();
+        let val = self.state.read().unwrap().kvs.get(&key).cloned();
         Ok(val)
     }
 
@@ -193,6 +193,7 @@ impl StateReader for MemStore {
             .state
             .read()
             .unwrap()
+            .kvs
             .range(range)
             .map(|(k, v)| (*k, v.clone()))
             .collect())
@@ -201,9 +202,10 @@ impl StateReader for MemStore {
     fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
         // Return the cached count, defaulting to 0 for buckets that haven't been accessed
         Ok(*self
-            .used_slots
+            .state
             .read()
             .unwrap()
+            .used_slots
             .get(&bucket_id)
             .unwrap_or(&0))
     }
