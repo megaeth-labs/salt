@@ -1,6 +1,6 @@
 //! This module export block witness's interfaces.
 use crate::{
-    constant::{default_commitment, NUM_META_BUCKETS},
+    constant::{default_commitment, BUCKET_SLOT_ID_MASK, NUM_META_BUCKETS},
     proof::{prover, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -198,8 +198,11 @@ impl StateReader for BlockWitness {
             }
             Some(None) => {
                 // Case 2: Bucket exists in proof but has default metadata
+                let start_key = SaltKey::from((bucket_id, 0u64));
+                let end_key = SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK));
+                let entries = self.entries(start_key..=end_key)?;
                 let meta = BucketMeta {
-                    used: Some(self.bucket_used_slots(bucket_id)?),
+                    used: Some(entries.len() as u64),
                     ..Default::default()
                 };
                 Ok(meta)

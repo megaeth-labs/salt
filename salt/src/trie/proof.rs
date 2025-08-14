@@ -5,7 +5,7 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
-    constant::{NUM_META_BUCKETS, TRIE_WIDTH_BITS},
+    constant::{BUCKET_SLOT_ID_MASK, NUM_META_BUCKETS, TRIE_WIDTH_BITS},
     proof::{prover, ProofError, SaltProof},
     state::state::{pk_hasher, probe, EphemeralSaltState},
     traits::{StateReader, TrieReader},
@@ -438,8 +438,12 @@ impl StateReader for PlainKeysProof {
         match self.metas.get(&bucket_id) {
             Some(meta) => Ok(*meta),
             None => {
+                // Compute used slots by counting entries
+                let start_key = SaltKey::from((bucket_id, 0u64));
+                let end_key = SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK));
+                let entries = self.entries(start_key..=end_key)?;
                 let meta = BucketMeta {
-                    used: Some(self.bucket_used_slots(bucket_id)?),
+                    used: Some(entries.len() as u64),
                     ..Default::default()
                 };
                 Ok(meta)
