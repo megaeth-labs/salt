@@ -32,7 +32,7 @@ impl From<&'static str> for SaltError {
 }
 
 /// This variable type is used to represent the meta value of a bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 pub struct BucketMeta {
     /// nonce value of a bucket.
     pub nonce: u32,
