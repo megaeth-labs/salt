@@ -62,7 +62,20 @@ struct StateStore {
 /// state and trie data entirely in memory. It maintains two primary data stores:
 ///
 /// 1. **State storage**: Key-value pairs representing blockchain state
-/// 2. **Trie storage**: Node commitments for the Merkle trie structure
+/// 2. **Trie storage**: Node commitments for the SALT trie structure
+///
+/// # Canonical State Structure
+///
+/// `MemStore` uses lazy initialization for bucket metadata, which defines the
+/// canonical structure of the SALT state. Only buckets with explicitly modified
+/// metadata store actual entries; all others are treated as having default metadata
+/// values when accessed through [`StateReader::metadata`].
+///
+/// This approach ensures:
+/// - **Deterministic state representation**: State roots are computed over this
+///   canonical minimal representation
+/// - **Consistent behavior**: Empty state always produces the same state root
+/// - **Storage efficiency**: Only non-default metadata consumes storage space
 ///
 /// # Implemented Traits
 ///
@@ -99,18 +112,6 @@ impl MemStore {
     /// Creates a new empty `MemStore` instance.
     ///
     /// Both the state and trie stores are initialized as empty [`BTreeMap`]s.
-    ///
-    /// # Lazy Initialization Optimization
-    ///
-    /// This implementation uses lazy initialization for bucket metadata to avoid
-    /// pre-populating tens of millions of metadata entries during unit testing.
-    /// When [`StateReader::get_meta`] is called for a bucket whose metadata entry
-    /// doesn't exist, it returns [`BucketMeta::default()`] instead of an empty value.
-    ///
-    /// This optimization reduces memory usage and initialization time for this
-    /// in-memory implementation, but adds code complexity. Production disk-based
-    /// implementations shall choose explicit initialization instead because the
-    /// storage savings don't justify the added complexity.
     pub fn new() -> Self {
         Self {
             state: RwLock::new(StateStore::default()),
@@ -249,40 +250,253 @@ impl TrieReader for MemStore {
 mod tests {
     use super::*;
 
-    /// Tests bucket metadata retrieval and storage.
+    /// Tests the lazy metadata initialization optimization.
     ///
     /// Verifies that:
-    /// - Default metadata is returned for unset buckets
-    /// - Metadata can be stored and retrieved correctly
-    /// - The metadata slot key mapping works as expected
+    /// - Metadata entries are not pre-populated in storage
+    /// - metadata() returns default values for unset buckets
+    /// - The used field is always computed and populated correctly
+    /// - No actual storage entry is created for default metadata
     #[test]
-    fn get_meta() {
+    fn test_lazy_metadata_initialization() {
         let store = MemStore::new();
-        let bucket_id = (NUM_META_BUCKETS + 400) as BucketId;
-        let salt_key: SaltKey = (
-            (bucket_id >> MIN_BUCKET_SIZE_BITS),
-            (bucket_id % MIN_BUCKET_SIZE as BucketId) as SlotId,
-        )
-            .into();
-        let mut meta = store.metadata(bucket_id).unwrap();
-        // The metadata() method now populates the used field
-        let expected_meta = BucketMeta {
-            used: Some(0), // populated by metadata()
-            ..BucketMeta::default()
-        };
-        assert_eq!(meta, expected_meta);
-        assert!(store.value(salt_key).unwrap().is_none());
-        meta.capacity = 1024;
-        let updates = StateUpdates {
-            data: [(salt_key, (None, Some(SaltValue::from(meta))))].into(),
-        };
-        store.update_state(updates);
-        // After update, used field should still be populated correctly
-        let updated_meta = store.metadata(bucket_id).unwrap();
-        assert_eq!(updated_meta.nonce, meta.nonce);
-        assert_eq!(updated_meta.capacity, meta.capacity);
-        assert_eq!(updated_meta.used, Some(0)); // Still 0 since we didn't add any entries
+        let bucket_id = NUM_META_BUCKETS as BucketId + 100;
+
+        // Verify metadata is not pre-populated
+        assert!(store.entries(METADATA_KEYS_RANGE).unwrap().is_empty());
+
+        // metadata() should return default values with used field populated
+        let meta = store.metadata(bucket_id).unwrap();
+        assert_eq!(meta.nonce, 0);
+        assert_eq!(meta.capacity, MIN_BUCKET_SIZE as u64);
+        assert_eq!(meta.used, Some(0));
+
+        // Still no actual metadata entry stored
+        assert!(store.entries(METADATA_KEYS_RANGE).unwrap().is_empty());
     }
 
-    // FIXME: no tests for bucket expansion??
+    /// Tests the used_slots cache consistency across all state operations.
+    ///
+    /// Verifies that:
+    /// - Insert operations increment the count: (false, true) -> +1
+    /// - Update operations don't change the count: (true, true) -> no change
+    /// - Delete operations decrement the count: (true, false) -> -1
+    /// - Meta bucket operations don't affect the cache
+    /// - Cache correctly handles buckets that haven't been accessed (returns 0)
+    #[test]
+    fn test_used_slots_cache_consistency() {
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId + 42;
+        let key1 = SaltKey::from((bucket_id, 10));
+        let key2 = SaltKey::from((bucket_id, 20));
+        let val = SaltValue::new(&[1; 32], &[2; 32]);
+
+        // Initially, bucket should have 0 used slots
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 0);
+
+        // Insert: (false, true) -> count should increase
+        let updates = StateUpdates {
+            data: [(key1, (None, Some(val.clone())))].into(),
+        };
+        store.update_state(updates);
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 1);
+
+        // Insert another: count should increase again
+        let updates = StateUpdates {
+            data: [(key2, (None, Some(val.clone())))].into(),
+        };
+        store.update_state(updates);
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
+
+        // Update existing: (true, true) -> count should not change
+        let updates = StateUpdates {
+            data: [(key1, (Some(val.clone()), Some(val.clone())))].into(),
+        };
+        store.update_state(updates);
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
+
+        // Delete: (true, false) -> count should decrease
+        let updates = StateUpdates {
+            data: [(key1, (Some(val.clone()), None))].into(),
+        };
+        store.update_state(updates);
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 1);
+
+        // Meta bucket keys should not affect used_slots
+        let meta_key = SaltKey::from((1000, 0)); // Meta bucket 1000
+        let updates = StateUpdates {
+            data: [(meta_key, (None, Some(val.clone())))].into(),
+        };
+        store.update_state(updates);
+        // Should not have created entry for bucket 1000 in used_slots
+        assert_eq!(store.entries(METADATA_KEYS_RANGE).unwrap().len(), 1);
+        assert_eq!(store.bucket_used_slots(1000).unwrap(), 0);
+    }
+
+    /// Tests metadata storage and retrieval with key mapping.
+    ///
+    /// Verifies that:
+    /// - Custom metadata can be stored and retrieved correctly
+    /// - The bucket_metadata_key mapping works (bucket_id / 256, bucket_id % 256)
+    /// - The used field is always computed from actual data, not stored value
+    /// - Metadata storage uses the standard SaltValue serialization
+    #[test]
+    fn test_metadata_storage_and_retrieval() {
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId + 256; // Maps to meta bucket 257, slot 0
+
+        // Store custom metadata
+        let custom_meta = BucketMeta {
+            nonce: 42,
+            capacity: 1024,
+            used: None, // Should be ignored when storing
+        };
+        let metadata_key = bucket_metadata_key(bucket_id);
+        let updates = StateUpdates {
+            data: [(metadata_key, (None, Some(SaltValue::from(custom_meta))))].into(),
+        };
+        store.update_state(updates);
+
+        // Add some actual data to the bucket
+        let data_key = SaltKey::from((bucket_id, 0));
+        let val = SaltValue::new(&[1; 32], &[2; 32]);
+        let updates = StateUpdates {
+            data: [(data_key, (None, Some(val)))].into(),
+        };
+        store.update_state(updates);
+
+        // Retrieve metadata - should have custom values with computed used field
+        let retrieved = store.metadata(bucket_id).unwrap();
+        assert_eq!(retrieved.nonce, 42);
+        assert_eq!(retrieved.capacity, 1024);
+        assert_eq!(retrieved.used, Some(1)); // Computed from actual data
+
+        // Verify the key mapping
+        assert_eq!(metadata_key.bucket_id(), 257);
+        assert_eq!(metadata_key.slot_id(), 0);
+    }
+
+    /// Tests the different behavior between meta buckets and data buckets.
+    ///
+    /// Verifies that:
+    /// - Meta buckets always return 0 for bucket_used_slots
+    /// - Data buckets return actual slot counts
+    /// - Boundary cases around NUM_META_BUCKETS work correctly
+    /// - Invalid bucket IDs (>= NUM_BUCKETS) return 0
+    #[test]
+    fn test_meta_vs_data_bucket_behavior() {
+        let store = MemStore::new();
+
+        // Test boundary case: last meta bucket
+        let last_meta = NUM_META_BUCKETS as BucketId - 1;
+        assert_eq!(store.bucket_used_slots(last_meta).unwrap(), 0);
+
+        // Test boundary case: first data bucket
+        let first_data = NUM_META_BUCKETS as BucketId;
+        assert_eq!(store.bucket_used_slots(first_data).unwrap(), 0);
+
+        // Add data to first data bucket
+        let key = SaltKey::from((first_data, 0));
+        let val = SaltValue::new(&[1; 32], &[2; 32]);
+        let updates = StateUpdates {
+            data: [(key, (None, Some(val)))].into(),
+        };
+        store.update_state(updates);
+
+        // Data bucket should show count
+        assert_eq!(store.bucket_used_slots(first_data).unwrap(), 1);
+        // Meta bucket should still return 0
+        assert_eq!(store.bucket_used_slots(last_meta).unwrap(), 0);
+
+        // Test invalid bucket (>= NUM_BUCKETS)
+        assert_eq!(store.bucket_used_slots(NUM_BUCKETS as BucketId).unwrap(), 0);
+    }
+
+    /// Tests atomic consistency of batch state updates.
+    ///
+    /// Verifies that:
+    /// - Batch updates maintain consistency between kvs and used_slots
+    /// - Complex multi-operation batches work correctly
+    /// - All state change types work in combination: insert, update, delete, no-op
+    #[test]
+    fn test_state_updates_atomicity() {
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId + 500;
+        let key1 = SaltKey::from((bucket_id, 1));
+        let key2 = SaltKey::from((bucket_id, 2));
+        let key3 = SaltKey::from((bucket_id, 3));
+        let val = SaltValue::new(&[1; 32], &[2; 32]);
+
+        // Batch update with multiple operations
+        let updates = StateUpdates {
+            data: [
+                (key1, (None, Some(val.clone()))), // Insert
+                (key2, (None, Some(val.clone()))), // Insert
+                (key3, (None, None)),              // No-op (delete non-existent)
+            ]
+            .into(),
+        };
+        store.update_state(updates);
+
+        // Check state consistency
+        assert!(store.value(key1).unwrap().is_some());
+        assert!(store.value(key2).unwrap().is_some());
+        assert!(store.value(key3).unwrap().is_none());
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
+
+        // Complex batch with all operation types
+        let updates = StateUpdates {
+            data: [
+                (key1, (Some(val.clone()), Some(val.clone()))), // Update
+                (key2, (Some(val.clone()), None)),              // Delete
+                (key3, (None, Some(val.clone()))),              // Insert
+            ]
+            .into(),
+        };
+        store.update_state(updates);
+
+        // Final state check
+        assert!(store.value(key1).unwrap().is_some());
+        assert!(store.value(key2).unwrap().is_none());
+        assert!(store.value(key3).unwrap().is_some());
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
+    }
+
+    /// Tests trie storage operations.
+    ///
+    /// Verifies that:
+    /// - Default commitments are returned for unset nodes
+    /// - Custom commitments can be stored and retrieved
+    /// - node_entries returns correct ranges of stored commitments
+    /// - Empty ranges return empty results
+    /// - TrieUpdates batch operations work correctly
+    #[test]
+    fn test_trie_operations() {
+        let store = MemStore::new();
+
+        // Test default commitment
+        let node_id = 42;
+        assert_eq!(
+            store.commitment(node_id).unwrap(),
+            default_commitment(node_id)
+        );
+
+        // Store custom commitment
+        let custom_commitment = [3u8; 64];
+        let updates = TrieUpdates {
+            data: vec![(node_id, ([0u8; 64], custom_commitment))],
+        };
+        store.update_trie(updates);
+
+        // Retrieve custom commitment
+        assert_eq!(store.commitment(node_id).unwrap(), custom_commitment);
+
+        // Test node_entries
+        let entries = store.node_entries(40..45).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], (node_id, custom_commitment));
+
+        // Empty range should return empty vec
+        assert!(store.node_entries(100..200).unwrap().is_empty());
+    }
 }
