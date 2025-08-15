@@ -23,6 +23,9 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Cache the values of datas and bucket metas read from `base_state`
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    /// Cache bucket usage counts to maintain correct 'used' field
+    /// when metadata is read from cache after serialization/deserialization
+    bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to save access records
     save_access: bool,
 }
@@ -33,6 +36,7 @@ impl<BaseState> Clone for EphemeralSaltState<'_, BaseState> {
         Self {
             base_state: self.base_state,
             cache: self.cache.clone(),
+            bucket_used_cache: self.bucket_used_cache.clone(),
             save_access: self.save_access,
         }
     }
@@ -44,6 +48,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Self {
             base_state: reader,
             cache: HashMap::new(),
+            bucket_used_cache: HashMap::new(),
             save_access: true,
         }
     }
@@ -82,12 +87,16 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
-        let metadata = match self.get_entry(bucket_metadata_key(bucket_id))? {
-            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-            // FIXME: this is highly inefficient & unnecessary; get_raw doesn't need "used"
-            // calling base_state.metadata is basically repeating the work of get_entry() -> base_state.value()
-            None => self.base_state.metadata(bucket_id)?,
-        };
+        // BUGGY CODE - commented out (though get_raw doesn't actually need "used"):
+        // let metadata = match self.get_entry(bucket_metadata_key(bucket_id))? {
+        //     Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+        //     // FIXME: this is highly inefficient & unnecessary; get_raw doesn't need "used"
+        //     // calling base_state.metadata is basically repeating the work of get_entry() -> base_state.value()
+        //     None => self.base_state.metadata(bucket_id)?,
+        // };
+
+        // Fixed implementation:
+        let metadata = self.get_bucket_metadata(bucket_id)?;
         // let meta = self.salt_state.meta(bucket_id)?;
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
@@ -110,6 +119,43 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(None)
     }
 
+    /// Get bucket metadata with correct 'used' field, combining cached metadata
+    /// with cached usage count to fix the serialization/deserialization issue.
+    fn get_bucket_metadata(&mut self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
+        match self.get_entry(bucket_metadata_key(bucket_id))? {
+            Some(v) => {
+                // When metadata comes from cache, 'used' is always None after deserialization
+                let mut meta: BucketMeta = v.try_into().expect("Failed to decode bucket metadata");
+
+                // Fix the 'used' field by looking up the cached usage count
+                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
+                    meta.used = Some(cached_used);
+                } else {
+                    // If not in cache, get from base_state which has correct 'used' field
+                    let base_meta = self.base_state.metadata(bucket_id)?;
+                    meta.used = base_meta.used;
+                    if let Some(used) = meta.used {
+                        self.bucket_used_cache.insert(bucket_id, used);
+                    }
+                }
+                Ok(meta)
+            }
+            None => {
+                let mut meta = self.base_state.metadata(bucket_id)?;
+                // Check if we have a cached usage count first
+                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
+                    meta.used = Some(cached_used);
+                } else {
+                    // Cache the usage count from base_state for future use
+                    if let Some(used) = meta.used {
+                        self.bucket_used_cache.insert(bucket_id, used);
+                    }
+                }
+                Ok(meta)
+            }
+        }
+    }
+
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
@@ -122,18 +168,22 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
 
             // Get the meta corresponding to the bucket_id
-            let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
-                // FIXME: this seems buggy; if the code goes here, meta.used must be None
-                // how come existing test case not fail!? NEED TO ENHANCE THE TESTS!!!
-                Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-                // FIXME: calling base_state.metadata() is also wrong! what if self.cache
-                // contains updates that modify "used"?
-                // Solution: maintain a HashMap from BucketId to u64 (used); whenever a bucket
-                // metadata is accessed, cache its used in this new HashMap; update this hashmap
-                // upon self.upsert; and when you need to read metadata, combine the cached "used"
-                // with cached "nonce + capacity"
-                None => self.base_state.metadata(bucket_id)?,
-            };
+            // BUGGY CODE - commented out:
+            // let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
+            //     // FIXME: this seems buggy; if the code goes here, meta.used must be None
+            //     // how come existing test case not fail!? NEED TO ENHANCE THE TESTS!!!
+            //     Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+            //     // FIXME: calling base_state.metadata() is also wrong! what if self.cache
+            //     // contains updates that modify "used"?
+            //     // Solution: maintain a HashMap from BucketId to u64 (used); whenever a bucket
+            //     // metadata is accessed, cache its used in this new HashMap; update this hashmap
+            //     // upon self.upsert; and when you need to read metadata, combine the cached "used"
+            //     // with cached "nonce + capacity"
+            //     None => self.base_state.metadata(bucket_id)?,
+            // };
+
+            // Fixed implementation:
+            let mut meta = self.get_bucket_metadata(bucket_id)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -234,6 +284,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     meta.capacity <<= 1;
                 }
                 meta.used = Some(used + 1);
+                // Update the bucket usage cache
+                self.bucket_used_cache.insert(bucket_id, used + 1);
                 return Ok(());
             }
         }
@@ -256,7 +308,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             let old_used = meta
                 .used
                 .expect("BucketMeta.used should always be populated");
-            meta.used = Some(old_used.saturating_sub(1));
+            let new_used = old_used.saturating_sub(1);
+            meta.used = Some(new_used);
+            // Update the bucket usage cache
+            self.bucket_used_cache.insert(bucket_id, new_used);
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -1429,5 +1484,39 @@ mod tests {
             &(Some(old_meta.into()), Some(new_meta.into())),
             "rehash_updates should contain the old and new meta"
         );
+    }
+
+    #[test]
+    fn test_cached_metadata_bug() {
+        // This test exposes the bug where metadata retrieved from store
+        // has used=None after deserialization, causing a panic in upsert/delete.
+        // The correct behavior should be successful updates without panics.
+
+        let store = MemStore::new();
+
+        // Use pre-computed key that maps to a specific bucket
+        let key1 = hex::decode("e1f65916535230d5abcc5d022348fced0ebcbd16").unwrap();
+        let value1 = Some(b"value_1".to_vec());
+        let bucket_id = pk_hasher::bucket_id(&key1);
+
+        // Manually set non-default metadata for this bucket to ensure it gets stored
+        let non_default_meta = BucketMeta {
+            nonce: 1, // Make it non-default so it gets stored
+            capacity: 256,
+            used: Some(0),
+        };
+        let meta_key = bucket_metadata_key(bucket_id);
+        let meta_updates = StateUpdates {
+            data: [(meta_key, (None, Some(SaltValue::from(non_default_meta))))].into(),
+        };
+        store.update_state(meta_updates);
+
+        // Now create state and do an update - this should read the non-default metadata
+        // from store, hit line 128 where v.try_into() sets used=None, then panic in upsert
+        let mut state = EphemeralSaltState::new(&store);
+        let kvs = vec![(&key1, &value1)];
+        let _updates = state
+            .update(kvs)
+            .expect("Update should succeed without panic");
     }
 }
