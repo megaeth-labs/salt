@@ -24,6 +24,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Cache the latest number of occupied slots in each accessed bucket
+    /// TODO: should we cache every accessed bucket? or just those whose "used" is changed?
     bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to save access records
     save_access: bool,
@@ -123,27 +124,22 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     fn get_bucket_metadata(&mut self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
         match self.get_entry(bucket_metadata_key(bucket_id))? {
             Some(v) => {
-                // When metadata comes from cache, 'used' is always None after deserialization
-                let mut meta: BucketMeta = v.try_into().expect("Failed to decode bucket metadata");
+                // // When metadata comes from cache, 'used' is always None after deserialization
+                // let mut meta: BucketMeta = v.try_into().expect("Failed to decode bucket metadata");
 
-                // Fix the 'used' field by looking up the cached usage count
-                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
-                    meta.used = Some(cached_used);
-                } else {
-                    // If not in cache, get from base_state which has correct 'used' field
-                    // FIXME: this is correct but wasteful; should call StateReader::bucket_used_slots instead
-                    let base_meta = self.base_state.metadata(bucket_id)?;
-                    meta.used = base_meta.used;
-                    if let Some(used) = meta.used {
-                        self.bucket_used_cache.insert(bucket_id, used);
-                    }
-                }
-                Ok(meta)
-            }
-            None => {
-                // FIXME: should not call StateReader::metadata; just call BucketMeta::default
-                // then set "used" to Some(0) if no cache usage count is found or
-                // self.bucket_used_cache.get(&bucket_id) if found
+                // // Fix the 'used' field by looking up the cached usage count
+                // if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
+                //     meta.used = Some(cached_used);
+                // } else {
+                //     // If not in cache, get from base_state which has correct 'used' field
+                //     // FIXME: this is correct but wasteful; should call StateReader::bucket_used_slots instead
+                //     let base_meta = self.base_state.metadata(bucket_id)?;
+                //     meta.used = base_meta.used;
+                //     if let Some(used) = meta.used {
+                //         self.bucket_used_cache.insert(bucket_id, used);
+                //     }
+                // }
+                // Ok(meta)
                 Ok(BucketMeta {
                     used: Some(
                         if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
@@ -153,20 +149,26 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                             0
                         },
                     ),
+                    ..v.try_into().expect("Failed to decode bucket metadata")
+                })
+            }
+            None => {
+                Ok(BucketMeta {
+                    used: Some(
+                        if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                            used
+                        } else {
+                            // Question: how do you know "used" is 0? why not call base_state.bucket_slots_used?
+                            // Note: our definition of bucket_used_cache requires caching
+                            // "used" for each accessed bucket;
+                            // TODO: i am not sure this is the right design; maybe we should call bucket_slots_used
+                            // instead? keys rarely fall in the same bucket, so inserting non-changed "used" seems wasteful
+                            self.bucket_used_cache.insert(bucket_id, 0);
+                            0
+                        },
+                    ),
                     ..BucketMeta::default()
                 })
-
-                // let mut meta = self.base_state.metadata(bucket_id)?;
-                // // Check if we have a cached usage count first
-                // if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
-                //     meta.used = Some(cached_used);
-                // } else {
-                //     // Cache the usage count from base_state for future use
-                //     if let Some(used) = meta.used {
-                //         self.bucket_used_cache.insert(bucket_id, used);
-                //     }
-                // }
-                // Ok(meta)
             }
         }
     }
