@@ -20,11 +20,10 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
     base_state: &'a BaseState,
-    /// Cache the values of datas and bucket metas read from `base_state`
+    /// Cache the values of datas and bucket metadata (nonce and capacity) read from `base_state`
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
-    /// Cache the latest number of occupied slots in each accessed bucket
-    /// TODO: should we cache every accessed bucket? or just those whose "used" is changed?
+    /// Caches the usage counts in buckets when insertions or deletions occurred.
     bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to save access records
     save_access: bool,
@@ -87,17 +86,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
-        // BUGGY CODE - commented out (though get_raw doesn't actually need "used"):
-        // let metadata = match self.get_entry(bucket_metadata_key(bucket_id))? {
-        //     Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-        //     // FIXME: this is highly inefficient & unnecessary; get_raw doesn't need "used"
-        //     // calling base_state.metadata is basically repeating the work of get_entry() -> base_state.value()
-        //     None => self.base_state.metadata(bucket_id)?,
-        // };
-
-        // Fixed implementation:
         let metadata = self.get_bucket_metadata(bucket_id)?;
-        // let meta = self.salt_state.meta(bucket_id)?;
+
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
 
@@ -119,58 +109,19 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(None)
     }
 
-    /// Get bucket metadata with correct 'used' field, combining cached metadata
-    /// with cached usage count to fix the serialization/deserialization issue.
     fn get_bucket_metadata(&mut self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
-        match self.get_entry(bucket_metadata_key(bucket_id))? {
-            Some(v) => {
-                // // When metadata comes from cache, 'used' is always None after deserialization
-                // let mut meta: BucketMeta = v.try_into().expect("Failed to decode bucket metadata");
-
-                // // Fix the 'used' field by looking up the cached usage count
-                // if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
-                //     meta.used = Some(cached_used);
-                // } else {
-                //     // If not in cache, get from base_state which has correct 'used' field
-                //     // FIXME: this is correct but wasteful; should call StateReader::bucket_used_slots instead
-                //     let base_meta = self.base_state.metadata(bucket_id)?;
-                //     meta.used = base_meta.used;
-                //     if let Some(used) = meta.used {
-                //         self.bucket_used_cache.insert(bucket_id, used);
-                //     }
-                // }
-                // Ok(meta)
-                Ok(BucketMeta {
-                    used: Some(
-                        if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
-                            used
-                        } else {
-                            self.bucket_used_cache.insert(bucket_id, 0);
-                            0
-                        },
-                    ),
-                    ..v.try_into().expect("Failed to decode bucket metadata")
-                })
-            }
-            None => {
-                Ok(BucketMeta {
-                    used: Some(
-                        if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
-                            used
-                        } else {
-                            // Question: how do you know "used" is 0? why not call base_state.bucket_slots_used?
-                            // Note: our definition of bucket_used_cache requires caching
-                            // "used" for each accessed bucket;
-                            // TODO: i am not sure this is the right design; maybe we should call bucket_slots_used
-                            // instead? keys rarely fall in the same bucket, so inserting non-changed "used" seems wasteful
-                            self.bucket_used_cache.insert(bucket_id, 0);
-                            0
-                        },
-                    ),
-                    ..BucketMeta::default()
-                })
-            }
-        }
+        let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
+            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+            None => BucketMeta::default(),
+        };
+        meta.used = Some(
+            if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                used
+            } else {
+                self.base_state.bucket_used_slots(bucket_id)?
+            },
+        );
+        Ok(meta)
     }
 
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
@@ -183,23 +134,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
-
-            // Get the meta corresponding to the bucket_id
-            // BUGGY CODE - commented out:
-            // let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
-            //     // FIXME: this seems buggy; if the code goes here, meta.used must be None
-            //     // how come existing test case not fail!? NEED TO ENHANCE THE TESTS!!!
-            //     Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-            //     // FIXME: calling base_state.metadata() is also wrong! what if self.cache
-            //     // contains updates that modify "used"?
-            //     // Solution: maintain a HashMap from BucketId to u64 (used); whenever a bucket
-            //     // metadata is accessed, cache its used in this new HashMap; update this hashmap
-            //     // upon self.upsert; and when you need to read metadata, combine the cached "used"
-            //     // with cached "nonce + capacity"
-            //     None => self.base_state.metadata(bucket_id)?,
-            // };
-
-            // Fixed implementation:
             let mut meta = self.get_bucket_metadata(bucket_id)?;
             match value_bytes {
                 Some(value_bytes) => {

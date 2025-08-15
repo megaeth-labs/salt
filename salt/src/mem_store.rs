@@ -205,9 +205,7 @@ impl StateReader for MemStore {
         let state = self.state.read().unwrap();
 
         let mut meta = match state.kvs.get(&key) {
-            Some(v) => v
-                .try_into()
-                .expect("Failed to decode bucket metadata: stored value is corrupted"),
+            Some(v) => v.try_into()?,
             None => BucketMeta::default(),
         };
         meta.used = Some(*state.used_slots.get(&bucket_id).unwrap_or(&0));
