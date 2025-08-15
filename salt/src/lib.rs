@@ -51,7 +51,7 @@ mod tests {
         store.update_state(state_updates.clone());
 
         // Read plain value back
-        let balance = state.get_raw(b"account1")?;
+        let balance = state.plain_value(b"account1")?;
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes

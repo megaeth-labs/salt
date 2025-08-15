@@ -34,14 +34,14 @@
 //! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Read individual values by plain key
-//! let balance = state.get_raw(b"account_address_1").unwrap();
+//! let balance = state.plain_value(b"account_address_1").unwrap();
 //! assert_eq!(balance, Some(b"balance_100_eth".to_vec()));
 //!
-//! let storage_val = state.get_raw(b"storage_slot_key").unwrap();
+//! let storage_val = state.plain_value(b"storage_slot_key").unwrap();
 //! assert_eq!(storage_val, Some(b"storage_value_data".to_vec()));
 //!
 //! // Check for non-existent key
-//! let missing = state.get_raw(b"non_existent_key").unwrap();
+//! let missing = state.plain_value(b"non_existent_key").unwrap();
 //! assert_eq!(missing, None);
 //! ```
 //!

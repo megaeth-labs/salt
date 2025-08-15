@@ -82,11 +82,19 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
-    /// Return the plain value associated with the given plain key.
-    pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
+    /// Retrieves the plain value associated with the given plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The raw key bytes to look up
+    ///
+    /// # Returns
+    /// * `Ok(Some(value))` - The plain value bytes if the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
-        let metadata = self.get_bucket_metadata(bucket_id)?;
+        let metadata = self.get_bucket_metadata(bucket_id, false)?;
 
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
@@ -109,21 +117,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(None)
     }
 
-    fn get_bucket_metadata(&mut self, bucket_id: BucketId) -> Result<BucketMeta, BaseState::Error> {
-        let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
-            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-            None => BucketMeta::default(),
-        };
-        meta.used = Some(
-            if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
-                used
-            } else {
-                self.base_state.bucket_used_slots(bucket_id)?
-            },
-        );
-        Ok(meta)
-    }
-
     /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
     /// (following the semantics of EVM storage, empty values indicate deletions).
     /// Return the resulting changes of the affected SALT bucket entries.
@@ -134,7 +127,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
-            let mut meta = self.get_bucket_metadata(bucket_id)?;
+            let mut meta = self.get_bucket_metadata(bucket_id, true)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -149,6 +142,35 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             }
         }
         Ok(state_updates)
+    }
+
+    /// Get bucket metadata for the given bucket ID.
+    ///
+    /// # Arguments
+    /// * `bucket_id` - The bucket ID to get metadata for
+    /// * `need_used` - Whether to populate the `used` field. Setting this to `false`
+    ///   avoids unnecessary `bucket_used_slots()` calls to the underlying storage
+    ///   backend when the usage count is not needed (e.g., for read operations like
+    ///   `plain_value` that only need `nonce` and `capacity`).
+    fn get_bucket_metadata(
+        &mut self,
+        bucket_id: BucketId,
+        need_used: bool,
+    ) -> Result<BucketMeta, BaseState::Error> {
+        let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
+            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+            None => BucketMeta::default(),
+        };
+        if need_used {
+            meta.used = Some(
+                if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                    used
+                } else {
+                    self.base_state.bucket_used_slots(bucket_id)?
+                },
+            );
+        }
+        Ok(meta)
     }
 
     /// Inserts or updates a plain key-value pair in the given bucket. This method
