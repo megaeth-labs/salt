@@ -94,7 +94,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(plain_key);
-        let metadata = self.get_bucket_metadata(bucket_id, false)?;
+        let metadata = self.bucket_metadata(bucket_id, false)?;
 
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
@@ -127,7 +127,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
             let bucket_id = pk_hasher::bucket_id(key_bytes);
-            let mut meta = self.get_bucket_metadata(bucket_id, true)?;
+            let mut meta = self.bucket_metadata(bucket_id, true)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -152,7 +152,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     ///   avoids unnecessary `bucket_used_slots()` calls to the underlying storage
     ///   backend when the usage count is not needed (e.g., for read operations like
     ///   `plain_value` that only need `nonce` and `capacity`).
-    fn get_bucket_metadata(
+    fn bucket_metadata(
         &mut self,
         bucket_id: BucketId,
         need_used: bool,
@@ -166,6 +166,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                 if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
                     used
                 } else {
+                    // Performance note: We intentionally avoid caching this usage
+                    // count to save on HashMap insertions. Since plain keys are
+                    // distributed randomly across buckets, bucket metadata is rarely
+                    // reused between different key operations.
                     self.base_state.bucket_used_slots(bucket_id)?
                 },
             );
