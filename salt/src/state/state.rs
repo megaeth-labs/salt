@@ -23,8 +23,7 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Cache the values of datas and bucket metas read from `base_state`
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
-    /// Cache bucket usage counts to maintain correct 'used' field
-    /// when metadata is read from cache after serialization/deserialization
+    /// Cache the latest number of occupied slots in each accessed bucket
     bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to save access records
     save_access: bool,
@@ -132,6 +131,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     meta.used = Some(cached_used);
                 } else {
                     // If not in cache, get from base_state which has correct 'used' field
+                    // FIXME: this is correct but wasteful; should call StateReader::bucket_used_slots instead
                     let base_meta = self.base_state.metadata(bucket_id)?;
                     meta.used = base_meta.used;
                     if let Some(used) = meta.used {
@@ -141,17 +141,32 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                 Ok(meta)
             }
             None => {
-                let mut meta = self.base_state.metadata(bucket_id)?;
-                // Check if we have a cached usage count first
-                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
-                    meta.used = Some(cached_used);
-                } else {
-                    // Cache the usage count from base_state for future use
-                    if let Some(used) = meta.used {
-                        self.bucket_used_cache.insert(bucket_id, used);
-                    }
-                }
-                Ok(meta)
+                // FIXME: should not call StateReader::metadata; just call BucketMeta::default
+                // then set "used" to Some(0) if no cache usage count is found or
+                // self.bucket_used_cache.get(&bucket_id) if found
+                Ok(BucketMeta {
+                    used: Some(
+                        if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                            used
+                        } else {
+                            self.bucket_used_cache.insert(bucket_id, 0);
+                            0
+                        },
+                    ),
+                    ..BucketMeta::default()
+                })
+
+                // let mut meta = self.base_state.metadata(bucket_id)?;
+                // // Check if we have a cached usage count first
+                // if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
+                //     meta.used = Some(cached_used);
+                // } else {
+                //     // Cache the usage count from base_state for future use
+                //     if let Some(used) = meta.used {
+                //         self.bucket_used_cache.insert(bucket_id, used);
+                //     }
+                // }
+                // Ok(meta)
             }
         }
     }
