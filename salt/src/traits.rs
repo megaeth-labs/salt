@@ -6,7 +6,7 @@ use crate::{
     },
     trie::trie::get_child_node,
     types::{
-        bucket_metadata_key, get_bfs_level, is_subtree_node, BucketMeta, CommitmentBytes, NodeId,
+        get_bfs_level, is_subtree_node, is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId,
         SaltKey, SaltValue,
     },
     BucketId,
@@ -80,12 +80,6 @@ pub trait StateReader: Debug + Send + Sync {
     /// Regardless of whether metadata is stored or default, the `used` field is **always**
     /// populated with the actual number of occupied slots.
     ///
-    /// # Default Implementation
-    ///
-    /// The default implementation counts entries in the bucket to compute the `used` field.
-    /// Implementations should override this method for more efficient metadata access
-    /// (e.g., using cached values).
-    ///
     /// # Arguments
     ///
     /// * `bucket_id` - The ID of the data bucket whose metadata to retrieve. Must be
@@ -101,22 +95,37 @@ pub trait StateReader: Debug + Send + Sync {
     /// - Panics if `bucket_id` refers to a meta bucket or is invalid (>= NUM_BUCKETS)
     /// - Panics if the stored metadata value cannot be decoded into a valid
     ///   [`BucketMeta`] structure (indicates data corruption)
-    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        let key = bucket_metadata_key(bucket_id);
-        let mut meta = match self.value(key)? {
-            Some(ref v) => v
-                .try_into()
-                .expect("Failed to decode bucket metadata: stored value is corrupted"),
-            None => BucketMeta::default(),
-        };
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error>;
 
-        // Compute the used field by counting actual entries
+    /// Returns the number of occupied slots in a data bucket.
+    ///
+    /// This method is intended for data buckets only. While meta bucket IDs are
+    /// accepted for completeness, they will always return 0 since meta buckets
+    /// don't store regular key-value data that would be counted as "used slots".
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation scans all entries in the bucket and counts
+    /// non-empty slots. Implementations should override this with a more
+    /// efficient approach (e.g., caching the count in memory).
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The ID of the bucket whose occupied slots to count
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)` - The number of occupied slots in the bucket (0 for meta buckets)
+    /// - `Err(_)` - If there's an error reading from storage
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
         let start_key = SaltKey::from((bucket_id, 0u64));
         let end_key = SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK));
         let entries = self.entries(start_key..=end_key)?;
-        meta.used = Some(entries.len() as u64);
-
-        Ok(meta)
+        Ok(entries.len() as u64)
     }
 }
 

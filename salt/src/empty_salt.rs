@@ -29,9 +29,7 @@ impl StateReader for EmptySalt {
         Ok(Vec::new())
     }
 
-    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        // bucket_metadata_key will validate the bucket_id
-        let _ = bucket_metadata_key(bucket_id);
+    fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         Ok(BucketMeta {
             used: Some(0),
             ..BucketMeta::default()
@@ -72,8 +70,11 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // Test metadata() returns default with used: Some(0)
+        // Test bucket_used_slots() returns 0
         let bucket_id = NUM_META_BUCKETS as u32;
+        assert_eq!(empty_salt.bucket_used_slots(bucket_id).unwrap(), 0);
+
+        // Test metadata() returns default with used: Some(0)
         let meta = empty_salt.metadata(bucket_id).unwrap();
         let expected_meta = BucketMeta {
             used: Some(0),

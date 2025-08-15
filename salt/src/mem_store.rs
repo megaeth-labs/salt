@@ -210,10 +210,17 @@ impl StateReader for MemStore {
                 .expect("Failed to decode bucket metadata: stored value is corrupted"),
             None => BucketMeta::default(),
         };
-
-        // Return the cached count, defaulting to 0 for buckets that haven't been accessed
         meta.used = Some(*state.used_slots.get(&bucket_id).unwrap_or(&0));
         Ok(meta)
+    }
+
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
+        let state = self.state.read().unwrap();
+        Ok(*state.used_slots.get(&bucket_id).unwrap_or(&0))
     }
 }
 
@@ -282,6 +289,7 @@ mod tests {
     /// - Insert operations increment the count: (false, true) -> +1
     /// - Update operations don't change the count: (true, true) -> no change
     /// - Delete operations decrement the count: (true, false) -> -1
+    /// - Meta bucket operations don't affect the cache
     /// - Cache correctly handles buckets that haven't been accessed (returns 0)
     #[test]
     fn test_used_slots_cache_consistency() {
@@ -292,35 +300,45 @@ mod tests {
         let val = SaltValue::new(&[1; 32], &[2; 32]);
 
         // Initially, bucket should have 0 used slots
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(0));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 0);
 
         // Insert: (false, true) -> count should increase
         let updates = StateUpdates {
             data: [(key1, (None, Some(val.clone())))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(1));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 1);
 
         // Insert another: count should increase again
         let updates = StateUpdates {
             data: [(key2, (None, Some(val.clone())))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(2));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
 
         // Update existing: (true, true) -> count should not change
         let updates = StateUpdates {
             data: [(key1, (Some(val.clone()), Some(val.clone())))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(2));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
 
         // Delete: (true, false) -> count should decrease
         let updates = StateUpdates {
             data: [(key1, (Some(val.clone()), None))].into(),
         };
         store.update_state(updates);
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(1));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 1);
+
+        // Meta bucket keys should not affect used_slots
+        let meta_key = SaltKey::from((1000, 0)); // Meta bucket 1000
+        let updates = StateUpdates {
+            data: [(meta_key, (None, Some(val.clone())))].into(),
+        };
+        store.update_state(updates);
+        // Should not have created entry for bucket 1000 in used_slots
+        assert_eq!(store.entries(METADATA_KEYS_RANGE).unwrap().len(), 1);
+        assert_eq!(store.bucket_used_slots(1000).unwrap(), 0);
     }
 
     /// Tests metadata storage and retrieval with key mapping.
@@ -366,6 +384,42 @@ mod tests {
         assert_eq!(metadata_key.slot_id(), 0);
     }
 
+    /// Tests the different behavior between meta buckets and data buckets.
+    ///
+    /// Verifies that:
+    /// - Meta buckets always return 0 for bucket_used_slots
+    /// - Data buckets return actual slot counts
+    /// - Boundary cases around NUM_META_BUCKETS work correctly
+    /// - Invalid bucket IDs (>= NUM_BUCKETS) return 0
+    #[test]
+    fn test_meta_vs_data_bucket_behavior() {
+        let store = MemStore::new();
+
+        // Test boundary case: last meta bucket
+        let last_meta = NUM_META_BUCKETS as BucketId - 1;
+        assert_eq!(store.bucket_used_slots(last_meta).unwrap(), 0);
+
+        // Test boundary case: first data bucket
+        let first_data = NUM_META_BUCKETS as BucketId;
+        assert_eq!(store.bucket_used_slots(first_data).unwrap(), 0);
+
+        // Add data to first data bucket
+        let key = SaltKey::from((first_data, 0));
+        let val = SaltValue::new(&[1; 32], &[2; 32]);
+        let updates = StateUpdates {
+            data: [(key, (None, Some(val)))].into(),
+        };
+        store.update_state(updates);
+
+        // Data bucket should show count
+        assert_eq!(store.bucket_used_slots(first_data).unwrap(), 1);
+        // Meta bucket should still return 0
+        assert_eq!(store.bucket_used_slots(last_meta).unwrap(), 0);
+
+        // Test invalid bucket (>= NUM_BUCKETS)
+        assert_eq!(store.bucket_used_slots(NUM_BUCKETS as BucketId).unwrap(), 0);
+    }
+
     /// Tests atomic consistency of batch state updates.
     ///
     /// Verifies that:
@@ -396,7 +450,7 @@ mod tests {
         assert!(store.value(key1).unwrap().is_some());
         assert!(store.value(key2).unwrap().is_some());
         assert!(store.value(key3).unwrap().is_none());
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(2));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
 
         // Complex batch with all operation types
         let updates = StateUpdates {
@@ -413,7 +467,7 @@ mod tests {
         assert!(store.value(key1).unwrap().is_some());
         assert!(store.value(key2).unwrap().is_none());
         assert!(store.value(key3).unwrap().is_some());
-        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(2));
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 2);
     }
 
     /// Tests trie storage operations.
