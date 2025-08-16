@@ -244,7 +244,7 @@ mod tests {
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
 
-        let mut state = EphemeralSaltState::new(&mem_store);
+        let mut state = EphemeralSaltState::new(&mem_store).cache_read();
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts

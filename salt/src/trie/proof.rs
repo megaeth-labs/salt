@@ -62,7 +62,7 @@ where
     for key_buf in keys {
         // Create a fresh ephemeral state for each key to prevent cache interference
         // This ensures that the search process for one key doesn't affect another
-        let mut state = EphemeralSaltState::new(state_reader);
+        let mut state = EphemeralSaltState::new(state_reader).cache_read();
 
         // Calculate which bucket this key belongs to using the hash function
         let bucket_id = hasher::bucket_id(key_buf);
@@ -279,7 +279,7 @@ impl PlainKeysProof {
                     let meta = self.metas.get(&bucket_id).copied().unwrap_or_default();
 
                     // Create ephemeral state and simulate the find operation
-                    let mut state = EphemeralSaltState::new(self);
+                    let mut state = EphemeralSaltState::new(self).cache_read();
                     let find_result = state.find(bucket_id, &meta, pkey).map_err(|_| {
                         ProofError::VerifyFailed(
                             "find operation failed during verification".to_string(),

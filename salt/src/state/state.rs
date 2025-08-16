@@ -15,18 +15,21 @@ use tracing::info;
 ///
 /// This allows users to tentatively update some SALT state without actually
 /// modifying it (the resulting changes are buffered in memory).
+///
+/// By default, only writes are cached. Read values are fetched from the base
+/// state on each access unless read caching is explicitly enabled.
 #[derive(Debug)]
 pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
     base_state: &'a BaseState,
-    /// Cache the values of datas and bucket metadata (nonce and capacity) read from `base_state`
-    /// and the changes made to it.
+    /// Cache for modified values and optionally read values from `base_state`.
+    /// Always caches writes, and optionally caches reads when enabled.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Caches the usage counts in buckets when insertions or deletions occurred.
     bucket_used_cache: HashMap<BucketId, u64>,
-    /// Whether to save access records
-    save_access: bool,
+    /// Whether to cache values read from the base state for subsequent access
+    cache_read: bool,
 }
 
 /// Implement the `Clone` trait for `EphemeralSaltState`.
@@ -36,50 +39,31 @@ impl<BaseState> Clone for EphemeralSaltState<'_, BaseState> {
             base_state: self.base_state,
             cache: self.cache.clone(),
             bucket_used_cache: self.bucket_used_cache.clone(),
-            save_access: self.save_access,
+            cache_read: self.cache_read,
         }
     }
 }
 
 impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     /// Create a [`EphemeralSaltState`] object.
+    ///
+    /// By default, only writes are cached. Read operations
+    /// fetch values from the base state on each access.
     pub fn new(reader: &'a BaseState) -> Self {
         Self {
             base_state: reader,
             cache: HashMap::new(),
             bucket_used_cache: HashMap::new(),
-            save_access: true,
+            cache_read: false,
         }
     }
 
-    /// After calling `extend_cache`, the state will be updated to `state`.
-    pub fn extend_cache(mut self, state_updates: &StateUpdates) -> Self {
-        for (k, (_, v)) in &state_updates.data {
-            self.cache
-                .entry(*k)
-                .and_modify(|change| *change = v.clone())
-                .or_insert_with(|| v.clone());
-        }
-        self
-    }
-
-    /// Create a [`EphemeralSaltState`] object with the given cache.
-    pub fn with_cache(self, cache: HashMap<SaltKey, Option<SaltValue>>) -> Self {
-        Self { cache, ..self }
-    }
-
-    /// Create a [`EphemeralSaltState`] object with the given `save_access` flag.
-    pub fn with_record_access(self, save_access: bool) -> Self {
+    /// Enable caching of read values from the base state.
+    pub fn cache_read(self) -> Self {
         Self {
-            save_access,
+            cache_read: true,
             ..self
         }
-    }
-
-    /// Consumes the state and returns the underlying cache containing all changes made to the base
-    /// state.
-    pub fn consume_cache(self) -> HashMap<SaltKey, Option<SaltValue>> {
-        self.cache
     }
 
     /// Retrieves the plain value associated with the given plain key.
@@ -415,7 +399,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
                 let value = self.base_state.value(key)?;
-                if self.save_access {
+                if self.cache_read {
                     entry.insert(value.clone());
                 }
                 value
@@ -589,34 +573,6 @@ mod tests {
             }
         }
         true
-    }
-
-    #[test]
-    fn check_extend_cache() {
-        let reader = EmptySalt;
-        let mock_db = MemStore::new();
-        let mut state = EphemeralSaltState::new(&reader);
-        let mut meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
-
-        for _ in 0..3 {
-            let mut state1 = EphemeralSaltState::new(&mock_db);
-            let kvs = create_random_kvs(40);
-            let mut state_updates = StateUpdates::default();
-            //Insert KEYS_NUM key-value pairs into table 65538 of state
-            for (k, v) in kvs.0.into_iter().zip(kvs.1.into_iter()) {
-                state1
-                    .upsert(65538, &mut meta, k, v, &mut state_updates)
-                    .unwrap();
-            }
-
-            state = state.extend_cache(&state_updates);
-            mock_db.update_state(state_updates);
-
-            assert!(is_bucket_eq(65538, &mut state, &mut state1));
-        }
     }
 
     #[test]
