@@ -16,37 +16,36 @@ use tracing::info;
 /// This allows users to tentatively update some SALT state without actually
 /// modifying it (the resulting changes are buffered in memory).
 ///
-/// By default, only writes are cached. Read values are fetched from the base
-/// state on each access unless read caching is explicitly enabled.
+/// By default, only writes are cached. Read values are fetched from the underlying
+/// store on each access unless read caching is explicitly enabled.
 #[derive(Debug, Clone)]
-pub struct EphemeralSaltState<'a, BaseState> {
-    /// Base state to apply incremental changes. Typically backed
-    /// by a persistent storage backend.
-    base_state: &'a BaseState,
-    /// Cache for modified values and optionally read values from `base_state`.
+pub struct EphemeralSaltState<'a, Store> {
+    /// Storage backend to fetch data from.
+    store: &'a Store,
+    /// Cache for modified values and optionally read values from the store.
     /// Always caches writes, and optionally caches reads when enabled.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Caches the usage counts in buckets when insertions or deletions occurred.
     bucket_used_cache: HashMap<BucketId, u64>,
-    /// Whether to cache values read from the base state for subsequent access
+    /// Whether to cache values read from the store for subsequent access
     cache_read: bool,
 }
 
-impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
+impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// Create a [`EphemeralSaltState`] object.
     ///
     /// By default, only writes are cached. Read operations
-    /// fetch values from the base state on each access.
-    pub fn new(reader: &'a BaseState) -> Self {
+    /// fetch values from the store on each access.
+    pub fn new(store: &'a Store) -> Self {
         Self {
-            base_state: reader,
+            store,
             cache: HashMap::new(),
             bucket_used_cache: HashMap::new(),
             cache_read: false,
         }
     }
 
-    /// Enable caching of read values from the base state.
+    /// Enable caching of read values from the store.
     pub fn cache_read(self) -> Self {
         Self {
             cache_read: true,
@@ -63,7 +62,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     /// * `Ok(Some(value))` - The plain value bytes if the key exists
     /// * `Ok(None)` - If the key does not exist
     /// * `Err(error)` - If there was an error accessing the underlying storage
-    pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
+    pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = hasher::bucket_id(plain_key);
         let metadata = self.metadata(bucket_id, false)?;
@@ -89,12 +88,12 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(None)
     }
 
-    /// Read the bucket entry of the given SALT key. Always look up `cache` before `base_state`.
-    pub fn value(&mut self, key: SaltKey) -> Result<Option<SaltValue>, BaseState::Error> {
+    /// Read the bucket entry of the given SALT key. Always look up `cache` before the store.
+    pub fn value(&mut self, key: SaltKey) -> Result<Option<SaltValue>, Store::Error> {
         let value = match self.cache.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
             Entry::Vacant(entry) => {
-                let value = self.base_state.value(key)?;
+                let value = self.store.value(key)?;
                 if self.cache_read {
                     entry.insert(value.clone());
                 }
@@ -111,7 +110,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     pub fn update<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
-    ) -> Result<StateUpdates, BaseState::Error> {
+    ) -> Result<StateUpdates, Store::Error> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
             let bucket_id = hasher::bucket_id(key_bytes);
@@ -146,7 +145,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         &mut self,
         bucket_id: BucketId,
         need_used: bool,
-    ) -> Result<BucketMeta, BaseState::Error> {
+    ) -> Result<BucketMeta, Store::Error> {
         let mut meta = match self.value(bucket_metadata_key(bucket_id))? {
             Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
             None => BucketMeta::default(),
@@ -160,7 +159,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     // count to save on HashMap insertions. Since plain keys are
                     // distributed randomly across buckets, bucket metadata is rarely
                     // reused between different key operations.
-                    self.base_state.bucket_used_slots(bucket_id)?
+                    self.store.bucket_used_slots(bucket_id)?
                 },
             );
         }
@@ -176,7 +175,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         mut pending_key: Vec<u8>,
         mut pending_value: Vec<u8>,
         out_updates: &mut StateUpdates,
-    ) -> Result<(), BaseState::Error> {
+    ) -> Result<(), Store::Error> {
         let hashed_key = hasher::hash_with_nonce(&pending_key, meta.nonce);
 
         // Explores all slots until a suitable one is found. If no suitable slot is found,
@@ -268,7 +267,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         meta: &mut BucketMeta,
         key: Vec<u8>,
         out_updates: &mut StateUpdates,
-    ) -> Result<(), BaseState::Error> {
+    ) -> Result<(), Store::Error> {
         let find_slot = self.shi_find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
@@ -325,7 +324,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         old_meta: &BucketMeta,
         new_meta: &mut BucketMeta,
         out_updates: &mut StateUpdates,
-    ) -> Result<(), BaseState::Error> {
+    ) -> Result<(), Store::Error> {
         // Merge the original bucket's data with the change records to create a new bucket state
         // Clear the original bucket's data, then insert the updated data with the new metadata
         // into the new state.
@@ -336,7 +335,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         // out_updates
         let mut old_data = vec![];
         let mut new_state: HashMap<SaltKey, SaltValue> = self
-            .base_state
+            .store
             .entries(
                 SaltKey::from((bucket_id, 0))..=SaltKey::from((bucket_id, old_meta.capacity - 1)),
             )?
@@ -405,7 +404,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         bucket_id: BucketId,
         meta: &BucketMeta,
         plain_key: &[u8],
-    ) -> Result<Option<(SlotId, SaltValue)>, BaseState::Error> {
+    ) -> Result<Option<(SlotId, SaltValue)>, Store::Error> {
         let hashed_key = hasher::hash_with_nonce(plain_key, meta.nonce);
 
         // Search the key sequentially until we find it or are certain it doesn't exist
@@ -433,7 +432,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         slot_id: SlotId,
         nonce: u32,
         capacity: u64,
-    ) -> Result<Option<(u64, SaltValue)>, BaseState::Error> {
+    ) -> Result<Option<(u64, SaltValue)>, Store::Error> {
         for i in 0..capacity {
             let next_slot_id = (slot_id + 1 + i as SlotId) & (capacity as SlotId - 1);
             let salt_key = (bucket_id, next_slot_id).into();
