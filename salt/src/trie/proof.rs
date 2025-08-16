@@ -75,7 +75,7 @@ where
         // Attempt to find the key in the Salt storage using the insertion algorithm
         // Returns Some((slot_id, salt_value)) if found, None if not found
         let slot_id = state
-            .find(bucket_id, &meta, key_buf)
+            .shi_find(bucket_id, &meta, key_buf)
             .map_err(ProofError::ReadStateFailed)?;
 
         match slot_id {
@@ -280,7 +280,7 @@ impl PlainKeysProof {
 
                     // Create ephemeral state and simulate the find operation
                     let mut state = EphemeralSaltState::new(self).cache_read();
-                    let find_result = state.find(bucket_id, &meta, pkey).map_err(|_| {
+                    let find_result = state.shi_find(bucket_id, &meta, pkey).map_err(|_| {
                         ProofError::VerifyFailed(
                             "find operation failed during verification".to_string(),
                         )
@@ -566,7 +566,7 @@ mod tests {
 
         let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[0]
-        let find_res = state.find(bucket_id, &meta, &plain_keys()[0]).unwrap();
+        let find_res = state.shi_find(bucket_id, &meta, &plain_keys()[0]).unwrap();
 
         assert!(find_res.is_none());
 
@@ -594,7 +594,7 @@ mod tests {
 
         let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[1]
-        let find_res = state.find(bucket_id, &meta, &plain_keys()[1]).unwrap();
+        let find_res = state.shi_find(bucket_id, &meta, &plain_keys()[1]).unwrap();
 
         assert!(find_res.is_none());
 
@@ -622,7 +622,7 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.find(bucket_id, &meta, &plain_keys()[1]).unwrap();
+        let find_res = state.shi_find(bucket_id, &meta, &plain_keys()[1]).unwrap();
 
         assert!(find_res.is_none());
 
@@ -650,7 +650,7 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.find(bucket_id, &meta, &plain_keys()[0]).unwrap();
+        let find_res = state.shi_find(bucket_id, &meta, &plain_keys()[0]).unwrap();
 
         assert!(find_res.is_none());
 
@@ -674,7 +674,7 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.find(bucket_id, &meta, &plain_keys()[6]).unwrap();
+        let find_res = state.shi_find(bucket_id, &meta, &plain_keys()[6]).unwrap();
 
         assert!(find_res.is_none());
     }
@@ -786,7 +786,7 @@ mod tests {
 
         for key in meta_keys {
             let proof_value = plain_keys_proof.value(key).unwrap();
-            let state_value = state.get_entry(key).unwrap();
+            let state_value = state.value(key).unwrap();
 
             assert_eq!(proof_value, state_value);
         }
