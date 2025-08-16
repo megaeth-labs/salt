@@ -18,7 +18,7 @@ use tracing::info;
 ///
 /// By default, only writes are cached. Read values are fetched from the base
 /// state on each access unless read caching is explicitly enabled.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
@@ -30,18 +30,6 @@ pub struct EphemeralSaltState<'a, BaseState> {
     bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to cache values read from the base state for subsequent access
     cache_read: bool,
-}
-
-/// Implement the `Clone` trait for `EphemeralSaltState`.
-impl<BaseState> Clone for EphemeralSaltState<'_, BaseState> {
-    fn clone(&self) -> Self {
-        Self {
-            base_state: self.base_state,
-            cache: self.cache.clone(),
-            bucket_used_cache: self.bucket_used_cache.clone(),
-            cache_read: self.cache_read,
-        }
-    }
 }
 
 impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
