@@ -1,8 +1,44 @@
-//! This module provides two major functionalities:
-//! (1) Use plain keys to access the current blockchain state,
-//!     which is stored in some storage backend in SALT format.
-//! (2) Tentatively update the current state and accumulate the
-//!     resulting incremental changes in memory.
+//! SALT state management with plain key abstraction and ephemeral state view.
+//!
+//! This module provides the primary interface for working with SALT state data
+//! through plain (unencoded) keys over the underlying SALT storage format.
+//!
+//! ## Core Functionalities
+//!
+//! 1. **Plain Key Access**: Translates plain keys into SALT's internal bucket-slot
+//!    addressing scheme and provides key-value read/write operations against the
+//!    current blockchain state stored in the storage backend.
+//!
+//! 2. **Ephemeral State Management**: Buffers modifications in memory without
+//!    immediately persisting them, allowing for batch operations, rollbacks, and
+//!    transactional semantics. All changes are accumulated as [`StateUpdates`]
+//!    that can be applied atomically.
+//!
+//! ## SHI Hash Table Implementation
+//!
+//! The module also implements the SHI (Strongly History Independent) hash table
+//! algorithm used by SALT buckets. The SHI hash table ensures that the same set
+//! of key-value pairs always produces the same bucket layout, regardless of
+//! insertion order.
+//!
+//! ### Key Features
+//! - **History Independence**: Final layout depends only on the key-value pairs, not insertion order
+//! - **Linear Probing**: Uses linear probing with key swapping for collision resolution
+//! - **Dynamic Resizing**: Supports bucket expansion when load factor exceeds threshold
+//!
+//! ### Core Operations
+//! - `upsert`: Insert or update a key-value pair
+//! - `delete`: Remove a key-value pair
+//! - `find`: Locate a key in the table
+//! - `rehash`: Resize and reorganize the bucket
+//!
+//! ## References
+//! This implementation is based on the work by Blelloch and Golovin.[^1]
+//!
+//! [^1]: Blelloch, G. E., & Golovin, D. (2007). Strongly History-Independent Hashing with Applications.
+//! *In Proceedings of the 48th Annual IEEE Symposium on Foundations of Computer Science (FOCS '07)*, 272–282.
+//! DOI: [10.5555/1333875.1334201](https://dl.acm.org/doi/10.5555/1333875.1334201)
+
 use super::{hasher, updates::StateUpdates};
 use crate::{constant::BUCKET_SLOT_BITS, traits::StateReader, types::*};
 use std::{
@@ -11,31 +47,57 @@ use std::{
 };
 use tracing::info;
 
-/// A non-persistent SALT state snapshot.
+/// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
-/// This allows users to tentatively update some SALT state without actually
-/// modifying it (the resulting changes are buffered in memory).
+/// `EphemeralSaltState` provides a mutable view over an immutable storage backend,
+/// allowing you to perform tentative state updates without modifying the underlying
+/// store. All modifications are tracked as deltas and can be extracted as
+/// [`StateUpdates`] for atomic application to persistent storage.
 ///
-/// By default, only writes are cached. Read values are fetched from the underlying
-/// store on each access unless read caching is explicitly enabled.
+/// ## Caching Behavior
+///
+/// - **Writes**: Always cached to track modifications and provide consistent reads
+/// - **Reads**: Only cached when explicitly enabled via [`cache_read()`] to avoid
+///   memory overhead for read-heavy workloads
+///
+/// ## Use Cases
+///
+/// - **Transaction Processing**: Buffer all state changes during transaction execution,
+///   then commit atomically or rollback on failure
+/// - **Batch Operations**: Accumulate multiple updates before applying them to storage
+/// - **Proof Generation**: Track all accessed state for cryptographic proof construction
+///
+/// [`cache_read()`]: EphemeralSaltState::cache_read
 #[derive(Debug, Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
     store: &'a Store,
-    /// Cache for modified values and optionally read values from the store.
-    /// Always caches writes, and optionally caches reads when enabled.
+    /// Cache for state entries accessed or modified during this session.
+    ///
+    /// Always caches writes to track modifications and provide read consistency.
+    /// Optionally caches reads when [`cache_reads`] is enabled. Each entry maps
+    /// a [`SaltKey`] to its current value (`Some(value)`) or deletion marker (`None`).
+    ///
+    /// Note: This field is `pub(crate)` to enable proof generation modules to
+    /// access the set of touched keys for witness construction.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
-    /// Caches the usage counts in buckets when insertions or deletions occurred.
+    /// Tracks the current usage count for buckets modified in this session.
+    ///
+    /// This field is essential because when [`BucketMeta`] is serialized to [`SaltValue`],
+    /// only the `nonce` and `capacity` fields are preserved - the usage count is dropped.
+    /// Without this cache, computing the current bucket occupancy would require complex
+    /// logic to reconcile the base store's usage count with all insertions and deletions
+    /// tracked in the main cache.
     bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to cache values read from the store for subsequent access
     cache_read: bool,
 }
 
 impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
-    /// Create a [`EphemeralSaltState`] object.
+    /// Creates a new ephemeral state view over the given storage backend.
     ///
-    /// By default, only writes are cached. Read operations
-    /// fetch values from the store on each access.
+    /// By default, only writes are cached. Read operations fetch values from
+    /// the store on each access.
     pub fn new(store: &'a Store) -> Self {
         Self {
             store,
@@ -45,7 +107,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
-    /// Enable caching of read values from the store.
+    /// Enables caching of read values from the store.
     pub fn cache_read(self) -> Self {
         Self {
             cache_read: true,
@@ -88,7 +150,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(None)
     }
 
-    /// Read the bucket entry of the given SALT key. Always look up `cache` before the store.
+    /// Reads the state value for the given SALT key.
+    ///
+    /// Always checks the cache first before querying the underlying store.
     pub fn value(&mut self, key: SaltKey) -> Result<Option<SaltValue>, Store::Error> {
         let value = match self.cache.entry(key) {
             Entry::Occupied(entry) => entry.into_mut().clone(),
@@ -104,9 +168,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(value)
     }
 
-    /// Update the SALT state with the given set of `PlainKey`'s and `PlainValue`'s
-    /// (following the semantics of EVM storage, empty values indicate deletions).
-    /// Return the resulting changes of the affected SALT bucket entries.
+    /// Updates the SALT state with the given set of plain key-value pairs.
+    ///
+    /// Empty values (`None`) indicate deletions. Returns the resulting changes
+    /// as [`StateUpdates`] that can be applied to persistent storage.
     pub fn update<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
@@ -133,14 +198,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(state_updates)
     }
 
-    /// Get bucket metadata for the given bucket ID.
+    /// Retrieves bucket metadata for the given bucket ID.
     ///
     /// # Arguments
     /// * `bucket_id` - The bucket ID to get metadata for
     /// * `need_used` - Whether to populate the `used` field. Setting this to `false`
     ///   avoids unnecessary `bucket_used_slots()` calls to the underlying storage
     ///   backend when the usage count is not needed (e.g., for read operations like
-    ///   `plain_value` that only need `nonce` and `capacity`).
+    ///   `plain_value` that only require `nonce` and `capacity`).
     fn metadata(
         &mut self,
         bucket_id: BucketId,
@@ -166,8 +231,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(meta)
     }
 
-    /// Inserts or updates a plain key-value pair in the given bucket. This method
-    /// implements the SHI hash table insertion algorithm described in the paper.
+    /// Inserts or updates a plain key-value pair using the SHI hash table algorithm.
+    ///
+    /// This method implements the strongly history-independent hash table insertion
+    /// algorithm, which maintains deterministic storage layout regardless of insertion
+    /// order. May trigger bucket resizing when load factor exceeds 80%.
     fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
@@ -259,8 +327,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         unreachable!("bucket {} capacity {} too large", bucket_id, meta.capacity);
     }
 
-    /// Deletes a plain key from the given bucket. This method implements
-    /// the SHI hash table deletion algorithm described in the paper.
+    /// Deletes a plain key using the SHI hash table deletion algorithm.
+    ///
+    /// Implements deletion with slot compaction to maintain the SHI property.
+    /// After removing the target key, suitable entries are shifted to fill gaps
+    /// and preserve the deterministic layout.
     fn shi_delete(
         &mut self,
         bucket_id: BucketId,
@@ -317,7 +388,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(())
     }
 
-    /// rehash the bucket with the new meta.
+    /// Rehashes all entries in a bucket with new metadata.
+    ///
+    /// This operation clears the existing bucket layout and reinserts all entries
+    /// using the new bucket metadata (typically with increased capacity or changed
+    /// nonce).
     fn shi_rehash(
         &mut self,
         bucket_id: u32,
@@ -397,8 +472,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(())
     }
 
-    /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if
-    /// any.
+    /// Searches for a plain key in a bucket using linear probing.
+    ///
+    /// Returns the slot ID and value if found, or `None` if the key doesn't exist.
+    /// The search terminates early when encountering an empty slot or a key with
+    /// lower lexicographic order (indicating the target key cannot exist).
     pub(crate) fn shi_find(
         &mut self,
         bucket_id: BucketId,
@@ -425,7 +503,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(None)
     }
 
-    /// Finds the SALT value that will be moved into `slot_id` once the current value is deleted.
+    /// Finds the next entry suitable for moving into the given slot during deletion.
+    ///
+    /// This method implements the slot compaction algorithm used during SHI deletion.
+    /// It searches for an entry that can be moved to fill the gap left by a deleted entry,
+    /// ensuring the hash table maintains its strongly history-independent property.
     fn shi_next(
         &mut self,
         bucket_id: BucketId,
@@ -456,7 +538,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(None)
     }
 
-    /// Updates the bucket entry and records the change in `out_updates`.
+    /// Updates a bucket entry and records the change for state tracking.
+    ///
+    /// This method handles both the in-memory cache update and the delta tracking
+    /// needed for generating [`StateUpdates`]. Changes are only recorded when the
+    /// old and new values differ to avoid empty deltas.
     fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
@@ -473,18 +559,19 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     }
 }
 
-/// Returns the i-th slot in the probe sequence of `hashed_key`. Our SHI hash table
-/// uses linear probing to address key collisions, so `i` is used as an offset. Since
-/// the first slot of each bucket is reserved for metadata (i.e., nonce & capacity),
-/// the returned value must be in the range of [1, bucket size).
+/// Computes the i-th slot in the linear probe sequence for a hashed key.
+///
+/// This implements linear probing for collision resolution in the SHI hash table,
+/// where `i` is used as an offset from the initial hash position.
 #[inline(always)]
 pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
     ((hashed_key + i) & (capacity - 1)) as SlotId
 }
 
-/// This function is the inverse of probe: i.e.,
-/// ```rank(hashed_key, slot_id, bucket_size) = i``` iff.
-/// ```probe(hashed_key, i, bucket_size) = slot_id```
+/// Computes the probe distance for a given slot position.
+///
+/// This function is the inverse of [`probe`]: given a hashed key and slot ID,
+/// it returns the probe distance `i` such that `probe(hashed_key, i, capacity) = slot_id`.
 #[inline(always)]
 fn rank(hashed_key: u64, slot_id: SlotId, capacity: u64) -> SlotId {
     let first = probe(hashed_key, 0, capacity);
