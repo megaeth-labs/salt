@@ -182,6 +182,7 @@ impl StateReader for ExpansionSalt {
             } else {
                 MIN_BUCKET_SIZE as u64
             },
+            used: Some(self.bucket_used_slots(bucket_id)?),
             ..Default::default()
         };
         Ok(meta)

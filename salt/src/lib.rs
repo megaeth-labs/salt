@@ -5,10 +5,7 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
-pub use state::{
-    state::{pk_hasher, EphemeralSaltState},
-    updates::StateUpdates,
-};
+pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
     proof::PlainKeysProof,
@@ -51,7 +48,7 @@ mod tests {
         store.update_state(state_updates.clone());
 
         // Read plain value back
-        let balance = state.get_raw(b"account1")?;
+        let balance = state.plain_value(b"account1")?;
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes

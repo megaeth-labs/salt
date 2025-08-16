@@ -7,6 +7,8 @@
 //! - [`NodeId`]: 64-bit identifiers for trie nodes
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
+use std::ops::RangeInclusive;
+
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
     NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
@@ -46,18 +48,29 @@ pub struct BucketMeta {
     pub nonce: u32,
     /// Total # slots of the bucket.
     pub capacity: u64,
-    /// Number of occupied slots in the bucket. This field can be inferred from
-    /// the bucket data, so it does not participate in the computation of bucket
-    /// commitment.
-    pub used: u64,
+    /// Number of occupied slots in the bucket. This field can be computed by
+    /// counting the actual number of SaltKeys in the bucket, so it does not
+    /// participate in serialization or the computation of bucket commitment.
+    pub used: Option<u64>,
 }
 
 impl Default for BucketMeta {
+    /// Returns default bucket metadata with unknown usage statistics.
+    ///
+    /// This default represents a bucket with:
+    /// - `nonce`: 0 (no rehashing operations performed)
+    /// - `capacity`: MIN_BUCKET_SIZE (256 slots)
+    /// - `used`: None (unknown, must be computed by counting actual entries)
+    ///
+    /// **Important**: A bucket with default metadata can still contain data entries.
+    /// Default metadata simply means the bucket hasn't been explicitly resized or
+    /// rehashed, but it may have been populated with entries that fit within the
+    /// default capacity.
     fn default() -> Self {
         Self {
             nonce: 0,
             capacity: MIN_BUCKET_SIZE as u64,
-            used: 0,
+            used: None,
         }
     }
 }
@@ -65,13 +78,13 @@ impl Default for BucketMeta {
 impl TryFrom<&[u8]> for BucketMeta {
     type Error = &'static str;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < 20 {
-            return Err("bytes length too short for BucketMeta");
+        if bytes.len() != 12 {
+            return Err("BucketMeta requires exactly 12 bytes");
         }
         Ok(Self {
             nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| "nonce error")?),
             capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| "capacity error")?),
-            used: u64::from_le_bytes(bytes[12..20].try_into().map_err(|_| "used error")?),
+            used: None,
         })
     }
 }
@@ -84,15 +97,32 @@ impl TryFrom<&SaltValue> for BucketMeta {
 }
 
 impl BucketMeta {
-    /// Serialize bucket metadata to a 20-byte little-endian byte array.
+    /// Serialize bucket metadata to a 12-byte little-endian byte array.
     ///
-    /// Layout: `nonce`(4) | `capacity`(8) | `used`(8)
-    pub fn to_bytes(&self) -> [u8; 20] {
-        let mut bytes = [0u8; 20];
+    /// Layout: `nonce`(4) | `capacity`(8)
+    ///
+    /// Note: The `used` field is not serialized as it can be computed dynamically.
+    pub fn to_bytes(&self) -> [u8; 12] {
+        let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&self.nonce.to_le_bytes());
         bytes[4..12].copy_from_slice(&self.capacity.to_le_bytes());
-        bytes[12..20].copy_from_slice(&self.used.to_le_bytes());
         bytes
+    }
+
+    /// Checks if this bucket metadata represents default values.
+    ///
+    /// A bucket has default metadata when:
+    /// - `nonce` is 0 (no rehashing operations performed)
+    /// - `capacity` is `MIN_BUCKET_SIZE` (256 slots)
+    ///
+    /// The `used` field is ignored since it's computed dynamically and may vary
+    /// even for buckets with otherwise default metadata.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this metadata has default `nonce` and `capacity` values, `false` otherwise.
+    pub fn is_default(&self) -> bool {
+        self.nonce == 0 && self.capacity == MIN_BUCKET_SIZE as u64
     }
 }
 
@@ -164,12 +194,12 @@ impl From<u64> for SaltKey {
 /// So, encoding a `Storage` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 86 bytes.
 ///
-/// For `BucketMeta`, the serialized form is 20 bytes (nonce:4 + capacity:8 + used:8).
+/// For `BucketMeta`, the serialized form is 12 bytes (nonce:4 + capacity:8).
 /// So, encoding a `BucketMetadata` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(0) = 22 bytes.
+///     `key_len`(1) + `value_len`(1) + `key`(12) + `value`(0) = 14 bytes.
 ///
 /// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 94,
-/// which is the maximum of 94, 86, and 22.
+/// which is the maximum of 94, 86, and 14.
 pub const MAX_SALT_VALUE_BYTES: usize = 94;
 
 /// Variable-length encoding of key-value pairs with length prefixes.
@@ -472,6 +502,17 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
     unreachable!("n = {bfs_number} should always match at least level 0")
 }
 
+/// The valid range of metadata keys. Metadata keys span from bucket 0 slot 0
+/// to bucket (NUM_META_BUCKETS-1) slot BUCKET_SLOT_ID_MASK.
+pub const METADATA_KEYS_RANGE: RangeInclusive<SaltKey> =
+    SaltKey(0)..=SaltKey(((NUM_META_BUCKETS - 1) as u64) << BUCKET_SLOT_BITS | BUCKET_SLOT_ID_MASK);
+
+/// Checks if a bucket ID refers to a valid data bucket.
+#[inline]
+pub fn is_valid_data_bucket(bucket_id: BucketId) -> bool {
+    bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId
+}
+
 /// Calculate the SaltKey where bucket metadata is stored.
 ///
 /// SALT uses a metadata storage scheme where each metadata bucket (first 65,536 buckets)
@@ -495,7 +536,7 @@ pub fn get_bfs_level(bfs_number: u64) -> usize {
 #[inline]
 pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
     assert!(
-        bucket_id >= NUM_META_BUCKETS as BucketId && bucket_id < NUM_BUCKETS as BucketId,
+        is_valid_data_bucket(bucket_id),
         "bucket_id {bucket_id} must be a valid data bucket ID (range: {NUM_META_BUCKETS}..{NUM_BUCKETS})"
     );
 
@@ -516,12 +557,20 @@ pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
 /// 2. Adding the slot ID (which represents the offset within the 256-bucket group)
 ///
 /// # Arguments
-/// * `key` - SaltKey pointing to a metadata storage location
+/// * `key` - SaltKey pointing to a metadata storage location. Must be within
+///   [`METADATA_KEYS_RANGE`] (i.e., a valid metadata key for a data bucket).
 ///
 /// # Returns
 /// The original bucket ID whose metadata is stored at this key
+///
+/// # Panics
+/// Panics if the provided key is not within the valid metadata key range.
 #[inline]
 pub fn bucket_id_from_metadata_key(key: SaltKey) -> BucketId {
+    assert!(
+        METADATA_KEYS_RANGE.contains(&key),
+        "SaltKey {key:?} is not in valid metadata key range"
+    );
     (key.bucket_id() << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId
 }
 
@@ -575,30 +624,32 @@ mod tests {
     }
 
     /// Tests BucketMeta serialization and deserialization roundtrip. Verifies that
-    /// the 20-byte little-endian encoding (nonce:4 + capacity:8 + used:8) correctly
-    /// preserves all field values through serialize-then-deserialize operations.
+    /// the 12-byte little-endian encoding (nonce:4 + capacity:8) correctly
+    /// preserves nonce and capacity values through serialize-then-deserialize operations.
     #[test]
     fn bucket_meta_serialization() {
         let meta = BucketMeta {
             nonce: 0x12345678,
             capacity: 0x123456789ABCDEF0,
-            used: 0x987654321,
+            used: Some(100), // This value is not serialized
         };
         let bytes = meta.to_bytes();
         let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
 
-        assert_eq!(meta, recovered);
-        assert_eq!(bytes.len(), 20);
+        assert_eq!(recovered.nonce, meta.nonce);
+        assert_eq!(recovered.capacity, meta.capacity);
+        assert_eq!(recovered.used, None); // Used field is not serialized
+        assert_eq!(bytes.len(), 12);
     }
 
     /// Tests BucketMeta default constructor. Verifies that default values match
-    /// expected initialization: nonce=0, capacity=MIN_BUCKET_SIZE (256), used=0.
+    /// expected initialization: nonce=0, capacity=MIN_BUCKET_SIZE (256), used=None.
     #[test]
     fn bucket_meta_default() {
         let meta = BucketMeta::default();
         assert_eq!(meta.nonce, 0);
         assert_eq!(meta.capacity, MIN_BUCKET_SIZE as u64);
-        assert_eq!(meta.used, 0);
+        assert_eq!(meta.used, None);
     }
 
     /// Tests SaltValue encoding format: key_len(1) | value_len(1) | key | value.
@@ -617,22 +668,24 @@ mod tests {
     }
 
     /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
-    /// contains the 20-byte serialized BucketMeta and the value is empty. Verifies
-    /// bidirectional conversion preserves all metadata fields correctly.
+    /// contains the 12-byte serialized BucketMeta and the value is empty. Verifies
+    /// bidirectional conversion preserves nonce and capacity correctly.
     #[test]
     fn salt_value_bucket_meta_conversion() {
         let meta = BucketMeta {
             nonce: 0xDEADBEEF,
             capacity: 1024,
-            used: 100,
+            used: Some(100), // This value is not serialized
         };
         let salt_value = SaltValue::from(meta);
 
-        assert_eq!(salt_value.data[0], 20); // key length (BucketMeta serialized size)
+        assert_eq!(salt_value.data[0], 12); // key length (BucketMeta serialized size)
         assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)
 
         let recovered_meta = BucketMeta::try_from(salt_value).unwrap();
-        assert_eq!(recovered_meta, meta);
+        assert_eq!(recovered_meta.nonce, meta.nonce);
+        assert_eq!(recovered_meta.capacity, meta.capacity);
+        assert_eq!(recovered_meta.used, None); // Used field is not serialized
     }
 
     /// Tests the metadata storage mapping scheme. Each metadata bucket (0-65535) stores
@@ -700,17 +753,33 @@ mod tests {
         }
     }
 
+    /// Tests that bucket_id_from_metadata_key correctly panics for keys outside the valid
+    /// metadata key range. Only keys that correspond to actual data bucket metadata should
+    /// be accepted.
+    #[test]
+    #[should_panic(expected = "SaltKey")]
+    fn bucket_id_from_metadata_key_invalid_range_panic() {
+        // Test with a key that's outside the valid metadata range
+        // Use a key from a bucket beyond NUM_META_BUCKETS-1, which is outside metadata buckets
+        let invalid_key = SaltKey::from((NUM_META_BUCKETS as u32, 0u64));
+        bucket_id_from_metadata_key(invalid_key);
+    }
+
     /// Tests BucketMeta deserialization error handling. The try_from implementation
-    /// requires exactly 20 bytes minimum for proper deserialization. Tests both
-    /// insufficient data (should fail) and minimum valid data (should succeed).
+    /// requires exactly 12 bytes for proper deserialization. Tests both
+    /// insufficient data (should fail) and correct size data (should succeed).
     #[test]
     fn bucket_meta_error_handling() {
         // Test insufficient bytes - should return error
         let short_bytes = [1u8; 10];
         assert!(BucketMeta::try_from(&short_bytes[..]).is_err());
 
-        // Test exactly 20 bytes (minimum required) - should succeed
-        let valid_bytes = [0u8; 20];
+        // Test too many bytes - should return error
+        let long_bytes = [1u8; 20];
+        assert!(BucketMeta::try_from(&long_bytes[..]).is_err());
+
+        // Test exactly 12 bytes (required) - should succeed
+        let valid_bytes = [0u8; 12];
         assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
     }
 

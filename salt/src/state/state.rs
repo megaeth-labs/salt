@@ -3,7 +3,7 @@
 //!     which is stored in some storage backend in SALT format.
 //! (2) Tentatively update the current state and accumulate the
 //!     resulting incremental changes in memory.
-use super::updates::StateUpdates;
+use super::{hasher, updates::StateUpdates};
 use crate::{constant::BUCKET_SLOT_BITS, traits::StateReader, types::*};
 use std::{
     cmp::Ordering,
@@ -20,9 +20,11 @@ pub struct EphemeralSaltState<'a, BaseState> {
     /// Base state to apply incremental changes. Typically backed
     /// by a persistent storage backend.
     base_state: &'a BaseState,
-    /// Cache the values of datas and bucket metas read from `base_state`
+    /// Cache the values of datas and bucket metadata (nonce and capacity) read from `base_state`
     /// and the changes made to it.
     pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    /// Caches the usage counts in buckets when insertions or deletions occurred.
+    bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to save access records
     save_access: bool,
 }
@@ -33,6 +35,7 @@ impl<BaseState> Clone for EphemeralSaltState<'_, BaseState> {
         Self {
             base_state: self.base_state,
             cache: self.cache.clone(),
+            bucket_used_cache: self.bucket_used_cache.clone(),
             save_access: self.save_access,
         }
     }
@@ -44,6 +47,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Self {
             base_state: reader,
             cache: HashMap::new(),
+            bucket_used_cache: HashMap::new(),
             save_access: true,
         }
     }
@@ -78,17 +82,22 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         self.cache
     }
 
-    /// Return the plain value associated with the given plain key.
-    pub fn get_raw(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
+    /// Retrieves the plain value associated with the given plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The raw key bytes to look up
+    ///
+    /// # Returns
+    /// * `Ok(Some(value))` - The plain value bytes if the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, BaseState::Error> {
         // Computes the `bucket_id` based on the `key`.
-        let bucket_id = pk_hasher::bucket_id(plain_key);
-        let metadata = self
-            .get_entry(bucket_metadata_key(bucket_id))?
-            .and_then(|v| v.try_into().ok())
-            .unwrap_or_else(BucketMeta::default);
-        // let meta = self.salt_state.meta(bucket_id)?;
+        let bucket_id = hasher::bucket_id(plain_key);
+        let metadata = self.bucket_metadata(bucket_id, false)?;
+
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
-        let hashed_id = pk_hasher::hashed_key(plain_key, metadata.nonce);
+        let hashed_id = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
         // Starts from the initial slot position and searches for the slot corresponding to the
         // `key`.
@@ -117,14 +126,8 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
     ) -> Result<StateUpdates, BaseState::Error> {
         let mut state_updates = StateUpdates::default();
         for (key_bytes, value_bytes) in kvs {
-            let bucket_id = pk_hasher::bucket_id(key_bytes);
-
-            // Get the meta corresponding to the bucket_id
-            let slot = bucket_metadata_key(bucket_id);
-            let value = self.get_entry(slot)?;
-            let mut meta = value
-                .and_then(|v| v.try_into().ok())
-                .unwrap_or_else(BucketMeta::default);
+            let bucket_id = hasher::bucket_id(key_bytes);
+            let mut meta = self.bucket_metadata(bucket_id, true)?;
             match value_bytes {
                 Some(value_bytes) => {
                     self.upsert(
@@ -141,6 +144,39 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         Ok(state_updates)
     }
 
+    /// Get bucket metadata for the given bucket ID.
+    ///
+    /// # Arguments
+    /// * `bucket_id` - The bucket ID to get metadata for
+    /// * `need_used` - Whether to populate the `used` field. Setting this to `false`
+    ///   avoids unnecessary `bucket_used_slots()` calls to the underlying storage
+    ///   backend when the usage count is not needed (e.g., for read operations like
+    ///   `plain_value` that only need `nonce` and `capacity`).
+    fn bucket_metadata(
+        &mut self,
+        bucket_id: BucketId,
+        need_used: bool,
+    ) -> Result<BucketMeta, BaseState::Error> {
+        let mut meta = match self.get_entry(bucket_metadata_key(bucket_id))? {
+            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+            None => BucketMeta::default(),
+        };
+        if need_used {
+            meta.used = Some(
+                if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                    used
+                } else {
+                    // Performance note: We intentionally avoid caching this usage
+                    // count to save on HashMap insertions. Since plain keys are
+                    // distributed randomly across buckets, bucket metadata is rarely
+                    // reused between different key operations.
+                    self.base_state.bucket_used_slots(bucket_id)?
+                },
+            );
+        }
+        Ok(meta)
+    }
+
     /// Inserts or updates a plain key-value pair in the given bucket. This method
     /// implements the SHI hash table insertion algorithm described in the paper.
     fn upsert(
@@ -151,7 +187,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         mut pending_value: Vec<u8>,
         out_updates: &mut StateUpdates,
     ) -> Result<(), BaseState::Error> {
-        let hashed_key = pk_hasher::hashed_key(&pending_key, meta.nonce);
+        let hashed_key = hasher::hash_with_nonce(&pending_key, meta.nonce);
 
         // Explores all slots until a suitable one is found. If no suitable slot is found,
         // resizing is required. Iterates through all slots to find a suitable location for
@@ -200,9 +236,11 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     Some(SaltValue::new(&pending_key, &pending_value)),
                 );
 
-                meta.used += 1;
+                let used = meta
+                    .used
+                    .expect("BucketMeta.used should always be populated");
                 // if the used of the bucket exceeds 4/5 of the capacity, resize the bucket.
-                if meta.used > meta.capacity * 4 / 5 && meta.capacity < (1 << BUCKET_SLOT_BITS) {
+                if used >= meta.capacity * 4 / 5 && meta.capacity < (1 << BUCKET_SLOT_BITS) {
                     // double the capacity of the bucket.
                     info!(
                         "bucket_id {} capacity extend from {} to {}",
@@ -221,17 +259,10 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
                     )?;
 
                     meta.capacity <<= 1;
-                } else {
-                    self.update_meta(
-                        out_updates,
-                        bucket_id,
-                        BucketMeta {
-                            used: meta.used - 1,
-                            ..*meta
-                        },
-                        *meta,
-                    );
                 }
+                meta.used = Some(used + 1);
+                // Update the bucket usage cache
+                self.bucket_used_cache.insert(bucket_id, used + 1);
                 return Ok(());
             }
         }
@@ -251,17 +282,13 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         let find_slot = self.find(bucket_id, meta, &key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
-            // used decreases by 1 and save the new meta in the state_updates.
-            meta.used -= 1;
-            self.update_meta(
-                out_updates,
-                bucket_id,
-                BucketMeta {
-                    used: meta.used + 1,
-                    ..*meta
-                },
-                *meta,
-            );
+            let old_used = meta
+                .used
+                .expect("BucketMeta.used should always be populated");
+            let new_used = old_used.saturating_sub(1);
+            meta.used = Some(new_used);
+            // Update the bucket usage cache
+            self.bucket_used_cache.insert(bucket_id, new_used);
             let mut delete_slot = (slot_id, slot_val);
 
             // Iterates over all slots in the table until a suitable slot is found.
@@ -359,7 +386,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         }
 
         // update the state with the new entry
-        new_meta.used = 0;
+        new_meta.used = Some(0);
         new_state.into_iter().try_for_each(|(_, v)| {
             self.upsert(
                 bucket_id,
@@ -377,7 +404,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             Some((*old_meta).into()),
             Some((*new_meta).into()),
         );
-        self.update_meta(out_updates, bucket_id, *old_meta, *new_meta);
 
         Ok(())
     }
@@ -416,20 +442,6 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         }
     }
 
-    /// Updates the bucket metadata and records the change in `out_updates`.
-    fn update_meta(
-        &mut self,
-        out_updates: &mut StateUpdates,
-        bucket_id: BucketId,
-        old_meta: BucketMeta,
-        new_meta: BucketMeta,
-    ) {
-        let id = bucket_metadata_key(bucket_id);
-        let new_value = Some(new_meta.into());
-        self.cache.insert(id, new_value.clone());
-        out_updates.add(id, Some(old_meta.into()), new_value);
-    }
-
     /// Finds the given plain key in a bucket. Returns the corresponding entry and its index, if
     /// any.
     pub(crate) fn find(
@@ -438,7 +450,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
         meta: &BucketMeta,
         plain_key: &[u8],
     ) -> Result<Option<(SlotId, SaltValue)>, BaseState::Error> {
-        let hashed_key = pk_hasher::hashed_key(plain_key, meta.nonce);
+        let hashed_key = hasher::hash_with_nonce(plain_key, meta.nonce);
 
         // Search the key sequentially until we find it or are certain it doesn't exist
         // (either the current slot is empty or the key it contains has a lower priority
@@ -474,7 +486,7 @@ impl<'a, BaseState: StateReader> EphemeralSaltState<'a, BaseState> {
             match entry {
                 // check next slot is suitable to store or not
                 Some(entry) => {
-                    let hashed_id = pk_hasher::hashed_key(entry.key(), nonce);
+                    let hashed_id = hasher::hash_with_nonce(entry.key(), nonce);
 
                     // Compares the weight of the next slot position with the weight of
                     // `cur_slot_id`.
@@ -513,57 +525,17 @@ fn rank(hashed_key: u64, slot_id: SlotId, capacity: u64) -> SlotId {
     }
 }
 
-/// Provides utility functions to convert plain keys to hashed keys (and eventually SALT keys).
-pub mod pk_hasher {
-    use crate::constant::{NUM_KV_BUCKETS, NUM_META_BUCKETS};
-    use megaeth_ahash::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    use super::BucketId;
-
-    /// Use the lower 32 bytes of keccak256("Make Ethereum Great Again") as the seed values.
-    const HASHER_SEED_0: u64 = 0x921321f4;
-    const HASHER_SEED_1: u64 = 0x2ccb667e;
-    const HASHER_SEED_2: u64 = 0x60d68842;
-    const HASHER_SEED_3: u64 = 0x077ada9d;
-
-    /// Hash the given byte string.
-    #[inline(always)]
-    pub(crate) fn hash(bytes: &[u8]) -> u64 {
-        static HASH_BUILDER: RandomState =
-            RandomState::with_seeds(HASHER_SEED_0, HASHER_SEED_1, HASHER_SEED_2, HASHER_SEED_3);
-
-        let mut hasher = HASH_BUILDER.build_hasher();
-        hasher.write(bytes);
-        hasher.finish()
-    }
-
-    /// Convert the plain key to a hashed key using the given bucket nonce.
-    /// The resulting hashed key will be used to search for the final bucket
-    /// location (i.e., the SALT key) where the plain key will be placed.
-    #[inline(always)]
-    pub(crate) fn hashed_key(plain_key: &[u8], nonce: u32) -> u64 {
-        let mut data = plain_key.to_vec();
-        data.extend_from_slice(&nonce.to_le_bytes());
-
-        hash(&data)
-    }
-
-    /// Locate the bucket where the given plain key resides.
-    #[inline(always)]
-    pub fn bucket_id(key: &[u8]) -> BucketId {
-        (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         empty_salt::EmptySalt,
         mem_store::*,
         state::{
-            state::{pk_hasher, probe, rank, EphemeralSaltState},
+            hasher,
+            state::{probe, rank, EphemeralSaltState},
             updates::StateUpdates,
         },
         traits::StateReader,
@@ -571,10 +543,8 @@ mod tests {
     };
     use rand::Rng;
 
-    const KEYS_NUM: usize = MIN_BUCKET_SIZE - 1;
+    const KEYS_NUM: usize = 3 * MIN_BUCKET_SIZE - 1;
     const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
-
-    // FIXME: need a unit test to fix the hash function we used to compute bucket id; avoid accidental hash change
 
     // FIXME: where are the unit tests that exercise SHI hashtable and SHI hashtable only? CRUD + resize, etc.
 
@@ -626,7 +596,10 @@ mod tests {
         let reader = EmptySalt;
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&reader);
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
 
         for _ in 0..3 {
             let mut state1 = EphemeralSaltState::new(&mock_db);
@@ -662,7 +635,10 @@ mod tests {
     fn insert_with_diff_order() {
         let (keys, vals) = create_random_kvs(KEYS_NUM);
         let reader = EmptySalt;
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
         //Insert KEYS_NUM key-value pairs into table 0 of state
@@ -684,7 +660,10 @@ mod tests {
             let mut out_updates = StateUpdates::default();
             // Rearrange the order of keys and vals
             let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals.clone());
-            let mut meta = BucketMeta::default();
+            let mut meta = BucketMeta {
+                used: Some(0),
+                ..BucketMeta::default()
+            };
 
             // Insert the reordered keys and vals into table 0
             (0..rand_keys.len()).for_each(|i| {
@@ -713,7 +692,10 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
 
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
@@ -744,7 +726,7 @@ mod tests {
         let reader = EmptySalt;
         let mut cmp_state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        meta.used = 0;
+        meta.used = Some(0);
 
         for j in del_num..rand_keys.len() {
             cmp_state
@@ -810,11 +792,14 @@ mod tests {
     fn find_key() {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
-        let meta = BucketMeta::default();
+        let meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let salt_val1 = SaltValue::new(&[1; 32], &[1; 32]);
 
         // Calculate the initial slot_id of the key
-        let hashed_key = pk_hasher::hashed_key(salt_val1.key(), 0);
+        let hashed_key = hasher::hash_with_nonce(salt_val1.key(), 0);
         let slot_id = probe(hashed_key, 0, meta.capacity);
         let salt_id = (BUCKET_ID, slot_id).into();
 
@@ -874,7 +859,7 @@ mod tests {
         let slot_id_vec: Vec<SlotId> = salt_array
             .iter()
             .map(|v| {
-                let hashed_key = pk_hasher::hashed_key(v.key(), 0);
+                let hashed_key = hasher::hash_with_nonce(v.key(), 0);
                 probe(hashed_key, 0, MIN_BUCKET_SIZE as SlotId)
             })
             .collect();
@@ -940,7 +925,10 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta::default();
+        let mut meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let salt_array = [
             SaltValue::new(&[1u8; 32], &[1u8; 32]),
             SaltValue::new(&[2u8; 32], &[1u8; 32]),
@@ -953,7 +941,7 @@ mod tests {
         let slot_id_vec: Vec<SlotId> = salt_array
             .iter()
             .map(|v| {
-                let hashed_key = pk_hasher::hashed_key(v.key(), 0);
+                let hashed_key = hasher::hash_with_nonce(v.key(), 0);
                 state
                     .upsert(
                         BUCKET_ID,
@@ -992,25 +980,41 @@ mod tests {
     }
 
     #[test]
-    fn test_hash() {
-        // tested data.
-        let data1 = b"hello";
-        let data2 = b"world";
-        let data3 = b"hash test";
-        // set related hash value(generated by ahash fallback algorithm).
-        let hash1 = 1027176506268606463;
-        let hash2 = 2337896903564117184;
-        let hash3 = 2116618212096523432;
+    fn state_update_in_same_bucket() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
 
-        // check the hash value
-        assert_eq!(hash1, pk_hasher::hash(data1));
-        assert_eq!(hash2, pk_hasher::hash(data2));
-        assert_eq!(hash3, pk_hasher::hash(data3));
+        // Use shared test keys that all hash to the same bucket
+        let keys = hasher::tests::get_same_bucket_test_keys();
+        let num_keys = keys.len() as u64;
+        let bucket_id = hasher::bucket_id(&keys[0]);
+        let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            keys.into_iter().map(|x| (x.clone(), Some(x))).collect();
+        let state_updates = state.update(&kvs).unwrap();
+
+        let meta_key = bucket_metadata_key(bucket_id);
+        assert!(
+            state_updates.data.contains_key(&meta_key),
+            "State updates should contain the meta"
+        );
+        let new_meta = BucketMeta {
+            capacity: 512,
+            used: Some(num_keys),
+            nonce: 0,
+        };
+        assert_eq!(
+            state_updates.data.get(&meta_key).unwrap(),
+            (&(Some(BucketMeta::default().into()), Some(new_meta.into()))),
+            "State updates should contain the meta key with default value"
+        );
     }
 
     #[test]
     fn extension_rehash() {
-        let old_meta = BucketMeta::default();
+        let old_meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
         let new_meta = BucketMeta {
             capacity: 2 * old_meta.capacity,
             ..old_meta
@@ -1022,6 +1026,7 @@ mod tests {
     fn contraction_rehash() {
         let old_meta = BucketMeta {
             capacity: 512,
+            used: Some(0),
             ..BucketMeta::default()
         };
         let new_meta = BucketMeta {
@@ -1031,8 +1036,9 @@ mod tests {
         check_rehash(old_meta, new_meta, 200);
     }
 
-    fn check_rehash(mut old_meta: BucketMeta, mut new_meta: BucketMeta, l: usize) {
+    fn check_rehash(old_meta: BucketMeta, mut new_meta: BucketMeta, l: usize) {
         let store = MemStore::new();
+        let mut meta1 = old_meta.clone();
         let mut rehash_state = EphemeralSaltState::new(&store);
         let mut rehash_updates = StateUpdates::default();
 
@@ -1049,7 +1055,7 @@ mod tests {
             rehash_state
                 .upsert(
                     BUCKET_ID,
-                    &mut old_meta,
+                    &mut meta1,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
                     &mut rehash_updates,
@@ -1076,7 +1082,7 @@ mod tests {
             rehash_state
                 .upsert(
                     BUCKET_ID,
-                    &mut old_meta,
+                    &mut meta1,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
                     &mut rehash_updates,
@@ -1096,12 +1102,7 @@ mod tests {
         // delete some kvs to state
         for i in l / 2 - l / 8 - 1..l / 2 + l / 8 {
             rehash_state
-                .delete(
-                    BUCKET_ID,
-                    &mut old_meta,
-                    kvs.0[i].clone(),
-                    &mut rehash_updates,
-                )
+                .delete(BUCKET_ID, &mut meta1, kvs.0[i].clone(), &mut rehash_updates)
                 .unwrap();
             cmp_state
                 .delete(BUCKET_ID, &mut cmp_meta, kvs.0[i].clone(), &mut cmp_updates)
@@ -1121,12 +1122,57 @@ mod tests {
         }
 
         // Verify the rehashing results after writing to store
-        store.update_state(rehash_updates);
+        store.update_state(rehash_updates.clone());
         let mut state = EphemeralSaltState::new(&store);
         for i in 0..kvs.0.len() {
             let kv1 = cmp_state.find(BUCKET_ID, &new_meta, &kvs.0[i]).unwrap();
             let kv2 = state.find(BUCKET_ID, &new_meta, &kvs.0[i]).unwrap();
             assert_eq!(kv1, kv2);
         }
+        //check changed meta in state updates
+        let meta_key = bucket_metadata_key(BUCKET_ID);
+        assert!(
+            rehash_updates.data.contains_key(&meta_key),
+            "rehash_updates should contain the meta key"
+        );
+        assert_eq!(
+            rehash_updates.data.get(&meta_key).unwrap(),
+            &(Some(old_meta.into()), Some(new_meta.into())),
+            "rehash_updates should contain the old and new meta"
+        );
+    }
+
+    #[test]
+    fn test_cached_metadata_bug() {
+        // This test exposes the bug where metadata retrieved from store
+        // has used=None after deserialization, causing a panic in upsert/delete.
+        // The correct behavior should be successful updates without panics.
+
+        let store = MemStore::new();
+
+        // Use pre-computed key that maps to a specific bucket
+        let key = hasher::tests::get_same_bucket_test_keys()[0].clone();
+        let value = Some(b"value_1".to_vec());
+        let bucket_id = hasher::bucket_id(&key);
+
+        // Manually set non-default metadata for this bucket to ensure it gets stored
+        let non_default_meta = BucketMeta {
+            nonce: 1, // Make it non-default so it gets stored
+            capacity: 256,
+            used: Some(0),
+        };
+        let meta_key = bucket_metadata_key(bucket_id);
+        let meta_updates = StateUpdates {
+            data: [(meta_key, (None, Some(SaltValue::from(non_default_meta))))].into(),
+        };
+        store.update_state(meta_updates);
+
+        // Now create state and do an update - this should read the non-default metadata
+        // from store, hit line 128 where v.try_into() sets used=None, then panic in upsert
+        let mut state = EphemeralSaltState::new(&store);
+        let kvs = vec![(&key, &value)];
+        let _updates = state
+            .update(kvs)
+            .expect("Update should succeed without panic");
     }
 }

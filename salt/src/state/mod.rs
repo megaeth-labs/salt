@@ -34,14 +34,14 @@
 //! let mut state = EphemeralSaltState::new(&store);
 //!
 //! // Read individual values by plain key
-//! let balance = state.get_raw(b"account_address_1").unwrap();
+//! let balance = state.plain_value(b"account_address_1").unwrap();
 //! assert_eq!(balance, Some(b"balance_100_eth".to_vec()));
 //!
-//! let storage_val = state.get_raw(b"storage_slot_key").unwrap();
+//! let storage_val = state.plain_value(b"storage_slot_key").unwrap();
 //! assert_eq!(storage_val, Some(b"storage_value_data".to_vec()));
 //!
 //! // Check for non-existent key
-//! let missing = state.get_raw(b"non_existent_key").unwrap();
+//! let missing = state.plain_value(b"non_existent_key").unwrap();
 //! assert_eq!(missing, None);
 //! ```
 //!
@@ -69,7 +69,7 @@
 //!
 //! // Read bucket metadata
 //! let meta = store.meta(bucket_id).unwrap();
-//! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used);
+//! println!("Bucket capacity: {}, used slots: {}", meta.capacity, meta.used.unwrap_or(0));
 //!
 //! // Read range of entries from a bucket
 //! let entries = store.entries(bucket_id, 0..=100).unwrap();
@@ -106,8 +106,7 @@
 //! store.update_state(state_updates);
 //! ```
 
+pub mod hasher;
 #[allow(clippy::module_inception)]
 pub mod state;
 pub mod updates;
-
-pub use state::pk_hasher;
