@@ -526,8 +526,7 @@ mod tests {
     };
     use rand::Rng;
 
-    const KEYS_NUM: usize = 3 * MIN_BUCKET_SIZE - 1;
-    const BUCKET_ID: BucketId = NUM_META_BUCKETS as BucketId + 1;
+    const TEST_BUCKET: BucketId = NUM_META_BUCKETS as BucketId + 1;
 
     // FIXME: where are the unit tests that exercise SHI hashtable and SHI hashtable only? CRUD + resize, etc.
 
@@ -588,7 +587,7 @@ mod tests {
 
     #[test]
     fn insert_with_diff_order() {
-        let (keys, vals) = create_random_kvs(KEYS_NUM);
+        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
         let mut meta = BucketMeta {
             used: Some(0),
@@ -600,7 +599,7 @@ mod tests {
         for i in 0..keys.len() {
             state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut meta,
                     keys[i].clone(),
                     vals[i].clone(),
@@ -624,7 +623,7 @@ mod tests {
             (0..rand_keys.len()).for_each(|i| {
                 cmp_state
                     .shi_upsert(
-                        BUCKET_ID,
+                        TEST_BUCKET,
                         &mut meta,
                         rand_keys[i].clone(),
                         rand_vals[i].clone(),
@@ -634,7 +633,7 @@ mod tests {
             });
 
             assert!(
-                is_bucket_eq(BUCKET_ID, &mut state, &mut cmp_state),
+                is_bucket_eq(TEST_BUCKET, &mut state, &mut cmp_state),
                 "The two tables should be equal"
             );
         }
@@ -643,7 +642,7 @@ mod tests {
     #[test]
     fn delete_with_diff_order() {
         let mut rng = rand::thread_rng();
-        let (keys, vals) = create_random_kvs(KEYS_NUM);
+        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
@@ -656,7 +655,7 @@ mod tests {
         for i in 0..keys.len() {
             state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut meta,
                     keys[i].clone(),
                     vals[i].clone(),
@@ -673,7 +672,7 @@ mod tests {
         let del_num: usize = rng.gen_range(0..keys.len());
         for key in rand_keys.iter().take(del_num) {
             state
-                .shi_delete(BUCKET_ID, &mut meta, key.clone(), &mut out_updates)
+                .shi_delete(TEST_BUCKET, &mut meta, key.clone(), &mut out_updates)
                 .unwrap();
         }
 
@@ -686,7 +685,7 @@ mod tests {
         for j in del_num..rand_keys.len() {
             cmp_state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut meta,
                     rand_keys[j].clone(),
                     rand_vals[j].clone(),
@@ -695,7 +694,7 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            is_bucket_eq(BUCKET_ID, &mut state, &mut cmp_state),
+            is_bucket_eq(TEST_BUCKET, &mut state, &mut cmp_state),
             "The two tables should be equal"
         );
     }
@@ -705,7 +704,7 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let salt_val = Some(SaltValue::new(&[1; 32], &[2; 32]));
-        let salt_id = (BUCKET_ID, 1).into();
+        let salt_id = (TEST_BUCKET, 1).into();
 
         assert_eq!(
             state.value(salt_id).unwrap(),
@@ -727,7 +726,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
         let salt_val = Some(SaltValue::new(&[1; 32], &[2; 32]));
-        let salt_id = (BUCKET_ID, 1).into();
+        let salt_id = (TEST_BUCKET, 1).into();
         state.update_value(&mut out_updates, salt_id, None, salt_val.clone());
 
         assert_eq!(
@@ -756,13 +755,13 @@ mod tests {
         // Calculate the initial slot_id of the key
         let hashed_key = hasher::hash_with_nonce(salt_val1.key(), 0);
         let slot_id = probe(hashed_key, 0, meta.capacity);
-        let salt_id = (BUCKET_ID, slot_id).into();
+        let salt_id = (TEST_BUCKET, slot_id).into();
 
         // Insert the key-value pair into the position of slot_id
         state.cache.insert(salt_id, Some(salt_val1.clone()));
 
         // Find key1 in the state
-        let find_slot = state.shi_find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id, salt_val1.clone()),
@@ -779,7 +778,7 @@ mod tests {
         state
             .cache
             .insert(SaltKey(salt_id.0 + 2), Some(salt_val1.clone()));
-        let find_slot = state.shi_find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id + 2, salt_val1.clone()),
@@ -789,14 +788,14 @@ mod tests {
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), None,
         // , (key1_slot_id + 2, (key1, val1))...], and key2 > key1
         state.cache.insert(SaltKey(salt_id.0 + 1), None);
-        let find_slot = state.shi_find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
 
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), (key1_slot_id + 1,
         // (key4, val4)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key4 < key1
         let salt_val4 = SaltValue::new(&[0; 32], &[0; 32]);
         state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
-        let find_slot = state.shi_find(BUCKET_ID, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
     }
 
@@ -822,7 +821,7 @@ mod tests {
         // Create a table 0 with entries like [...(slot_id_vec[0], (key_array[0], val)),
         // (slot_id_vec[0] + 1, (key_array[1], val)), (slot_id_vec[0] + 2, (key_array[2],
         // val))...]
-        let salt_id = (BUCKET_ID, slot_id_vec[0]).into();
+        let salt_id = (TEST_BUCKET, slot_id_vec[0]).into();
         state.cache.insert(salt_id, Some(salt_array[0].clone()));
         state
             .cache
@@ -833,7 +832,7 @@ mod tests {
 
         // Find the next suitable slot for the position slot_id_vec[0]
         let rs = state
-            .shi_next(BUCKET_ID, slot_id_vec[0], 0, MIN_BUCKET_SIZE as u64)
+            .shi_next(TEST_BUCKET, slot_id_vec[0], 0, MIN_BUCKET_SIZE as u64)
             .unwrap();
 
         if slot_id_vec[1] <= slot_id_vec[0] || slot_id_vec[1] > slot_id_vec[0] + 1 {
@@ -847,7 +846,7 @@ mod tests {
         // Find the next suitable slot for the position slot_id_vec[0] - 1
         if slot_id_vec[0] > 1 {
             let rs = state
-                .shi_next(BUCKET_ID, slot_id_vec[0] - 1, 0, MIN_BUCKET_SIZE as u64)
+                .shi_next(TEST_BUCKET, slot_id_vec[0] - 1, 0, MIN_BUCKET_SIZE as u64)
                 .unwrap();
             if slot_id_vec[1] < slot_id_vec[0] || slot_id_vec[1] > slot_id_vec[0] + 1 {
                 assert_eq!(rs.unwrap(), (slot_id_vec[0] + 1, salt_array[1].clone()));
@@ -860,7 +859,7 @@ mod tests {
 
         // Find the next suitable slot for the position slot_id_vec[0] + 1
         let rs = state
-            .shi_next(BUCKET_ID, slot_id_vec[0] + 1, 0, MIN_BUCKET_SIZE as u64)
+            .shi_next(TEST_BUCKET, slot_id_vec[0] + 1, 0, MIN_BUCKET_SIZE as u64)
             .unwrap();
         if slot_id_vec[2] <= slot_id_vec[0] + 1 || slot_id_vec[2] > slot_id_vec[0] + 2 {
             assert_eq!(rs.unwrap(), (slot_id_vec[0] + 2, salt_array[2].clone()));
@@ -870,7 +869,7 @@ mod tests {
 
         // Find the next suitable slot for the position slot_id_vec[0] + 2
         let rs = state
-            .shi_next(BUCKET_ID, slot_id_vec[0] + 2, 0, MIN_BUCKET_SIZE as u64)
+            .shi_next(TEST_BUCKET, slot_id_vec[0] + 2, 0, MIN_BUCKET_SIZE as u64)
             .unwrap();
         assert_eq!(rs, None);
     }
@@ -899,7 +898,7 @@ mod tests {
                 let hashed_key = hasher::hash_with_nonce(v.key(), 0);
                 state
                     .shi_upsert(
-                        BUCKET_ID,
+                        TEST_BUCKET,
                         &mut meta,
                         v.key().to_vec(),
                         v.value().to_vec(),
@@ -911,7 +910,7 @@ mod tests {
             .collect();
 
         slot_id_vec.iter().enumerate().for_each(|(i, slot_id)| {
-            let salt_id = (BUCKET_ID, *slot_id).into();
+            let salt_id = (TEST_BUCKET, *slot_id).into();
             let slot = state.value(salt_id).unwrap();
             assert_eq!(
                 slot.unwrap(),
@@ -923,12 +922,12 @@ mod tests {
         // Iterate through key_array and delete the corresponding key
         for v in &salt_array {
             state
-                .shi_delete(BUCKET_ID, &mut meta, v.key().to_vec(), &mut out_updates)
+                .shi_delete(TEST_BUCKET, &mut meta, v.key().to_vec(), &mut out_updates)
                 .unwrap();
         }
 
         for slot_id in &slot_id_vec {
-            let salt_id = (BUCKET_ID, *slot_id).into();
+            let salt_id = (TEST_BUCKET, *slot_id).into();
             let slot = state.value(salt_id).unwrap();
             assert_eq!(slot, None, "after delete slot_id: {slot_id} should be None");
         }
@@ -1009,7 +1008,7 @@ mod tests {
         for i in 0..kvs.0.len() {
             rehash_state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut meta1,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
@@ -1022,7 +1021,7 @@ mod tests {
             }
             cmp_state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut cmp_meta,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
@@ -1036,7 +1035,7 @@ mod tests {
             kvs.1[i] = [i as u8; 32].into();
             rehash_state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut meta1,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
@@ -1045,7 +1044,7 @@ mod tests {
                 .unwrap();
             cmp_state
                 .shi_upsert(
-                    BUCKET_ID,
+                    TEST_BUCKET,
                     &mut cmp_meta,
                     kvs.0[i].clone(),
                     kvs.1[i].clone(),
@@ -1057,23 +1056,35 @@ mod tests {
         // delete some kvs to state
         for i in l / 2 - l / 8 - 1..l / 2 + l / 8 {
             rehash_state
-                .shi_delete(BUCKET_ID, &mut meta1, kvs.0[i].clone(), &mut rehash_updates)
+                .shi_delete(
+                    TEST_BUCKET,
+                    &mut meta1,
+                    kvs.0[i].clone(),
+                    &mut rehash_updates,
+                )
                 .unwrap();
             cmp_state
-                .shi_delete(BUCKET_ID, &mut cmp_meta, kvs.0[i].clone(), &mut cmp_updates)
+                .shi_delete(
+                    TEST_BUCKET,
+                    &mut cmp_meta,
+                    kvs.0[i].clone(),
+                    &mut cmp_updates,
+                )
                 .unwrap();
         }
 
         // state has insert, update and delete operation, rehash state
         rehash_state
-            .shi_rehash(BUCKET_ID, &old_meta, &mut new_meta, &mut rehash_updates)
+            .shi_rehash(TEST_BUCKET, &old_meta, &mut new_meta, &mut rehash_updates)
             .unwrap();
 
         // Verify the rehashing results
         for i in 0..kvs.0.len() {
-            let kv1 = cmp_state.shi_find(BUCKET_ID, &cmp_meta, &kvs.0[i]).unwrap();
+            let kv1 = cmp_state
+                .shi_find(TEST_BUCKET, &cmp_meta, &kvs.0[i])
+                .unwrap();
             let kv2 = rehash_state
-                .shi_find(BUCKET_ID, &new_meta, &kvs.0[i])
+                .shi_find(TEST_BUCKET, &new_meta, &kvs.0[i])
                 .unwrap();
             assert_eq!(kv1, kv2);
         }
@@ -1082,12 +1093,14 @@ mod tests {
         store.update_state(rehash_updates.clone());
         let mut state = EphemeralSaltState::new(&store);
         for i in 0..kvs.0.len() {
-            let kv1 = cmp_state.shi_find(BUCKET_ID, &new_meta, &kvs.0[i]).unwrap();
-            let kv2 = state.shi_find(BUCKET_ID, &new_meta, &kvs.0[i]).unwrap();
+            let kv1 = cmp_state
+                .shi_find(TEST_BUCKET, &new_meta, &kvs.0[i])
+                .unwrap();
+            let kv2 = state.shi_find(TEST_BUCKET, &new_meta, &kvs.0[i]).unwrap();
             assert_eq!(kv1, kv2);
         }
         //check changed meta in state updates
-        let meta_key = bucket_metadata_key(BUCKET_ID);
+        let meta_key = bucket_metadata_key(TEST_BUCKET);
         assert!(
             rehash_updates.data.contains_key(&meta_key),
             "rehash_updates should contain the meta key"
