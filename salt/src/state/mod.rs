@@ -106,8 +106,7 @@
 //! store.update_state(state_updates);
 //! ```
 
+pub mod hasher;
 #[allow(clippy::module_inception)]
 pub mod state;
 pub mod updates;
-
-pub use state::pk_hasher;

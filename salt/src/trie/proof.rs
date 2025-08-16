@@ -7,7 +7,10 @@
 use crate::{
     constant::{NUM_META_BUCKETS, TRIE_WIDTH_BITS},
     proof::{prover, ProofError, SaltProof},
-    state::state::{pk_hasher, probe, EphemeralSaltState},
+    state::{
+        hasher,
+        state::{probe, EphemeralSaltState},
+    },
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -62,7 +65,7 @@ where
         let mut state = EphemeralSaltState::new(state_reader);
 
         // Calculate which bucket this key belongs to using the hash function
-        let bucket_id = pk_hasher::bucket_id(key_buf);
+        let bucket_id = hasher::bucket_id(key_buf);
 
         // Retrieve the bucket's metadata (capacity, nonce, etc.)
         let meta = state_reader
@@ -99,8 +102,11 @@ where
 
                 // Calculate the optimal slot where this key would be inserted
                 // This is the starting point of Salt's linear probing algorithm
-                let optimal_slot_id =
-                    probe(pk_hasher::hashed_key(key_buf, meta.nonce), 0, meta.capacity);
+                let optimal_slot_id = probe(
+                    hasher::hash_with_nonce(key_buf, meta.nonce),
+                    0,
+                    meta.capacity,
+                );
 
                 // Determine the final slot where the key would be inserted
                 // This logic handles bucket capacity wraparound for linear probing
@@ -267,7 +273,7 @@ impl PlainKeysProof {
                 // This is more complex as we need to recreate the insertion process
                 PlainKeyStatus::NotExisted(salt_key) => {
                     // Pre-calculate bucket_id to avoid repeated computation
-                    let bucket_id = pk_hasher::bucket_id(pkey);
+                    let bucket_id = hasher::bucket_id(pkey);
 
                     // Get the bucket metadata from the proof
                     let meta = self.metas.get(&bucket_id).copied().unwrap_or_default();
@@ -295,7 +301,7 @@ impl PlainKeysProof {
 
                     // Optimize: Calculate target slot with pre-computed values
                     let optimal_slot_id =
-                        probe(pk_hasher::hashed_key(pkey, meta.nonce), 0, meta.capacity);
+                        probe(hasher::hash_with_nonce(pkey, meta.nonce), 0, meta.capacity);
                     let cache_len = cache.len() as u64;
 
                     let expected_target_key = if optimal_slot_id + cache_len > meta.capacity {

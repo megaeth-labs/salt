@@ -5,10 +5,7 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
-pub use state::{
-    state::{pk_hasher, EphemeralSaltState},
-    updates::StateUpdates,
-};
+pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
     proof::PlainKeysProof,
