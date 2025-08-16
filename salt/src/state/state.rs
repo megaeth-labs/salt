@@ -185,13 +185,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     self.shi_upsert(
                         bucket_id,
                         &mut meta,
-                        key_bytes.clone(),
-                        value_bytes.clone(),
+                        key_bytes.as_slice(),
+                        value_bytes.as_slice(),
                         &mut state_updates,
                     )?;
                 }
                 None => {
-                    self.shi_delete(bucket_id, &mut meta, key_bytes.clone(), &mut state_updates)?
+                    self.shi_delete(bucket_id, &mut meta, key_bytes.as_slice(), &mut state_updates)?
                 }
             }
         }
@@ -240,10 +240,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         &mut self,
         bucket_id: BucketId,
         meta: &mut BucketMeta,
-        mut pending_key: Vec<u8>,
-        mut pending_value: Vec<u8>,
+        pending_key: &[u8],
+        pending_value: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
+        let mut pending_key = pending_key.to_vec();
+        let mut pending_value = pending_value.to_vec();
         let hashed_key = hasher::hash_with_nonce(&pending_key, meta.nonce);
 
         // Explores all slots until a suitable one is found. If no suitable slot is found,
@@ -336,10 +338,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         &mut self,
         bucket_id: BucketId,
         meta: &mut BucketMeta,
-        key: Vec<u8>,
+        key: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        let find_slot = self.shi_find(bucket_id, meta, &key)?;
+        let find_slot = self.shi_find(bucket_id, meta, key)?;
 
         if let Some((slot_id, slot_val)) = find_slot {
             let old_used = meta
@@ -395,7 +397,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// nonce).
     fn shi_rehash(
         &mut self,
-        bucket_id: u32,
+        bucket_id: BucketId,
         old_meta: &BucketMeta,
         new_meta: &mut BucketMeta,
         out_updates: &mut StateUpdates,
@@ -455,8 +457,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             self.shi_upsert(
                 bucket_id,
                 new_meta,
-                v.key().to_vec(),
-                v.value().to_vec(),
+                v.key(),
+                v.value(),
                 out_updates,
             )
         })?;
@@ -675,8 +677,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut meta,
-                    keys[i].clone(),
-                    vals[i].clone(),
+                    &keys[i],
+                    &vals[i],
                     &mut out_updates,
                 )
                 .unwrap();
@@ -699,8 +701,8 @@ mod tests {
                     .shi_upsert(
                         TEST_BUCKET,
                         &mut meta,
-                        rand_keys[i].clone(),
-                        rand_vals[i].clone(),
+                        &rand_keys[i],
+                        &rand_vals[i],
                         &mut out_updates,
                     )
                     .unwrap();
@@ -731,8 +733,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut meta,
-                    keys[i].clone(),
-                    vals[i].clone(),
+                    &keys[i],
+                    &vals[i],
                     &mut out_updates,
                 )
                 .unwrap();
@@ -746,7 +748,7 @@ mod tests {
         let del_num: usize = rng.gen_range(0..keys.len());
         for key in rand_keys.iter().take(del_num) {
             state
-                .shi_delete(TEST_BUCKET, &mut meta, key.clone(), &mut out_updates)
+                .shi_delete(TEST_BUCKET, &mut meta, key, &mut out_updates)
                 .unwrap();
         }
 
@@ -761,8 +763,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut meta,
-                    rand_keys[j].clone(),
-                    rand_vals[j].clone(),
+                    &rand_keys[j],
+                    &rand_vals[j],
                     &mut out_updates,
                 )
                 .unwrap();
@@ -974,8 +976,8 @@ mod tests {
                     .shi_upsert(
                         TEST_BUCKET,
                         &mut meta,
-                        v.key().to_vec(),
-                        v.value().to_vec(),
+                        v.key(),
+                        v.value(),
                         &mut out_updates,
                     )
                     .unwrap();
@@ -996,7 +998,7 @@ mod tests {
         // Iterate through key_array and delete the corresponding key
         for v in &salt_array {
             state
-                .shi_delete(TEST_BUCKET, &mut meta, v.key().to_vec(), &mut out_updates)
+                .shi_delete(TEST_BUCKET, &mut meta, v.key(), &mut out_updates)
                 .unwrap();
         }
 
@@ -1084,8 +1086,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut meta1,
-                    kvs.0[i].clone(),
-                    kvs.1[i].clone(),
+                    &kvs.0[i],
+                    &kvs.1[i],
                     &mut rehash_updates,
                 )
                 .unwrap();
@@ -1097,8 +1099,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut cmp_meta,
-                    kvs.0[i].clone(),
-                    kvs.1[i].clone(),
+                    &kvs.0[i],
+                    &kvs.1[i],
                     &mut cmp_updates,
                 )
                 .unwrap();
@@ -1111,8 +1113,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut meta1,
-                    kvs.0[i].clone(),
-                    kvs.1[i].clone(),
+                    &kvs.0[i],
+                    &kvs.1[i],
                     &mut rehash_updates,
                 )
                 .unwrap();
@@ -1120,8 +1122,8 @@ mod tests {
                 .shi_upsert(
                     TEST_BUCKET,
                     &mut cmp_meta,
-                    kvs.0[i].clone(),
-                    kvs.1[i].clone(),
+                    &kvs.0[i],
+                    &kvs.1[i],
                     &mut cmp_updates,
                 )
                 .unwrap();
@@ -1133,7 +1135,7 @@ mod tests {
                 .shi_delete(
                     TEST_BUCKET,
                     &mut meta1,
-                    kvs.0[i].clone(),
+                    &kvs.0[i],
                     &mut rehash_updates,
                 )
                 .unwrap();
@@ -1141,7 +1143,7 @@ mod tests {
                 .shi_delete(
                     TEST_BUCKET,
                     &mut cmp_meta,
-                    kvs.0[i].clone(),
+                    &kvs.0[i],
                     &mut cmp_updates,
                 )
                 .unwrap();
