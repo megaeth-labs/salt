@@ -51,6 +51,9 @@ pub const BUCKET_SLOT_BITS: usize = 40;
 /// Mask of the slot ID in a bucket. The slot ID is the lower 40 bits of the `SaltKey`.
 pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
 
+pub const BUCKET_RESIZE_LOAD_FACTOR_PCT: u64 = 80;
+pub const BUCKET_RESIZE_MULTIPLIER: u64 = 2;
+
 /// The degree of the polynomial used in the IPA proof.
 pub const POLY_DEGREE: usize = 256;
 /// Macro to convert a 128-character hex string into a [u8; 64] array at compile time

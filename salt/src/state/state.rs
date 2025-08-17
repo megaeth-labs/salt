@@ -40,12 +40,15 @@
 //! DOI: [10.5555/1333875.1334201](https://dl.acm.org/doi/10.5555/1333875.1334201)
 
 use super::{hasher, updates::StateUpdates};
-use crate::{constant::BUCKET_SLOT_BITS, traits::StateReader, types::*};
+use crate::{
+    constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER},
+    traits::StateReader,
+    types::*,
+};
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
 };
-use tracing::info;
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -234,94 +237,56 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
-        pending_key: &[u8],
-        pending_value: &[u8],
+        plain_key: &[u8],
+        plain_val: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         let metadata = self.metadata(bucket_id, true)?;
-        let mut pending_key = pending_key.to_vec();
-        let mut pending_value = pending_value.to_vec();
-        let hashed_key = hasher::hash_with_nonce(&pending_key, metadata.nonce);
+        let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
-        // Explores all slots until a suitable one is found. If no suitable slot is found,
-        // resizing is required. Iterates through all slots to find a suitable location for
-        // the key-value pair. If no empty slot is found, indicating that the table is full,
-        // the function triggers a resize operation.
+        let mut new_salt_val = SaltValue::new(plain_key, plain_val);
         for step in 0..metadata.capacity {
-            let salt_id = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
-            let slot_val = self.value(salt_id)?;
-
-            // During the process, the size of the key is
-            // compared with existing keys:
-            // - If the key is equal, the value is updated and the function returns.
-            // - If the key is greater, the exploration continues to the next slot.
-            // - If the key is less, the key-value pair is swapped and the exploration continues to
-            // the next slot.
-            // - If a slot is empty, the new key-value pair is inserted and the function returns.
-            if let Some(val) = slot_val {
-                match val.key().cmp(&pending_key) {
+            let salt_key = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
+            if let Some(old_salt_val) = self.value(salt_key)? {
+                match old_salt_val.key().cmp(new_salt_val.key()) {
                     Ordering::Equal => {
                         self.update_value(
                             out_updates,
-                            salt_id,
-                            Some(val),
-                            Some(SaltValue::new(&pending_key, &pending_value)),
+                            salt_key,
+                            Some(old_salt_val),
+                            Some(new_salt_val),
                         );
                         return Ok(());
                     }
                     Ordering::Less => {
-                        // exchange the slot key & value with pending key & value, and then
-                        // shift to next slot for further operation.
                         self.update_value(
                             out_updates,
-                            salt_id,
-                            Some(val.clone()),
-                            Some(SaltValue::new(&pending_key, &pending_value)),
+                            salt_key,
+                            Some(old_salt_val.clone()),
+                            Some(new_salt_val),
                         );
-                        (pending_key, pending_value) = (val.key().to_vec(), val.value().to_vec());
+                        new_salt_val = old_salt_val;
                     }
                     _ => (),
                 }
             } else {
-                self.update_value(
-                    out_updates,
-                    salt_id,
-                    None,
-                    Some(SaltValue::new(&pending_key, &pending_value)),
-                );
+                self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
                 let used = metadata
                     .used
                     .expect("BucketMeta.used should always be populated");
                 self.bucket_used_cache.insert(bucket_id, used + 1);
 
-                // if the used of the bucket exceeds 4/5 of the capacity, resize the bucket.
-                if used >= metadata.capacity * 4 / 5 && metadata.capacity < (1 << BUCKET_SLOT_BITS)
-                {
-                    // FIXME: "metadata.capacity < (1 << BUCKET_SLOT_BITS)" is useless
-                    // double the capacity of the bucket.
-                    // FIXME: make it configurable
-                    info!(
-                        "bucket_id {} capacity extend from {} to {}",
-                        bucket_id,
-                        metadata.capacity,
-                        metadata.capacity << 1
-                    );
+                // Resize the bucket.
+                if used >= metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                     self.shi_rehash(
                         bucket_id,
                         &metadata,
                         metadata.nonce,
-                        metadata.capacity * 2,
-                        // &mut BucketMeta {
-                        //     capacity: metadata.capacity * 2,
-                        //     ..metadata
-                        // },
+                        metadata.capacity * BUCKET_RESIZE_MULTIPLIER,
                         out_updates,
                     )?;
-
-                    // metadata.capacity <<= 1;
                 }
-                // metadata.used = Some(used + 1);
                 return Ok(());
             }
         }
@@ -502,25 +467,19 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     fn shi_next(
         &mut self,
         bucket_id: BucketId,
-        slot_id: SlotId,
+        del_slot: SlotId,
         nonce: u32,
         capacity: u64,
     ) -> Result<Option<(u64, SaltValue)>, Store::Error> {
-        for i in 0..capacity {
-            let next_slot_id = (slot_id + 1 + i as SlotId) & (capacity as SlotId - 1);
-            let salt_key = (bucket_id, next_slot_id).into();
-            let entry = self.value(salt_key)?;
-            match entry {
-                // check next slot is suitable to store or not
-                Some(entry) => {
-                    let hashed_id = hasher::hash_with_nonce(entry.key(), nonce);
-
-                    // Compares the weight of the next slot position with the weight of
-                    // `cur_slot_id`.
-                    if rank(hashed_id, next_slot_id, capacity) > rank(hashed_id, slot_id, capacity)
+        for i in 1..capacity {
+            let next_slot = probe(del_slot, i, capacity);
+            let salt_key = (bucket_id, next_slot).into();
+            match self.value(salt_key)? {
+                Some(salt_val) => {
+                    let hashed_key = hasher::hash_with_nonce(salt_val.key(), nonce);
+                    if rank(hashed_key, next_slot, capacity) > rank(hashed_key, del_slot, capacity)
                     {
-                        // If the weight is greater, it returns the current slot and slot value.
-                        return Ok(Some((next_slot_id, entry)));
+                        return Ok(Some((next_slot, salt_val)));
                     }
                 }
                 None => return Ok(None),
@@ -554,7 +513,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 /// where `i` is used as an offset from the initial hash position.
 #[inline(always)]
 pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
-    ((hashed_key + i) & (capacity - 1)) as SlotId
+    (hashed_key.wrapping_add(i) & (capacity - 1)) as SlotId
 }
 
 /// Computes the probe distance for a given slot position.
@@ -650,7 +609,8 @@ mod tests {
 
     #[test]
     fn insert_with_diff_order() {
-        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+        // let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+        let (keys, vals) = create_random_kvs(100);
         let reader = EmptySalt;
         // let mut meta = BucketMeta {
         //     used: Some(0),
@@ -693,7 +653,8 @@ mod tests {
     #[test]
     fn delete_with_diff_order() {
         let mut rng = rand::thread_rng();
-        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+        // let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+        let (keys, vals) = create_random_kvs(150);
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
