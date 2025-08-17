@@ -176,23 +176,23 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
     ) -> Result<StateUpdates, Store::Error> {
         let mut state_updates = StateUpdates::default();
-        for (key_bytes, value_bytes) in kvs {
-            let bucket_id = hasher::bucket_id(key_bytes);
-            let mut meta = self.metadata(bucket_id, true)?;
-            match value_bytes {
-                Some(value_bytes) => {
+        for (plain_key, plain_val) in kvs {
+            let bucket_id = hasher::bucket_id(plain_key);
+            let mut metadata = self.metadata(bucket_id, true)?;
+            match plain_val {
+                Some(plain_val) => {
                     self.shi_upsert(
                         bucket_id,
-                        &mut meta,
-                        key_bytes.as_slice(),
-                        value_bytes.as_slice(),
+                        &mut metadata,
+                        plain_key.as_slice(),
+                        plain_val.as_slice(),
                         &mut state_updates,
                     )?;
                 }
                 None => self.shi_delete(
                     bucket_id,
-                    &mut meta,
-                    key_bytes.as_slice(),
+                    &mut metadata,
+                    plain_key.as_slice(),
                     &mut state_updates,
                 )?,
             }
