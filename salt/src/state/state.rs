@@ -125,22 +125,21 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// * `Ok(None)` - If the key does not exist
     /// * `Err(error)` - If there was an error accessing the underlying storage
     pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
-        // Computes the `bucket_id` based on the `key`.
         let bucket_id = hasher::bucket_id(plain_key);
         let metadata = self.metadata(bucket_id, false)?;
+        let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
-        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
-        let hashed_id = hasher::hash_with_nonce(plain_key, metadata.nonce);
-
-        // Starts from the initial slot position and searches for the slot corresponding to the
-        // `key`.
         for step in 0..metadata.capacity {
-            let slot_id = probe(hashed_id, step, metadata.capacity);
-            if let Some(slot_val) = self.value((bucket_id, slot_id).into())? {
-                match slot_val.key().cmp(plain_key) {
+            let slot = probe(hashed_key, step, metadata.capacity);
+            // FIXME: too many memory copies on the read path currently
+            // 1. self.value() has two internal paths:
+            //    - Cache hit: 1 copy from cache
+            //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
+            // 2. salt_val.value().to_vec() copies the plain value bytes upon return
+            if let Some(salt_val) = self.value((bucket_id, slot).into())? {
+                match salt_val.key().cmp(plain_key) {
                     Ordering::Less => return Ok(None),
-                    // FIXME: no need to copy out the value using "to_vec()"; leave that decision to the caller!
-                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Equal => return Ok(Some(salt_val.value().to_vec())),
                     Ordering::Greater => (),
                 }
             } else {
@@ -155,11 +154,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// Always checks the cache first before querying the underlying store.
     pub fn value(&mut self, key: SaltKey) -> Result<Option<SaltValue>, Store::Error> {
         let value = match self.cache.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut().clone(),
-            Entry::Vacant(entry) => {
+            Entry::Occupied(cache_entry) => cache_entry.into_mut().clone(),
+            Entry::Vacant(cache_entry) => {
                 let value = self.store.value(key)?;
                 if self.cache_read {
-                    entry.insert(value.clone());
+                    cache_entry.insert(value.clone());
                 }
                 value
             }
@@ -190,9 +189,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         &mut state_updates,
                     )?;
                 }
-                None => {
-                    self.shi_delete(bucket_id, &mut meta, key_bytes.as_slice(), &mut state_updates)?
-                }
+                None => self.shi_delete(
+                    bucket_id,
+                    &mut meta,
+                    key_bytes.as_slice(),
+                    &mut state_updates,
+                )?,
             }
         }
         Ok(state_updates)
@@ -454,13 +456,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         // update the state with the new entry
         new_meta.used = Some(0);
         new_state.into_iter().try_for_each(|(_, v)| {
-            self.shi_upsert(
-                bucket_id,
-                new_meta,
-                v.key(),
-                v.value(),
-                out_updates,
-            )
+            self.shi_upsert(bucket_id, new_meta, v.key(), v.value(), out_updates)
         })?;
 
         // Add meta change to the updates
@@ -674,13 +670,7 @@ mod tests {
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
             state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut meta,
-                    &keys[i],
-                    &vals[i],
-                    &mut out_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &mut meta, &keys[i], &vals[i], &mut out_updates)
                 .unwrap();
         }
 
@@ -730,13 +720,7 @@ mod tests {
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
             state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut meta,
-                    &keys[i],
-                    &vals[i],
-                    &mut out_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &mut meta, &keys[i], &vals[i], &mut out_updates)
                 .unwrap();
         }
 
@@ -973,13 +957,7 @@ mod tests {
             .map(|v| {
                 let hashed_key = hasher::hash_with_nonce(v.key(), 0);
                 state
-                    .shi_upsert(
-                        TEST_BUCKET,
-                        &mut meta,
-                        v.key(),
-                        v.value(),
-                        &mut out_updates,
-                    )
+                    .shi_upsert(TEST_BUCKET, &mut meta, v.key(), v.value(), &mut out_updates)
                     .unwrap();
                 probe(hashed_key, 0, MIN_BUCKET_SIZE as u64)
             })
@@ -1132,20 +1110,10 @@ mod tests {
         // delete some kvs to state
         for i in l / 2 - l / 8 - 1..l / 2 + l / 8 {
             rehash_state
-                .shi_delete(
-                    TEST_BUCKET,
-                    &mut meta1,
-                    &kvs.0[i],
-                    &mut rehash_updates,
-                )
+                .shi_delete(TEST_BUCKET, &mut meta1, &kvs.0[i], &mut rehash_updates)
                 .unwrap();
             cmp_state
-                .shi_delete(
-                    TEST_BUCKET,
-                    &mut cmp_meta,
-                    &kvs.0[i],
-                    &mut cmp_updates,
-                )
+                .shi_delete(TEST_BUCKET, &mut cmp_meta, &kvs.0[i], &mut cmp_updates)
                 .unwrap();
         }
 
