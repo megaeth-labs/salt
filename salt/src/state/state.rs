@@ -382,18 +382,15 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         // Step 1: Extract all existing entries and clear the bucket
-        let old_bucket = (0..old_meta.capacity)
-            .filter_map(|slot| {
-                let salt_key = SaltKey::from((bucket_id, slot));
-                if let Ok(Some(salt_val)) = self.value(salt_key) {
-                    // Mark all non-empty slots as deleted in cache
-                    self.cache.insert(salt_key, None);
-                    Some((salt_key, salt_val))
-                } else {
-                    None
-                }
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut old_bucket = BTreeMap::new();
+        for slot in 0..old_meta.capacity {
+            let salt_key = SaltKey::from((bucket_id, slot));
+            if let Some(salt_val) = self.value(salt_key)? {
+                // Mark all non-empty slots as deleted in cache
+                self.cache.insert(salt_key, None);
+                old_bucket.insert(salt_key, salt_val);
+            }
+        }
 
         // Step 2: Convert to plain key-value pairs for reinsertion
         let plain_kv_pairs = old_bucket
@@ -418,12 +415,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
 
         // Step 4: Snapshot the new bucket layout after reinsertion
-        let new_bucket = (0..new_capacity)
-            .filter_map(|slot| {
-                let salt_key = SaltKey::from((bucket_id, slot));
-                self.value(salt_key).ok()?.map(|value| (salt_key, value))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut new_bucket = BTreeMap::new();
+        for slot in 0..new_capacity {
+            let salt_key = SaltKey::from((bucket_id, slot));
+            if let Some(salt_val) = self.value(salt_key)? {
+                new_bucket.insert(salt_key, salt_val);
+            }
+        }
 
         // Step 5: Record state changes by comparing slot-by-slot differences
         for slot in 0..old_meta.capacity.max(new_capacity) {
@@ -604,7 +602,11 @@ mod tests {
         table1: &mut EphemeralSaltState<'_, R1>,
         table2: &mut EphemeralSaltState<'_, R2>,
     ) -> bool {
-        for slot_id in 0..MIN_BUCKET_SIZE {
+        let meta1 = table1.metadata(bucket_id, false).unwrap();
+        let meta2 = table2.metadata(bucket_id, false).unwrap();
+        let max_capacity = meta1.capacity.max(meta2.capacity);
+
+        for slot_id in 0..max_capacity {
             let salt_id = (bucket_id, slot_id as SlotId).into();
             if table1.value(salt_id).unwrap() != table2.value(salt_id).unwrap() {
                 return false;
@@ -629,10 +631,6 @@ mod tests {
     fn insert_with_diff_order() {
         let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
-        // let mut meta = BucketMeta {
-        //     used: Some(0),
-        //     ..BucketMeta::default()
-        // };
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
         //Insert KEYS_NUM key-value pairs into table 0 of state
@@ -648,10 +646,6 @@ mod tests {
             let mut out_updates = StateUpdates::default();
             // Rearrange the order of keys and vals
             let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals.clone());
-            // let mut meta = BucketMeta {
-            //     used: Some(0),
-            //     ..BucketMeta::default()
-            // };
 
             // Insert the reordered keys and vals into table 0
             (0..rand_keys.len()).for_each(|i| {
@@ -669,20 +663,15 @@ mod tests {
 
     #[test]
     fn delete_with_diff_order() {
-        let mut rng = rand::thread_rng();
-        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+        let (keys, vals) = create_random_kvs(250); // Enough to trigger resize in both buckets
         let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
+        let mut state1 = EphemeralSaltState::new(&reader);
+        let mut out_updates1 = StateUpdates::default();
 
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
-            state
-                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates)
+            state1
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates1)
                 .unwrap();
         }
 
@@ -690,27 +679,28 @@ mod tests {
         let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals);
 
         let mut out_updates = StateUpdates::default();
-        //Randomly generate a number between 0 and keys.len(), then delete the first del_num keys
-        let del_num: usize = rng.gen_range(0..keys.len());
+        // Delete exactly 40 keys, leaving 210 keys for state2 to also trigger resize
+        let del_num: usize = 40;
+
         for key in rand_keys.iter().take(del_num) {
-            state
+            state1
                 .shi_delete(TEST_BUCKET, key, &mut out_updates)
                 .unwrap();
         }
 
         // Reinsert the key-value pairs from del_num to keys.len() into table 0 of cmp_state
         let reader = EmptySalt;
-        let mut cmp_state = EphemeralSaltState::new(&reader);
-        let mut out_updates = StateUpdates::default();
-        meta.used = Some(0);
+        let mut state2 = EphemeralSaltState::new(&reader);
+        let mut out_updates2 = StateUpdates::default();
 
         for j in del_num..rand_keys.len() {
-            cmp_state
-                .shi_upsert(TEST_BUCKET, &rand_keys[j], &rand_vals[j], &mut out_updates)
+            state2
+                .shi_upsert(TEST_BUCKET, &rand_keys[j], &rand_vals[j], &mut out_updates2)
                 .unwrap();
         }
+
         assert!(
-            is_bucket_eq(TEST_BUCKET, &mut state, &mut cmp_state),
+            is_bucket_eq(TEST_BUCKET, &mut state1, &mut state2),
             "The two tables should be equal"
         );
     }
