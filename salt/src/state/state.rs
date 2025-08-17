@@ -47,7 +47,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap},
 };
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
@@ -356,76 +356,71 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         old_meta: &BucketMeta,
         new_nonce: u32,
         new_capacity: u64,
-        // new_meta: &mut BucketMeta,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        // Merge the original bucket's data with the change records to create a new bucket state
-        // Clear the original bucket's data, then insert the updated data with the new metadata
-        // into the new state.
-        // The state's cache marks the original data as empty, allowing the state to treat the
-        // original data as deleted, while out_updates records this change process (Old, None)
-
-        // create a new state of the bucket with the updates, and clear entries from cache and
-        // out_updates
-        let mut old_data = vec![];
-        let mut new_state: HashMap<SaltKey, SaltValue> = self
-            .store
-            .entries(
-                SaltKey::from((bucket_id, 0))..=SaltKey::from((bucket_id, old_meta.capacity - 1)),
-            )?
-            .into_iter()
-            .filter_map(|(k, old_v)| {
-                // clear entries from cache
-                self.cache.remove(&k);
-                old_data.push((k, old_v.clone()));
-
-                // Update new_state based on the change records in out_updates
-                match out_updates.data.remove(&k) {
-                    Some((_, Some(new_v))) => Some((k, new_v)),
-                    Some((_, None)) => None,
-                    _ => Some((k, old_v)),
+        // Collect existing bucket entries and clear cache
+        let old_bucket = (0..old_meta.capacity)
+            .filter_map(|slot| {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                if let Ok(Some(salt_value)) = self.value(salt_key) {
+                    self.cache.insert(salt_key, None);
+                    Some((salt_key, salt_value))
+                } else {
+                    None
                 }
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
 
-        // After clear entries by old bucket state, clear new entries from the cache and
-        // out_updates, update these changes to new state.
-        self.cache.retain(|k, _| {
-            if k.bucket_id() == bucket_id {
-                if let Some((_, Some(new_v))) = out_updates.data.remove(k) {
-                    new_state.insert(*k, new_v);
+        // Extract plain key-value pairs
+        let plain_kv_pairs = old_bucket
+            .values()
+            .map(|salt_value| (salt_value.key().to_vec(), salt_value.value().to_vec()))
+            .collect::<BTreeMap<_, _>>();
+
+        // Re-insert key-value pairs in reverse order using simplified SHI algorithm
+        // Since we iterate in decreasing key order into an empty bucket, we can skip
+        // key comparisons and just find the first empty slot for each key
+        for (plain_key, plain_val) in plain_kv_pairs.iter().rev() {
+            let hashed_key = hasher::hash_with_nonce(plain_key, new_nonce);
+            let salt_value = SaltValue::new(plain_key, plain_val);
+
+            // Find first empty slot - no need for key comparison since bucket is being rebuilt
+            for step in 0..new_capacity {
+                let salt_key = (bucket_id, probe(hashed_key, step, new_capacity)).into();
+                if self.value(salt_key)?.is_none() {
+                    self.cache.insert(salt_key, Some(salt_value));
+                    break;
                 }
-                false
-            } else {
-                true
             }
-        });
-
-        // Updating the state cache's value to None is equivalent to clearing the bucket,
-        // so that during the next access, it can directly get None from the cache
-        for (k, old_v) in old_data {
-            self.cache.insert(k, None);
-            out_updates.data.insert(k, (Some(old_v), None));
         }
 
-        // update the state with the new entry
-        // new_meta.used = Some(0);
-        // FIXME: fix re-population later!
-        // new_state.into_iter().try_for_each(|(_, v)| {
-        //     self.shi_upsert(bucket_id, new_meta, v.key(), v.value(), out_updates)
-        // })?;
+        // Collect new bucket state
+        let new_bucket = (0..new_capacity)
+            .filter_map(|slot| {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                self.value(salt_key).ok()?.map(|value| (salt_key, value))
+            })
+            .collect::<BTreeMap<_, _>>();
 
-        // Add meta change to the updates
+        // Generate state updates by comparing old and new slots
+        for slot in 0..old_meta.capacity.max(new_capacity) {
+            let salt_key = SaltKey::from((bucket_id, slot));
+            let old_value = old_bucket.get(&salt_key);
+            let new_value = new_bucket.get(&salt_key);
+            out_updates.add(salt_key, old_value.cloned(), new_value.cloned());
+        }
+
+        // Update bucket metadata
         let new_metadata = BucketMeta {
             nonce: new_nonce,
             capacity: new_capacity,
-            used: None,
+            used: old_meta.used,
         };
         self.update_value(
             out_updates,
             bucket_metadata_key(bucket_id),
             Some((*old_meta).into()),
-            Some((new_metadata).into()),
+            Some(new_metadata.into()),
         );
 
         Ok(())
@@ -609,8 +604,7 @@ mod tests {
 
     #[test]
     fn insert_with_diff_order() {
-        // let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
-        let (keys, vals) = create_random_kvs(100);
+        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
         // let mut meta = BucketMeta {
         //     used: Some(0),
@@ -653,8 +647,7 @@ mod tests {
     #[test]
     fn delete_with_diff_order() {
         let mut rng = rand::thread_rng();
-        // let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
-        let (keys, vals) = create_random_kvs(150);
+        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
