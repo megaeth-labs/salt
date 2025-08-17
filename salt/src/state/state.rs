@@ -178,12 +178,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         let mut state_updates = StateUpdates::default();
         for (plain_key, plain_val) in kvs {
             let bucket_id = hasher::bucket_id(plain_key);
-            let mut metadata = self.metadata(bucket_id, true)?;
             match plain_val {
                 Some(plain_val) => {
                     self.shi_upsert(
                         bucket_id,
-                        &mut metadata,
                         plain_key.as_slice(),
                         plain_val.as_slice(),
                         &mut state_updates,
@@ -236,21 +234,21 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
-        meta: &mut BucketMeta,
         pending_key: &[u8],
         pending_value: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
+        let metadata = self.metadata(bucket_id, true)?;
         let mut pending_key = pending_key.to_vec();
         let mut pending_value = pending_value.to_vec();
-        let hashed_key = hasher::hash_with_nonce(&pending_key, meta.nonce);
+        let hashed_key = hasher::hash_with_nonce(&pending_key, metadata.nonce);
 
         // Explores all slots until a suitable one is found. If no suitable slot is found,
         // resizing is required. Iterates through all slots to find a suitable location for
         // the key-value pair. If no empty slot is found, indicating that the table is full,
         // the function triggers a resize operation.
-        for step in 0..meta.capacity {
-            let salt_id = (bucket_id, probe(hashed_key, step, meta.capacity)).into();
+        for step in 0..metadata.capacity {
+            let salt_id = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
             let slot_val = self.value(salt_id)?;
 
             // During the process, the size of the key is
@@ -292,38 +290,46 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     Some(SaltValue::new(&pending_key, &pending_value)),
                 );
 
-                let used = meta
+                let used = metadata
                     .used
                     .expect("BucketMeta.used should always be populated");
+                self.bucket_used_cache.insert(bucket_id, used + 1);
+
                 // if the used of the bucket exceeds 4/5 of the capacity, resize the bucket.
-                if used >= meta.capacity * 4 / 5 && meta.capacity < (1 << BUCKET_SLOT_BITS) {
+                if used >= metadata.capacity * 4 / 5 && metadata.capacity < (1 << BUCKET_SLOT_BITS)
+                {
+                    // FIXME: "metadata.capacity < (1 << BUCKET_SLOT_BITS)" is useless
                     // double the capacity of the bucket.
+                    // FIXME: make it configurable
                     info!(
                         "bucket_id {} capacity extend from {} to {}",
                         bucket_id,
-                        meta.capacity,
-                        meta.capacity << 1
+                        metadata.capacity,
+                        metadata.capacity << 1
                     );
                     self.shi_rehash(
                         bucket_id,
-                        meta,
-                        &mut BucketMeta {
-                            capacity: meta.capacity * 2,
-                            ..*meta
-                        },
+                        &metadata,
+                        metadata.nonce,
+                        metadata.capacity * 2,
+                        // &mut BucketMeta {
+                        //     capacity: metadata.capacity * 2,
+                        //     ..metadata
+                        // },
                         out_updates,
                     )?;
 
-                    meta.capacity <<= 1;
+                    // metadata.capacity <<= 1;
                 }
-                meta.used = Some(used + 1);
-                // Update the bucket usage cache
-                self.bucket_used_cache.insert(bucket_id, used + 1);
+                // metadata.used = Some(used + 1);
                 return Ok(());
             }
         }
 
-        unreachable!("bucket {} capacity {} too large", bucket_id, meta.capacity);
+        unreachable!(
+            "bucket {} capacity {} too large",
+            bucket_id, metadata.capacity
+        );
     }
 
     /// Deletes a plain key using the SHI hash table deletion algorithm.
@@ -383,7 +389,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         &mut self,
         bucket_id: BucketId,
         old_meta: &BucketMeta,
-        new_meta: &mut BucketMeta,
+        new_nonce: u32,
+        new_capacity: u64,
+        // new_meta: &mut BucketMeta,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         // Merge the original bucket's data with the change records to create a new bucket state
@@ -436,17 +444,23 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
 
         // update the state with the new entry
-        new_meta.used = Some(0);
-        new_state.into_iter().try_for_each(|(_, v)| {
-            self.shi_upsert(bucket_id, new_meta, v.key(), v.value(), out_updates)
-        })?;
+        // new_meta.used = Some(0);
+        // FIXME: fix re-population later!
+        // new_state.into_iter().try_for_each(|(_, v)| {
+        //     self.shi_upsert(bucket_id, new_meta, v.key(), v.value(), out_updates)
+        // })?;
 
         // Add meta change to the updates
+        let new_metadata = BucketMeta {
+            nonce: new_nonce,
+            capacity: new_capacity,
+            used: None,
+        };
         self.update_value(
             out_updates,
             bucket_metadata_key(bucket_id),
             Some((*old_meta).into()),
-            Some((*new_meta).into()),
+            Some((new_metadata).into()),
         );
 
         Ok(())
@@ -465,16 +479,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         plain_key: &[u8],
     ) -> Result<Option<(SlotId, SaltValue)>, Store::Error> {
         let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
-
-        // Search the key sequentially until we find it or are certain it doesn't exist
-        // (either the current slot is empty or the key it contains has a lower priority
-        // than the target key).
         for step in 0..capacity {
-            let slot_id = probe(hashed_key, step, capacity);
-            if let Some(entry) = self.value((bucket_id, slot_id).into())? {
-                match entry.key().cmp(plain_key) {
+            let slot = probe(hashed_key, step, capacity);
+            if let Some(salt_val) = self.value((bucket_id, slot).into())? {
+                match salt_val.key().cmp(plain_key) {
                     Ordering::Less => return Ok(None),
-                    Ordering::Equal => return Ok(Some((slot_id, entry))),
+                    Ordering::Equal => return Ok(Some((slot, salt_val))),
                     Ordering::Greater => (),
                 }
             } else {
@@ -531,8 +541,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         old_value: Option<SaltValue>,
         new_value: Option<SaltValue>,
     ) {
-        // we only record the change if the old value is different from the new value, unless there
-        // will be empty salt deltas.
         if old_value != new_value {
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
@@ -644,16 +652,16 @@ mod tests {
     fn insert_with_diff_order() {
         let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
         let reader = EmptySalt;
-        let mut meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
+        // let mut meta = BucketMeta {
+        //     used: Some(0),
+        //     ..BucketMeta::default()
+        // };
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
             state
-                .shi_upsert(TEST_BUCKET, &mut meta, &keys[i], &vals[i], &mut out_updates)
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates)
                 .unwrap();
         }
 
@@ -663,21 +671,15 @@ mod tests {
             let mut out_updates = StateUpdates::default();
             // Rearrange the order of keys and vals
             let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals.clone());
-            let mut meta = BucketMeta {
-                used: Some(0),
-                ..BucketMeta::default()
-            };
+            // let mut meta = BucketMeta {
+            //     used: Some(0),
+            //     ..BucketMeta::default()
+            // };
 
             // Insert the reordered keys and vals into table 0
             (0..rand_keys.len()).for_each(|i| {
                 cmp_state
-                    .shi_upsert(
-                        TEST_BUCKET,
-                        &mut meta,
-                        &rand_keys[i],
-                        &rand_vals[i],
-                        &mut out_updates,
-                    )
+                    .shi_upsert(TEST_BUCKET, &rand_keys[i], &rand_vals[i], &mut out_updates)
                     .unwrap();
             });
 
@@ -703,7 +705,7 @@ mod tests {
         //Insert KEYS_NUM key-value pairs into table 0 of state
         for i in 0..keys.len() {
             state
-                .shi_upsert(TEST_BUCKET, &mut meta, &keys[i], &vals[i], &mut out_updates)
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates)
                 .unwrap();
         }
 
@@ -727,13 +729,7 @@ mod tests {
 
         for j in del_num..rand_keys.len() {
             cmp_state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut meta,
-                    &rand_keys[j],
-                    &rand_vals[j],
-                    &mut out_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &rand_keys[j], &rand_vals[j], &mut out_updates)
                 .unwrap();
         }
         assert!(
@@ -804,7 +800,9 @@ mod tests {
         state.cache.insert(salt_id, Some(salt_val1.clone()));
 
         // Find key1 in the state
-        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
+        let find_slot = state
+            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
+            .unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id, salt_val1.clone()),
@@ -821,7 +819,9 @@ mod tests {
         state
             .cache
             .insert(SaltKey(salt_id.0 + 2), Some(salt_val1.clone()));
-        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
+        let find_slot = state
+            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
+            .unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id + 2, salt_val1.clone()),
@@ -831,14 +831,18 @@ mod tests {
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), None,
         // , (key1_slot_id + 2, (key1, val1))...], and key2 > key1
         state.cache.insert(SaltKey(salt_id.0 + 1), None);
-        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
+        let find_slot = state
+            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
+            .unwrap();
         assert_eq!(find_slot, None, "should be found None");
 
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), (key1_slot_id + 1,
         // (key4, val4)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key4 < key1
         let salt_val4 = SaltValue::new(&[0; 32], &[0; 32]);
         state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
-        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
+        let find_slot = state
+            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
+            .unwrap();
         assert_eq!(find_slot, None, "should be found None");
     }
 
@@ -922,10 +926,10 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        let mut meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
+        // let mut meta = BucketMeta {
+        //     used: Some(0),
+        //     ..BucketMeta::default()
+        // };
         let salt_array = [
             SaltValue::new(&[1u8; 32], &[1u8; 32]),
             SaltValue::new(&[2u8; 32], &[1u8; 32]),
@@ -940,7 +944,7 @@ mod tests {
             .map(|v| {
                 let hashed_key = hasher::hash_with_nonce(v.key(), 0);
                 state
-                    .shi_upsert(TEST_BUCKET, &mut meta, v.key(), v.value(), &mut out_updates)
+                    .shi_upsert(TEST_BUCKET, v.key(), v.value(), &mut out_updates)
                     .unwrap();
                 probe(hashed_key, 0, MIN_BUCKET_SIZE as u64)
             })
@@ -1027,15 +1031,15 @@ mod tests {
         check_rehash(old_meta, new_meta, 200);
     }
 
-    fn check_rehash(old_meta: BucketMeta, mut new_meta: BucketMeta, l: usize) {
+    fn check_rehash(old_meta: BucketMeta, new_meta: BucketMeta, l: usize) {
         let store = MemStore::new();
-        let mut meta1 = old_meta.clone();
+        // let mut meta1 = old_meta.clone();
         let mut rehash_state = EphemeralSaltState::new(&store);
         let mut rehash_updates = StateUpdates::default();
 
         let mut cmp_state = EphemeralSaltState::new(&EmptySalt);
         let mut cmp_updates = StateUpdates::default();
-        let mut cmp_meta = new_meta;
+        let cmp_meta = new_meta;
 
         let mut kvs = create_random_kvs(l);
 
@@ -1044,26 +1048,14 @@ mod tests {
         // and the second half of the data is in `out_updates`.
         for i in 0..kvs.0.len() {
             rehash_state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut meta1,
-                    &kvs.0[i],
-                    &kvs.1[i],
-                    &mut rehash_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut rehash_updates)
                 .unwrap();
             if i == l / 2 {
                 store.update_state(rehash_updates);
                 rehash_updates = StateUpdates::default();
             }
             cmp_state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut cmp_meta,
-                    &kvs.0[i],
-                    &kvs.1[i],
-                    &mut cmp_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut cmp_updates)
                 .unwrap();
         }
 
@@ -1071,22 +1063,10 @@ mod tests {
         for i in l / 2 - l / 4 - 1..l / 2 + l / 4 {
             kvs.1[i] = [i as u8; 32].into();
             rehash_state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut meta1,
-                    &kvs.0[i],
-                    &kvs.1[i],
-                    &mut rehash_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut rehash_updates)
                 .unwrap();
             cmp_state
-                .shi_upsert(
-                    TEST_BUCKET,
-                    &mut cmp_meta,
-                    &kvs.0[i],
-                    &kvs.1[i],
-                    &mut cmp_updates,
-                )
+                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut cmp_updates)
                 .unwrap();
         }
 
@@ -1102,7 +1082,13 @@ mod tests {
 
         // state has insert, update and delete operation, rehash state
         rehash_state
-            .shi_rehash(TEST_BUCKET, &old_meta, &mut new_meta, &mut rehash_updates)
+            .shi_rehash(
+                TEST_BUCKET,
+                &old_meta,
+                new_meta.nonce,
+                new_meta.capacity,
+                &mut rehash_updates,
+            )
             .unwrap();
 
         // Verify the rehashing results
@@ -1123,7 +1109,9 @@ mod tests {
             let kv1 = cmp_state
                 .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
                 .unwrap();
-            let kv2 = state.shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i]).unwrap();
+            let kv2 = state
+                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
+                .unwrap();
             assert_eq!(kv1, kv2);
         }
         //check changed meta in state updates

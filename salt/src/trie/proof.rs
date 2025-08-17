@@ -568,7 +568,9 @@ mod tests {
 
         let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[0]
-        let find_res = state.shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0]).unwrap();
+        let find_res = state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0])
+            .unwrap();
 
         assert!(find_res.is_none());
 
@@ -596,7 +598,9 @@ mod tests {
 
         let mut state = EphemeralSaltState::new(&store);
         // can't find the plain_keys()[1]
-        let find_res = state.shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1]).unwrap();
+        let find_res = state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1])
+            .unwrap();
 
         assert!(find_res.is_none());
 
@@ -624,7 +628,9 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1]).unwrap();
+        let find_res = state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1])
+            .unwrap();
 
         assert!(find_res.is_none());
 
@@ -652,7 +658,9 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0]).unwrap();
+        let find_res = state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0])
+            .unwrap();
 
         assert!(find_res.is_none());
 
@@ -676,7 +684,9 @@ mod tests {
         let meta = store.metadata(bucket_id).unwrap();
 
         let mut state = EphemeralSaltState::new(&store);
-        let find_res = state.shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[6]).unwrap();
+        let find_res = state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[6])
+            .unwrap();
 
         assert!(find_res.is_none());
     }
