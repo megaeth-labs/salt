@@ -196,6 +196,29 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(state_updates)
     }
 
+    /// Sets a new nonce for the specified bucket, triggering a manual rehash.
+    ///
+    /// Preserves all existing key-value pairs while changing their slot assignments.
+    /// Returns the resulting changes as [`StateUpdates`] that can be applied to
+    /// persistent storage.
+    pub fn set_nonce(
+        &mut self,
+        bucket_id: BucketId,
+        new_nonce: u32,
+    ) -> Result<StateUpdates, Store::Error> {
+        let metadata = self.metadata(bucket_id, true)?;
+        let mut state_updates = StateUpdates::default();
+        self.shi_rehash(
+            bucket_id,
+            &metadata,
+            new_nonce,
+            metadata.capacity,
+            &mut state_updates,
+        )?;
+
+        Ok(state_updates)
+    }
+
     /// Retrieves bucket metadata for the given bucket ID.
     ///
     /// # Arguments
@@ -1113,5 +1136,89 @@ mod tests {
         let _updates = state
             .update(kvs)
             .expect("Update should succeed without panic");
+    }
+
+    /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
+    ///
+    /// Verifies that changing nonce values causes slot reassignments but maintains
+    /// data integrity, and that returning to the original nonce restores the exact
+    /// original layout.
+    #[test]
+    fn test_set_nonce_basic() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // Use pre-computed keys that all hash to the same bucket
+        let keys = hasher::tests::get_same_bucket_test_keys();
+        let bucket_id = hasher::bucket_id(&keys[0]);
+
+        // Create key-value pairs for testing
+        let kvs: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), format!("value_{}", i).into_bytes()))
+            .collect();
+
+        // Insert all key-value pairs
+        let mut updates = StateUpdates::default();
+        for (key, value) in &kvs {
+            state
+                .shi_upsert(bucket_id, key, value, &mut updates)
+                .unwrap();
+        }
+        store.update_state(updates);
+
+        // Take a snapshot of the original bucket layout
+        let original_meta = state.metadata(bucket_id, true).unwrap();
+        let original_layout = (0..original_meta.capacity)
+            .map(|slot| {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                (slot, state.value(salt_key).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // Test multiple nonce values including returning to the original
+        let test_nonces = [5, 10, 0]; // Last value should be original nonce
+        for &test_nonce in &test_nonces {
+            // Set nonce to the test value
+            let nonce_updates = state.set_nonce(bucket_id, test_nonce).unwrap();
+            store.update_state(nonce_updates.clone());
+
+            // Verify metadata was updated with new nonce
+            let meta_key = bucket_metadata_key(bucket_id);
+            assert!(nonce_updates.data.contains_key(&meta_key));
+            let updated_meta = state.metadata(bucket_id, true).unwrap();
+            assert_eq!(updated_meta.nonce, test_nonce);
+            assert_eq!(updated_meta.capacity, original_meta.capacity);
+            assert_eq!(updated_meta.used, original_meta.used);
+
+            // Verify all key-value pairs are still accessible
+            for (key, expected_value) in &kvs {
+                let found_value = state.plain_value(key).unwrap();
+                assert_eq!(found_value, Some(expected_value.clone()));
+            }
+
+            // Take a snapshot of the current bucket layout
+            let current_layout = (0..updated_meta.capacity)
+                .map(|slot| {
+                    let salt_key = SaltKey::from((bucket_id, slot));
+                    (slot, state.value(salt_key).unwrap())
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            // Verify that the number of key-value pairs hasn't changed
+            assert_eq!(
+                kvs.len(),
+                current_layout.values().filter(|v| v.is_some()).count()
+            );
+
+            if test_nonce == original_meta.nonce {
+                // When we return to the original nonce, layout should match exactly
+                assert_eq!(
+                    original_layout, current_layout,
+                    "Bucket layout should be restored when nonce is set back to original"
+                );
+            }
+        }
     }
 }
