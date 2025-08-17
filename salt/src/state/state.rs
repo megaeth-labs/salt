@@ -358,43 +358,43 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         new_capacity: u64,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        // Collect existing bucket entries and clear cache
+        // Step 1: Extract all existing entries and clear the bucket
         let old_bucket = (0..old_meta.capacity)
             .filter_map(|slot| {
                 let salt_key = SaltKey::from((bucket_id, slot));
-                if let Ok(Some(salt_value)) = self.value(salt_key) {
+                if let Ok(Some(salt_val)) = self.value(salt_key) {
+                    // Mark all non-empty slots as deleted in cache
                     self.cache.insert(salt_key, None);
-                    Some((salt_key, salt_value))
+                    Some((salt_key, salt_val))
                 } else {
                     None
                 }
             })
             .collect::<BTreeMap<_, _>>();
 
-        // Extract plain key-value pairs
+        // Step 2: Convert to plain key-value pairs for reinsertion
         let plain_kv_pairs = old_bucket
             .values()
-            .map(|salt_value| (salt_value.key().to_vec(), salt_value.value().to_vec()))
+            .map(|salt_val| (salt_val.key().to_vec(), salt_val.value().to_vec()))
             .collect::<BTreeMap<_, _>>();
 
-        // Re-insert key-value pairs in reverse order using simplified SHI algorithm
-        // Since we iterate in decreasing key order into an empty bucket, we can skip
-        // key comparisons and just find the first empty slot for each key
+        // Step 3: Reinsert plain key-value pairs in reverse lexicographic order.
+        // So we use the simplified SHI insertion algorithm without key comparisons.
         for (plain_key, plain_val) in plain_kv_pairs.iter().rev() {
             let hashed_key = hasher::hash_with_nonce(plain_key, new_nonce);
-            let salt_value = SaltValue::new(plain_key, plain_val);
+            let salt_val = SaltValue::new(plain_key, plain_val);
 
-            // Find first empty slot - no need for key comparison since bucket is being rebuilt
+            // Find first empty slot - no need for key comparison
             for step in 0..new_capacity {
                 let salt_key = (bucket_id, probe(hashed_key, step, new_capacity)).into();
                 if self.value(salt_key)?.is_none() {
-                    self.cache.insert(salt_key, Some(salt_value));
+                    self.cache.insert(salt_key, Some(salt_val));
                     break;
                 }
             }
         }
 
-        // Collect new bucket state
+        // Step 4: Snapshot the new bucket layout after reinsertion
         let new_bucket = (0..new_capacity)
             .filter_map(|slot| {
                 let salt_key = SaltKey::from((bucket_id, slot));
@@ -402,7 +402,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             })
             .collect::<BTreeMap<_, _>>();
 
-        // Generate state updates by comparing old and new slots
+        // Step 5: Record state changes by comparing slot-by-slot differences
         for slot in 0..old_meta.capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
             let old_value = old_bucket.get(&salt_key);
@@ -414,7 +414,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         let new_metadata = BucketMeta {
             nonce: new_nonce,
             capacity: new_capacity,
-            used: old_meta.used,
+            ..*old_meta
         };
         self.update_value(
             out_updates,
