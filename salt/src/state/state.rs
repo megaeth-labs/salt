@@ -189,12 +189,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         &mut state_updates,
                     )?;
                 }
-                None => self.shi_delete(
-                    bucket_id,
-                    &mut metadata,
-                    plain_key.as_slice(),
-                    &mut state_updates,
-                )?,
+                None => self.shi_delete(bucket_id, plain_key.as_slice(), &mut state_updates)?,
             }
         }
         Ok(state_updates)
@@ -339,51 +334,38 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     fn shi_delete(
         &mut self,
         bucket_id: BucketId,
-        meta: &mut BucketMeta,
         key: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        let find_slot = self.shi_find(bucket_id, meta, key)?;
-
-        if let Some((slot_id, slot_val)) = find_slot {
-            let old_used = meta
+        let metadata = self.metadata(bucket_id, true)?;
+        if let Some((slot, salt_val)) =
+            self.shi_find(bucket_id, metadata.nonce, metadata.capacity, key)?
+        {
+            // Update the bucket usage cache
+            let used = metadata
                 .used
                 .expect("BucketMeta.used should always be populated");
-            let new_used = old_used.saturating_sub(1);
-            meta.used = Some(new_used);
-            // Update the bucket usage cache
-            self.bucket_used_cache.insert(bucket_id, new_used);
-            let mut delete_slot = (slot_id, slot_val);
+            self.bucket_used_cache.insert(bucket_id, used - 1);
 
-            // Iterates over all slots in the table until a suitable slot is found.
-            // If a suitable slot is found, it is swapped with the delete slot.
-            // The process repeats until no more suitable slots are found, and then
-            // the delete slot is cleared.
-            //
-            // [..(delete_slot)......(suitable_slot)....]
-            //        ^--------<-->---------^
-            // delete_slot = suitable_slot , suitable_slot = delete_slot, repeats until
-            // no more suitable slots are found.
-            for _i in 0..meta.capacity {
-                // Searches for the next suitable slot to transfer to the delete slot.
+            // TODO: add comments here
+            let mut del_slot = slot;
+            let mut del_value = salt_val;
+            loop {
                 let suitable_slot =
-                    self.shi_next(bucket_id, delete_slot.0, meta.nonce, meta.capacity)?;
-                let salt_id = (bucket_id, delete_slot.0).into();
+                    self.shi_next(bucket_id, del_slot, metadata.nonce, metadata.capacity)?;
+                let salt_key = (bucket_id, del_slot).into();
                 match suitable_slot {
-                    Some((slot_id, slot_value)) => {
-                        // Swap the delete slot with the suitable slot and continue the
-                        // exploration.
+                    Some((slot, salt_value)) => {
                         self.update_value(
                             out_updates,
-                            salt_id,
-                            Some(delete_slot.1),
-                            Some(slot_value.clone()),
+                            salt_key,
+                            Some(del_value),
+                            Some(salt_value.clone()),
                         );
-                        delete_slot = (slot_id, slot_value);
+                        (del_slot, del_value) = (slot, salt_value);
                     }
                     None => {
-                        // If no suitable slot is found, the delete slot is cleared.
-                        self.update_value(out_updates, salt_id, Some(delete_slot.1), None);
+                        self.update_value(out_updates, salt_key, Some(del_value), None);
                         return Ok(());
                     }
                 }
@@ -478,16 +460,17 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     pub(crate) fn shi_find(
         &mut self,
         bucket_id: BucketId,
-        meta: &BucketMeta,
+        nonce: u32,
+        capacity: u64,
         plain_key: &[u8],
     ) -> Result<Option<(SlotId, SaltValue)>, Store::Error> {
-        let hashed_key = hasher::hash_with_nonce(plain_key, meta.nonce);
+        let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
 
         // Search the key sequentially until we find it or are certain it doesn't exist
         // (either the current slot is empty or the key it contains has a lower priority
         // than the target key).
-        for step in 0..meta.capacity {
-            let slot_id = probe(hashed_key, step, meta.capacity);
+        for step in 0..capacity {
+            let slot_id = probe(hashed_key, step, capacity);
             if let Some(entry) = self.value((bucket_id, slot_id).into())? {
                 match entry.key().cmp(plain_key) {
                     Ordering::Less => return Ok(None),
@@ -732,7 +715,7 @@ mod tests {
         let del_num: usize = rng.gen_range(0..keys.len());
         for key in rand_keys.iter().take(del_num) {
             state
-                .shi_delete(TEST_BUCKET, &mut meta, key, &mut out_updates)
+                .shi_delete(TEST_BUCKET, key, &mut out_updates)
                 .unwrap();
         }
 
@@ -821,7 +804,7 @@ mod tests {
         state.cache.insert(salt_id, Some(salt_val1.clone()));
 
         // Find key1 in the state
-        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id, salt_val1.clone()),
@@ -838,7 +821,7 @@ mod tests {
         state
             .cache
             .insert(SaltKey(salt_id.0 + 2), Some(salt_val1.clone()));
-        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
         assert_eq!(
             find_slot.unwrap(),
             (slot_id + 2, salt_val1.clone()),
@@ -848,14 +831,14 @@ mod tests {
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), None,
         // , (key1_slot_id + 2, (key1, val1))...], and key2 > key1
         state.cache.insert(SaltKey(salt_id.0 + 1), None);
-        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
 
         // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), (key1_slot_id + 1,
         // (key4, val4)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key4 < key1
         let salt_val4 = SaltValue::new(&[0; 32], &[0; 32]);
         state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
-        let find_slot = state.shi_find(TEST_BUCKET, &meta, salt_val1.key()).unwrap();
+        let find_slot = state.shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key()).unwrap();
         assert_eq!(find_slot, None, "should be found None");
     }
 
@@ -976,7 +959,7 @@ mod tests {
         // Iterate through key_array and delete the corresponding key
         for v in &salt_array {
             state
-                .shi_delete(TEST_BUCKET, &mut meta, v.key(), &mut out_updates)
+                .shi_delete(TEST_BUCKET, v.key(), &mut out_updates)
                 .unwrap();
         }
 
@@ -1110,10 +1093,10 @@ mod tests {
         // delete some kvs to state
         for i in l / 2 - l / 8 - 1..l / 2 + l / 8 {
             rehash_state
-                .shi_delete(TEST_BUCKET, &mut meta1, &kvs.0[i], &mut rehash_updates)
+                .shi_delete(TEST_BUCKET, &kvs.0[i], &mut rehash_updates)
                 .unwrap();
             cmp_state
-                .shi_delete(TEST_BUCKET, &mut cmp_meta, &kvs.0[i], &mut cmp_updates)
+                .shi_delete(TEST_BUCKET, &kvs.0[i], &mut cmp_updates)
                 .unwrap();
         }
 
@@ -1125,10 +1108,10 @@ mod tests {
         // Verify the rehashing results
         for i in 0..kvs.0.len() {
             let kv1 = cmp_state
-                .shi_find(TEST_BUCKET, &cmp_meta, &kvs.0[i])
+                .shi_find(TEST_BUCKET, cmp_meta.nonce, cmp_meta.capacity, &kvs.0[i])
                 .unwrap();
             let kv2 = rehash_state
-                .shi_find(TEST_BUCKET, &new_meta, &kvs.0[i])
+                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
                 .unwrap();
             assert_eq!(kv1, kv2);
         }
@@ -1138,9 +1121,9 @@ mod tests {
         let mut state = EphemeralSaltState::new(&store);
         for i in 0..kvs.0.len() {
             let kv1 = cmp_state
-                .shi_find(TEST_BUCKET, &new_meta, &kvs.0[i])
+                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
                 .unwrap();
-            let kv2 = state.shi_find(TEST_BUCKET, &new_meta, &kvs.0[i]).unwrap();
+            let kv2 = state.shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i]).unwrap();
             assert_eq!(kv1, kv2);
         }
         //check changed meta in state updates
