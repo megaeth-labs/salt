@@ -261,12 +261,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         let metadata = self.metadata(bucket_id, true)?;
         let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
+        // Start with the new key-value pair we want to insert
         let mut new_salt_val = SaltValue::new(plain_key, plain_val);
+
+        // Linear probe through the bucket, creating a displacement chain
         for step in 0..metadata.capacity {
             let salt_key = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
             if let Some(old_salt_val) = self.value(salt_key)? {
                 match old_salt_val.key().cmp(new_salt_val.key()) {
                     Ordering::Equal => {
+                        // Found the key - this is an update operation
                         self.update_value(
                             out_updates,
                             salt_key,
@@ -276,25 +280,28 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         return Ok(());
                     }
                     Ordering::Less => {
+                        // Key displacement: the existing key is smaller, so it gets displaced.
+                        // Place our key here and continue inserting the displaced key.
+                        // This creates a displacement chain that shi_delete will later retrace.
                         self.update_value(
                             out_updates,
                             salt_key,
                             Some(old_salt_val.clone()),
                             Some(new_salt_val),
                         );
-                        new_salt_val = old_salt_val;
+                        new_salt_val = old_salt_val; // Continue inserting the displaced key
                     }
-                    _ => (),
+                    _ => (), // Existing key is larger, continue probing
                 }
             } else {
+                // Found empty slot - insert the key and complete
                 self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
-                let used = metadata
-                    .used
-                    .expect("BucketMeta.used should always be populated");
+                // Update the bucket usage cache.
+                let used = metadata.used.unwrap();
                 self.bucket_used_cache.insert(bucket_id, used + 1);
 
-                // Resize the bucket.
+                // Resize the bucket if load factor threshold exceeded
                 if used >= metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                     self.shi_rehash(
                         bucket_id,
@@ -329,20 +336,24 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             self.shi_find(bucket_id, metadata.nonce, metadata.capacity, key)?
         {
             // Update the bucket usage cache
-            let used = metadata
-                .used
-                .expect("BucketMeta.used should always be populated");
-            self.bucket_used_cache.insert(bucket_id, used - 1);
+            self.bucket_used_cache
+                .insert(bucket_id, metadata.used.unwrap() - 1);
 
-            // TODO: add comments here
+            // Slot compaction: retrace the displacement chain created by shi_upsert.
+            // When shi_upsert displaced keys to make room, deletion must undo this
+            // by moving entries back toward their ideal positions to fill the gap.
             let mut del_slot = slot;
             let mut del_value = salt_val;
             loop {
+                // Find the next entry that should move into the gap
                 let suitable_slot =
                     self.shi_next(bucket_id, del_slot, metadata.nonce, metadata.capacity)?;
                 let salt_key = (bucket_id, del_slot).into();
                 match suitable_slot {
                     Some((slot, salt_value)) => {
+                        // Move this entry into the current gap and continue filling
+                        // the new gap it left behind. This retraces the displacement
+                        // chain that shi_upsert created.
                         self.update_value(
                             out_updates,
                             salt_key,
@@ -352,6 +363,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         (del_slot, del_value) = (slot, salt_value);
                     }
                     None => {
+                        // No suitable entry found - this gap becomes empty, completing
+                        // the deletion. The table is now in the same state as if the
+                        // deleted key had never been inserted (history independence).
                         self.update_value(out_updates, salt_key, Some(del_value), None);
                         return Ok(());
                     }
@@ -621,12 +635,10 @@ mod tests {
             (123456u64, MIN_BUCKET_SIZE as u64),
             (0u64, MIN_BUCKET_SIZE as u64),
             (100u64, MIN_BUCKET_SIZE as u64), // Test boundaries
-
             // Different capacities
             (42u64, 256u64),
             (1234567890u64, 512u64),
             (999u64, 1024u64),
-
             // Large hash keys that could cause overflow
             (u64::MAX, MIN_BUCKET_SIZE as u64),
             (u64::MAX - 1, 256u64),
@@ -643,7 +655,10 @@ mod tests {
                 assert!(
                     slot_id < capacity,
                     "Probe result out of bounds: key={}, i={}, slot={}, capacity={}",
-                    hashed_key, i, slot_id, capacity
+                    hashed_key,
+                    i,
+                    slot_id,
+                    capacity
                 );
 
                 // Verify inverse relationship
@@ -691,6 +706,198 @@ mod tests {
                 probe_distance, expected_slot, actual_slot
             );
         }
+    }
+
+    /// Comprehensive test for plain_value() method covering all key scenarios.
+    ///
+    /// Tests: non-existent keys, successful retrieval with hash collisions,
+    /// and caching behavior with cache_read enabled/disabled.
+    #[test]
+    fn test_plain_value() {
+        // Test non-existent key returns None
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        assert_eq!(state.plain_value(b"missing").unwrap(), None);
+
+        // Setup test data with collision-prone keys
+        let kvs = create_same_bucket_test_data(3);
+        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates);
+
+        // Test successful retrieval (validates collision handling)
+        for (key, expected) in &kvs {
+            assert_eq!(
+                EphemeralSaltState::new(&store).plain_value(key).unwrap(),
+                expected.clone()
+            );
+        }
+
+        // Test cache behavior: without cache_read should not populate cache
+        let mut no_cache_state = EphemeralSaltState::new(&store);
+        no_cache_state.plain_value(&kvs[0].0).unwrap();
+        assert!(no_cache_state.cache.is_empty());
+
+        // Test cache behavior: with cache_read should populate cache
+        let mut cache_state = EphemeralSaltState::new(&store).cache_read();
+        cache_state.plain_value(&kvs[0].0).unwrap();
+        cache_state.plain_value(&kvs[1].0).unwrap();
+        assert_eq!(
+            cache_state.cache.len(),
+            3,
+            "Cache should contain exactly 3 entries: bucket metadata + 2 key-value pairs"
+        );
+        assert!(
+            cache_state.bucket_used_cache.is_empty(),
+            "Bucket usage cache should remain empty - we don't cache bucket usage counts on read"
+        );
+    }
+
+    /// Tests cache hit and miss behavior in the value() method.
+    ///
+    /// Validates that the caching logic correctly handles:
+    /// - Cache misses that fetch from store
+    /// - Cache hits from previous writes
+    /// - Cache population behavior based on cache_read setting
+    #[test]
+    fn test_salt_value() {
+        let store = MemStore::new();
+        let test_key = SaltKey(42);
+        let test_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+
+        // Populate store with test data
+        store.update_state(StateUpdates {
+            data: [(test_key, (None, Some(test_value.clone())))].into(),
+        });
+
+        // Test cache miss without cache_read - should fetch from store but not cache
+        let mut state = EphemeralSaltState::new(&store);
+        let value = state.value(test_key).unwrap();
+        assert_eq!(value.as_ref(), Some(&test_value));
+        assert!(
+            state.cache.is_empty(),
+            "Should not cache reads without cache_read"
+        );
+
+        // Test cache miss with cache_read - should fetch and cache
+        let mut cached_state = EphemeralSaltState::new(&store).cache_read();
+        let value = cached_state.value(test_key).unwrap();
+        assert_eq!(value.as_ref(), Some(&test_value));
+        assert!(
+            cached_state.cache.contains_key(&test_key),
+            "Should cache reads with cache_read"
+        );
+
+        // Test write operations always populate cache
+        let write_key = SaltKey(43);
+        state.cache.insert(write_key, Some(test_value.clone()));
+        let write_value = state.value(write_key).unwrap();
+        assert_eq!(write_value.as_ref(), Some(&test_value));
+        assert!(
+            state.cache.contains_key(&write_key),
+            "Writes should always be cached"
+        );
+
+        // Test cache hit - access of the write_key should use cached value
+        assert_eq!(state.value(write_key).unwrap().as_ref(), Some(&test_value));
+    }
+
+    /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
+    ///
+    /// Verifies that changing nonce values causes slot reassignments but maintains
+    /// data integrity, and that returning to the original nonce restores the exact
+    /// original layout.
+    #[test]
+    fn test_set_nonce() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let kvs = create_same_bucket_test_data(5);
+        let bucket_id = hasher::bucket_id(&kvs[0].0);
+        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates);
+
+        // Take a snapshot of the original bucket layout
+        let original_meta = state.metadata(bucket_id, true).unwrap();
+        let original_layout = (0..original_meta.capacity)
+            .map(|slot| {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                (slot, state.value(salt_key).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        // Test multiple nonce values including returning to the original
+        let test_nonces = [5, 10, 0]; // Last value should be original nonce
+        for &test_nonce in &test_nonces {
+            // Set nonce to the test value
+            let nonce_updates = state.set_nonce(bucket_id, test_nonce).unwrap();
+            store.update_state(nonce_updates.clone());
+
+            // Verify metadata was updated with new nonce
+            let meta_key = bucket_metadata_key(bucket_id);
+            assert!(nonce_updates.data.contains_key(&meta_key));
+            let updated_meta = state.metadata(bucket_id, true).unwrap();
+            assert_eq!(updated_meta.nonce, test_nonce);
+            assert_eq!(updated_meta.capacity, original_meta.capacity);
+            assert_eq!(updated_meta.used, original_meta.used);
+
+            // Verify all key-value pairs are still accessible
+            for (key, expected_value) in &kvs {
+                let found_value = state.plain_value(key).unwrap();
+                assert_eq!(found_value, *expected_value);
+            }
+
+            // Take a snapshot of the current bucket layout
+            let current_layout = (0..updated_meta.capacity)
+                .map(|slot| {
+                    let salt_key = SaltKey::from((bucket_id, slot));
+                    (slot, state.value(salt_key).unwrap())
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            // Verify that the number of key-value pairs hasn't changed
+            assert_eq!(
+                kvs.len(),
+                current_layout.values().filter(|v| v.is_some()).count()
+            );
+
+            if test_nonce == original_meta.nonce {
+                // When we return to the original nonce, layout should match exactly
+                assert_eq!(
+                    original_layout, current_layout,
+                    "Bucket layout should be restored when nonce is set back to original"
+                );
+            }
+        }
+    }
+
+    /// This test exposes the bug where metadata retrieved from store
+    /// has used=None after deserialization, causing a panic in upsert/delete.
+    /// The correct behavior should be successful updates without panics.
+    #[test]
+    fn test_cached_metadata_bug() {
+        let store = MemStore::new();
+        let key = hasher::tests::get_same_bucket_test_keys()[0].clone();
+        let value = Some(b"value_1".to_vec());
+        let bucket_id = hasher::bucket_id(&key);
+
+        // Manually set non-default metadata for this bucket to ensure it gets stored
+        let non_default_meta = BucketMeta {
+            nonce: 1, // Make it non-default so it gets stored
+            capacity: 256,
+            used: Some(0),
+        };
+        let meta_key = bucket_metadata_key(bucket_id);
+        let meta_updates = StateUpdates {
+            data: [(meta_key, (None, Some(SaltValue::from(non_default_meta))))].into(),
+        };
+        store.update_state(meta_updates);
+
+        // Now create state and do an update - this should read the non-default metadata
+        // from store, hit line 128 where v.try_into() sets used=None, then panic in upsert
+        let mut state = EphemeralSaltState::new(&store);
+        let kvs = vec![(&key, &value)];
+        let _updates = state
+            .update(kvs)
+            .expect("Update should succeed without panic");
     }
 
     #[test]
@@ -1162,121 +1369,395 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_cached_metadata_bug() {
-        // This test exposes the bug where metadata retrieved from store
-        // has used=None after deserialization, causing a panic in upsert/delete.
-        // The correct behavior should be successful updates without panics.
+    // ============================
+    // Test Utility Functions
+    // ============================
 
-        let store = MemStore::new();
-
-        // Use pre-computed key that maps to a specific bucket
-        let key = hasher::tests::get_same_bucket_test_keys()[0].clone();
-        let value = Some(b"value_1".to_vec());
-        let bucket_id = hasher::bucket_id(&key);
-
-        // Manually set non-default metadata for this bucket to ensure it gets stored
-        let non_default_meta = BucketMeta {
-            nonce: 1, // Make it non-default so it gets stored
-            capacity: 256,
-            used: Some(0),
-        };
-        let meta_key = bucket_metadata_key(bucket_id);
-        let meta_updates = StateUpdates {
-            data: [(meta_key, (None, Some(SaltValue::from(non_default_meta))))].into(),
-        };
-        store.update_state(meta_updates);
-
-        // Now create state and do an update - this should read the non-default metadata
-        // from store, hit line 128 where v.try_into() sets used=None, then panic in upsert
-        let mut state = EphemeralSaltState::new(&store);
-        let kvs = vec![(&key, &value)];
-        let _updates = state
-            .update(kvs)
-            .expect("Update should succeed without panic");
-    }
-
-    /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
+    /// Creates a test EphemeralSaltState with pre-populated sample data.
     ///
-    /// Verifies that changing nonce values causes slot reassignments but maintains
-    /// data integrity, and that returning to the original nonce restores the exact
-    /// original layout.
-    #[test]
-    fn test_set_nonce_basic() {
-        let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
+    /// This utility function sets up a complete testing environment by creating
+    /// random key-value pairs, inserting them into the provided store via state
+    /// updates, and returning the configured state along with the test data.
+    /// Useful for tests that need existing data to work with rather than starting
+    /// from an empty state.
+    ///
+    /// Returns: (configured_state, test_keys, test_values)
+    fn create_test_state_with_data<'a>(
+        store: &'a MemStore,
+        num_keys: usize,
+    ) -> (EphemeralSaltState<'a, MemStore>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut state = EphemeralSaltState::new(store);
+        let (keys, values) = create_random_kvs(num_keys);
 
-        // Use pre-computed keys that all hash to the same bucket
-        let keys = hasher::tests::get_same_bucket_test_keys();
-        let bucket_id = hasher::bucket_id(&keys[0]);
-
-        // Create key-value pairs for testing
-        let kvs: Vec<_> = keys
+        let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> = keys
             .iter()
-            .enumerate()
-            .map(|(i, key)| (key.clone(), format!("value_{}", i).into_bytes()))
+            .zip(values.iter())
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
             .collect();
 
-        // Insert all key-value pairs
-        let mut updates = StateUpdates::default();
-        for (key, value) in &kvs {
-            state
-                .shi_upsert(bucket_id, key, value, &mut updates)
-                .unwrap();
-        }
+        let updates = state.update(&kvs).unwrap();
         store.update_state(updates);
 
-        // Take a snapshot of the original bucket layout
-        let original_meta = state.metadata(bucket_id, true).unwrap();
-        let original_layout = (0..original_meta.capacity)
-            .map(|slot| {
-                let salt_key = SaltKey::from((bucket_id, slot));
-                (slot, state.value(salt_key).unwrap())
-            })
-            .collect::<BTreeMap<_, _>>();
+        (state, keys, values)
+    }
 
-        // Test multiple nonce values including returning to the original
-        let test_nonces = [5, 10, 0]; // Last value should be original nonce
-        for &test_nonce in &test_nonces {
-            // Set nonce to the test value
-            let nonce_updates = state.set_nonce(bucket_id, test_nonce).unwrap();
-            store.update_state(nonce_updates.clone());
+    /// Creates test key-value pairs that hash to the same bucket for collision testing.
+    ///
+    /// This utility function generates test data specifically designed to stress-test
+    /// the SHI hash table's collision handling mechanisms. Uses pre-computed keys
+    /// from the hasher test module that are guaranteed to hash to the same bucket,
+    /// creating scenarios where linear probing and key swapping logic are exercised.
+    /// Essential for validating bucket layout algorithms under high collision scenarios.
+    ///
+    /// Returns: Vector of (key, Some(value)) pairs ready for update() calls
+    fn create_same_bucket_test_data(count: usize) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let keys = hasher::tests::get_same_bucket_test_keys();
+        if count > keys.len() {
+            panic!(
+                "Requested {} keys but only {} available from get_same_bucket_test_keys",
+                count,
+                keys.len()
+            );
+        }
+        keys.into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(i, key)| (key, Some(format!("value_{}", i).into_bytes())))
+            .collect()
+    }
 
-            // Verify metadata was updated with new nonce
-            let meta_key = bucket_metadata_key(bucket_id);
-            assert!(nonce_updates.data.contains_key(&meta_key));
-            let updated_meta = state.metadata(bucket_id, true).unwrap();
-            assert_eq!(updated_meta.nonce, test_nonce);
-            assert_eq!(updated_meta.capacity, original_meta.capacity);
-            assert_eq!(updated_meta.used, original_meta.used);
-
-            // Verify all key-value pairs are still accessible
-            for (key, expected_value) in &kvs {
-                let found_value = state.plain_value(key).unwrap();
-                assert_eq!(found_value, Some(expected_value.clone()));
-            }
-
-            // Take a snapshot of the current bucket layout
-            let current_layout = (0..updated_meta.capacity)
-                .map(|slot| {
-                    let salt_key = SaltKey::from((bucket_id, slot));
-                    (slot, state.value(salt_key).unwrap())
-                })
-                .collect::<BTreeMap<_, _>>();
-
-            // Verify that the number of key-value pairs hasn't changed
+    /// Assertion helper that verifies a state contains all expected key-value pairs.
+    ///
+    /// This utility function performs batch verification of key-value pair existence
+    /// by iterating through expected pairs and using plain_value() to check each one.
+    /// Provides clear error messages when assertions fail, making it easier to debug
+    /// test failures. Used extensively in tests that need to verify data integrity
+    /// after operations like insertions, updates, or bucket rehashing.
+    fn assert_state_contains_kvs<Store: StateReader>(
+        state: &mut EphemeralSaltState<Store>,
+        expected_kvs: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        for (key, expected_value) in expected_kvs {
+            let actual_value = state.plain_value(key).unwrap();
             assert_eq!(
-                kvs.len(),
-                current_layout.values().filter(|v| v.is_some()).count()
+                actual_value,
+                Some(expected_value.clone()),
+                "Key {:?} should have value {:?}",
+                key,
+                expected_value
+            );
+        }
+    }
+
+    /// Assertion helper that verifies specified keys are not present in the state.
+    ///
+    /// This utility function performs batch verification of key absence by checking
+    /// that plain_value() returns None for each provided key. Used primarily in
+    /// deletion tests to verify that removed keys are no longer accessible.
+    /// Provides clear error messages indicating which key was unexpectedly found,
+    /// making it easier to identify deletion logic issues.
+    fn assert_keys_not_present<Store: StateReader>(
+        state: &mut EphemeralSaltState<Store>,
+        keys: &[Vec<u8>],
+    ) {
+        for key in keys {
+            let value = state.plain_value(key).unwrap();
+            assert_eq!(value, None, "Key {:?} should not exist", key);
+        }
+    }
+
+    // ============================
+    // Batch Update Tests
+    // ============================
+
+    /// Tests batch update with insert-only operations.
+    ///
+    /// This test validates that the update() method correctly handles a batch of
+    /// pure insert operations without any existing data conflicts. Creates multiple
+    /// random key-value pairs, passes them to update() as inserts (Some values),
+    /// then verifies: 1) Non-empty StateUpdates are generated 2) All keys become
+    /// accessible after applying updates. This ensures the basic batch insertion
+    /// path works correctly through the SHI hash table algorithm.
+    #[test]
+    fn test_update_insert_only() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let (keys, values) = create_random_kvs(10);
+
+        let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+
+        let updates = state.update(&kvs).unwrap();
+        assert!(!updates.data.is_empty());
+
+        store.update_state(updates);
+
+        // Verify all keys are accessible
+        let mut fresh_state = EphemeralSaltState::new(&store);
+        assert_state_contains_kvs(
+            &mut fresh_state,
+            &keys
+                .iter()
+                .zip(values.iter())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Tests batch update with delete-only operations.
+    ///
+    /// This test validates that the update() method correctly handles a batch of
+    /// pure delete operations on existing data. Creates initial test data, then
+    /// performs a batch delete of half the keys (using None values), and verifies:
+    /// 1) Deleted keys are no longer accessible 2) Remaining keys are unaffected
+    /// This ensures the SHI deletion algorithm with slot compaction works correctly
+    /// in batch scenarios.
+    #[test]
+    fn test_update_delete_only() {
+        let store = MemStore::new();
+        let (mut state, keys, values) = create_test_state_with_data(&store, 8);
+
+        // Delete half of the keys
+        let keys_to_delete = &keys[0..4];
+        let remaining_keys = &keys[4..];
+        let remaining_values = &values[4..];
+
+        let delete_kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            keys_to_delete.iter().map(|k| (k.clone(), None)).collect();
+
+        let updates = state.update(&delete_kvs).unwrap();
+        store.update_state(updates);
+
+        // Verify deleted keys are not present
+        let mut fresh_state = EphemeralSaltState::new(&store);
+        assert_keys_not_present(&mut fresh_state, keys_to_delete);
+
+        // Verify remaining keys are still present
+        assert_state_contains_kvs(
+            &mut fresh_state,
+            &remaining_keys
+                .iter()
+                .zip(remaining_values.iter())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Tests batch update with mixed insert, update, and delete operations.
+    ///
+    /// This test validates that the update() method correctly handles complex
+    /// batches containing all operation types in a single call. Sets up initial
+    /// data, then creates a batch with: 1) Value update of existing key
+    /// 2) Deletion of existing key 3) Insertion of new key. Verifies each
+    /// operation type worked correctly by checking final state. This ensures
+    /// the batch processing correctly handles the different operation types
+    /// and maintains data consistency.
+    #[test]
+    fn test_update_mixed_operations() {
+        let store = MemStore::new();
+        let (mut state, keys, values) = create_test_state_with_data(&store, 6);
+
+        let mut mixed_kvs = BTreeMap::new();
+
+        // Update existing key
+        mixed_kvs.insert(keys[0].clone(), Some(b"updated_value".to_vec()));
+
+        // Delete existing key
+        mixed_kvs.insert(keys[1].clone(), None);
+
+        // Insert new key
+        let new_key = b"new_key".to_vec();
+        let new_value = b"new_value".to_vec();
+        mixed_kvs.insert(new_key.clone(), Some(new_value.clone()));
+
+        let updates = state.update(&mixed_kvs).unwrap();
+        store.update_state(updates);
+
+        // Verify changes
+        let mut fresh_state = EphemeralSaltState::new(&store);
+
+        // Updated key should have new value
+        assert_eq!(
+            fresh_state.plain_value(&keys[0]).unwrap(),
+            Some(b"updated_value".to_vec())
+        );
+
+        // Deleted key should not exist
+        assert_eq!(fresh_state.plain_value(&keys[1]).unwrap(), None);
+
+        // New key should exist
+        assert_eq!(fresh_state.plain_value(&new_key).unwrap(), Some(new_value));
+
+        // Untouched keys should remain
+        for i in 2..keys.len() {
+            assert_eq!(
+                fresh_state.plain_value(&keys[i]).unwrap(),
+                Some(values[i].clone())
+            );
+        }
+    }
+
+    /// Tests batch update behavior with empty input.
+    ///
+    /// This test validates that the update() method handles empty batches gracefully
+    /// without errors or unnecessary state changes. Passes an empty BTreeMap to
+    /// update() and verifies that the returned StateUpdates is also empty, ensuring
+    /// no spurious changes are generated. This is important for preventing
+    /// unnecessary work in scenarios where no actual updates are needed.
+    #[test]
+    fn test_update_empty_batch() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        let empty_kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+        let updates = state.update(&empty_kvs).unwrap();
+
+        // Should produce empty updates
+        assert!(updates.data.is_empty());
+    }
+
+    /// Tests duplicate key handling in batch updates.
+    ///
+    /// This test validates that when the same key appears multiple times in a batch
+    /// update, the system correctly applies the last value (BTreeMap deduplication
+    /// behavior). Creates a batch with the same key mapped to different values,
+    /// then verifies that only the final value is stored. This ensures predictable
+    /// behavior when batch operations contain duplicate keys, which could occur
+    /// in some application scenarios.
+    #[test]
+    fn test_update_duplicate_keys() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        let key = b"duplicate_key".to_vec();
+        let mut kvs = BTreeMap::new();
+
+        // BTreeMap will automatically deduplicate, keeping the last value
+        kvs.insert(key.clone(), Some(b"first_value".to_vec()));
+        kvs.insert(key.clone(), Some(b"second_value".to_vec()));
+
+        let updates = state.update(&kvs).unwrap();
+        store.update_state(updates);
+
+        // Should contain the last value
+        let mut fresh_state = EphemeralSaltState::new(&store);
+        assert_eq!(
+            fresh_state.plain_value(&key).unwrap(),
+            Some(b"second_value".to_vec())
+        );
+    }
+
+    /// Tests that batch updates correctly trigger automatic bucket resizing.
+    ///
+    /// This test validates that the update() method properly handles bucket capacity
+    /// expansion when the load factor threshold is exceeded. Uses pre-computed keys
+    /// that hash to the same bucket to force high occupancy, then verifies:
+    /// 1) StateUpdates contain bucket metadata changes 2) All keys remain accessible
+    /// after resize. This ensures the automatic resizing mechanism works correctly
+    /// during batch operations and maintains data integrity through the rehash process.
+    #[test]
+    fn test_update_triggers_bucket_resize() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // Use keys that hash to the same bucket to force resize
+        let keys = hasher::tests::get_same_bucket_test_keys();
+        let values: Vec<Vec<u8>> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("value_{}", i).into_bytes())
+            .collect();
+
+        let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+
+        let updates = state.update(&kvs).unwrap();
+
+        // Should contain metadata update for bucket resize
+        let bucket_id = hasher::bucket_id(&keys[0]);
+        let meta_key = bucket_metadata_key(bucket_id);
+        assert!(updates.data.contains_key(&meta_key));
+
+        store.update_state(updates);
+
+        // Verify all keys are still accessible after resize
+        let mut fresh_state = EphemeralSaltState::new(&store);
+        assert_state_contains_kvs(
+            &mut fresh_state,
+            &keys
+                .iter()
+                .zip(values.iter())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    // ============================
+    // Edge Cases and Error Handling Tests
+    // ============================
+
+    /// Tests state consistency across multiple sequential operation rounds.
+    ///
+    /// This test validates that EphemeralSaltState maintains data consistency across
+    /// complex sequences of mixed operations. Simulates multiple rounds where each
+    /// round: 1) Inserts new random keys 2) Verifies insertion success 3) Deletes
+    /// half the keys 4) Verifies deletion and remaining data integrity. This stress
+    /// test ensures the state management correctly handles accumulating changes over
+    /// time without data corruption or consistency issues.
+    #[test]
+    fn test_state_consistency_multiple_operations() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // Simulate multiple rounds of operations
+        for _round in 0..3 {
+            let (keys, values) = create_random_kvs(20);
+
+            // Insert all keys
+            let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> = keys
+                .iter()
+                .zip(values.iter())
+                .map(|(k, v)| (k.clone(), Some(v.clone())))
+                .collect();
+
+            let updates = state.update(&kvs).unwrap();
+            store.update_state(updates);
+
+            // Verify all keys are accessible
+            let mut verification_state = EphemeralSaltState::new(&store);
+            assert_state_contains_kvs(
+                &mut verification_state,
+                &keys
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>(),
             );
 
-            if test_nonce == original_meta.nonce {
-                // When we return to the original nonce, layout should match exactly
-                assert_eq!(
-                    original_layout, current_layout,
-                    "Bucket layout should be restored when nonce is set back to original"
-                );
-            }
+            // Delete half the keys
+            let delete_kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+                keys[0..10].iter().map(|k| (k.clone(), None)).collect();
+
+            let delete_updates = state.update(&delete_kvs).unwrap();
+            store.update_state(delete_updates);
+
+            // Verify deletions
+            let mut post_delete_state = EphemeralSaltState::new(&store);
+            assert_keys_not_present(&mut post_delete_state, &keys[0..10]);
+            assert_state_contains_kvs(
+                &mut post_delete_state,
+                &keys[10..]
+                    .iter()
+                    .zip(values[10..].iter())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>(),
+            );
         }
     }
 }
