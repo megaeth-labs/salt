@@ -1099,79 +1099,229 @@ mod tests {
         assert_eq!(find_slot, None, "should be found None");
     }
 
+    /// Tests that `shi_next` correctly identifies displaced entries that should
+    /// move closer to their ideal position.
+    ///
+    /// **Behavior under test**: The core SHI hashing invariant where entries
+    /// with higher displacement (rank) from their ideal position get priority
+    /// for movement during deletion operations.
+    ///
+    /// **Setup**: Entry at slot 2 that ideally belongs at slot 0 (displacement = 2)
+    /// **Action**: Delete slot 1 (between ideal and current position)
+    /// **Expected**: Returns the displaced entry because rank(current=2) > rank(del_slot=1)
+    /// from ideal position 0
+    ///
+    /// **Invariant verified**:
+    /// `rank(hashed_key, current_slot, capacity) > rank(hashed_key, del_slot, capacity)`
+    /// implies the entry should be moved to del_slot for better positioning.
     #[test]
-    fn next_slot() {
-        let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let salt_array = [
-            SaltValue::new(&[1u8; 32], &[1u8; 32]),
-            SaltValue::new(&[2u8; 32], &[1u8; 32]),
-            SaltValue::new(&[3u8; 32], &[1u8; 32]),
-        ];
+    fn test_shi_next_finds_displaced_entry() {
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let capacity = 4;
+        let nonce = 0;
 
-        // Calculate the initial slot_ids of the keys
-        let slot_id_vec: Vec<SlotId> = salt_array
+        // Create a key that ideally belongs at slot 0
+        let key_a = create_key_for_slot(0, nonce, capacity);
+        let value_a = vec![0xFF; 32];
+
+        // Place it at slot 2 (displaced by 2 positions)
+        setup_bucket_layout(
+            &mut state,
+            TEST_BUCKET,
+            vec![(2, Some(SaltValue::new(&key_a, &value_a)))],
+        );
+
+        // Test deletion at slot 1
+        let result = state.shi_next(TEST_BUCKET, 1, nonce, capacity).unwrap();
+
+        // Should find the displaced entry at slot 2
+        assert!(result.is_some());
+        let (found_slot, found_value) = result.unwrap();
+        assert_eq!(found_slot, 2);
+        assert_eq!(found_value.key(), &key_a);
+
+        // Verify rank calculation: rank(hashed_key, 2, 4) > rank(hashed_key, 1, 4)
+        let hashed_key = hasher::hash_with_nonce(&key_a, nonce);
+        assert!(rank(hashed_key, 2, capacity) > rank(hashed_key, 1, capacity));
+    }
+
+    /// Tests that `shi_next` properly terminates when encountering an empty slot
+    /// during linear probing.
+    ///
+    /// **Behavior under test**: Stop searching when an empty slot is found, since
+    /// no qualified entries can exist beyond the first empty slot in a properly
+    /// maintained SHI table.
+    ///
+    /// **Setup**: Entry at slot 0, empty slot at 1, entry at slot 3
+    /// **Action**: Delete slot 0 (probe sequence: 1, 2, 3...)
+    /// **Expected**: Returns None because probe stops at empty slot 1, never reaching slot 3
+    #[test]
+    fn test_shi_next_stops_at_empty_slot() {
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let capacity = 4;
+        let nonce = 0;
+
+        // Create keys for specific slots
+        let key_a = create_key_for_slot(0, nonce, capacity);
+        let key_b = create_key_for_slot(2, nonce, capacity);
+
+        // Setup: entry at slot 0, empty at slot 1, entry at slot 3 that ideally belongs at slot 2
+        setup_bucket_layout(
+            &mut state,
+            TEST_BUCKET,
+            vec![
+                (0, Some(SaltValue::new(&key_a, &vec![0x01; 32]))),
+                (1, None), // empty slot
+                (3, Some(SaltValue::new(&key_b, &vec![0x02; 32]))),
+            ],
+        );
+
+        // Delete slot 0, which should probe slot 1 first
+        let result = state.shi_next(TEST_BUCKET, 0, nonce, capacity).unwrap();
+
+        // Should return None because probe stops at empty slot 1
+        assert_eq!(result, None);
+    }
+
+    /// Tests that `shi_next` correctly handles probe sequence wraparound at bucket boundaries.
+    ///
+    /// **Behavior under test**: Circular probing behavior where the linear probe sequence wraps
+    /// from the end of the bucket (slot capacity-1) back to the beginning (slot 0).
+    ///
+    /// **Setup**: Entry at slot 0 that ideally belongs at slot 3 (wrapped during original insertion)
+    /// **Action**: Delete slot 3 (the entry's ideal position)
+    /// **Expected**: Finds entry at slot 0 because it would prefer to be at the deleted slot 3
+    ///
+    /// **Invariant verified**: Wraparound probing maintains consistent rank calculations across
+    /// bucket boundaries, ensuring `rank(hashed_key, 0, capacity) > rank(hashed_key, 3, capacity)`
+    /// when the ideal position is slot 3.
+    #[test]
+    fn test_shi_next_wraparound_at_boundary() {
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let capacity = 4;
+        let nonce = 0;
+
+        // Create a key that ideally belongs at slot 3
+        let key_a = create_key_for_slot(3, nonce, capacity);
+        let value_a = vec![0xFF; 32];
+
+        // Place it at slot 0 (it wrapped around when originally inserted)
+        setup_bucket_layout(
+            &mut state,
+            TEST_BUCKET,
+            vec![(0, Some(SaltValue::new(&key_a, &value_a)))],
+        );
+
+        // Delete slot 3 (its ideal position)
+        let result = state.shi_next(TEST_BUCKET, 3, nonce, capacity).unwrap();
+
+        // Should find the entry at slot 0 since it wants to be at slot 3
+        assert!(result.is_some());
+        let (found_slot, found_value) = result.unwrap();
+        assert_eq!(found_slot, 0);
+        assert_eq!(found_value.key(), &key_a);
+
+        // Verify: rank from slot 0 to ideal 3 > rank from slot 3 to ideal 3
+        let hashed_key = hasher::hash_with_nonce(&key_a, nonce);
+        assert!(rank(hashed_key, 0, capacity) > rank(hashed_key, 3, capacity));
+    }
+
+    /// Tests that `shi_next` correctly skips over entries that wouldn't benefit
+    /// from movement.
+    ///
+    /// **Behavior under test**: `shi_next` examines multiple entries during linear
+    /// probing but only returns those that would improve their positioning by moving
+    /// to the deletion slot.
+    ///
+    /// **Setup**:
+    /// - Slot 2: Entry with ideal position 2 (already optimal, rank=0)
+    /// - Slot 3: Entry with ideal position 0 (displaced by 3, rank=3)
+    /// **Action**: Delete slot 1 (probe sequence: 2 → 3 → 0...)
+    /// **Expected**: Skips slot 2 (no rank improvement: 0 vs 3) and returns slot 3 (rank improves: 3 → 1)
+    #[test]
+    fn test_shi_next_skips_non_suitable_entries() {
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let capacity = 4;
+        let nonce = 0;
+
+        // Create keys with specific ideal positions
+        let key_optimal = create_key_for_slot(2, nonce, capacity); // wants slot 2 (optimal)
+        let key_displaced = create_key_for_slot(0, nonce, capacity); // wants slot 0 (displaced)
+
+        // Setup bucket:
+        // - Slot 2: Entry at its ideal position (rank=0, won't benefit from move to slot 1)
+        // - Slot 3: Entry displaced from ideal slot 0 (rank=3, will benefit from move to slot 1)
+        setup_bucket_layout(
+            &mut state,
+            TEST_BUCKET,
+            vec![
+                (2, Some(SaltValue::new(&key_optimal, &vec![0x02; 32]))),
+                (3, Some(SaltValue::new(&key_displaced, &vec![0x03; 32]))),
+            ],
+        );
+
+        // Delete slot 1 (probe sequence: 2 → 3 → 0...)
+        let result = state.shi_next(TEST_BUCKET, 1, nonce, capacity).unwrap();
+
+        // Should skip slot 2 (already optimal) and return slot 3 (benefits from move)
+        assert!(result.is_some());
+        let (found_slot, found_value) = result.unwrap();
+        assert_eq!(found_slot, 3);
+        assert_eq!(found_value.key(), &key_displaced);
+
+        // Verify rank calculations:
+        // - Slot 2 entry: rank(2->2)=0, rank(1->2)=3, no benefit (0 <= 3)
+        // - Slot 3 entry: rank(3->0)=3, rank(1->0)=1, benefits (3 > 1)
+        let optimal_hashed = hasher::hash_with_nonce(&key_optimal, nonce);
+        let displaced_hashed = hasher::hash_with_nonce(&key_displaced, nonce);
+
+        assert!(rank(optimal_hashed, 2, capacity) <= rank(optimal_hashed, 1, capacity));
+        assert!(rank(displaced_hashed, 3, capacity) > rank(displaced_hashed, 1, capacity));
+    }
+
+    /// Tests that `shi_next` exhaustively scans all remaining slots when no suitable
+    /// candidate is found.
+    ///
+    /// **Behavior under test**: Complete traversal behavior ensuring the algorithm
+    /// doesn't miss potential candidates and correctly terminates with None after
+    /// checking all possible positions.
+    ///
+    /// **Setup**: Full bucket where every entry is at its exact ideal position (perfect hash distribution)
+    /// **Action**: Delete any slot (testing with slot 1)
+    /// **Expected**: Returns None after scanning all remaining slots (0, 2, 3)
+    ///
+    /// **Invariant verified**: When `rank(hashed_key, current_slot, capacity) <=
+    /// rank(hashed_key, del_slot, capacity)` for all entries, no movement should occur.
+    #[test]
+    fn test_shi_next_scans_all_slots() {
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let capacity = 4;
+        let nonce = 0;
+
+        // Fill bucket with entries at their ideal positions
+        let keys: Vec<_> = (0..capacity as SlotId)
+            .map(|slot| create_key_for_slot(slot, nonce, capacity))
+            .collect();
+
+        let layout: Vec<_> = keys
             .iter()
-            .map(|v| {
-                let hashed_key = hasher::hash_with_nonce(v.key(), 0);
-                probe(hashed_key, 0, MIN_BUCKET_SIZE as SlotId)
+            .enumerate()
+            .map(|(slot, key)| {
+                (
+                    slot as SlotId,
+                    Some(SaltValue::new(key, &vec![slot as u8; 32])),
+                )
             })
             .collect();
 
-        // Create a table 0 with entries like [...(slot_id_vec[0], (key_array[0], val)),
-        // (slot_id_vec[0] + 1, (key_array[1], val)), (slot_id_vec[0] + 2, (key_array[2],
-        // val))...]
-        let salt_id = (TEST_BUCKET, slot_id_vec[0]).into();
-        state.cache.insert(salt_id, Some(salt_array[0].clone()));
-        state
-            .cache
-            .insert(SaltKey(salt_id.0 + 1), Some(salt_array[1].clone()));
-        state
-            .cache
-            .insert(SaltKey(salt_id.0 + 2), Some(salt_array[2].clone()));
+        setup_bucket_layout(&mut state, TEST_BUCKET, layout);
 
-        // Find the next suitable slot for the position slot_id_vec[0]
-        let rs = state
-            .shi_next(TEST_BUCKET, slot_id_vec[0], 0, MIN_BUCKET_SIZE as u64)
-            .unwrap();
+        // Delete any slot (let's use slot 1)
+        let result = state.shi_next(TEST_BUCKET, 1, nonce, capacity).unwrap();
 
-        if slot_id_vec[1] <= slot_id_vec[0] || slot_id_vec[1] > slot_id_vec[0] + 1 {
-            assert_eq!(rs.unwrap(), (slot_id_vec[0] + 1, salt_array[1].clone()));
-        } else if slot_id_vec[2] <= slot_id_vec[0] || slot_id_vec[2] > slot_id_vec[0] + 2 {
-            assert_eq!(rs.unwrap(), (slot_id_vec[0] + 2, salt_array[2].clone()));
-        } else {
-            assert_eq!(rs, None);
-        }
-
-        // Find the next suitable slot for the position slot_id_vec[0] - 1
-        if slot_id_vec[0] > 1 {
-            let rs = state
-                .shi_next(TEST_BUCKET, slot_id_vec[0] - 1, 0, MIN_BUCKET_SIZE as u64)
-                .unwrap();
-            if slot_id_vec[1] < slot_id_vec[0] || slot_id_vec[1] > slot_id_vec[0] + 1 {
-                assert_eq!(rs.unwrap(), (slot_id_vec[0] + 1, salt_array[1].clone()));
-            } else if slot_id_vec[2] < slot_id_vec[0] - 1 || slot_id_vec[2] > slot_id_vec[0] + 2 {
-                assert_eq!(rs.unwrap(), (slot_id_vec[0] + 2, salt_array[2].clone()));
-            } else {
-                assert_eq!(rs, None);
-            }
-        }
-
-        // Find the next suitable slot for the position slot_id_vec[0] + 1
-        let rs = state
-            .shi_next(TEST_BUCKET, slot_id_vec[0] + 1, 0, MIN_BUCKET_SIZE as u64)
-            .unwrap();
-        if slot_id_vec[2] <= slot_id_vec[0] + 1 || slot_id_vec[2] > slot_id_vec[0] + 2 {
-            assert_eq!(rs.unwrap(), (slot_id_vec[0] + 2, salt_array[2].clone()));
-        } else {
-            assert_eq!(rs, None);
-        }
-
-        // Find the next suitable slot for the position slot_id_vec[0] + 2
-        let rs = state
-            .shi_next(TEST_BUCKET, slot_id_vec[0] + 2, 0, MIN_BUCKET_SIZE as u64)
-            .unwrap();
-        assert_eq!(rs, None);
+        // Should return None after checking all remaining slots
+        // because all entries are at their ideal positions
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -1385,6 +1535,65 @@ mod tests {
     // ============================
     // Test Utility Functions
     // ============================
+
+    /// Helper to create a key that hashes to a specific slot for testing.
+    /// Uses a simple approach: tries incrementing key values until finding one
+    /// that hashes to the desired slot.
+    fn create_key_for_slot(ideal_slot: SlotId, nonce: u32, capacity: u64) -> Vec<u8> {
+        for i in 0..1000u32 {
+            let key = i.to_le_bytes().to_vec();
+            let hashed_key = hasher::hash_with_nonce(&key, nonce);
+            if probe(hashed_key, 0, capacity) == ideal_slot {
+                return key;
+            }
+        }
+        panic!(
+            "Could not find key for slot {} with nonce {} capacity {}",
+            ideal_slot, nonce, capacity
+        );
+    }
+
+    /// Helper to visualize bucket state for debugging tests.
+    #[allow(dead_code)]
+    fn print_bucket_state(
+        state: &mut EphemeralSaltState<impl StateReader>,
+        bucket_id: BucketId,
+        capacity: u64,
+        nonce: u32,
+    ) {
+        println!("Bucket {} layout (capacity={}):", bucket_id, capacity);
+        for slot in 0..capacity {
+            let salt_key = (bucket_id, slot).into();
+            let entry = state.value(salt_key).unwrap();
+            match entry {
+                Some(val) => {
+                    let hashed_key = hasher::hash_with_nonce(val.key(), nonce);
+                    let ideal = probe(hashed_key, 0, capacity);
+                    let displacement = rank(hashed_key, slot, capacity);
+                    println!(
+                        "  Slot {}: Key {:?} (ideal={}, displacement={})",
+                        slot,
+                        val.key(),
+                        ideal,
+                        displacement
+                    );
+                }
+                None => println!("  Slot {}: empty", slot),
+            }
+        }
+    }
+
+    /// Helper to set up a bucket with specific entry placements for testing.
+    fn setup_bucket_layout(
+        state: &mut EphemeralSaltState<impl StateReader>,
+        bucket_id: BucketId,
+        layout: Vec<(SlotId, Option<SaltValue>)>,
+    ) {
+        for (slot, value) in layout {
+            let salt_key = (bucket_id, slot).into();
+            state.cache.insert(salt_key, value);
+        }
+    }
 
     /// Creates a test EphemeralSaltState with pre-populated sample data.
     ///
