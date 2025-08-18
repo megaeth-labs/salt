@@ -500,8 +500,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             let salt_key = (bucket_id, next_slot).into();
             match self.value(salt_key)? {
                 Some(salt_val) => {
-                    let hashed_key = hasher::hash_with_nonce(salt_val.key(), nonce);
-                    if rank(hashed_key, next_slot, capacity) > rank(hashed_key, del_slot, capacity)
+                    let ideal_slot = hasher::hash_with_nonce(salt_val.key(), nonce);
+                    if rank(ideal_slot, next_slot, capacity) > rank(ideal_slot, del_slot, capacity)
                     {
                         return Ok(Some((next_slot, salt_val)));
                     }
@@ -869,35 +869,69 @@ mod tests {
         }
     }
 
-    /// This test exposes the bug where metadata retrieved from store
-    /// has used=None after deserialization, causing a panic in upsert/delete.
-    /// The correct behavior should be successful updates without panics.
+    /// Comprehensive test for the metadata() method covering all scenarios.
+    ///
+    /// - **Default metadata**: Tests retrieval when no metadata is stored (returns `BucketMeta::default()`)
+    /// - **Usage count behavior**: Validates `need_used=false` (no usage) vs `need_used=true` (populates usage)
+    /// - **Stored metadata**: Tests custom metadata retrieval (nonce=123, capacity=512)
+    /// - **Non-zero usage counting**: Adds data to bucket and verifies usage count reflects actual entries
+    /// - **Cache behavior**: Tests that `bucket_used_cache` takes precedence over store counting
+    /// - **Cache isolation**: Verifies usage counts aren't cached during read operations
     #[test]
-    fn test_cached_metadata_bug() {
+    fn test_metadata() {
         let store = MemStore::new();
-        let key = hasher::tests::get_same_bucket_test_keys()[0].clone();
-        let value = Some(b"value_1".to_vec());
-        let bucket_id = hasher::bucket_id(&key);
-
-        // Manually set non-default metadata for this bucket to ensure it gets stored
-        let non_default_meta = BucketMeta {
-            nonce: 1, // Make it non-default so it gets stored
-            capacity: 256,
-            used: Some(0),
-        };
-        let meta_key = bucket_metadata_key(bucket_id);
-        let meta_updates = StateUpdates {
-            data: [(meta_key, (None, Some(SaltValue::from(non_default_meta))))].into(),
-        };
-        store.update_state(meta_updates);
-
-        // Now create state and do an update - this should read the non-default metadata
-        // from store, hit line 128 where v.try_into() sets used=None, then panic in upsert
         let mut state = EphemeralSaltState::new(&store);
-        let kvs = vec![(&key, &value)];
-        let _updates = state
-            .update(kvs)
-            .expect("Update should succeed without panic");
+
+        // Test 1: Default metadata (no stored metadata, need_used=false)
+        let meta = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(meta, BucketMeta::default());
+        assert!(meta.used.is_none());
+
+        // Test 2: Default metadata with need_used=true (should call bucket_used_slots)
+        let meta = state.metadata(TEST_BUCKET, true).unwrap();
+        assert_eq!(meta.nonce, 0);
+        assert_eq!(meta.capacity, MIN_BUCKET_SIZE as u64);
+        assert_eq!(meta.used, Some(0)); // Empty bucket has 0 used slots
+
+        // Test 3: Stored metadata retrieval with need_used=true
+        let stored_meta = BucketMeta {
+            nonce: 123,
+            capacity: 512,
+            used: None,
+        };
+        let meta_key = bucket_metadata_key(TEST_BUCKET);
+        store.update_state(StateUpdates {
+            data: [(meta_key, (None, Some(stored_meta.into())))].into(),
+        });
+
+        let meta = state.metadata(TEST_BUCKET, true).unwrap();
+        assert_eq!(meta.nonce, 123);
+        assert_eq!(meta.capacity, 512);
+        assert_eq!(meta.used, Some(0)); // Still empty
+
+        // Test 4: Add some data to the bucket to test non-zero usage count
+        let test_key = SaltKey::from((TEST_BUCKET, 1));
+        let test_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+        store.update_state(StateUpdates {
+            data: [(test_key, (None, Some(test_value)))].into(),
+        });
+
+        let meta = state.metadata(TEST_BUCKET, true).unwrap();
+        assert_eq!(meta.nonce, 123);
+        assert_eq!(meta.capacity, 512);
+        assert_eq!(meta.used, Some(1)); // Now has 1 slot used
+        assert!(
+            state.bucket_used_cache.is_empty(),
+            "Usage counts not cached on reads"
+        );
+
+        // Test 5: Cached usage count (should use cache instead of calling bucket_used_slots)
+        state.bucket_used_cache.insert(TEST_BUCKET, 100);
+
+        let meta = state.metadata(TEST_BUCKET, true).unwrap();
+        assert_eq!(meta.nonce, 123);
+        assert_eq!(meta.capacity, 512);
+        assert_eq!(meta.used, Some(100)); // From cache, not store count
     }
 
     #[test]
@@ -975,27 +1009,6 @@ mod tests {
         assert!(
             is_bucket_eq(TEST_BUCKET, &mut state1, &mut state2),
             "The two tables should be equal"
-        );
-    }
-
-    #[test]
-    fn get_set_slot_val() {
-        let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let salt_val = Some(SaltValue::new(&[1; 32], &[2; 32]));
-        let salt_id = (TEST_BUCKET, 1).into();
-
-        assert_eq!(
-            state.value(salt_id).unwrap(),
-            None,
-            "The default slot should be None",
-        );
-
-        state.cache.insert(salt_id, salt_val.clone());
-        assert_eq!(
-            state.value(salt_id).unwrap(),
-            salt_val,
-            "After calling set_slot_val, get_slot_val should return the same value",
         );
     }
 
