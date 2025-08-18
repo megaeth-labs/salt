@@ -609,15 +609,87 @@ mod tests {
         true
     }
 
+    /// Tests the fundamental inverse relationship between probe and rank functions.
+    ///
+    /// Verifies that for any valid probe distance i:
+    ///   rank(probe(key, i, capacity), capacity) == i.
+    /// Also tests boundary conditions, various capacities, and large hash values.
     #[test]
-    fn probe_and_rank_work() {
-        let hashed_key = 123456u64;
-        let bucket_size = MIN_BUCKET_SIZE as u64;
+    fn probe_and_rank_inverse_relationship() {
+        let test_cases = [
+            // Basic cases with MIN_BUCKET_SIZE
+            (123456u64, MIN_BUCKET_SIZE as u64),
+            (0u64, MIN_BUCKET_SIZE as u64),
+            (100u64, MIN_BUCKET_SIZE as u64), // Test boundaries
 
-        for i in 0..bucket_size - 1 {
-            let slot_id = probe(hashed_key, i, bucket_size);
-            let j = rank(hashed_key, slot_id, bucket_size);
-            assert_eq!(i, j as u64);
+            // Different capacities
+            (42u64, 256u64),
+            (1234567890u64, 512u64),
+            (999u64, 1024u64),
+
+            // Large hash keys that could cause overflow
+            (u64::MAX, MIN_BUCKET_SIZE as u64),
+            (u64::MAX - 1, 256u64),
+            (u64::MAX / 2, 512u64),
+            (0x8000_0000_0000_0000u64, 256u64), // Large power of 2
+            (0xFFFF_FFFF_FFFF_FFF0u64, 512u64), // Large with low bits set
+        ];
+
+        for (hashed_key, capacity) in test_cases {
+            for i in 0..capacity {
+                let slot_id = probe(hashed_key, i, capacity);
+
+                // Verify slot is always within bounds
+                assert!(
+                    slot_id < capacity,
+                    "Probe result out of bounds: key={}, i={}, slot={}, capacity={}",
+                    hashed_key, i, slot_id, capacity
+                );
+
+                // Verify inverse relationship
+                let rank_result = rank(hashed_key, slot_id, capacity);
+                assert_eq!(
+                    i, rank_result as u64,
+                    "probe-rank inverse failed: key={}, capacity={}, i={}, slot_id={}, rank={}",
+                    hashed_key, capacity, i, slot_id, rank_result
+                );
+            }
+        }
+    }
+
+    /// Tests wraparound behavior when probe sequence wraps from end to beginning of bucket.
+    ///
+    /// Focuses specifically on the wraparound mechanics using modulo arithmetic
+    /// to ensure correct slot calculation when probe goes beyond capacity.
+    #[test]
+    fn probe_and_rank_wraparound() {
+        let capacity = 256u64;
+
+        // Test hash key that places initial position near the end
+        let hashed_key = capacity - 5; // Should start at position 251 in a 256-slot bucket
+
+        let first_slot = probe(hashed_key, 0, capacity);
+        assert_eq!(first_slot, 251, "First slot should be at position 251");
+
+        // Test explicit wraparound behavior
+        let test_cases = [
+            (0, 251), // i=0 -> slot 251
+            (1, 252), // i=1 -> slot 252
+            (2, 253), // i=2 -> slot 253
+            (3, 254), // i=3 -> slot 254
+            (4, 255), // i=4 -> slot 255
+            (5, 0),   // i=5 -> wraps to slot 0
+            (6, 1),   // i=6 -> wraps to slot 1
+            (7, 2),   // i=7 -> wraps to slot 2
+        ];
+
+        for (probe_distance, expected_slot) in test_cases {
+            let actual_slot = probe(hashed_key, probe_distance, capacity);
+            assert_eq!(
+                actual_slot, expected_slot,
+                "Wraparound failed at i={}: expected slot {}, got {}",
+                probe_distance, expected_slot, actual_slot
+            );
         }
     }
 
