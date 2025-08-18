@@ -206,15 +206,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         bucket_id: BucketId,
         new_nonce: u32,
     ) -> Result<StateUpdates, Store::Error> {
-        let metadata = self.metadata(bucket_id, true)?;
+        let metadata = self.metadata(bucket_id, false)?;
         let mut state_updates = StateUpdates::default();
-        self.shi_rehash(
-            bucket_id,
-            &metadata,
-            new_nonce,
-            metadata.capacity,
-            &mut state_updates,
-        )?;
+        self.shi_rehash(bucket_id, new_nonce, metadata.capacity, &mut state_updates)?;
 
         Ok(state_updates)
     }
@@ -304,7 +298,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 if used >= metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                     self.shi_rehash(
                         bucket_id,
-                        &metadata,
                         metadata.nonce,
                         metadata.capacity * BUCKET_RESIZE_MULTIPLIER,
                         out_updates,
@@ -376,18 +369,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
-        old_meta: &BucketMeta,
         new_nonce: u32,
         new_capacity: u64,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        // Step 1: Extract all existing entries and clear the bucket
+        // Step 1: Extract all existing entries (but do not clear the cache yet)
+        let old_metadata = self.metadata(bucket_id, true)?;
         let mut old_bucket = BTreeMap::new();
-        for slot in 0..old_meta.capacity {
+        for slot in 0..old_metadata.capacity {
             let salt_key = SaltKey::from((bucket_id, slot));
             if let Some(salt_val) = self.value(salt_key)? {
-                // Mark all non-empty slots as deleted in cache
-                self.cache.insert(salt_key, None);
                 old_bucket.insert(salt_key, salt_val);
             }
         }
@@ -400,47 +391,50 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 
         // Step 3: Reinsert plain key-value pairs in reverse lexicographic order.
         // So we use the simplified SHI insertion algorithm without key comparisons.
+        let mut new_bucket = BTreeMap::new();
         for (plain_key, plain_val) in plain_kv_pairs.iter().rev() {
             let hashed_key = hasher::hash_with_nonce(plain_key, new_nonce);
             let salt_val = SaltValue::new(plain_key, plain_val);
 
             // Find first empty slot - no need for key comparison
             for step in 0..new_capacity {
-                let salt_key = (bucket_id, probe(hashed_key, step, new_capacity)).into();
-                if self.value(salt_key)?.is_none() {
-                    self.cache.insert(salt_key, Some(salt_val));
-                    break;
+                let salt_key = SaltKey::from((bucket_id, probe(hashed_key, step, new_capacity)));
+                // Note the code below operates directly on `new_bucket` as the
+                // cache has not been cleared yet
+                use std::collections::btree_map::Entry;
+                match new_bucket.entry(salt_key) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(salt_val);
+                        break;
+                    }
+                    Entry::Occupied(_) => {}
                 }
             }
         }
 
-        // Step 4: Snapshot the new bucket layout after reinsertion
-        let mut new_bucket = BTreeMap::new();
-        for slot in 0..new_capacity {
-            let salt_key = SaltKey::from((bucket_id, slot));
-            if let Some(salt_val) = self.value(salt_key)? {
-                new_bucket.insert(salt_key, salt_val);
-            }
-        }
-
-        // Step 5: Record state changes by comparing slot-by-slot differences
-        for slot in 0..old_meta.capacity.max(new_capacity) {
+        // Step 4: Record state changes by comparing slot-by-slot differences
+        for slot in 0..old_metadata.capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
             let old_value = old_bucket.get(&salt_key);
             let new_value = new_bucket.get(&salt_key);
-            out_updates.add(salt_key, old_value.cloned(), new_value.cloned());
+            self.update_value(
+                out_updates,
+                salt_key,
+                old_value.cloned(),
+                new_value.cloned(),
+            );
         }
 
         // Update bucket metadata
         let new_metadata = BucketMeta {
             nonce: new_nonce,
             capacity: new_capacity,
-            ..*old_meta
+            ..old_metadata
         };
         self.update_value(
             out_updates,
             bucket_metadata_key(bucket_id),
-            Some((*old_meta).into()),
+            Some(old_metadata.into()),
             Some(new_metadata.into()),
         );
 
@@ -893,10 +887,6 @@ mod tests {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
         let mut out_updates = StateUpdates::default();
-        // let mut meta = BucketMeta {
-        //     used: Some(0),
-        //     ..BucketMeta::default()
-        // };
         let salt_array = [
             SaltValue::new(&[1u8; 32], &[1u8; 32]),
             SaltValue::new(&[2u8; 32], &[1u8; 32]),
@@ -1000,8 +990,15 @@ mod tests {
 
     fn check_rehash(old_meta: BucketMeta, new_meta: BucketMeta, l: usize) {
         let store = MemStore::new();
-        // let mut meta1 = old_meta.clone();
         let mut rehash_state = EphemeralSaltState::new(&store);
+        rehash_state
+            .shi_rehash(
+                TEST_BUCKET,
+                old_meta.nonce,
+                old_meta.capacity,
+                &mut StateUpdates::default(),
+            )
+            .unwrap();
         let mut rehash_updates = StateUpdates::default();
 
         let mut cmp_state = EphemeralSaltState::new(&EmptySalt);
@@ -1051,7 +1048,6 @@ mod tests {
         rehash_state
             .shi_rehash(
                 TEST_BUCKET,
-                &old_meta,
                 new_meta.nonce,
                 new_meta.capacity,
                 &mut rehash_updates,

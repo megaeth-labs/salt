@@ -48,8 +48,7 @@ impl StateUpdates {
     ) {
         match self.data.entry(salt_key) {
             Entry::Occupied(mut entry) => {
-                // FIXME: enable this check
-                // debug_assert_eq!(old_value, entry.get().0);
+                debug_assert_eq!(old_value, entry.get().1);
                 if entry.get().0 == new_value {
                     entry.remove();
                 } else {
