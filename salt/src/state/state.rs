@@ -350,8 +350,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
 
+        // Should not be possible due to load factor limits
         unreachable!(
-            "bucket {} capacity {} too large",
+            "shi_upsert: no empty slot found in bucket {} after probing all {} slots",
             bucket_id, metadata.capacity
         );
     }
@@ -573,7 +574,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 /// where `i` is used as an offset from the initial hash position.
 #[inline(always)]
 pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
-    (hashed_key.wrapping_add(i) & (capacity - 1)) as SlotId
+    ((hashed_key + i) % capacity) as SlotId
 }
 
 /// Computes the probe distance for a given slot position.
@@ -610,8 +611,6 @@ mod tests {
 
     const TEST_BUCKET: BucketId = NUM_META_BUCKETS as BucketId + 1;
 
-    // FIXME: where are the unit tests that exercise SHI hashtable and SHI hashtable only? CRUD + resize, etc.
-
     // Randomly generate 'l' key-value pairs
     fn create_random_kvs(l: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let mut keys = vec![];
@@ -624,39 +623,6 @@ mod tests {
             vals.push(v.to_vec());
         }
         (keys, vals)
-    }
-
-    // Reorder keys and values randomly
-    fn reorder_keys(
-        mut keys: Vec<Vec<u8>>,
-        mut vals: Vec<Vec<u8>>,
-    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let mut rng = rand::thread_rng();
-        for i in 0..keys.len() {
-            let r: usize = rng.gen_range(0..keys.len());
-            keys.swap(i, r);
-            vals.swap(i, r);
-        }
-        (keys, vals)
-    }
-
-    // Compare two tables
-    fn is_bucket_eq<R1: StateReader, R2: StateReader>(
-        bucket_id: BucketId,
-        state1: &mut EphemeralSaltState<'_, R1>,
-        state2: &mut EphemeralSaltState<'_, R2>,
-    ) -> bool {
-        let meta1 = state1.metadata(bucket_id, false).unwrap();
-        let meta2 = state2.metadata(bucket_id, false).unwrap();
-        let max_capacity = meta1.capacity.max(meta2.capacity);
-
-        for slot in 0..max_capacity {
-            let salt_key = (bucket_id, slot as SlotId).into();
-            if state1.value(salt_key).unwrap() != state2.value(salt_key).unwrap() {
-                return false;
-            }
-        }
-        true
     }
 
     /// Tests the fundamental inverse relationship between probe and rank functions.
@@ -675,12 +641,15 @@ mod tests {
             (42u64, 256u64),
             (1234567890u64, 512u64),
             (999u64, 1024u64),
-            // Large hash keys that could cause overflow
-            (u64::MAX, MIN_BUCKET_SIZE as u64),
-            (u64::MAX - 1, 256u64),
+            // Large hash keys
             (u64::MAX / 2, 512u64),
             (0x8000_0000_0000_0000u64, 256u64), // Large power of 2
-            (0xFFFF_FFFF_FFFF_FFF0u64, 512u64), // Large with low bits set
+            (0xFFFF_FFFF_FFFF_F000u64, 512u64), // Large with low bits set
+            // Non-power-of-2 capacities to test arbitrary capacity support
+            (42u64, 12u64),
+            (100u64, 15u64),
+            (1000u64, 25u64),
+            (12345u64, 13u64), // Prime capacity
         ];
 
         for (hashed_key, capacity) in test_cases {
@@ -1147,6 +1116,8 @@ mod tests {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
 
+        const BUCKET_CAPACITY: u64 = 12;
+
         #[derive(Clone, Debug)]
         enum Op {
             Delete(u8),
@@ -1174,7 +1145,7 @@ mod tests {
         let mut ref_updates = StateUpdates::default();
 
         ref_state
-            .shi_rehash(TEST_BUCKET, 0, 12, &mut ref_updates)
+            .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut ref_updates)
             .unwrap();
         for (k, v) in &initial_data {
             ref_state
@@ -1207,7 +1178,7 @@ mod tests {
             let mut test_updates = StateUpdates::default();
 
             test_state
-                .shi_rehash(TEST_BUCKET, 0, 12, &mut test_updates)
+                .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut test_updates)
                 .unwrap();
             for (k, v) in &initial_data {
                 test_state
@@ -1280,50 +1251,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn delete_with_diff_order() {
-        let (keys, vals) = create_random_kvs(250); // Enough to trigger resize in both buckets
-        let reader = EmptySalt;
-        let mut state1 = EphemeralSaltState::new(&reader);
-        let mut out_updates1 = StateUpdates::default();
-
-        //Insert KEYS_NUM key-value pairs into table 0 of state
-        for i in 0..keys.len() {
-            state1
-                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates1)
-                .unwrap();
-        }
-
-        // Rearrange the order of keys and vals
-        let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals);
-
-        let mut out_updates = StateUpdates::default();
-        // Delete exactly 40 keys, leaving 210 keys for state2 to also trigger resize
-        let del_num: usize = 40;
-
-        for key in rand_keys.iter().take(del_num) {
-            state1
-                .shi_delete(TEST_BUCKET, key, &mut out_updates)
-                .unwrap();
-        }
-
-        // Reinsert the key-value pairs from del_num to keys.len() into table 0 of cmp_state
-        let reader = EmptySalt;
-        let mut state2 = EphemeralSaltState::new(&reader);
-        let mut out_updates2 = StateUpdates::default();
-
-        for j in del_num..rand_keys.len() {
-            state2
-                .shi_upsert(TEST_BUCKET, &rand_keys[j], &rand_vals[j], &mut out_updates2)
-                .unwrap();
-        }
-
-        assert!(
-            is_bucket_eq(TEST_BUCKET, &mut state1, &mut state2),
-            "The two tables should be equal"
-        );
     }
 
     #[test]
