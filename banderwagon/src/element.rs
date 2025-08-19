@@ -234,8 +234,8 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use ark_serialize::CanonicalSerialize;
+
     #[test]
     fn consistent_group_to_field() {
         // In python this is called commitment_to_field

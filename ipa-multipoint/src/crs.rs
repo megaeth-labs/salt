@@ -203,55 +203,60 @@ fn generate_random_elements(num_required_points: usize, seed: &'static [u8]) -> 
         .collect()
 }
 
-/// Verifies deterministic CRS generation produces expected points.
-///
-/// Checks specific point values and an aggregate hash to ensure the
-/// hash-to-curve algorithm remains consistent with the reference implementation.
-#[test]
-fn crs_consistency() {
-    use sha2::{Digest, Sha256};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let points = generate_random_elements(256, b"MAKE_ETHEREUM_GREAT_AGAIN");
+    /// Verifies deterministic CRS generation produces expected points.
+    ///
+    /// Checks specific point values and an aggregate hash to ensure the
+    /// hash-to-curve algorithm remains consistent with the reference implementation.
+    #[test]
+    fn crs_consistency() {
+        use sha2::{Digest, Sha256};
 
-    let bytes = points[0].to_bytes();
-    assert_eq!(
-        hex::encode(bytes),
-        "2816c0c3ac2555ec31fd5790f97bec3ec9b87d25136507bae595567416e76b80",
-        "the first point is incorrect"
-    );
-    let bytes = points[255].to_bytes();
-    assert_eq!(
-        hex::encode(bytes),
-        "046e3ca0b403c4bb91b27583d57d305945cae298ce18386cd0c0a0d5d76871ab",
-        "the 256th (last) point is incorrect"
-    );
+        let points = generate_random_elements(256, b"MAKE_ETHEREUM_GREAT_AGAIN");
 
-    let mut hasher = Sha256::new();
-    for point in &points {
-        let bytes = point.to_bytes();
-        hasher.update(bytes);
+        let bytes = points[0].to_bytes();
+        assert_eq!(
+            hex::encode(bytes),
+            "2816c0c3ac2555ec31fd5790f97bec3ec9b87d25136507bae595567416e76b80",
+            "the first point is incorrect"
+        );
+        let bytes = points[255].to_bytes();
+        assert_eq!(
+            hex::encode(bytes),
+            "046e3ca0b403c4bb91b27583d57d305945cae298ce18386cd0c0a0d5d76871ab",
+            "the 256th (last) point is incorrect"
+        );
+
+        let mut hasher = Sha256::new();
+        for point in &points {
+            let bytes = point.to_bytes();
+            hasher.update(bytes);
+        }
+        let bytes = hasher.finalize().to_vec();
+        assert_eq!(
+            hex::encode(bytes),
+            "e0d59418bbe04c1f4ec7493a9ed30497982d4ab5480d68b5e8ce426dd756d136",
+            "unexpected point encountered"
+        );
     }
-    let bytes = hasher.finalize().to_vec();
-    assert_eq!(
-        hex::encode(bytes),
-        "e0d59418bbe04c1f4ec7493a9ed30497982d4ab5480d68b5e8ce426dd756d136",
-        "unexpected point encountered"
-    );
-}
 
-/// Tests round-trip serialization consistency for CRS byte encoding.
-///
-/// Verifies that serializing a CRS to bytes and deserializing back
-/// produces identical byte representations.
-#[test]
-fn load_from_bytes_to_bytes() {
-    let crs = CRS::new(256, b"eth_verkle_oct_2021");
-    let bytes = crs.to_bytes();
-    let crs2 = CRS::from_bytes(&bytes);
-    let bytes2 = crs2.to_bytes();
+    /// Tests round-trip serialization consistency for CRS byte encoding.
+    ///
+    /// Verifies that serializing a CRS to bytes and deserializing back
+    /// produces identical byte representations.
+    #[test]
+    fn load_from_bytes_to_bytes() {
+        let crs = CRS::new(256, b"eth_verkle_oct_2021");
+        let bytes = crs.to_bytes();
+        let crs2 = CRS::from_bytes(&bytes);
+        let bytes2 = crs2.to_bytes();
 
-    assert_eq!(
-        bytes, bytes2,
-        "Round-trip serialization must preserve all data"
-    );
+        assert_eq!(
+            bytes, bytes2,
+            "Round-trip serialization must preserve all data"
+        );
+    }
 }

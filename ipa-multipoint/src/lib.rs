@@ -1,4 +1,3 @@
-pub mod committer;
 pub mod crs;
 mod default_crs;
 pub mod ipa; // follows the BCMS20 scheme
