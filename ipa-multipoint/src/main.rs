@@ -26,9 +26,9 @@ fn main() {
 
         let start = Instant::now();
         for i in 0..N {
-            std::hint::black_box(for (idx, v) in vecs[i][0..vec_len].iter().enumerate() {
+            for (idx, v) in vecs[i][0..vec_len].iter().enumerate() {
                 committer.mul_index(v, idx);
-            });
+            }
         }
         let duration = start.elapsed();
         println!("takes {}µs", duration.as_micros() / (N as u128));
