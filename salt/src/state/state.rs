@@ -643,16 +643,16 @@ mod tests {
     // Compare two tables
     fn is_bucket_eq<R1: StateReader, R2: StateReader>(
         bucket_id: BucketId,
-        table1: &mut EphemeralSaltState<'_, R1>,
-        table2: &mut EphemeralSaltState<'_, R2>,
+        state1: &mut EphemeralSaltState<'_, R1>,
+        state2: &mut EphemeralSaltState<'_, R2>,
     ) -> bool {
-        let meta1 = table1.metadata(bucket_id, false).unwrap();
-        let meta2 = table2.metadata(bucket_id, false).unwrap();
+        let meta1 = state1.metadata(bucket_id, false).unwrap();
+        let meta2 = state2.metadata(bucket_id, false).unwrap();
         let max_capacity = meta1.capacity.max(meta2.capacity);
 
-        for slot_id in 0..max_capacity {
-            let salt_id = (bucket_id, slot_id as SlotId).into();
-            if table1.value(salt_id).unwrap() != table2.value(salt_id).unwrap() {
+        for slot in 0..max_capacity {
+            let salt_key = (bucket_id, slot as SlotId).into();
+            if state1.value(salt_key).unwrap() != state2.value(salt_key).unwrap() {
                 return false;
             }
         }
@@ -970,38 +970,132 @@ mod tests {
         assert_eq!(meta.used, Some(100)); // From cache, not store count
     }
 
-    #[test]
-    fn insert_with_diff_order() {
-        let (keys, vals) = create_random_kvs(3 * MIN_BUCKET_SIZE);
+    /// Common helper function to test insertion order independence.
+    ///
+    /// Tests that a hash table produces identical results regardless of key
+    /// insertion order. Supports testing both with and without bucket resizing.
+    ///
+    /// # Arguments
+    /// * `initial_capacity` - Starting bucket capacity
+    /// * `num_keys` - Number of key-value pairs to insert
+    /// * `num_iterations` - Number of different insertion orders to test
+    /// * `expect_resize` - Whether bucket resize should occur during insertion
+    fn test_insertion_order_independence(
+        initial_capacity: u64,
+        num_keys: usize,
+        num_iterations: usize,
+        expect_resize: bool,
+    ) {
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+
+        // Create reference state
         let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let mut out_updates = StateUpdates::default();
-        //Insert KEYS_NUM key-value pairs into table 0 of state
+        let mut ref_state = EphemeralSaltState::new(&reader);
+        let mut ref_updates = StateUpdates::default();
+
+        // Set up bucket with specified capacity
+        ref_state
+            .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut ref_updates)
+            .unwrap();
+
+        // Create test key-value pairs
+        let keys: Vec<Vec<u8>> = (1..=num_keys).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (11..=11 + num_keys - 1)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+
+        // Insert in original order to create reference state
         for i in 0..keys.len() {
-            state
-                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut out_updates)
+            ref_state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut ref_updates)
                 .unwrap();
         }
 
-        for _i in 0..2 {
-            let reader = EmptySalt;
-            let mut cmp_state = EphemeralSaltState::new(&reader);
-            let mut out_updates = StateUpdates::default();
-            // Rearrange the order of keys and vals
-            let (rand_keys, rand_vals) = reorder_keys(keys.clone(), vals.clone());
-
-            // Insert the reordered keys and vals into table 0
-            (0..rand_keys.len()).for_each(|i| {
-                cmp_state
-                    .shi_upsert(TEST_BUCKET, &rand_keys[i], &rand_vals[i], &mut out_updates)
-                    .unwrap();
-            });
-
+        // Get final metadata and verify resize expectations
+        let final_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
+        if expect_resize {
             assert!(
-                is_bucket_eq(TEST_BUCKET, &mut state, &mut cmp_state),
-                "The two tables should be equal"
+                final_meta.capacity > initial_capacity,
+                "Expected bucket resize: {} -> {}",
+                initial_capacity,
+                final_meta.capacity
+            );
+        } else {
+            assert_eq!(
+                final_meta.capacity, initial_capacity,
+                "Expected no resize, capacity should remain {}",
+                initial_capacity
             );
         }
+
+        // Test multiple different random insertion orders
+        for iteration in 0..num_iterations {
+            let reader = EmptySalt;
+            let mut test_state = EphemeralSaltState::new(&reader);
+            let mut test_updates = StateUpdates::default();
+
+            // Set up bucket with same initial capacity
+            test_state
+                .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut test_updates)
+                .unwrap();
+
+            // Create shuffled order of indices
+            let mut indices: Vec<usize> = (0..keys.len()).collect();
+            indices.shuffle(&mut thread_rng());
+
+            // Insert in shuffled order
+            for &i in &indices {
+                test_state
+                    .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut test_updates)
+                    .unwrap();
+            }
+
+            // Verify final capacity matches reference state
+            let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
+            assert_eq!(
+                test_meta.capacity, final_meta.capacity,
+                "Iteration {}: Final capacity should be {}",
+                iteration, final_meta.capacity
+            );
+
+            // Verify all keys are accessible with correct values and locations
+            for i in 0..keys.len() {
+                let ref_find = ref_state
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .unwrap();
+                let test_find = test_state
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .unwrap();
+                assert_eq!(
+                    ref_find, test_find,
+                    "Iteration {}: Key {} should be found in same location with same value",
+                    iteration, i
+                );
+            }
+        }
+    }
+
+    /// Test insertion order independence with small bucket and no resize.
+    ///
+    /// Verifies that a hash table produces identical final state regardless of the
+    /// insertion order of key-value pairs. Uses a small bucket (capacity=8) with
+    /// 5 key-value pairs to stay well below the resize threshold, and tests 10
+    /// different random insertion orders.
+    #[test]
+    fn test_insertion_order_independence_small_bucket() {
+        test_insertion_order_independence(8, 5, 10, false);
+    }
+
+    /// Test insertion order independence when bucket resize is triggered.
+    ///
+    /// Verifies that a hash table maintains insertion order independence even when
+    /// bucket resizing occurs during insertion. Uses a small bucket (capacity=8) with
+    /// 10 key-value pairs to exceed the 80% load factor threshold and trigger resize
+    /// to capacity=16. Tests 10 different random insertion orders.
+    #[test]
+    fn test_insertion_order_independence_with_resize() {
+        test_insertion_order_independence(8, 10, 10, true);
     }
 
     #[test]
