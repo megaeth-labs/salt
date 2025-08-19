@@ -226,23 +226,59 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         bucket_id: BucketId,
         need_used: bool,
     ) -> Result<BucketMeta, Store::Error> {
-        let mut meta = match self.value(bucket_metadata_key(bucket_id))? {
-            Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
-            None => BucketMeta::default(),
+        let metadata_key = bucket_metadata_key(bucket_id);
+
+        // Check cache first
+        let meta = if let Some(cached_value) = self.cache.get(&metadata_key) {
+            // Found in cache - decode it
+            let mut meta = match cached_value {
+                Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
+                None => BucketMeta::default(),
+            };
+
+            // Cached value doesn't have 'used' field, populate if needed
+            if need_used {
+                meta.used = Some(
+                    if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+                        used
+                    } else {
+                        self.store.bucket_used_slots(bucket_id)?
+                    },
+                );
+            }
+            meta
+        } else {
+            // Common path: Not in cache, get from store (more efficient than self.value())
+            let mut meta = self.store.metadata(bucket_id)?;
+
+            if need_used {
+                // Look up cache for the latest usage count
+                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
+                    meta.used = Some(cached_used);
+                }
+            } else {
+                // Clear "used" if not needed
+                meta.used = None;
+            }
+
+            // Cache the metadata only if requested
+            if self.cache_read {
+                // Performance note: We intentionally avoid caching the usage count
+                // to save on HashMap insertions. Since plain keys are distributed
+                // randomly across buckets, bucket metadata is rarely reused between
+                // different keys.
+                self.cache.insert(
+                    metadata_key,
+                    if meta.is_default() {
+                        None
+                    } else {
+                        Some(meta.into())
+                    },
+                );
+            }
+            meta
         };
-        if need_used {
-            meta.used = Some(
-                if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
-                    used
-                } else {
-                    // Performance note: We intentionally avoid caching this usage
-                    // count to save on HashMap insertions. Since plain keys are
-                    // distributed randomly across buckets, bucket metadata is rarely
-                    // reused between different key operations.
-                    self.store.bucket_used_slots(bucket_id)?
-                },
-            );
-        }
+
         Ok(meta)
     }
 
