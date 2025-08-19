@@ -1105,7 +1105,7 @@ mod tests {
     /// of the order in which mixed operations (insert, update, delete) are performed.
     ///
     /// ## Initial State
-    /// - Bucket capacity: 16 slots (well below resize threshold)
+    /// - Bucket capacity: 12 slots (smaller capacity to create more collisions)
     /// - Pre-populated with 6 key-value pairs:
     ///   - Key 1 → Value 11
     ///   - Key 2 → Value 12
@@ -1115,24 +1115,24 @@ mod tests {
     ///   - Key 6 → Value 16
     ///
     /// ## Operations Applied (in various orders)
-    /// 1. **Delete operations**: Remove keys 5 and 6
+    /// 1. **Delete operations**: Remove keys 3 and 6
     /// 2. **Update operations**:
     ///    - Update key 1 from value 11 to 100
-    ///    - Update key 2 from value 12 to 200
+    ///    - Update key 4 from value 14 to 200
     /// 3. **Insert operations**: Add new keys:
-    ///    - Key 20 → Value 30
-    ///    - Key 21 → Value 31
-    ///    - Key 22 → Value 32
+    ///    - Key 7 → Value 17
+    ///    - Key 8 → Value 18
+    ///    - Key 9 → Value 19
     ///
     /// ## Expected Final State (after all operations)
     /// - Key 1 → Value 100 (updated)
-    /// - Key 2 → Value 200 (updated)
-    /// - Key 3 → Value 13 (unchanged)
-    /// - Key 4 → Value 14 (unchanged)
-    /// - Key 20 → Value 30 (newly inserted)
-    /// - Key 21 → Value 31 (newly inserted)
-    /// - Key 22 → Value 32 (newly inserted)
-    /// - Keys 5, 6 → Not present (deleted)
+    /// - Key 2 → Value 12 (unchanged)
+    /// - Key 4 → Value 200 (updated)
+    /// - Key 5 → Value 15 (unchanged)
+    /// - Key 7 → Value 17 (newly inserted)
+    /// - Key 8 → Value 18 (newly inserted)
+    /// - Key 9 → Value 19 (newly inserted)
+    /// - Keys 3, 6 → Not present (deleted)
     ///
     /// ## Verification Strategy
     /// 1. Apply operations in reference order to create baseline state
@@ -1157,15 +1157,15 @@ mod tests {
         // Initial data: keys 1-6 with values 11-16
         let initial_data: Vec<(u8, u8)> = (1..=6).zip(11..=16).collect();
 
-        // Operations: delete keys 5,6; update keys 1,2; insert keys 20-22
+        // Operations: delete keys 3,6; update keys 1,4; insert keys 7-9
         let operations = vec![
-            Op::Delete(5),
+            Op::Delete(3),
             Op::Delete(6),
             Op::Update(1, 100),
-            Op::Update(2, 200),
-            Op::Insert(20, 30),
-            Op::Insert(21, 31),
-            Op::Insert(22, 32),
+            Op::Update(4, 200),
+            Op::Insert(7, 17),
+            Op::Insert(8, 18),
+            Op::Insert(9, 19),
         ];
 
         // Create reference state
@@ -1174,7 +1174,7 @@ mod tests {
         let mut ref_updates = StateUpdates::default();
 
         ref_state
-            .shi_rehash(TEST_BUCKET, 0, 16, &mut ref_updates)
+            .shi_rehash(TEST_BUCKET, 0, 12, &mut ref_updates)
             .unwrap();
         for (k, v) in &initial_data {
             ref_state
@@ -1207,7 +1207,7 @@ mod tests {
             let mut test_updates = StateUpdates::default();
 
             test_state
-                .shi_rehash(TEST_BUCKET, 0, 16, &mut test_updates)
+                .shi_rehash(TEST_BUCKET, 0, 12, &mut test_updates)
                 .unwrap();
             for (k, v) in &initial_data {
                 test_state
@@ -1239,15 +1239,15 @@ mod tests {
                 ref_meta.capacity
             );
 
-            // Expected final keys: 1(100), 2(200), 3(13), 4(14), 20(30), 21(31), 22(32)
+            // Expected final keys: 1(100), 2(12), 4(200), 5(15), 7(17), 8(18), 9(19)
             for (k, _) in [
                 (1, 100),
-                (2, 200),
-                (3, 13),
-                (4, 14),
-                (20, 30),
-                (21, 31),
-                (22, 32),
+                (2, 12),
+                (4, 200),
+                (5, 15),
+                (7, 17),
+                (8, 18),
+                (9, 19),
             ] {
                 let key = vec![k; 32];
                 let ref_find = ref_state
@@ -1264,7 +1264,7 @@ mod tests {
             }
 
             // Verify deleted keys don't exist
-            for k in [5, 6] {
+            for k in [3, 6] {
                 let key = vec![k; 32];
                 assert_eq!(
                     ref_state
