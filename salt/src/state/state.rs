@@ -1098,6 +1098,190 @@ mod tests {
         test_insertion_order_independence(8, 10, 10, true);
     }
 
+    /// Test history independence with mixed insert, update, and delete operations.
+    ///
+    /// ## Test Scenario
+    /// This test verifies that a hash table produces identical final state regardless
+    /// of the order in which mixed operations (insert, update, delete) are performed.
+    ///
+    /// ## Initial State
+    /// - Bucket capacity: 16 slots (well below resize threshold)
+    /// - Pre-populated with 6 key-value pairs:
+    ///   - Key 1 → Value 11
+    ///   - Key 2 → Value 12
+    ///   - Key 3 → Value 13
+    ///   - Key 4 → Value 14
+    ///   - Key 5 → Value 15
+    ///   - Key 6 → Value 16
+    ///
+    /// ## Operations Applied (in various orders)
+    /// 1. **Delete operations**: Remove keys 5 and 6
+    /// 2. **Update operations**:
+    ///    - Update key 1 from value 11 to 100
+    ///    - Update key 2 from value 12 to 200
+    /// 3. **Insert operations**: Add new keys:
+    ///    - Key 20 → Value 30
+    ///    - Key 21 → Value 31
+    ///    - Key 22 → Value 32
+    ///
+    /// ## Expected Final State (after all operations)
+    /// - Key 1 → Value 100 (updated)
+    /// - Key 2 → Value 200 (updated)
+    /// - Key 3 → Value 13 (unchanged)
+    /// - Key 4 → Value 14 (unchanged)
+    /// - Key 20 → Value 30 (newly inserted)
+    /// - Key 21 → Value 31 (newly inserted)
+    /// - Key 22 → Value 32 (newly inserted)
+    /// - Keys 5, 6 → Not present (deleted)
+    ///
+    /// ## Verification Strategy
+    /// 1. Apply operations in reference order to create baseline state
+    /// 2. For 10 iterations, shuffle operations randomly and apply to fresh state
+    /// 3. Verify that each key exists in same slot with same value across all orderings
+    /// 4. Verify that deleted keys are absent in all states
+    ///
+    /// This comprehensive test ensures the SHI (Strongly History-Independent) property
+    /// holds for real-world scenarios involving all types of hash table operations.
+    #[test]
+    fn test_history_independence_with_mixed_operations() {
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Delete(u8),
+            Update(u8, u8),
+            Insert(u8, u8),
+        }
+
+        // Initial data: keys 1-6 with values 11-16
+        let initial_data: Vec<(u8, u8)> = (1..=6).zip(11..=16).collect();
+
+        // Operations: delete keys 5,6; update keys 1,2; insert keys 20-22
+        let operations = vec![
+            Op::Delete(5),
+            Op::Delete(6),
+            Op::Update(1, 100),
+            Op::Update(2, 200),
+            Op::Insert(20, 30),
+            Op::Insert(21, 31),
+            Op::Insert(22, 32),
+        ];
+
+        // Create reference state
+        let reader = EmptySalt;
+        let mut ref_state = EphemeralSaltState::new(&reader);
+        let mut ref_updates = StateUpdates::default();
+
+        ref_state
+            .shi_rehash(TEST_BUCKET, 0, 16, &mut ref_updates)
+            .unwrap();
+        for (k, v) in &initial_data {
+            ref_state
+                .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                .unwrap();
+        }
+        for op in &operations {
+            match op {
+                Op::Delete(k) => {
+                    ref_state
+                        .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut ref_updates)
+                        .unwrap();
+                }
+                Op::Update(k, v) | Op::Insert(k, v) => {
+                    ref_state
+                        .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                        .unwrap();
+                }
+            }
+        }
+        let ref_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
+
+        // Test 10 random operation orders
+        for iteration in 0..10 {
+            let mut shuffled = operations.clone();
+            shuffled.shuffle(&mut thread_rng());
+
+            let test_reader = EmptySalt;
+            let mut test_state = EphemeralSaltState::new(&test_reader);
+            let mut test_updates = StateUpdates::default();
+
+            test_state
+                .shi_rehash(TEST_BUCKET, 0, 16, &mut test_updates)
+                .unwrap();
+            for (k, v) in &initial_data {
+                test_state
+                    .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut test_updates)
+                    .unwrap();
+            }
+            for op in &shuffled {
+                match op {
+                    Op::Delete(k) => {
+                        test_state
+                            .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut test_updates)
+                            .unwrap();
+                    }
+                    Op::Update(k, v) | Op::Insert(k, v) => {
+                        test_state
+                            .shi_upsert(
+                                TEST_BUCKET,
+                                &vec![*k; 32],
+                                &vec![*v; 32],
+                                &mut test_updates,
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+
+            assert_eq!(
+                test_state.metadata(TEST_BUCKET, false).unwrap().capacity,
+                ref_meta.capacity
+            );
+
+            // Expected final keys: 1(100), 2(200), 3(13), 4(14), 20(30), 21(31), 22(32)
+            for (k, _) in [
+                (1, 100),
+                (2, 200),
+                (3, 13),
+                (4, 14),
+                (20, 30),
+                (21, 31),
+                (22, 32),
+            ] {
+                let key = vec![k; 32];
+                let ref_find = ref_state
+                    .shi_find(TEST_BUCKET, 0, ref_meta.capacity, &key)
+                    .unwrap();
+                let test_find = test_state
+                    .shi_find(TEST_BUCKET, 0, ref_meta.capacity, &key)
+                    .unwrap();
+                assert_eq!(
+                    ref_find, test_find,
+                    "Iteration {}: Key {} mismatch",
+                    iteration, k
+                );
+            }
+
+            // Verify deleted keys don't exist
+            for k in [5, 6] {
+                let key = vec![k; 32];
+                assert_eq!(
+                    ref_state
+                        .shi_find(TEST_BUCKET, 0, ref_meta.capacity, &key)
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(
+                    test_state
+                        .shi_find(TEST_BUCKET, 0, ref_meta.capacity, &key)
+                        .unwrap(),
+                    None
+                );
+            }
+        }
+    }
+
     #[test]
     fn delete_with_diff_order() {
         let (keys, vals) = create_random_kvs(250); // Enough to trigger resize in both buckets
