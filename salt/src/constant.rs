@@ -31,6 +31,8 @@ pub const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
 pub const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
 /// Index of root commitment in salt buckets.
 pub const ROOT_NODE_ID: NodeId = 0;
+/// Default hash value of [1u8; 32] when the slot is empty
+pub const KV_NONE_HASH: [u8; 32] = [1u8; 32];
 
 /// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
 /// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
@@ -102,30 +104,39 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,
-            b512!("02e24303c4bf933c0f4c6c8295c1329186b928df22faeca7d78cfb42c2c14917975ce437fde2773f40feda8871808425116d657b4ad84e4f061476cfb0feaa2d"),
-            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+            b512!("5f0ee344a7c4c41456f239be83cda66eb4e1311b64ea69c7be03df42e5d5650c2abbf663ac56db88332dfea35f3d65c1365f413d5890cf90232b15f26d33cb03"),
+            b512!("5f0ee344a7c4c41456f239be83cda66eb4e1311b64ea69c7be03df42e5d5650c2abbf663ac56db88332dfea35f3d65c1365f413d5890cf90232b15f26d33cb03"),
         ),
         (
             STARTING_NODE_ID[1] + 1,
             b512!("4abb404b7e0555512fa6c91ef6c2ab0b694ed5c55c4796b2581eed30ec1b7a63b83260bddc4f935c1a3e9cb4ab683a6d8a387cef20e356c673e69fe84dab6001"),
-            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+            b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),
         ),
         (
             STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,
             b512!("632ad81f19f816c3f986568e7e829fe8456989e90a106cfc0f0150d75aedbb5bd2b8131e1349252f63d067f9d7de9838f1999e16996e3a7a0c6fa54fb3256601"),
-            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+            b512!("1d8d81bcb60ff180ff99c497a8298af38d71d2fbf3c0ffda09b659839e3732612771a485191ab8fe740dc20d1a33c53f8cfbb1c07676d74050de914c0efc7f54"),
         ),
         (
             STARTING_NODE_ID[3] + NUM_META_BUCKETS,
             b512!("21824da3ca11d224dbc2d2191ae01357f89c65e618daf8a97c5678058542865945c25871df9856d9234a045eca471580aae9270439e6131e12b641b65c981c08"),
-            b512!("00000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"),
+            b512!("da260863cc36b265d34f9912c3b98ae7e046ced37bf5eebe1be164695093714efc9e5b23b9ab87c9f7b51e4fec4ea377e4fe44672d70752f7c3522e0f0269555"),
         ),
     ];
 
-    let level = get_bfs_level(node_id);
+    // Precomputed node commitment at each level of an empty SALT SubTrie.
+    static SUBTRIE_DEFAULT_COMMITMENT:[CommitmentBytes; SUB_TRIE_LEVELS] = [
+        b512!("5a4458230b52d0445f846b078df60f4aba2130f015eff95bf6530098bdcfbc570331d402f243631ee94f2b59af6c41b9014eb1a767ff4d4e692889ea546a3c01"),
+        b512!("26e37bc889bd763289bc5ca3fd88babef8c4477ea0c0d0ec457d165c7a37e1449bf45aaa4d7fdf0c6a43aa579243015ad99e70dfa4fb66137fc6733be79a4803"),
+        b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),
+        b512!("1d8d81bcb60ff180ff99c497a8298af38d71d2fbf3c0ffda09b659839e3732612771a485191ab8fe740dc20d1a33c53f8cfbb1c07676d74050de914c0efc7f54"),
+        b512!("da260863cc36b265d34f9912c3b98ae7e046ced37bf5eebe1be164695093714efc9e5b23b9ab87c9f7b51e4fec4ea377e4fe44672d70752f7c3522e0f0269555"),
+    ];
+
+    let level = get_bfs_level(node_id & BUCKET_SLOT_ID_MASK as NodeId);
 
     if is_subtree_node(node_id) {
-        zero_commitment()
+        SUBTRIE_DEFAULT_COMMITMENT[level]
     } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
