@@ -1,5 +1,4 @@
-use banderwagon::{trait_defs::*, Fr};
-use ipa_multipoint::committer::{Committer, DefaultCommitter};
+use banderwagon::{salt_committer::Committer, trait_defs::*, Fr};
 use ipa_multipoint::crs::CRS;
 use std::time::Instant;
 
@@ -10,7 +9,7 @@ fn main() {
 
     let crs = CRS::new(256, "eth_verkle_oct_2021".as_bytes());
 
-    let committer = DefaultCommitter::new(&crs.G);
+    let committer = Committer::new(&crs.G, 11);
     let mut vec_len = 1;
     while vec_len <= 256 {
         println!("\twith {vec_len} elements... ");
@@ -27,7 +26,9 @@ fn main() {
 
         let start = Instant::now();
         for i in 0..N {
-            std::hint::black_box(committer.commit_lagrange(&vecs[i][0..vec_len]));
+            for (idx, v) in vecs[i][0..vec_len].iter().enumerate() {
+                committer.mul_index(v, idx);
+            }
         }
         let duration = start.elapsed();
         println!("takes {}µs", duration.as_micros() / (N as u128));

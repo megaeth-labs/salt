@@ -463,7 +463,6 @@ pub(crate) fn get_main_trie_child_node(parent_id: NodeId, point: u8) -> NodeId {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use rand::Rng;
 

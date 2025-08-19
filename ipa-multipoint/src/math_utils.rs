@@ -41,19 +41,24 @@ pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     powers
 }
 
-#[test]
-fn simple_vandemonde() {
-    use ark_std::test_rng;
-    use ark_std::UniformRand;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let rand_fr = Fr::rand(&mut test_rng());
-    let n = 100;
-    let powers = powers_of(rand_fr, n);
+    #[test]
+    fn simple_vandemonde() {
+        use ark_std::test_rng;
+        use ark_std::UniformRand;
 
-    assert_eq!(powers[0], Fr::one());
-    assert_eq!(powers[n - 1], rand_fr.pow([(n - 1) as u64]));
+        let rand_fr = Fr::rand(&mut test_rng());
+        let n = 100;
+        let powers = powers_of(rand_fr, n);
 
-    for (i, power) in powers.into_iter().enumerate() {
-        assert_eq!(power, rand_fr.pow([i as u64]))
+        assert_eq!(powers[0], Fr::one());
+        assert_eq!(powers[n - 1], rand_fr.pow([(n - 1) as u64]));
+
+        for (i, power) in powers.into_iter().enumerate() {
+            assert_eq!(power, rand_fr.pow([i as u64]))
+        }
     }
 }

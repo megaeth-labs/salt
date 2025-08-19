@@ -254,6 +254,7 @@ impl LagrangeBasis {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 
     impl LagrangeBasis {
@@ -297,7 +298,6 @@ mod tests {
         }
     }
 
-    use super::*;
     #[test]
     fn basic_interpolation() {
         use ark_poly::Polynomial;
@@ -344,6 +344,7 @@ mod tests {
         }
         assert_eq!(got, expected)
     }
+
     #[test]
     fn simple_division() {
         let domain_size = 4;
