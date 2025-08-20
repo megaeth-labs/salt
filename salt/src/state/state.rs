@@ -1560,7 +1560,7 @@ mod tests {
 
     /// Comprehensive test for shi_rehash method covering various scenarios.
     #[test]
-    fn test_shi_rehash_comprehensive() {
+    fn test_shi_rehash() {
         // Test cases: (old_nonce, old_capacity, new_nonce, new_capacity, num_entries)
         let test_cases = [
             (0, 8, 0, 8, 0),  // Empty bucket, no change
@@ -1582,69 +1582,77 @@ mod tests {
         }
     }
 
+    /// Comprehensive test for shi_find method with high bucket occupancy.
+    ///
+    /// This test exercises all code paths in shi_find by using a high number of keys
+    /// in a single bucket, which naturally creates various collision scenarios and
+    /// probe sequences. The test verifies finding existing keys, handling deleted
+    /// keys, and different termination conditions.
     #[test]
-    fn find_key() {
-        let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
-        let salt_val1 = SaltValue::new(&[1; 32], &[1; 32]);
-
-        // Calculate the initial slot_id of the key
-        let hashed_key = hasher::hash_with_nonce(salt_val1.key(), 0);
-        let slot_id = probe(hashed_key, 0, meta.capacity);
-        let salt_id = (TEST_BUCKET, slot_id).into();
-
-        // Insert the key-value pair into the position of slot_id
-        state.cache.insert(salt_id, Some(salt_val1.clone()));
-
-        // Find key1 in the state
-        let find_slot = state
-            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
-            .unwrap();
-        assert_eq!(
-            find_slot.unwrap(),
-            (slot_id, salt_val1.clone()),
-            "The key1 should be found in the slot_id and the value should equal val1",
-        );
-
-        let salt_val2 = SaltValue::new(&[2; 32], &[2; 32]);
-        let salt_val3 = SaltValue::new(&[3; 32], &[3; 32]);
-
-        // Create a table 0 with entries like [...(key1_slot_id, (key1, val1)), (key1_slot_id + 1,
-        // (key3, val3)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key3 > key1
-        state.cache.insert(salt_id, Some(salt_val3));
-        state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val2));
+    fn test_shi_find() {
+        use std::collections::HashSet;
+        let mut state = EphemeralSaltState::new(&EmptySalt);
+        let mut updates = StateUpdates::default();
         state
-            .cache
-            .insert(SaltKey(salt_id.0 + 2), Some(salt_val1.clone()));
-        let find_slot = state
-            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
+            .shi_rehash(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, &mut updates)
             .unwrap();
-        assert_eq!(
-            find_slot.unwrap(),
-            (slot_id + 2, salt_val1.clone()),
-            "The key1 should be found in the slot_id+2 and the value should equal val1",
-        );
 
-        // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), None,
-        // , (key1_slot_id + 2, (key1, val1))...], and key2 > key1
-        state.cache.insert(SaltKey(salt_id.0 + 1), None);
-        let find_slot = state
-            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
-            .unwrap();
-        assert_eq!(find_slot, None, "should be found None");
+        // Insert 203 keys (79% of 256) to avoid triggering resize
+        let num_keys = (MIN_BUCKET_SIZE as u64 * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 - 1) as usize;
+        let test_data: Vec<(Vec<u8>, Vec<u8>)> = (1..=num_keys)
+            .map(|i| (vec![i as u8; 32], vec![(i + 99) as u8; 32]))
+            .collect();
 
-        // Create a table 0 with entries like [...(key1_slot_id, (key2, val2)), (key1_slot_id + 1,
-        // (key4, val4)), (key1_slot_id + 2, (key1, val1))...], and key2 > key1, key4 < key1
-        let salt_val4 = SaltValue::new(&[0; 32], &[0; 32]);
-        state.cache.insert(SaltKey(salt_id.0 + 1), Some(salt_val4));
-        let find_slot = state
-            .shi_find(TEST_BUCKET, meta.nonce, meta.capacity, salt_val1.key())
-            .unwrap();
-        assert_eq!(find_slot, None, "should be found None");
+        // Insert all keys
+        for (k, v) in &test_data {
+            state.shi_upsert(TEST_BUCKET, k, v, &mut updates).unwrap();
+        }
+
+        // Verify all keys can be found
+        for (i, (k, v)) in test_data.iter().enumerate() {
+            let (_, found) = state
+                .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
+                .unwrap()
+                .expect(&format!("Key {} missing", i));
+            assert_eq!(found.key(), k);
+            assert_eq!(found.value(), v);
+        }
+
+        // Delete every 10th key
+        let deleted: HashSet<usize> = (0..num_keys).step_by(10).collect();
+        for &i in &deleted {
+            state
+                .shi_delete(TEST_BUCKET, &test_data[i].0, &mut updates)
+                .unwrap();
+            assert_eq!(
+                state
+                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, &test_data[i].0)
+                    .unwrap(),
+                None
+            );
+        }
+
+        // Verify remaining keys still found
+        for (i, (k, v)) in test_data.iter().enumerate() {
+            if !deleted.contains(&i) {
+                let (_, found) = state
+                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
+                    .unwrap()
+                    .expect(&format!("Key {} missing after deletion", i));
+                assert_eq!(found.key(), k);
+                assert_eq!(found.value(), v);
+            }
+        }
+
+        // Test non-existent keys
+        for key in [vec![0u8; 32], vec![255u8; 32], vec![50; 4]] {
+            assert_eq!(
+                state
+                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, &key)
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     /// Tests that `shi_next` correctly identifies displaced entries that should
@@ -1906,5 +1914,4 @@ mod tests {
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
     }
-
 }
