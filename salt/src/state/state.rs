@@ -596,7 +596,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        constant::{
+            BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER, MIN_BUCKET_SIZE,
+            NUM_META_BUCKETS,
+        },
         empty_salt::EmptySalt,
         mem_store::*,
         state::{
@@ -939,6 +942,27 @@ mod tests {
         assert_eq!(meta.used, Some(100)); // From cache, not store count
     }
 
+    /// Helper function to verify all key-value pairs are present with correct values.
+    fn verify_all_keys_present(
+        state: &mut EphemeralSaltState<EmptySalt>,
+        bucket_id: BucketId,
+        capacity: u64,
+        keys: &[Vec<u8>],
+        vals: &[Vec<u8>],
+    ) {
+        for i in 0..keys.len() {
+            let find_result = state.shi_find(bucket_id, 0, capacity, &keys[i]).unwrap();
+            assert!(find_result.is_some(), "Key {} should be found in state", i);
+            let (_, found_value) = find_result.unwrap();
+            assert_eq!(
+                found_value.value(),
+                &vals[i],
+                "Key {} should have correct value",
+                i
+            );
+        }
+    }
+
     /// Common helper function to test insertion order independence.
     ///
     /// Tests that a hash table produces identical results regardless of key
@@ -994,6 +1018,15 @@ mod tests {
             final_meta.capacity, expected_final_capacity,
             "Expected capacity {} after inserting {} keys into bucket with initial capacity {}",
             expected_final_capacity, num_keys, initial_capacity
+        );
+
+        // Verify all key-value pairs are present in reference state with correct values
+        verify_all_keys_present(
+            &mut ref_state,
+            TEST_BUCKET,
+            final_meta.capacity,
+            &keys,
+            &vals,
         );
 
         // Test multiple different random insertion orders
