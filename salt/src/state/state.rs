@@ -610,23 +610,277 @@ mod tests {
         traits::StateReader,
         types::*,
     };
-    use rand::Rng;
 
     const TEST_BUCKET: BucketId = NUM_META_BUCKETS as BucketId + 1;
 
-    // Randomly generate 'l' key-value pairs
-    fn create_random_kvs(l: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-        let mut keys = vec![];
-        let mut vals = vec![];
-        let mut rng = rand::thread_rng();
-        for _ in 0..l {
-            let k: [u8; 32] = rng.gen();
-            let v: [u8; 32] = rng.gen();
-            keys.push(k.to_vec());
-            vals.push(v.to_vec());
+    // ============================
+    // Test Utility Helper Methods
+    // ============================
+
+    /// Helper function to verify all key-value pairs are present with correct values.
+    fn verify_all_keys_present(
+        state: &mut EphemeralSaltState<EmptySalt>,
+        bucket_id: BucketId,
+        nonce: u32,
+        capacity: u64,
+        keys: &[Vec<u8>],
+        vals: &[Vec<u8>],
+    ) {
+        for i in 0..keys.len() {
+            let find_result = state
+                .shi_find(bucket_id, nonce, capacity, &keys[i])
+                .unwrap();
+            assert!(find_result.is_some(), "Key {} should be found in state", i);
+            let (_, found_value) = find_result.unwrap();
+            assert_eq!(
+                found_value.value(),
+                &vals[i],
+                "Key {} should have correct value",
+                i
+            );
         }
-        (keys, vals)
     }
+
+    /// Common helper function to test insertion order independence.
+    ///
+    /// Tests that a hash table produces identical results regardless of key
+    /// insertion order. Supports testing both with and without bucket resizing.
+    ///
+    /// # Arguments
+    /// * `initial_capacity` - Starting bucket capacity
+    /// * `num_keys` - Number of key-value pairs to insert
+    /// * `num_iterations` - Number of different insertion orders to test
+    fn test_insertion_order_independence(
+        initial_capacity: u64,
+        num_keys: usize,
+        num_iterations: usize,
+    ) {
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+
+        // Compute expected final capacity based on load factor
+        let expect_resize =
+            num_keys as u64 >= initial_capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100;
+        let expected_final_capacity = if expect_resize {
+            initial_capacity * BUCKET_RESIZE_MULTIPLIER
+        } else {
+            initial_capacity
+        };
+
+        // Create reference state
+        let reader = EmptySalt;
+        let mut ref_state = EphemeralSaltState::new(&reader);
+        let mut ref_updates = StateUpdates::default();
+
+        // Set up bucket with specified capacity
+        ref_state
+            .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut ref_updates)
+            .unwrap();
+
+        // Create test key-value pairs
+        let keys: Vec<Vec<u8>> = (1..=num_keys).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (11..=11 + num_keys - 1)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+
+        // Insert in original order to create reference state
+        for i in 0..keys.len() {
+            ref_state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut ref_updates)
+                .unwrap();
+        }
+
+        // Verify the final capacity matches expectation
+        let final_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(
+            final_meta.capacity, expected_final_capacity,
+            "Expected capacity {} after inserting {} keys into bucket with initial capacity {}",
+            expected_final_capacity, num_keys, initial_capacity
+        );
+
+        // Verify all key-value pairs are present in reference state with correct values
+        verify_all_keys_present(
+            &mut ref_state,
+            TEST_BUCKET,
+            0,
+            final_meta.capacity,
+            &keys,
+            &vals,
+        );
+
+        // Test multiple different random insertion orders
+        for iteration in 0..num_iterations {
+            let reader = EmptySalt;
+            let mut test_state = EphemeralSaltState::new(&reader);
+            let mut test_updates = StateUpdates::default();
+
+            // Set up bucket with same initial capacity
+            test_state
+                .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut test_updates)
+                .unwrap();
+
+            // Create shuffled order of indices
+            let mut indices: Vec<usize> = (0..keys.len()).collect();
+            indices.shuffle(&mut thread_rng());
+
+            // Insert in shuffled order
+            for &i in &indices {
+                test_state
+                    .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut test_updates)
+                    .unwrap();
+            }
+
+            // Verify final metadata matches reference state exactly
+            let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
+            assert_eq!(
+                test_meta, final_meta,
+                "Iteration {}: Final metadata should match reference state",
+                iteration
+            );
+
+            // Verify all keys are accessible with correct values and locations
+            for i in 0..keys.len() {
+                let ref_find = ref_state
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .unwrap();
+                let test_find = test_state
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .unwrap();
+                assert_eq!(
+                    ref_find, test_find,
+                    "Iteration {}: Key {} should be found in same location with same value",
+                    iteration, i
+                );
+            }
+        }
+    }
+
+    /// Helper function to verify shi_rehash behavior for a specific configuration.
+    fn verify_rehash(
+        old_nonce: u32,
+        old_capacity: u64,
+        new_nonce: u32,
+        new_capacity: u64,
+        num_entries: usize,
+    ) {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+
+        // Initialize bucket with old configuration
+        state
+            .shi_rehash(TEST_BUCKET, old_nonce, old_capacity, &mut updates)
+            .unwrap();
+
+        // Create test data - deterministic for reproducibility
+        let keys: Vec<Vec<u8>> = (1..=num_entries).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (100..=100 + num_entries - 1)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+
+        // Insert test entries
+        for i in 0..num_entries {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+
+        // Verify initial state before rehash
+        let old_meta = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(old_meta.nonce, old_nonce);
+        assert_eq!(old_meta.capacity, old_capacity);
+
+        // Perform rehash
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(TEST_BUCKET, new_nonce, new_capacity, &mut rehash_updates)
+            .unwrap();
+
+        // Verify metadata after rehash
+        let new_meta = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(new_meta.nonce, new_nonce, "Nonce should be updated");
+        assert_eq!(
+            new_meta.capacity, new_capacity,
+            "Capacity should be updated"
+        );
+
+        // Verify all entries are preserved with correct values
+        verify_all_keys_present(
+            &mut state,
+            TEST_BUCKET,
+            new_nonce,
+            new_capacity,
+            &keys,
+            &vals,
+        );
+
+        // Verify StateUpdates contains metadata change
+        if old_nonce != new_nonce || old_capacity != new_capacity {
+            let meta_key = bucket_metadata_key(TEST_BUCKET);
+            assert!(
+                rehash_updates.data.contains_key(&meta_key),
+                "Rehash should update metadata in StateUpdates"
+            );
+        }
+    }
+
+    /// Helper to create a key that hashes to a specific slot for testing.
+    /// Uses a simple approach: tries incrementing key values until finding one
+    /// that hashes to the desired slot.
+    fn create_key_for_slot(ideal_slot: SlotId, nonce: u32, capacity: u64) -> Vec<u8> {
+        for i in 0..1000u32 {
+            let key = i.to_le_bytes().to_vec();
+            let hashed_key = hasher::hash_with_nonce(&key, nonce);
+            if probe(hashed_key, 0, capacity) == ideal_slot {
+                return key;
+            }
+        }
+        panic!(
+            "Could not find key for slot {} with nonce {} capacity {}",
+            ideal_slot, nonce, capacity
+        );
+    }
+
+    /// Helper to set up a bucket with specific entry placements for testing.
+    fn setup_bucket_layout(
+        state: &mut EphemeralSaltState<impl StateReader>,
+        bucket_id: BucketId,
+        layout: Vec<(SlotId, Option<SaltValue>)>,
+    ) {
+        for (slot, value) in layout {
+            let salt_key = (bucket_id, slot).into();
+            state.cache.insert(salt_key, value);
+        }
+    }
+
+    /// Creates test key-value pairs that hash to the same bucket for collision testing.
+    ///
+    /// This utility function generates test data specifically designed to stress-test
+    /// the SHI hash table's collision handling mechanisms. Uses pre-computed keys
+    /// from the hasher test module that are guaranteed to hash to the same bucket,
+    /// creating scenarios where linear probing and key swapping logic are exercised.
+    /// Essential for validating bucket layout algorithms under high collision scenarios.
+    ///
+    /// Returns: Vector of (key, Some(value)) pairs ready for update() calls
+    fn create_same_bucket_test_data(count: usize) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let keys = hasher::tests::get_same_bucket_test_keys();
+        if count > keys.len() {
+            panic!(
+                "Requested {} keys but only {} available from get_same_bucket_test_keys",
+                count,
+                keys.len()
+            );
+        }
+        keys.into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(i, key)| (key, Some(format!("value_{}", i).into_bytes())))
+            .collect()
+    }
+
+    // ============================
+    // Test Functions
+    // ============================
 
     /// Tests the fundamental inverse relationship between probe and rank functions.
     ///
@@ -1068,144 +1322,6 @@ mod tests {
         assert_eq!(meta.used, Some(100)); // From cache, not store count
     }
 
-    /// Helper function to verify all key-value pairs are present with correct values.
-    fn verify_all_keys_present(
-        state: &mut EphemeralSaltState<EmptySalt>,
-        bucket_id: BucketId,
-        nonce: u32,
-        capacity: u64,
-        keys: &[Vec<u8>],
-        vals: &[Vec<u8>],
-    ) {
-        for i in 0..keys.len() {
-            let find_result = state
-                .shi_find(bucket_id, nonce, capacity, &keys[i])
-                .unwrap();
-            assert!(find_result.is_some(), "Key {} should be found in state", i);
-            let (_, found_value) = find_result.unwrap();
-            assert_eq!(
-                found_value.value(),
-                &vals[i],
-                "Key {} should have correct value",
-                i
-            );
-        }
-    }
-
-    /// Common helper function to test insertion order independence.
-    ///
-    /// Tests that a hash table produces identical results regardless of key
-    /// insertion order. Supports testing both with and without bucket resizing.
-    ///
-    /// # Arguments
-    /// * `initial_capacity` - Starting bucket capacity
-    /// * `num_keys` - Number of key-value pairs to insert
-    /// * `num_iterations` - Number of different insertion orders to test
-    fn test_insertion_order_independence(
-        initial_capacity: u64,
-        num_keys: usize,
-        num_iterations: usize,
-    ) {
-        use rand::seq::SliceRandom;
-        use rand::thread_rng;
-
-        // Compute expected final capacity based on load factor
-        let expect_resize =
-            num_keys as u64 >= initial_capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100;
-        let expected_final_capacity = if expect_resize {
-            initial_capacity * BUCKET_RESIZE_MULTIPLIER
-        } else {
-            initial_capacity
-        };
-
-        // Create reference state
-        let reader = EmptySalt;
-        let mut ref_state = EphemeralSaltState::new(&reader);
-        let mut ref_updates = StateUpdates::default();
-
-        // Set up bucket with specified capacity
-        ref_state
-            .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut ref_updates)
-            .unwrap();
-
-        // Create test key-value pairs
-        let keys: Vec<Vec<u8>> = (1..=num_keys).map(|i| vec![i as u8; 32]).collect();
-        let vals: Vec<Vec<u8>> = (11..=11 + num_keys - 1)
-            .map(|i| vec![i as u8; 32])
-            .collect();
-
-        // Insert in original order to create reference state
-        for i in 0..keys.len() {
-            ref_state
-                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut ref_updates)
-                .unwrap();
-        }
-
-        // Verify the final capacity matches expectation
-        let final_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
-        assert_eq!(
-            final_meta.capacity, expected_final_capacity,
-            "Expected capacity {} after inserting {} keys into bucket with initial capacity {}",
-            expected_final_capacity, num_keys, initial_capacity
-        );
-
-        // Verify all key-value pairs are present in reference state with correct values
-        verify_all_keys_present(
-            &mut ref_state,
-            TEST_BUCKET,
-            0,
-            final_meta.capacity,
-            &keys,
-            &vals,
-        );
-
-        // Test multiple different random insertion orders
-        for iteration in 0..num_iterations {
-            let reader = EmptySalt;
-            let mut test_state = EphemeralSaltState::new(&reader);
-            let mut test_updates = StateUpdates::default();
-
-            // Set up bucket with same initial capacity
-            test_state
-                .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut test_updates)
-                .unwrap();
-
-            // Create shuffled order of indices
-            let mut indices: Vec<usize> = (0..keys.len()).collect();
-            indices.shuffle(&mut thread_rng());
-
-            // Insert in shuffled order
-            for &i in &indices {
-                test_state
-                    .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut test_updates)
-                    .unwrap();
-            }
-
-            // Verify final metadata matches reference state exactly
-            let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
-            assert_eq!(
-                test_meta, final_meta,
-                "Iteration {}: Final metadata should match reference state",
-                iteration
-            );
-
-            // Verify all keys are accessible with correct values and locations
-            for i in 0..keys.len() {
-                let ref_find = ref_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
-                    .unwrap();
-                let test_find = test_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
-                    .unwrap();
-                assert_eq!(
-                    ref_find, test_find,
-                    "Iteration {}: Key {} should be found in same location with same value",
-                    iteration, i
-                );
-            }
-        }
-    }
-
     /// Test insertion order independence with small bucket and no resize.
     ///
     /// Verifies that a hash table produces identical final state regardless of the
@@ -1462,75 +1578,6 @@ mod tests {
                 new_nonce,
                 new_capacity,
                 num_entries,
-            );
-        }
-    }
-
-    /// Helper function to verify shi_rehash behavior for a specific configuration.
-    fn verify_rehash(
-        old_nonce: u32,
-        old_capacity: u64,
-        new_nonce: u32,
-        new_capacity: u64,
-        num_entries: usize,
-    ) {
-        let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let mut updates = StateUpdates::default();
-
-        // Initialize bucket with old configuration
-        state
-            .shi_rehash(TEST_BUCKET, old_nonce, old_capacity, &mut updates)
-            .unwrap();
-
-        // Create test data - deterministic for reproducibility
-        let keys: Vec<Vec<u8>> = (1..=num_entries).map(|i| vec![i as u8; 32]).collect();
-        let vals: Vec<Vec<u8>> = (100..=100 + num_entries - 1)
-            .map(|i| vec![i as u8; 32])
-            .collect();
-
-        // Insert test entries
-        for i in 0..num_entries {
-            state
-                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
-                .unwrap();
-        }
-
-        // Verify initial state before rehash
-        let old_meta = state.metadata(TEST_BUCKET, false).unwrap();
-        assert_eq!(old_meta.nonce, old_nonce);
-        assert_eq!(old_meta.capacity, old_capacity);
-
-        // Perform rehash
-        let mut rehash_updates = StateUpdates::default();
-        state
-            .shi_rehash(TEST_BUCKET, new_nonce, new_capacity, &mut rehash_updates)
-            .unwrap();
-
-        // Verify metadata after rehash
-        let new_meta = state.metadata(TEST_BUCKET, false).unwrap();
-        assert_eq!(new_meta.nonce, new_nonce, "Nonce should be updated");
-        assert_eq!(
-            new_meta.capacity, new_capacity,
-            "Capacity should be updated"
-        );
-
-        // Verify all entries are preserved with correct values
-        verify_all_keys_present(
-            &mut state,
-            TEST_BUCKET,
-            new_nonce,
-            new_capacity,
-            &keys,
-            &vals,
-        );
-
-        // Verify StateUpdates contains metadata change
-        if old_nonce != new_nonce || old_capacity != new_capacity {
-            let meta_key = bucket_metadata_key(TEST_BUCKET);
-            assert!(
-                rehash_updates.data.contains_key(&meta_key),
-                "Rehash should update metadata in StateUpdates"
             );
         }
     }
@@ -1860,131 +1907,4 @@ mod tests {
         assert_eq!(updates.data.len(), prev_len);
     }
 
-    // ============================
-    // Test Utility Functions
-    // ============================
-
-    /// Helper to create a key that hashes to a specific slot for testing.
-    /// Uses a simple approach: tries incrementing key values until finding one
-    /// that hashes to the desired slot.
-    fn create_key_for_slot(ideal_slot: SlotId, nonce: u32, capacity: u64) -> Vec<u8> {
-        for i in 0..1000u32 {
-            let key = i.to_le_bytes().to_vec();
-            let hashed_key = hasher::hash_with_nonce(&key, nonce);
-            if probe(hashed_key, 0, capacity) == ideal_slot {
-                return key;
-            }
-        }
-        panic!(
-            "Could not find key for slot {} with nonce {} capacity {}",
-            ideal_slot, nonce, capacity
-        );
-    }
-
-    /// Helper to visualize bucket state for debugging tests.
-    #[allow(dead_code)]
-    fn print_bucket_state(
-        state: &mut EphemeralSaltState<impl StateReader>,
-        bucket_id: BucketId,
-        capacity: u64,
-        nonce: u32,
-    ) {
-        println!("Bucket {} layout (capacity={}):", bucket_id, capacity);
-        for slot in 0..capacity {
-            let salt_key = (bucket_id, slot).into();
-            let entry = state.value(salt_key).unwrap();
-            match entry {
-                Some(val) => {
-                    let hashed_key = hasher::hash_with_nonce(val.key(), nonce);
-                    let ideal = probe(hashed_key, 0, capacity);
-                    let displacement = rank(hashed_key, slot, capacity);
-                    println!(
-                        "  Slot {}: Key {:?} (ideal={}, displacement={})",
-                        slot,
-                        val.key(),
-                        ideal,
-                        displacement
-                    );
-                }
-                None => println!("  Slot {}: empty", slot),
-            }
-        }
-    }
-
-    /// Helper to set up a bucket with specific entry placements for testing.
-    fn setup_bucket_layout(
-        state: &mut EphemeralSaltState<impl StateReader>,
-        bucket_id: BucketId,
-        layout: Vec<(SlotId, Option<SaltValue>)>,
-    ) {
-        for (slot, value) in layout {
-            let salt_key = (bucket_id, slot).into();
-            state.cache.insert(salt_key, value);
-        }
-    }
-
-    /// Creates test key-value pairs that hash to the same bucket for collision testing.
-    ///
-    /// This utility function generates test data specifically designed to stress-test
-    /// the SHI hash table's collision handling mechanisms. Uses pre-computed keys
-    /// from the hasher test module that are guaranteed to hash to the same bucket,
-    /// creating scenarios where linear probing and key swapping logic are exercised.
-    /// Essential for validating bucket layout algorithms under high collision scenarios.
-    ///
-    /// Returns: Vector of (key, Some(value)) pairs ready for update() calls
-    fn create_same_bucket_test_data(count: usize) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        let keys = hasher::tests::get_same_bucket_test_keys();
-        if count > keys.len() {
-            panic!(
-                "Requested {} keys but only {} available from get_same_bucket_test_keys",
-                count,
-                keys.len()
-            );
-        }
-        keys.into_iter()
-            .take(count)
-            .enumerate()
-            .map(|(i, key)| (key, Some(format!("value_{}", i).into_bytes())))
-            .collect()
-    }
-
-    /// Assertion helper that verifies a state contains all expected key-value pairs.
-    ///
-    /// This utility function performs batch verification of key-value pair existence
-    /// by iterating through expected pairs and using plain_value() to check each one.
-    /// Provides clear error messages when assertions fail, making it easier to debug
-    /// test failures. Used extensively in tests that need to verify data integrity
-    /// after operations like insertions, updates, or bucket rehashing.
-    fn assert_state_contains_kvs<Store: StateReader>(
-        state: &mut EphemeralSaltState<Store>,
-        expected_kvs: &[(Vec<u8>, Vec<u8>)],
-    ) {
-        for (key, expected_value) in expected_kvs {
-            let actual_value = state.plain_value(key).unwrap();
-            assert_eq!(
-                actual_value,
-                Some(expected_value.clone()),
-                "Key {:?} should have value {:?}",
-                key,
-                expected_value
-            );
-        }
-    }
-
-    /// Assertion helper that verifies specified keys are not present in the state.
-    ///
-    /// This utility function performs batch verification of key absence by checking
-    /// that plain_value() returns None for each provided key. Used primarily in
-    /// deletion tests to verify that removed keys are no longer accessible.
-    /// Provides clear error messages indicating which key was unexpectedly found,
-    /// making it easier to identify deletion logic issues.
-    fn assert_keys_not_present<Store: StateReader>(
-        state: &mut EphemeralSaltState<Store>,
-        keys: &[Vec<u8>],
-    ) {
-        for key in keys {
-            let value = state.plain_value(key).unwrap();
-            assert_eq!(value, None, "Key {:?} should not exist", key);
-        }
-    }
 }
