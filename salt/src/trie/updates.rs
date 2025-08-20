@@ -11,3 +11,13 @@ pub struct TrieUpdates {
     #[serde_as(as = "Vec<(_, (Bytes, Bytes))>")]
     pub data: Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>,
 }
+
+impl TrieUpdates {
+    /// Generate the inverse of `TrieUpdates`.
+    pub fn inverse(mut self) -> Self {
+        for (_, (old_value, new_value)) in self.data.iter_mut() {
+            std::mem::swap(old_value, new_value);
+        }
+        self
+    }
+}
