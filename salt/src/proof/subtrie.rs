@@ -1,6 +1,6 @@
 //! This module return all-needed queries for a given kv list by create_sub_trie()
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, NUM_META_BUCKETS},
+    constant::{BUCKET_SLOT_ID_MASK, KV_NONE_HASH, NUM_META_BUCKETS},
     proof::{
         calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
@@ -10,7 +10,7 @@ use crate::{
     trie::trie::{sub_trie_top_level, subtrie_salt_key_start},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
 };
-use ark_ff::AdditiveGroup;
+use ark_ff::{AdditiveGroup, PrimeField};
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 use rayon::prelude::*;
@@ -134,7 +134,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                                 let mut default_frs = if *bucket_id < 65536 {
                                     vec![calculate_fr_by_kv(&BucketMeta::default().into()); 256]
                                 } else {
-                                    vec![Fr::ZERO; 256]
+                                    vec![Fr::from_le_bytes_mod_order(&KV_NONE_HASH); 256]
                                 };
 
                                 for (k, v) in children_kvs

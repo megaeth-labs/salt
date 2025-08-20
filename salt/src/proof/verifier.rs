@@ -1,6 +1,6 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
+    constant::{KV_NONE_HASH, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
     proof::{
         calculate_fr_by_kv,
         shape::{
@@ -12,7 +12,7 @@ use crate::{
     trie::trie::{get_child_node, subtrie_node_id},
     types::{BucketId, BucketMeta, NodeId, SaltKey, SaltValue},
 };
-use ark_ff::AdditiveGroup;
+use ark_ff::{AdditiveGroup, PrimeField};
 use banderwagon::{Element, Fr};
 use ipa_multipoint::multiproof::VerifierQuery;
 use rayon::prelude::*;
@@ -196,7 +196,10 @@ where
                     let result = if bucket_id < NUM_META_BUCKETS as BucketId && val.is_none() {
                         calculate_fr_by_kv(&(BucketMeta::default().into()))
                     } else {
-                        val.as_ref().map_or(Fr::ZERO, calculate_fr_by_kv)
+                        val.as_ref().map_or(
+                            Fr::from_le_bytes_mod_order(&KV_NONE_HASH),
+                            calculate_fr_by_kv,
+                        )
                     };
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];

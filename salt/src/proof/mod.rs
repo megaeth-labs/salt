@@ -188,7 +188,7 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
 mod tests {
     use super::*;
     use crate::{
-        constant::{default_commitment, STARTING_NODE_ID},
+        constant::{default_commitment, KV_NONE_HASH, STARTING_NODE_ID},
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
@@ -217,38 +217,70 @@ mod tests {
 
         let salt_keys: Vec<SaltKey> = vec![(0, 0).into()];
 
+        let default_fr = Fr::from_le_bytes_mod_order(&KV_NONE_HASH);
+
         let crs = CRS::default();
 
-        let bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
-        let bucket_frs = vec![bucket_fr; 256];
-        let bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(bucket_frs));
+        let meta_bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
+        let meta_bucket_frs = vec![meta_bucket_fr; 256];
+        let meta_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(meta_bucket_frs));
+
         assert_eq!(
-            bucket_commitment,
+            meta_bucket_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[3] as NodeId
             ))
         );
 
-        let l3_frs = vec![bucket_commitment.map_to_scalar_field(); 256];
-        let l3_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_frs));
+        let data_bucket_frs = vec![default_fr; 256];
+        let data_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(data_bucket_frs));
+
         assert_eq!(
-            l3_commitment,
+            data_bucket_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(131329))
+        );
+
+        let l3_left_frs = vec![meta_bucket_commitment.map_to_scalar_field(); 256];
+        let l3_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_left_frs));
+
+        assert_eq!(
+            l3_left_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[2] as NodeId
             ))
         );
 
-        let l2_frs = vec![l3_commitment.map_to_scalar_field(); 256];
-        let l2_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_frs));
+        let l3_right_frs = vec![data_bucket_commitment.map_to_scalar_field(); 256];
+        let l3_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_right_frs));
+
         assert_eq!(
-            l2_commitment,
+            l3_right_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[3] as NodeId - 1
+            ))
+        );
+
+        let l2_left_frs = vec![l3_left_commitment.map_to_scalar_field(); 256];
+        let l2_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_left_frs));
+        assert_eq!(
+            l2_left_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[1] as NodeId
             ))
         );
 
-        let mut l1_frs = vec![Fr::ZERO; 256];
-        l1_frs[0] = l2_commitment.map_to_scalar_field();
+        let l2_right_frs = vec![l3_right_commitment.map_to_scalar_field(); 256];
+        let l2_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_right_frs));
+        assert_eq!(
+            l2_right_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[2] as NodeId - 1
+            ))
+        );
+
+        let mut l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
+        l1_frs[0] = l2_left_commitment.map_to_scalar_field();
+
         let l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l1_frs));
         assert_eq!(
             l1_commitment,
