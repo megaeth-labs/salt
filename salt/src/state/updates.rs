@@ -42,20 +42,21 @@ impl StateUpdates {
     /// Adds a new updated entry to the state changes.
     pub fn add(
         &mut self,
-        entry_id: SaltKey,
-        old_entry: Option<SaltValue>,
-        new_entry: Option<SaltValue>,
+        salt_key: SaltKey,
+        old_value: Option<SaltValue>,
+        new_value: Option<SaltValue>,
     ) {
-        match self.data.entry(entry_id) {
+        match self.data.entry(salt_key) {
             Entry::Occupied(mut entry) => {
-                if entry.get().0 == new_entry {
+                debug_assert_eq!(old_value, entry.get().1);
+                if entry.get().0 == new_value {
                     entry.remove();
                 } else {
-                    entry.get_mut().1 = new_entry;
+                    entry.get_mut().1 = new_value;
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert((old_entry, new_entry));
+                entry.insert((old_value, new_value));
             }
         }
     }
