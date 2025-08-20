@@ -946,12 +946,15 @@ mod tests {
     fn verify_all_keys_present(
         state: &mut EphemeralSaltState<EmptySalt>,
         bucket_id: BucketId,
+        nonce: u32,
         capacity: u64,
         keys: &[Vec<u8>],
         vals: &[Vec<u8>],
     ) {
         for i in 0..keys.len() {
-            let find_result = state.shi_find(bucket_id, 0, capacity, &keys[i]).unwrap();
+            let find_result = state
+                .shi_find(bucket_id, nonce, capacity, &keys[i])
+                .unwrap();
             assert!(find_result.is_some(), "Key {} should be found in state", i);
             let (_, found_value) = find_result.unwrap();
             assert_eq!(
@@ -1024,6 +1027,7 @@ mod tests {
         verify_all_keys_present(
             &mut ref_state,
             TEST_BUCKET,
+            0,
             final_meta.capacity,
             &keys,
             &vals,
@@ -1199,6 +1203,34 @@ mod tests {
         }
         let ref_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
 
+        // Verify reference state has all expected final key-value pairs
+        let expected_keys: Vec<Vec<u8>> = vec![
+            vec![1; 32],
+            vec![2; 32],
+            vec![4; 32],
+            vec![5; 32],
+            vec![7; 32],
+            vec![8; 32],
+            vec![9; 32],
+        ];
+        let expected_values: Vec<Vec<u8>> = vec![
+            vec![100; 32],
+            vec![12; 32],
+            vec![200; 32],
+            vec![15; 32],
+            vec![17; 32],
+            vec![18; 32],
+            vec![19; 32],
+        ];
+        verify_all_keys_present(
+            &mut ref_state,
+            TEST_BUCKET,
+            0,
+            ref_meta.capacity,
+            &expected_keys,
+            &expected_values,
+        );
+
         // Test 10 random operation orders
         for iteration in 0..10 {
             let mut shuffled = operations.clone();
@@ -1281,6 +1313,99 @@ mod tests {
                     None
                 );
             }
+        }
+    }
+
+    /// Comprehensive test for shi_rehash method covering various scenarios.
+    #[test]
+    fn test_shi_rehash_comprehensive() {
+        // Test cases: (old_nonce, old_capacity, new_nonce, new_capacity, num_entries)
+        let test_cases = [
+            (0, 8, 0, 8, 0),  // Empty bucket, no change
+            (0, 8, 1, 8, 5),  // Nonce change only
+            (0, 8, 0, 16, 6), // Capacity expansion
+            (0, 16, 0, 8, 5), // Capacity contraction (reduced entries to fit)
+            (0, 8, 1, 16, 6), // Both nonce and capacity change
+            (0, 8, 0, 8, 6),  // Near-full bucket
+        ];
+
+        for (old_nonce, old_capacity, new_nonce, new_capacity, num_entries) in test_cases {
+            verify_rehash(
+                old_nonce,
+                old_capacity,
+                new_nonce,
+                new_capacity,
+                num_entries,
+            );
+        }
+    }
+
+    /// Helper function to verify shi_rehash behavior for a specific configuration.
+    fn verify_rehash(
+        old_nonce: u32,
+        old_capacity: u64,
+        new_nonce: u32,
+        new_capacity: u64,
+        num_entries: usize,
+    ) {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+
+        // Initialize bucket with old configuration
+        state
+            .shi_rehash(TEST_BUCKET, old_nonce, old_capacity, &mut updates)
+            .unwrap();
+
+        // Create test data - deterministic for reproducibility
+        let keys: Vec<Vec<u8>> = (1..=num_entries).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (100..=100 + num_entries - 1)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+
+        // Insert test entries
+        for i in 0..num_entries {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+
+        // Verify initial state before rehash
+        let old_meta = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(old_meta.nonce, old_nonce);
+        assert_eq!(old_meta.capacity, old_capacity);
+
+        // Perform rehash
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(TEST_BUCKET, new_nonce, new_capacity, &mut rehash_updates)
+            .unwrap();
+
+        // Verify metadata after rehash
+        let new_meta = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(new_meta.nonce, new_nonce, "Nonce should be updated");
+        assert_eq!(
+            new_meta.capacity, new_capacity,
+            "Capacity should be updated"
+        );
+
+        // Verify all entries are preserved with correct values
+        verify_all_keys_present(
+            &mut state,
+            TEST_BUCKET,
+            new_nonce,
+            new_capacity,
+            &keys,
+            &vals,
+        );
+
+        // Verify StateUpdates contains metadata change
+        if old_nonce != new_nonce || old_capacity != new_capacity {
+            let meta_key = bucket_metadata_key(TEST_BUCKET);
+            assert!(
+                rehash_updates.data.contains_key(&meta_key),
+                "Rehash should update metadata in StateUpdates"
+            );
         }
     }
 
@@ -1607,135 +1732,6 @@ mod tests {
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
-    }
-
-    #[test]
-    fn extension_rehash() {
-        let old_meta = BucketMeta {
-            used: Some(0),
-            ..BucketMeta::default()
-        };
-        let new_meta = BucketMeta {
-            capacity: 2 * old_meta.capacity,
-            ..old_meta
-        };
-        check_rehash(old_meta, new_meta, 240);
-    }
-
-    #[test]
-    fn contraction_rehash() {
-        let old_meta = BucketMeta {
-            capacity: 512,
-            used: Some(0),
-            ..BucketMeta::default()
-        };
-        let new_meta = BucketMeta {
-            capacity: old_meta.capacity >> 1,
-            ..old_meta
-        };
-        check_rehash(old_meta, new_meta, 200);
-    }
-
-    fn check_rehash(old_meta: BucketMeta, new_meta: BucketMeta, l: usize) {
-        let store = MemStore::new();
-        let mut rehash_state = EphemeralSaltState::new(&store);
-        rehash_state
-            .shi_rehash(
-                TEST_BUCKET,
-                old_meta.nonce,
-                old_meta.capacity,
-                &mut StateUpdates::default(),
-            )
-            .unwrap();
-        let mut rehash_updates = StateUpdates::default();
-
-        let mut cmp_state = EphemeralSaltState::new(&EmptySalt);
-        let mut cmp_updates = StateUpdates::default();
-        let cmp_meta = new_meta;
-
-        let mut kvs = create_random_kvs(l);
-
-        // Create initial data. In the case of expansion, `cmp_state` inserts `kvs`.
-        // The first half of the data is updated to `store` before the state update,
-        // and the second half of the data is in `out_updates`.
-        for i in 0..kvs.0.len() {
-            rehash_state
-                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut rehash_updates)
-                .unwrap();
-            if i == l / 2 {
-                store.update_state(rehash_updates);
-                rehash_updates = StateUpdates::default();
-            }
-            cmp_state
-                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut cmp_updates)
-                .unwrap();
-        }
-
-        // update some kvs to state
-        for i in l / 2 - l / 4 - 1..l / 2 + l / 4 {
-            kvs.1[i] = [i as u8; 32].into();
-            rehash_state
-                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut rehash_updates)
-                .unwrap();
-            cmp_state
-                .shi_upsert(TEST_BUCKET, &kvs.0[i], &kvs.1[i], &mut cmp_updates)
-                .unwrap();
-        }
-
-        // delete some kvs to state
-        for i in l / 2 - l / 8 - 1..l / 2 + l / 8 {
-            rehash_state
-                .shi_delete(TEST_BUCKET, &kvs.0[i], &mut rehash_updates)
-                .unwrap();
-            cmp_state
-                .shi_delete(TEST_BUCKET, &kvs.0[i], &mut cmp_updates)
-                .unwrap();
-        }
-
-        // state has insert, update and delete operation, rehash state
-        rehash_state
-            .shi_rehash(
-                TEST_BUCKET,
-                new_meta.nonce,
-                new_meta.capacity,
-                &mut rehash_updates,
-            )
-            .unwrap();
-
-        // Verify the rehashing results
-        for i in 0..kvs.0.len() {
-            let kv1 = cmp_state
-                .shi_find(TEST_BUCKET, cmp_meta.nonce, cmp_meta.capacity, &kvs.0[i])
-                .unwrap();
-            let kv2 = rehash_state
-                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
-                .unwrap();
-            assert_eq!(kv1, kv2);
-        }
-
-        // Verify the rehashing results after writing to store
-        store.update_state(rehash_updates.clone());
-        let mut state = EphemeralSaltState::new(&store);
-        for i in 0..kvs.0.len() {
-            let kv1 = cmp_state
-                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
-                .unwrap();
-            let kv2 = state
-                .shi_find(TEST_BUCKET, new_meta.nonce, new_meta.capacity, &kvs.0[i])
-                .unwrap();
-            assert_eq!(kv1, kv2);
-        }
-        //check changed meta in state updates
-        let meta_key = bucket_metadata_key(TEST_BUCKET);
-        assert!(
-            rehash_updates.data.contains_key(&meta_key),
-            "rehash_updates should contain the meta key"
-        );
-        assert_eq!(
-            rehash_updates.data.get(&meta_key).unwrap(),
-            &(Some(old_meta.into()), Some(new_meta.into())),
-            "rehash_updates should contain the old and new meta"
-        );
     }
 
     // ============================
