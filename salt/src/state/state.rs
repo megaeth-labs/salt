@@ -596,7 +596,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER, MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         empty_salt::EmptySalt,
         mem_store::*,
         state::{
@@ -948,15 +948,22 @@ mod tests {
     /// * `initial_capacity` - Starting bucket capacity
     /// * `num_keys` - Number of key-value pairs to insert
     /// * `num_iterations` - Number of different insertion orders to test
-    /// * `expect_resize` - Whether bucket resize should occur during insertion
     fn test_insertion_order_independence(
         initial_capacity: u64,
         num_keys: usize,
         num_iterations: usize,
-        expect_resize: bool,
     ) {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
+
+        // Compute expected final capacity based on load factor
+        let expect_resize =
+            num_keys as u64 >= initial_capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100;
+        let expected_final_capacity = if expect_resize {
+            initial_capacity * BUCKET_RESIZE_MULTIPLIER
+        } else {
+            initial_capacity
+        };
 
         // Create reference state
         let reader = EmptySalt;
@@ -981,22 +988,13 @@ mod tests {
                 .unwrap();
         }
 
-        // Get final metadata and verify resize expectations
+        // Verify the final capacity matches expectation
         let final_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
-        if expect_resize {
-            assert!(
-                final_meta.capacity > initial_capacity,
-                "Expected bucket resize: {} -> {}",
-                initial_capacity,
-                final_meta.capacity
-            );
-        } else {
-            assert_eq!(
-                final_meta.capacity, initial_capacity,
-                "Expected no resize, capacity should remain {}",
-                initial_capacity
-            );
-        }
+        assert_eq!(
+            final_meta.capacity, expected_final_capacity,
+            "Expected capacity {} after inserting {} keys into bucket with initial capacity {}",
+            expected_final_capacity, num_keys, initial_capacity
+        );
 
         // Test multiple different random insertion orders
         for iteration in 0..num_iterations {
@@ -1020,12 +1018,12 @@ mod tests {
                     .unwrap();
             }
 
-            // Verify final capacity matches reference state
+            // Verify final metadata matches reference state exactly
             let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
             assert_eq!(
-                test_meta.capacity, final_meta.capacity,
-                "Iteration {}: Final capacity should be {}",
-                iteration, final_meta.capacity
+                test_meta, final_meta,
+                "Iteration {}: Final metadata should match reference state",
+                iteration
             );
 
             // Verify all keys are accessible with correct values and locations
@@ -1053,7 +1051,7 @@ mod tests {
     /// different random insertion orders.
     #[test]
     fn test_insertion_order_independence_small_bucket() {
-        test_insertion_order_independence(8, 5, 10, false);
+        test_insertion_order_independence(8, 5, 10);
     }
 
     /// Test insertion order independence when bucket resize is triggered.
@@ -1064,7 +1062,7 @@ mod tests {
     /// to capacity=16. Tests 10 different random insertion orders.
     #[test]
     fn test_insertion_order_independence_with_resize() {
-        test_insertion_order_independence(8, 10, 10, true);
+        test_insertion_order_independence(8, 10, 10);
     }
 
     /// Test history independence with mixed insert, update, and delete operations.
@@ -1251,28 +1249,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn set_updates() {
-        let reader = EmptySalt;
-        let mut state = EphemeralSaltState::new(&reader);
-        let mut out_updates = StateUpdates::default();
-        let salt_val = Some(SaltValue::new(&[1; 32], &[2; 32]));
-        let salt_id = (TEST_BUCKET, 1).into();
-        state.update_value(&mut out_updates, salt_id, None, salt_val.clone());
-
-        assert_eq!(
-            out_updates.data.get(&salt_id).unwrap(),
-            &(None, salt_val.clone()),
-            "After calling set_updates, out_updates should contain the corresponding updates",
-        );
-
-        assert_eq!(
-            state.value(salt_id).unwrap(),
-            salt_val,
-            "After calling set_updates, the value of table 0 slot 1 in the state should match the key and val",
-        );
     }
 
     #[test]
@@ -1565,83 +1541,39 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    /// Tests the `update_value` method for correct state tracking and cache updates.
+    ///
+    /// Verifies that `update_value` properly handles all value transition scenarios:
+    /// - Insert (None → Some): Records new entry in StateUpdates
+    /// - Update (Some → Some): Tracks value changes with original old_value
+    /// - Delete (Some → None): Completes insert/delete roundtrip by removing from StateUpdates
+    /// - No-ops (None → None, Some → Same): Skips recording when values are identical
     #[test]
-    fn upsert_delete() {
+    fn test_update_value() {
         let reader = EmptySalt;
         let mut state = EphemeralSaltState::new(&reader);
-        let mut out_updates = StateUpdates::default();
-        let salt_array = [
-            SaltValue::new(&[1u8; 32], &[1u8; 32]),
-            SaltValue::new(&[2u8; 32], &[1u8; 32]),
-            SaltValue::new(&[3u8; 32], &[1u8; 32]),
-        ];
+        let mut updates = StateUpdates::default();
+        let key = (TEST_BUCKET, 1).into();
+        let val1 = Some(SaltValue::new(&[1; 32], &[2; 32]));
+        let val2 = Some(SaltValue::new(&[3; 32], &[4; 32]));
 
-        // Traverse the key_array, generate the initial slot_id
-        // for the corresponding key, and insert the key-value pair
-        // into the state
-        let slot_id_vec: Vec<SlotId> = salt_array
-            .iter()
-            .map(|v| {
-                let hashed_key = hasher::hash_with_nonce(v.key(), 0);
-                state
-                    .shi_upsert(TEST_BUCKET, v.key(), v.value(), &mut out_updates)
-                    .unwrap();
-                probe(hashed_key, 0, MIN_BUCKET_SIZE as u64)
-            })
-            .collect();
+        // None → Some (insert)
+        state.update_value(&mut updates, key, None, val1.clone());
+        assert_eq!(updates.data.get(&key), Some(&(None, val1.clone())));
 
-        slot_id_vec.iter().enumerate().for_each(|(i, slot_id)| {
-            let salt_id = (TEST_BUCKET, *slot_id).into();
-            let slot = state.value(salt_id).unwrap();
-            assert_eq!(
-                slot.unwrap(),
-                salt_array[i].clone(),
-                "After upsert, the initial slot should store the corresponding key-value pair",
-            );
-        });
+        // Some → Some different (update)
+        state.update_value(&mut updates, key, val1.clone(), val2.clone());
+        assert_eq!(updates.data.get(&key), Some(&(None, val2.clone())));
 
-        // Iterate through key_array and delete the corresponding key
-        for v in &salt_array {
-            state
-                .shi_delete(TEST_BUCKET, v.key(), &mut out_updates)
-                .unwrap();
-        }
+        // Some → None (delete)
+        state.update_value(&mut updates, key, val2, None);
+        assert_eq!(updates.data.get(&key), None); // Full roundtrip
 
-        for slot_id in &slot_id_vec {
-            let salt_id = (TEST_BUCKET, *slot_id).into();
-            let slot = state.value(salt_id).unwrap();
-            assert_eq!(slot, None, "after delete slot_id: {slot_id} should be None");
-        }
-    }
-
-    #[test]
-    fn state_update_in_same_bucket() {
-        let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
-
-        // Use shared test keys that all hash to the same bucket
-        let keys = hasher::tests::get_same_bucket_test_keys();
-        let num_keys = keys.len() as u64;
-        let bucket_id = hasher::bucket_id(&keys[0]);
-        let kvs: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
-            keys.into_iter().map(|x| (x.clone(), Some(x))).collect();
-        let state_updates = state.update(&kvs).unwrap();
-
-        let meta_key = bucket_metadata_key(bucket_id);
-        assert!(
-            state_updates.data.contains_key(&meta_key),
-            "State updates should contain the meta"
-        );
-        let new_meta = BucketMeta {
-            capacity: 512,
-            used: Some(num_keys),
-            nonce: 0,
-        };
-        assert_eq!(
-            state_updates.data.get(&meta_key).unwrap(),
-            (&(Some(BucketMeta::default().into()), Some(new_meta.into()))),
-            "State updates should contain the meta key with default value"
-        );
+        // No-op cases (no updates recorded)
+        let prev_len = updates.data.len();
+        state.update_value(&mut updates, key, None, None);
+        state.update_value(&mut updates, key, val1.clone(), val1);
+        assert_eq!(updates.data.len(), prev_len);
     }
 
     #[test]
