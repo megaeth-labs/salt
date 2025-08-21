@@ -996,7 +996,7 @@ mod tests {
         state_updates1.add(key1, None, Some(value1.clone()));
         state_updates1.add(key2, None, Some(value2.clone()));
         state_updates1.add(key3, None, Some(value3));
-        state_updates.merge(&state_updates1);
+        state_updates.merge(state_updates1.clone());
 
         // Update the trie with the first set of state updates, and check the root.
         let (_root1, trie_updates1) = trie
@@ -1004,7 +1004,7 @@ mod tests {
             .unwrap();
         let mut state_updates2 = StateUpdates::default();
         state_updates2.add(key1, Some(value1.clone()), Some(value2.clone()));
-        state_updates.merge(&state_updates2);
+        state_updates.merge(state_updates2.clone());
         // after add deltas, trie's state with state_updates1
         trie.add_deltas(&trie_updates1);
         let (root2, trie_updates2) = trie
@@ -1018,7 +1018,7 @@ mod tests {
 
         let mut state_updates3 = StateUpdates::default();
         state_updates3.add(key2, Some(value2), Some(value1));
-        state_updates.merge(&state_updates3);
+        state_updates.merge(state_updates3.clone());
         trie.add_deltas(&trie_updates2);
         let (root3, _) = trie
             .update(trie_reader, trie_reader, &state_updates3)
@@ -1424,10 +1424,10 @@ mod tests {
         let mut trie = StateRoot::new();
         trie.incremental_update(trie_reader, trie_reader, &state_updates1)
             .unwrap();
-        state_updates.merge(&state_updates1);
+        state_updates.merge(state_updates1);
         trie.incremental_update(trie_reader, trie_reader, &state_updates2)
             .unwrap();
-        state_updates.merge(&state_updates2);
+        state_updates.merge(state_updates2);
         let (root, mut trie_updates) = trie.finalize(trie_reader).unwrap();
 
         let cmp_state_updates = StateUpdates {
@@ -1522,7 +1522,7 @@ mod tests {
             let state_updates = state.update(kvs).unwrap();
             trie.incremental_update(&mock_db, &mock_db, &state_updates)
                 .unwrap();
-            final_state_updates.merge(&state_updates);
+            final_state_updates.merge(state_updates);
         }
         let (final_root, mut final_trie_updates) = trie.finalize(&mock_db).unwrap();
 
