@@ -13,14 +13,12 @@ use std::{
 };
 
 /// create a block witness from the trie
-pub fn get_block_witness<S, T>(
+pub fn get_block_witness<Store>(
     min_sub_tree: &[SaltKey],
-    state_reader: &S,
-    trie_reader: &T,
-) -> Result<BlockWitness, ProofError<S, T>>
+    store: &Store,
+) -> Result<BlockWitness, ProofError<Store, Store>>
 where
-    S: StateReader,
-    T: TrieReader,
+    Store: StateReader + TrieReader,
 {
     let mut keys = min_sub_tree.to_vec();
 
@@ -39,7 +37,7 @@ where
         .par_iter()
         .filter_map(|&salt_key| {
             let bucket_id = bucket_id_from_metadata_key(salt_key);
-            state_reader
+            store
                 .metadata(bucket_id)
                 .ok()
                 .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
@@ -49,14 +47,14 @@ where
     let kvs = data_keys
         .par_iter()
         .map(|&salt_key| {
-            state_reader
+            store
                 .value(salt_key)
                 .map_err(ProofError::ReadStateFailed)
                 .map(|entry| (salt_key, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-    let proof = prover::create_salt_proof(&keys, state_reader, trie_reader)?;
+    let proof = prover::create_salt_proof(&keys, store, store)?;
 
     Ok(BlockWitness {
         metadata,
@@ -103,11 +101,7 @@ impl TrieReader for BlockWitness {
 
 impl BlockWitness {
     /// Verify the block witness
-    pub fn verify_proof<B, T>(&self, root: [u8; 32]) -> Result<(), ProofError<B, T>>
-    where
-        B: StateReader,
-        T: TrieReader,
-    {
+    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError<Self, Self>> {
         let mut keys = self
             .metadata
             .keys()
@@ -249,11 +243,11 @@ mod tests {
         let (new_trie_root, mut trie_updates) = trie.update(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
 
         // 3.options in prover node
         // 3.1 verify the block witness
-        let res = block_witness.verify_proof::<MemStore, MemStore>(old_trie_root);
+        let res = block_witness.verify_proof(old_trie_root);
         assert!(res.is_ok());
 
         // 3.2 create EphemeralSaltState from block witness
@@ -306,10 +300,9 @@ mod tests {
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness_res =
-            get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness_res = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
 
-        let res = block_witness_res.verify_proof::<MemStore, MemStore>(root);
+        let res = block_witness_res.verify_proof(root);
         assert!(res.is_ok());
     }
 
@@ -336,7 +329,7 @@ mod tests {
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
