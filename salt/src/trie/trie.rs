@@ -824,11 +824,8 @@ fn calculate_subtrie_with_all_kvs<S: StateReader>(node_id: NodeId, store: &S) ->
             .collect();
     }
 
-    if commitments.is_empty() {
-        zero
-    } else {
-        commitments[0].1
-    }
+    assert!(commitments.len() > 0);
+    commitments[0].1
 }
 
 /// Given the ID and level of a node, return the index of this node among its siblings.
