@@ -3,9 +3,9 @@
 use super::updates::TrieUpdates;
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, KV_NONE_HASH, MIN_BUCKET_SIZE,
-        MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
-        TRIE_LEVELS, TRIE_WIDTH_BITS,
+        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
+        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID,
+        SUB_TRIE_LEVELS, TRIE_LEVELS, TRIE_WIDTH_BITS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -781,7 +781,7 @@ pub(crate) fn subtrie_node_id(key: &SaltKey) -> NodeId {
 #[inline(always)]
 fn kv_hash(entry: &Option<SaltValue>) -> [u8; 32] {
     entry.as_ref().map_or_else(
-        || KV_NONE_HASH,
+        || EMPTY_SLOT_HASH,
         |salt_value| {
             let mut data = blake3::Hasher::new();
             data.update(salt_value.key());

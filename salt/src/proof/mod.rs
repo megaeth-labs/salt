@@ -190,8 +190,8 @@ mod tests {
     use crate::{
         bucket_metadata_key,
         constant::{
-            default_commitment, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS,
-            STARTING_NODE_ID,
+            default_commitment, EMPTY_SLOT_HASH, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
+            NUM_META_BUCKETS, STARTING_NODE_ID,
         },
         empty_salt::EmptySalt,
         mem_store::MemStore,
@@ -223,7 +223,7 @@ mod tests {
 
         let salt_keys: Vec<SaltKey> = vec![(0, 0).into()];
         let first_data_bucket_id = 131329;
-        let default_fr = Fr::from_le_bytes_mod_order(&[1; 32]);
+        let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
 
         let crs = CRS::default();
 
@@ -335,19 +335,19 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_salt = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_key_values).unwrap();
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
-        mem_salt.update_trie(trie_updates);
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
-        let value = mem_salt.value(salt_key).unwrap();
+        let value = mem_store.value(salt_key).unwrap();
 
-        let proof = prover::create_salt_proof(&[salt_key], &mem_salt, &mem_salt).unwrap();
+        let proof = prover::create_salt_proof(&[salt_key], &mem_store, &mem_store).unwrap();
 
         let res = proof.check::<MemStore, MemStore>(vec![salt_key], vec![value], trie_root);
         assert!(res.is_ok());
@@ -369,18 +369,18 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_salt = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_key_values).unwrap();
 
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates);
+        mem_store.update_trie(trie_updates);
 
-        let trie_root_commitment = mem_salt.commitment(0).unwrap();
+        let trie_root_commitment = mem_store.commitment(0).unwrap();
 
         let root_from_commitment = B256::from_slice(&fr_to_le_bytes(
             Element::from_bytes_unchecked_uncompressed(trie_root_commitment).map_to_scalar_field(),
@@ -405,16 +405,16 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
 
-        let mem_salt = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_salt);
+        let mem_store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&mem_store);
         let updates = state.update(&initial_kvs).unwrap();
 
-        mem_salt.update_state(updates.clone());
+        mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_salt, &mem_salt, &updates).unwrap();
+        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
 
-        mem_salt.update_trie(trie_updates.clone());
+        mem_store.update_trie(trie_updates.clone());
 
         let mut salt_keys = updates.data.keys().cloned().collect::<Vec<_>>();
         salt_keys.push((16777215, 1).into());
@@ -431,7 +431,7 @@ mod tests {
         values.push(None);
         values.push(None);
 
-        let proof = prover::create_salt_proof(&salt_keys, &mem_salt, &mem_salt).unwrap();
+        let proof = prover::create_salt_proof(&salt_keys, &mem_store, &mem_store).unwrap();
 
         let res = proof.check::<MemStore, MemStore>(salt_keys, values, trie_root);
 
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(root, expansion_root);
 
         let crs = CRS::default();
-        let default_fr = Fr::from_le_bytes_mod_order(&[1; 32]);
+        let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
         let mut sub_bucket_frs = vec![default_fr; 256];
         sub_bucket_frs[3] = calculate_fr_by_kv(&salt_value);
         let sub_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_bucket_frs));

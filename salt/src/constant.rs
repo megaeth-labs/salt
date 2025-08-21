@@ -32,7 +32,7 @@ pub const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
 /// Index of root commitment in salt buckets.
 pub const ROOT_NODE_ID: NodeId = 0;
 /// Default hash value of [1u8; 32] when the slot is empty
-pub const KV_NONE_HASH: [u8; 32] = [1u8; 32];
+pub const EMPTY_SLOT_HASH: [u8; 32] = [1u8; 32];
 
 /// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
 /// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
