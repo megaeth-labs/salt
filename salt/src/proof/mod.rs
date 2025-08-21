@@ -340,8 +340,8 @@ mod tests {
         let updates = state.update(&initial_key_values).unwrap();
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
@@ -375,8 +375,8 @@ mod tests {
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -411,8 +411,8 @@ mod tests {
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn salt_proof_in_bucket_expansion() {
         let store = MemStore::new();
-        let mut trie = StateRoot::new();
+        let mut trie = StateRoot::new(&store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let slot_id = 3;
         let salt_key: SaltKey = (bid, slot_id).into();
@@ -493,9 +493,8 @@ mod tests {
                 .collect(),
         };
 
-        let (initialize_root, initialize_trie_updates) = trie
-            .update(&store, &store, &initialize_state_updates)
-            .unwrap();
+        let (initialize_root, initialize_trie_updates) =
+            trie.update(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
 
@@ -527,8 +526,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
@@ -605,7 +603,7 @@ mod tests {
         }
 
         let store = MemStore::new();
-        let mut trie = StateRoot::new();
+        let mut trie = StateRoot::new(&store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let salt_key: SaltKey = (
             bid >> MIN_BUCKET_SIZE_BITS,
@@ -629,9 +627,8 @@ mod tests {
             .collect(),
         };
 
-        let (initialize_root, initialize_trie_updates) = trie
-            .update(&store, &store, &initialize_state_updates)
-            .unwrap();
+        let (initialize_root, initialize_trie_updates) =
+            trie.update(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
@@ -660,8 +657,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
@@ -717,8 +713,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();

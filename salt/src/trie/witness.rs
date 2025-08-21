@@ -233,10 +233,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (old_trie_root, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (old_trie_root, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -248,8 +246,7 @@ mod tests {
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) =
-            trie.update(&mem_store, &mem_store, &state_updates).unwrap();
+        let (new_trie_root, mut trie_updates) = trie.update(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
@@ -267,10 +264,9 @@ mod tests {
 
         assert_eq!(state_updates, prover_updates);
 
-        let mut prover_trie = StateRoot::new();
-        let (prover_trie_root, mut prover_trie_updates) = prover_trie
-            .update(&block_witness, &block_witness, &prover_updates)
-            .unwrap();
+        let mut prover_trie = StateRoot::new(&block_witness);
+        let (prover_trie_root, mut prover_trie_updates) =
+            prover_trie.update(&prover_updates).unwrap();
 
         trie_updates
             .data
@@ -294,10 +290,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (root, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (root, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -329,10 +323,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (_, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (_, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
