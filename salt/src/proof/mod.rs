@@ -188,17 +188,21 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
 mod tests {
     use super::*;
     use crate::{
-        constant::{default_commitment, STARTING_NODE_ID},
+        bucket_metadata_key,
+        constant::{
+            default_commitment, EMPTY_SLOT_HASH, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
+            NUM_META_BUCKETS, STARTING_NODE_ID,
+        },
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
-        state::state::EphemeralSaltState,
+        state::{state::EphemeralSaltState, updates::StateUpdates},
         traits::{StateReader, TrieReader},
-        trie::trie::StateRoot,
+        trie::trie::{compute_from_scratch, StateRoot},
+        types::{BucketId, SlotId},
         BucketMeta,
     };
     use alloy_primitives::{Address, B256};
-    use ark_ff::AdditiveGroup;
     use banderwagon::{CanonicalSerialize, Element, Fr};
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -211,50 +215,96 @@ mod tests {
         bytes
     }
 
+    const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
+
     #[test]
     fn test_empty_trie_proof() {
         let salt = EmptySalt;
 
         let salt_keys: Vec<SaltKey> = vec![(0, 0).into()];
+        let first_data_bucket_id = 131329;
+        let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
 
         let crs = CRS::default();
 
-        let bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
-        let bucket_frs = vec![bucket_fr; 256];
-        let bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(bucket_frs));
+        let meta_bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
+        let meta_bucket_frs = vec![meta_bucket_fr; 256];
+        let meta_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(meta_bucket_frs));
+
         assert_eq!(
-            bucket_commitment,
+            meta_bucket_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[3] as NodeId
             ))
         );
 
-        let l3_frs = vec![bucket_commitment.map_to_scalar_field(); 256];
-        let l3_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_frs));
+        let data_bucket_frs = vec![default_fr; 256];
+        let data_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(data_bucket_frs));
+
         assert_eq!(
-            l3_commitment,
+            data_bucket_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(first_data_bucket_id))
+        );
+
+        let l3_left_frs = vec![meta_bucket_commitment.map_to_scalar_field(); 256];
+        let l3_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_left_frs));
+        assert_eq!(
+            l3_left_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[2] as NodeId
             ))
         );
 
-        let l2_frs = vec![l3_commitment.map_to_scalar_field(); 256];
-        let l2_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_frs));
+        let l3_right_frs = vec![data_bucket_commitment.map_to_scalar_field(); 256];
+        let l3_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_right_frs));
         assert_eq!(
-            l2_commitment,
+            l3_right_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[3] as NodeId - 1
+            ))
+        );
+
+        let l2_left_frs = vec![l3_left_commitment.map_to_scalar_field(); 256];
+        let l2_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_left_frs));
+        assert_eq!(
+            l2_left_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[1] as NodeId
             ))
         );
 
-        let mut l1_frs = vec![Fr::ZERO; 256];
-        l1_frs[0] = l2_commitment.map_to_scalar_field();
+        let l2_right_frs = vec![l3_right_commitment.map_to_scalar_field(); 256];
+        let l2_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_right_frs));
+        assert_eq!(
+            l2_right_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[2] as NodeId - 1
+            ))
+        );
+
+        let mut l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
+        l1_frs[0] = l2_left_commitment.map_to_scalar_field();
+
         let l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l1_frs));
         assert_eq!(
             l1_commitment,
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[0] as NodeId
             ))
+        );
+
+        let sub_trie_l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
+        let sub_trie_l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_trie_l1_frs));
+        assert_eq!(
+            sub_trie_l1_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment((65536 << 40) + 1))
+        );
+
+        let sub_trie_l0_frs = vec![sub_trie_l1_commitment.map_to_scalar_field(); 256];
+        let sub_trie_l0_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_trie_l0_frs));
+        assert_eq!(
+            sub_trie_l0_commitment,
+            Element::from_bytes_unchecked_uncompressed(default_commitment(65536 << 40))
         );
 
         let l0_fr = l1_commitment.map_to_scalar_field();
@@ -294,7 +344,7 @@ mod tests {
         let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
         mem_store.update_trie(trie_updates);
 
-        let salt_key = *updates.data.keys().nth(0).unwrap();
+        let salt_key = *updates.data.keys().next().unwrap();
         let value = mem_store.value(salt_key).unwrap();
 
         let proof = prover::create_salt_proof(&[salt_key], &mem_store, &mem_store).unwrap();
@@ -343,7 +393,7 @@ mod tests {
     fn test_multi_insert_proof() {
         let mut rng = StdRng::seed_from_u64(42);
 
-        let initial_kvs = (0..30)
+        let initial_kvs = (0..1000)
             .map(|_| {
                 let k = PlainKey::Storage(
                     Address::from(rng.gen::<[u8; 20]>()),
@@ -428,32 +478,19 @@ mod tests {
 
     #[test]
     fn salt_proof_in_bucket_expansion() {
-        use crate::{
-            constant::{MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS},
-            state::updates::StateUpdates,
-            trie::trie::compute_from_scratch,
-            types::{BucketId, SlotId},
-        };
-        const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
-
         let store = MemStore::new();
         let mut trie = StateRoot::new();
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
+        let slot_id = 3;
+        let salt_key: SaltKey = (bid, slot_id).into();
+        let salt_value = SaltValue::new(&[1; 32], &[1; 32]);
+        let bucket_meta_salt_key = bucket_metadata_key(bid);
 
         // initialize the trie
         let initialize_state_updates = StateUpdates {
-            data: vec![
-                (
-                    (bid, 3).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                ),
-                (
-                    (bid, 5).into(),
-                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+            data: vec![(salt_key, (None, Some(salt_value.clone())))]
+                .into_iter()
+                .collect(),
         };
 
         let (initialize_root, initialize_trie_updates) = trie
@@ -461,19 +498,16 @@ mod tests {
             .unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
+
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
         init_trie_updates
             .data
             .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
+        assert_eq!(init_trie_updates, initialize_trie_updates);
 
-        let salt_key: SaltKey = (
-            bid >> MIN_BUCKET_SIZE_BITS,
-            bid as SlotId % MIN_BUCKET_SIZE as SlotId,
-        )
-            .into();
-
-        let new_capacity = 256 * 256 * 256 * 256;
+        // only expand bucket 65540 capacity.
+        let new_capacity = 256 * 256;
         fn bucket_meta(nonce: u32, capacity: SlotId) -> BucketMeta {
             BucketMeta {
                 nonce,
@@ -483,34 +517,77 @@ mod tests {
         }
 
         let expand_state_updates = StateUpdates {
-            data: vec![
+            data: vec![(
+                bucket_meta_salt_key,
                 (
-                    salt_key,
-                    (
-                        Some(BucketMeta::default().into()),
-                        Some(bucket_meta(0, new_capacity).into()),
-                    ),
+                    Some(BucketMeta::default().into()),
+                    Some(bucket_meta(0, new_capacity).into()),
                 ),
-                (
-                    (bid, 2049).into(),
-                    (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
-                ),
-            ]
+            )]
             .into_iter()
             .collect(),
         };
         let (expansion_root, trie_updates) =
             trie.update(&store, &store, &expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
+
         store.update_trie(trie_updates);
+
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
-        let proof = prover::create_salt_proof(&[(bid, 3).into()], &store, &store).unwrap();
+        let crs = CRS::default();
+        let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
+        let mut sub_bucket_frs = vec![default_fr; 256];
+        sub_bucket_frs[3] = calculate_fr_by_kv(&salt_value);
+        let sub_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_bucket_frs));
+
+        // sub trie L4
+        assert_eq!(
+            Element::from_bytes_unchecked_uncompressed(
+                store.commitment(72_061_992_101_282_049).unwrap()
+            ),
+            sub_bucket_commitment
+        );
+
+        assert_eq!(
+            Element::from_bytes_unchecked_uncompressed(
+                store.commitment(72_061_992_101_282_057).unwrap()
+            ),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(72_061_992_101_282_057))
+        );
+
+        let mut sub_trie_l3_frs = vec![
+            Element::from_bytes_unchecked_uncompressed(
+                store.commitment(72_061_992_101_282_050).unwrap()
+            )
+            .map_to_scalar_field();
+            256
+        ];
+        sub_trie_l3_frs[0] = sub_bucket_commitment.map_to_scalar_field();
+        let sub_trie_l3_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_trie_l3_frs));
+
+        // main trie L3
+        assert_eq!(
+            Element::from_bytes_unchecked_uncompressed(store.commitment(131333).unwrap()),
+            sub_trie_l3_commitment
+        );
+
+        // sub trie L3
+        assert_eq!(
+            Element::from_bytes_unchecked_uncompressed(
+                store.commitment(72_061_992_084_504_833).unwrap()
+            ),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(72_061_992_084_504_833))
+        );
+
+        // sub trie L2
+        let proof =
+            prover::create_salt_proof(&[SaltKey::from((bid, 2049))], &store, &store).unwrap();
 
         let res = proof.check::<MemStore, MemStore>(
-            vec![(bid, 3).into()],
-            vec![Some(SaltValue::new(&[1; 32], &[1; 32]))],
+            vec![SaltKey::from((bid, 2049))],
+            vec![None],
             expansion_root,
         );
 
@@ -519,14 +596,6 @@ mod tests {
 
     #[test]
     fn salt_proof_in_bucket_expansion_2() {
-        use crate::{
-            constant::{MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_META_BUCKETS},
-            state::updates::StateUpdates,
-            trie::trie::compute_from_scratch,
-            types::{BucketId, SlotId},
-        };
-        const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
-
         fn bucket_meta(nonce: u32, capacity: SlotId) -> BucketMeta {
             BucketMeta {
                 nonce,
