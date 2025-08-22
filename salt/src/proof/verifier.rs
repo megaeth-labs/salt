@@ -6,7 +6,7 @@ use crate::{
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
-    trie::trie::{get_child_node, subtrie_node_id},
+    trie::node_utils::{get_child_node, subtrie_node_id},
     types::{BucketId, BucketMeta, NodeId, SaltKey, SaltValue},
 };
 use banderwagon::{Element, Fr, PrimeField};

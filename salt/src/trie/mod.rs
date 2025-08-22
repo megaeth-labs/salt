@@ -2,6 +2,7 @@
 //! that is used to authenticate the key-value pairs stored in the leaf
 //! nodes (i.e., the SALT buckets).
 
+pub mod node_utils;
 pub mod proof;
 #[allow(clippy::module_inception)]
 pub mod trie;

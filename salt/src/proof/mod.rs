@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_sub_trie_top_level() {
-        use crate::trie::trie::{
+        use crate::trie::node_utils::{
             get_child_node, sub_trie_top_level, subtrie_node_id, subtrie_parent_id,
             subtrie_salt_key_start,
         };

@@ -8,8 +8,9 @@ pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
+    node_utils::get_child_node,
     proof::PlainKeysProof,
-    trie::{get_child_node, StateRoot, TrieUpdates},
+    trie::{StateRoot, TrieUpdates},
     witness::BlockWitness,
 };
 

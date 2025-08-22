@@ -48,7 +48,7 @@
 
 use crate::{
     constant::{BUCKET_SLOT_BITS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS, TRIE_WIDTH_BITS},
-    trie::trie::subtrie_node_id,
+    trie::node_utils::subtrie_node_id,
     BucketId, NodeId, SaltKey, SlotId,
 };
 use iter_tools::Itertools;
