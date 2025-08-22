@@ -1,7 +1,7 @@
 //! This module export block witness's interfaces.
 use crate::{
     constant::{default_commitment, NUM_META_BUCKETS},
-    proof::{prover, ProofError, SaltProof},
+    proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -91,7 +91,7 @@ impl BlockWitness {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-        let proof = prover::create_salt_proof(&keys, store)?;
+        let proof = SaltProof::create(&keys, store)?;
 
         Ok(BlockWitness {
             metadata,
@@ -368,11 +368,11 @@ mod tests {
 
     /// Helper function to create a mock SaltProof for testing
     fn create_mock_proof() -> SaltProof {
-        use crate::{empty_salt::EmptySalt, proof::prover};
+        use crate::{empty_salt::EmptySalt, proof::SaltProof};
 
         // Create a minimal real proof using EmptySalt
         let salt_keys = vec![SaltKey(0)];
-        prover::create_salt_proof(&salt_keys, &EmptySalt).unwrap()
+        SaltProof::create(&salt_keys, &EmptySalt).unwrap()
     }
 
     /// Test all three cases of the BlockWitness::metadata() method

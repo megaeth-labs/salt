@@ -6,7 +6,7 @@
 
 use crate::{
     constant::TRIE_WIDTH_BITS,
-    proof::{prover, ProofError},
+    proof::{ProofError, SaltProof},
     state::{
         hasher,
         state::{probe, EphemeralSaltState},
@@ -178,7 +178,7 @@ impl PlainKeysProof {
 
         // Generate the underlying cryptographic proof for all the salt keys and values
         // This creates a Merkle proof that these specific key-value pairs exist in the trie
-        let proof = prover::create_salt_proof(&salt_keys, store)?;
+        let proof = SaltProof::create(&salt_keys, store)?;
 
         // Create a BlockWitness from the collected data
         let witness = BlockWitness {

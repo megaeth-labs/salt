@@ -3,7 +3,7 @@ use crate::{
     constant::{default_commitment, EMPTY_SLOT_HASH, NUM_META_BUCKETS, TRIE_WIDTH},
     get_child_node,
     proof::{
-        calculate_fr_by_kv,
+        prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },

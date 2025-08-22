@@ -2,7 +2,7 @@
 use crate::{
     constant::{EMPTY_SLOT_HASH, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
     proof::{
-        calculate_fr_by_kv,
+        prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
