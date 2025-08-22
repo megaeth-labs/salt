@@ -177,7 +177,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
@@ -212,7 +212,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -248,7 +248,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -330,7 +330,7 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update(&initialize_state_updates).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
 
@@ -360,7 +360,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
@@ -457,7 +457,7 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update(&initialize_state_updates).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
@@ -484,7 +484,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
@@ -539,7 +539,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();

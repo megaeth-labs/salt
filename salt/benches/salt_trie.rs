@@ -72,7 +72,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -86,7 +86,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -101,7 +101,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
                 black_box({
                     let mut trie = StateRoot::new(&EmptySalt);
                     for state_updates in state_updates_vec.iter() {
-                        trie.incremental_update(state_updates).unwrap();
+                        trie.update(state_updates).unwrap();
                     }
                     trie.finalize().unwrap()
                 })
@@ -116,7 +116,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 {
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new(&EmptySalt).update(state_updates).unwrap();
+                        StateRoot::new(&EmptySalt)
+                            .update_fin(state_updates)
+                            .unwrap();
                     }
                 }
                 black_box(())
@@ -131,7 +133,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     StateRoot::new(&ExpansionSalt((65536 * 16, 512)))
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap()
                 })
             },
