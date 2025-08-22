@@ -52,7 +52,8 @@ impl PlainKeysProof {
     ///    - The optimal slot (if empty or contains lower priority key)
     ///    - A subsequent slot (if optimal slot contains higher priority key)
     ///
-    /// All accessed salt keys, values, and bucket metadata are included in the proof
+    /// The above process will be hidden in EphemeralSaltState::plain_value(), that is,
+    /// all accessed salt keys, values, and bucket metadata are included in the proof
     /// to enable verification of the insertion process.
     pub fn create<Store>(keys: &[Vec<u8>], store: &Store) -> Result<PlainKeysProof, ProofError>
     where
