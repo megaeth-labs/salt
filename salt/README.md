@@ -113,7 +113,7 @@ let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
 let is_valid = proof.verify(root_hash);
 assert!(is_valid.is_ok());
 
-let proved_plain_values = proof.get_values();
+let proved_plain_values = proof.get_values()?;
 
 assert_eq!(proved_plain_values, expected_values);
 ```
