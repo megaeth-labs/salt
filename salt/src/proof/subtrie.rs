@@ -42,9 +42,9 @@ fn create_prover_queries(
         .collect()
 }
 
-fn process_trie_queries<T: TrieReader>(
+fn process_trie_queries<Store: TrieReader>(
     trie_nodes: Vec<(NodeId, NodeId, Vec<u8>)>,
-    trie_reader: &T,
+    store: &Store,
     num_threads: usize,
     queries: &mut Vec<ProverQuery>,
 ) {
@@ -60,7 +60,7 @@ fn process_trie_queries<T: TrieReader>(
                     .iter()
                     .flat_map(|(_, logic_parent, _)| {
                         let child_idx = get_child_node(logic_parent, 0);
-                        let children = trie_reader
+                        let children = store
                             .node_entries(child_idx..child_idx + TRIE_WIDTH as NodeId)
                             .expect("Failed to get trie children");
                         let mut default_commitment = if child_idx == 1 {
@@ -83,9 +83,7 @@ fn process_trie_queries<T: TrieReader>(
                     .zip(multi_children_frs.chunks(256))
                     .flat_map(|((parent, _, children), frs)| {
                         let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                            trie_reader
-                                .commitment(*parent)
-                                .expect("Failed to get trie node"),
+                            store.commitment(*parent).expect("Failed to get trie node"),
                         );
 
                         create_prover_queries(
@@ -101,10 +99,9 @@ fn process_trie_queries<T: TrieReader>(
 }
 
 /// Process bucket state queries
-fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
+fn process_bucket_state_queries<Store: StateReader + TrieReader>(
     bucket_state_nodes: Vec<BucketStateNode>,
-    state_reader: &S,
-    trie_reader: &T,
+    store: &Store,
     num_threads: usize,
     queries: &mut Vec<ProverQuery>,
 ) {
@@ -119,7 +116,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                             .iter()
                             .flat_map(|(node_id, slot_ids)| {
                                 let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                                    trie_reader
+                                    store
                                         .commitment(*node_id)
                                         .expect("Failed to get trie node"),
                                 );
@@ -136,7 +133,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
                                     vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); 256]
                                 };
                                 let slot_start = salt_key_start.slot_id();
-                                let children_kvs = state_reader
+                                let children_kvs = store
                                     .entries(SaltKey::from((*bucket_id, slot_start))..=SaltKey::from((*bucket_id, slot_start + TRIE_WIDTH as SlotId -1)))
                                     .unwrap_or_else(|_| {
                                         panic!(
@@ -165,14 +162,12 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
 
 /// Create a new sub trie.
 /// the `salt_keys` have already been sorted and deduped
-pub(crate) fn create_sub_trie<S, T>(
-    state_reader: &S,
-    trie_reader: &T,
+pub(crate) fn create_sub_trie<Store>(
+    store: &Store,
     salt_keys: &[SaltKey],
-) -> Result<SubTrieInfo, ProofError<S, T>>
+) -> Result<SubTrieInfo, ProofError<Store>>
 where
-    S: StateReader,
-    T: TrieReader,
+    Store: StateReader + TrieReader,
 {
     let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
@@ -186,11 +181,11 @@ where
                 return Ok((bucket_id, 4u8));
             }
 
-            let meta = state_reader.metadata(bucket_id)?;
+            let meta = store.metadata(bucket_id)?;
             let bucket_trie_top_level = sub_trie_top_level(meta.capacity);
             Ok((bucket_id, bucket_trie_top_level as u8))
         })
-        .collect::<Result<FxHashMap<_, _>, S::Error>>()
+        .collect::<Result<FxHashMap<_, _>, <Store as StateReader>::Error>>()
         .map_err(|e| ProofError::ReadStateFailed(e))?;
 
     let (bucket_trie_nodes, bucket_state_nodes) =
@@ -212,16 +207,10 @@ where
     let num_threads = rayon::current_num_threads();
 
     // Process trie queries
-    process_trie_queries(trie_nodes.clone(), trie_reader, num_threads, &mut queries);
+    process_trie_queries(trie_nodes.clone(), store, num_threads, &mut queries);
 
     // Process state queries
-    process_bucket_state_queries(
-        bucket_state_nodes.clone(),
-        state_reader,
-        trie_reader,
-        num_threads,
-        &mut queries,
-    );
+    process_bucket_state_queries(bucket_state_nodes.clone(), store, num_threads, &mut queries);
 
     // Process trie nodes commitments
     let mut parents_commitments = trie_nodes
@@ -229,11 +218,7 @@ where
         .map(|(parent, _, _)| {
             (
                 parent,
-                CommitmentBytesW(
-                    trie_reader
-                        .commitment(parent)
-                        .expect("Failed to get trie node"),
-                ),
+                CommitmentBytesW(store.commitment(parent).expect("Failed to get trie node")),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -246,11 +231,7 @@ where
             .map(|(node_id, _)| {
                 (
                     node_id,
-                    CommitmentBytesW(
-                        trie_reader
-                            .commitment(node_id)
-                            .expect("Failed to get trie node"),
-                    ),
+                    CommitmentBytesW(store.commitment(node_id).expect("Failed to get trie node")),
                 )
             }),
     );
@@ -311,7 +292,7 @@ mod tests {
 
         let keys = vec![salt_key];
 
-        let (prover_queries, _, _) = create_sub_trie(&mem_store, &mem_store, &keys).unwrap();
+        let (prover_queries, _, _) = create_sub_trie(&mem_store, &keys).unwrap();
 
         let crs = CRS::default();
 

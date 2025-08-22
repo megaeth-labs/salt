@@ -110,7 +110,7 @@ let expected_values = vec![Some(b"balance100".to_vec()), None];
 let proof = create_proof(&plain_keys_to_prove, &store)?;
 
 // Bob verifies the proof against its local state root
-let is_valid = proof.verify::<MemStore>(root_hash);
+let is_valid = proof.verify(root_hash);
 assert!(is_valid.is_ok());
 
 let proved_plain_values = proof.get_values();

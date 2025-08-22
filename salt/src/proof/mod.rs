@@ -92,15 +92,14 @@ where
 
 impl SaltProof {
     /// Check if the proof is valid.
-    pub fn check<B, T>(
+    pub fn check<Store>(
         &self,
         keys: Vec<SaltKey>,
         values: Vec<Option<SaltValue>>,
         state_root: [u8; 32],
-    ) -> Result<(), ProofError<B, T>>
+    ) -> Result<(), ProofError<Store>>
     where
-        B: StateReader,
-        T: TrieReader,
+        Store: StateReader + TrieReader,
     {
         if keys.is_empty() {
             return Err(ProofError::VerifyFailed("empty key set".to_string()));
@@ -156,17 +155,16 @@ impl SaltProof {
 
 /// Error type for proof.
 #[derive(Debug, Error)]
-pub enum ProofError<S, T>
+pub enum ProofError<Store>
 where
-    S: StateReader,
-    T: TrieReader,
+    Store: StateReader + TrieReader,
 {
     /// read  state failed
     #[error("read state failed: {0:?}")]
-    ReadStateFailed(S::Error),
+    ReadStateFailed(<Store as StateReader>::Error),
     /// read  trie failed
     #[error("read trie failed: {0:?}")]
-    ReadTrieFailed(T::Error),
+    ReadTrieFailed(<Store as TrieReader>::Error),
     /// Prove error
     #[error("prove failed: {0}")]
     ProveFailed(String),
@@ -310,11 +308,11 @@ mod tests {
         let l0_fr = l1_commitment.map_to_scalar_field();
         let empty_root = fr_to_le_bytes(l0_fr);
 
-        let proof = prover::create_salt_proof(&salt_keys, &salt, &salt).unwrap();
+        let proof = prover::create_salt_proof(&salt_keys, &salt).unwrap();
 
         let value = salt.value(salt_keys[0]).unwrap();
 
-        let res = proof.check::<EmptySalt, EmptySalt>(salt_keys, vec![value], empty_root);
+        let res = proof.check::<EmptySalt>(salt_keys, vec![value], empty_root);
 
         assert!(res.is_ok());
     }
@@ -347,9 +345,9 @@ mod tests {
         let salt_key = *updates.data.keys().next().unwrap();
         let value = mem_store.value(salt_key).unwrap();
 
-        let proof = prover::create_salt_proof(&[salt_key], &mem_store, &mem_store).unwrap();
+        let proof = prover::create_salt_proof(&[salt_key], &mem_store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(vec![salt_key], vec![value], trie_root);
+        let res = proof.check::<MemStore>(vec![salt_key], vec![value], trie_root);
         assert!(res.is_ok());
     }
 
@@ -431,9 +429,9 @@ mod tests {
         values.push(None);
         values.push(None);
 
-        let proof = prover::create_salt_proof(&salt_keys, &mem_store, &mem_store).unwrap();
+        let proof = prover::create_salt_proof(&salt_keys, &mem_store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(salt_keys, values, trie_root);
+        let res = proof.check::<MemStore>(salt_keys, values, trie_root);
 
         assert!(res.is_ok());
     }
@@ -580,14 +578,10 @@ mod tests {
         );
 
         // sub trie L2
-        let proof =
-            prover::create_salt_proof(&[SaltKey::from((bid, 2049))], &store, &store).unwrap();
+        let proof = prover::create_salt_proof(&[SaltKey::from((bid, 2049))], &store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
-            vec![SaltKey::from((bid, 2049))],
-            vec![None],
-            expansion_root,
-        );
+        let res =
+            proof.check::<MemStore>(vec![SaltKey::from((bid, 2049))], vec![None], expansion_root);
 
         assert!(res.is_ok());
     }
@@ -671,11 +665,10 @@ mod tests {
                 (bid, new_capacity - 1).into(),
             ],
             &store,
-            &store,
         )
         .unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
+        let res = proof.check::<MemStore>(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -730,11 +723,10 @@ mod tests {
                 (bid, new_capacity2 - 1).into(),
             ],
             &store,
-            &store,
         )
         .unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
+        let res = proof.check::<MemStore>(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),

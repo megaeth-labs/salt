@@ -16,7 +16,7 @@ use std::{
 pub fn get_block_witness<Store>(
     min_sub_tree: &[SaltKey],
     store: &Store,
-) -> Result<BlockWitness, ProofError<Store, Store>>
+) -> Result<BlockWitness, ProofError<Store>>
 where
     Store: StateReader + TrieReader,
 {
@@ -54,7 +54,7 @@ where
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-    let proof = prover::create_salt_proof(&keys, store, store)?;
+    let proof = prover::create_salt_proof(&keys, store)?;
 
     Ok(BlockWitness {
         metadata,
@@ -101,7 +101,7 @@ impl TrieReader for BlockWitness {
 
 impl BlockWitness {
     /// Verify the block witness
-    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError<Self, Self>> {
+    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError<Self>> {
         let mut keys = self
             .metadata
             .keys()
@@ -372,7 +372,7 @@ mod tests {
 
         // Create a minimal real proof using EmptySalt
         let salt_keys = vec![SaltKey(0)];
-        prover::create_salt_proof(&salt_keys, &EmptySalt, &EmptySalt).unwrap()
+        prover::create_salt_proof(&salt_keys, &EmptySalt).unwrap()
     }
 
     /// Test all three cases of the BlockWitness::metadata() method

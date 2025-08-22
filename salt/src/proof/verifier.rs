@@ -124,14 +124,13 @@ fn process_trie_queries(
 
 /// Create verifier queries.
 /// kvs have already been sorted and deduped.
-pub(crate) fn create_verifier_queries<B, T>(
+pub(crate) fn create_verifier_queries<Store>(
     path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
     kvs: Vec<(SaltKey, Option<SaltValue>)>,
     buckets_top_level: &FxHashMap<BucketId, u8>,
-) -> Result<Vec<VerifierQuery>, ProofError<B, T>>
+) -> Result<Vec<VerifierQuery>, ProofError<Store>>
 where
-    B: StateReader,
-    T: TrieReader,
+    Store: StateReader + TrieReader,
 {
     let mut bucket_ids = kvs.iter().map(|(k, _)| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();

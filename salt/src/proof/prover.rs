@@ -16,14 +16,12 @@ pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(TRIE_WIDTH));
 
 /// Create a new proof.
-pub fn create_salt_proof<S, T>(
+pub fn create_salt_proof<Store>(
     keys: &[SaltKey],
-    state_reader: &S,
-    trie_reader: &T,
-) -> Result<SaltProof, ProofError<S, T>>
+    store: &Store,
+) -> Result<SaltProof, ProofError<Store>>
 where
-    S: StateReader,
-    T: TrieReader,
+    Store: StateReader + TrieReader,
 {
     if keys.is_empty() {
         return Err(ProofError::ProveFailed("empty key set".to_string()));
@@ -39,8 +37,7 @@ where
     }
     keys.dedup();
 
-    let (prover_queries, parents_commitments, buckets_top_level) =
-        create_sub_trie(state_reader, trie_reader, &keys)?;
+    let (prover_queries, parents_commitments, buckets_top_level) = create_sub_trie(store, &keys)?;
 
     let crs = CRS::default();
 
