@@ -1,6 +1,5 @@
 //! This module implements [`StateRoot`].
 
-use super::updates::TrieUpdates;
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
@@ -13,6 +12,7 @@ use crate::{
     types::*,
 };
 use banderwagon::{salt_committer::Committer, Element};
+use derive_more::Deref;
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
@@ -23,6 +23,15 @@ use std::collections::{BTreeMap, HashMap};
 const MIN_TASK_SIZE: usize = 64;
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
+
+/// Records updates to the internal commitment values of a SALT trie.
+#[derive(Debug, Default, Deref, Clone, PartialEq, Eq)]
+pub struct TrieUpdates {
+    /// Stores the old and new commitment values of the trie nodes,
+    /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
+    #[deref]
+    pub data: Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>,
+}
 
 type NodeUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 type SaltUpdates<'a> = Vec<(&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValue>))>;

@@ -5,6 +5,5 @@
 pub mod proof;
 #[allow(clippy::module_inception)]
 pub mod trie;
-pub mod updates;
 pub use banderwagon::Element;
 pub mod witness;

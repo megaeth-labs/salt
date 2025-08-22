@@ -9,8 +9,7 @@ pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
     proof::PlainKeysProof,
-    trie::{get_child_node, StateRoot},
-    updates::TrieUpdates,
+    trie::{get_child_node, StateRoot, TrieUpdates},
     witness::BlockWitness,
 };
 
