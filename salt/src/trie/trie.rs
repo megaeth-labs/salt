@@ -14,15 +14,20 @@ use crate::{
 };
 use banderwagon::{salt_committer::Committer, Element};
 use ipa_multipoint::crs::CRS;
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// Don't use parallel processing in computing vector commitments if the total
 /// number of updated elements is below this threshold.
 const MIN_TASK_SIZE: usize = 64;
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
+
+/// Global shared instance of the Committer to avoid repeated expensive initialization
+static SHARED_COMMITTER: Lazy<Arc<Committer>> =
+    Lazy::new(|| Arc::new(Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE)));
 
 /// Records updates to the internal commitment values of a SALT trie.
 /// Stores the old and new commitment values of the trie nodes,
@@ -39,6 +44,8 @@ pub struct StateRoot<'a, Store> {
     pub updates: HashMap<NodeId, (CommitmentBytes, CommitmentBytes)>,
     /// Cache the latest commitments of each updated trie node.
     pub cache: HashMap<NodeId, CommitmentBytes>,
+    /// Shared committer instance for cryptographic operations.
+    committer: Arc<Committer>,
 }
 
 impl<'a, Store> StateRoot<'a, Store>
@@ -51,6 +58,7 @@ where
             store,
             updates: HashMap::new(),
             cache: HashMap::new(),
+            committer: Arc::clone(&SHARED_COMMITTER),
         }
     }
 
@@ -147,7 +155,7 @@ where
     where
         P: Fn(&NodeId, usize) -> NodeId + Sync + Send,
     {
-        let committer = get_global_committer();
+        let committer = &self.committer;
         let num_tasks = 10 * rayon::current_num_threads();
         let task_size = std::cmp::max(MIN_TASK_SIZE, child_updates.len().div_ceil(num_tasks));
 
@@ -544,7 +552,7 @@ where
     where
         N: Fn(&SaltKey) -> NodeId + Sync + Send,
     {
-        let committer = get_global_committer();
+        let committer = &self.committer;
         let num_tasks = 10 * rayon::current_num_threads();
         let task_size = std::cmp::max(MIN_TASK_SIZE, state_updates.len().div_ceil(num_tasks));
 
@@ -706,13 +714,6 @@ impl StateRoot<'_, EmptySalt> {
     }
 }
 
-/// Retrieves or creates a global `TrieCommitter` to reduce the overhead of repeatedly
-/// creating precomputed instances.
-pub fn get_global_committer() -> &'static Committer {
-    static INSTANCE_COMMITTER: OnceCell<Committer> = OnceCell::new();
-    INSTANCE_COMMITTER.get_or_init(|| Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE))
-}
-
 /// Generates a 256-bit secure hash from the bucket entry.
 /// Note: as a special case, empty entries are hashed to 0.
 #[inline(always)]
@@ -797,7 +798,7 @@ mod tests {
         store: &S,
     ) -> CommitmentBytes {
         let level = get_bfs_level(node_id);
-        let committer = get_global_committer();
+        let committer = SHARED_COMMITTER.as_ref();
         let zero = Committer::zero();
         let mut start = node_id - STARTING_NODE_ID[level] as NodeId;
         let mut end = start + 1;
@@ -1569,9 +1570,9 @@ mod tests {
 
     #[test]
     fn trie_update_leaf_nodes() {
-        let committer = get_global_committer();
         let store = MemStore::new();
         let trie = StateRoot::new(&store);
+        let committer = &trie.committer;
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
@@ -1639,9 +1640,9 @@ mod tests {
 
     #[test]
     fn trie_update_internal_nodes() {
-        let committer = get_global_committer();
         let bottom_level = TRIE_LEVELS - 1;
         let trie = StateRoot::new(&EmptySalt);
+        let committer = &trie.committer;
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
@@ -1732,7 +1733,6 @@ mod tests {
     #[test]
     fn trie_calculate_inner() {
         let mut trie = StateRoot::new(&EmptySalt);
-        let committer = get_global_committer();
 
         let mut state_updates = StateUpdates::default();
         let kv1 = Some(SaltValue::new(&[1; 32], &[1; 32]));
@@ -1756,6 +1756,7 @@ mod tests {
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
 
         // Check the commitment updates of the bottom-level node
+        let committer = &trie.committer;
         let c1 = committer
             .add_deltas(default_bucket_data, &[(9, fr1, fr2)])
             .to_bytes_uncompressed();
@@ -1909,10 +1910,10 @@ mod tests {
                     }
                 };
 
-            default_committment_vec[i].0 = get_global_committer()
+            default_committment_vec[i].0 = SHARED_COMMITTER
                 .add_deltas(zero, &meta_delta_indices)
                 .to_bytes_uncompressed();
-            default_committment_vec[i].1 = get_global_committer()
+            default_committment_vec[i].1 = SHARED_COMMITTER
                 .add_deltas(zero, &data_delta_indices)
                 .to_bytes_uncompressed();
 
@@ -1949,7 +1950,7 @@ mod tests {
                 data_delta_indices
             };
 
-            default_subtrie_c_vec[i] = get_global_committer()
+            default_subtrie_c_vec[i] = SHARED_COMMITTER
                 .add_deltas(zero, &data_delta_indices)
                 .to_bytes_uncompressed();
 
@@ -1986,7 +1987,7 @@ mod tests {
     }
 
     fn create_commitments(l: usize) -> Vec<CommitmentBytes> {
-        let committer = get_global_committer();
+        let committer = SHARED_COMMITTER.as_ref();
         (0..l)
             .map(|i| {
                 committer
