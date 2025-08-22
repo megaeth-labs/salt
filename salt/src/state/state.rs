@@ -333,28 +333,56 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 // Found empty slot - insert the key and complete
                 self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
-                // Update the bucket usage cache.
-                let used = metadata.used.unwrap();
-                self.bucket_used_cache.insert(bucket_id, used + 1);
+                if let Some(mut used) = metadata.used {
+                    // Update the bucket usage cache.
+                    used += 1;
+                    self.bucket_used_cache.insert(bucket_id, used);
 
-                // Resize the bucket if load factor threshold exceeded
-                if used >= metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
-                    self.shi_rehash(
-                        bucket_id,
-                        metadata.nonce,
-                        metadata.capacity * BUCKET_RESIZE_MULTIPLIER,
-                        out_updates,
-                    )?;
+                    // Resize the bucket if load factor threshold exceeded
+                    if used > metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
+                        let new_capacity = compute_resize_capacity(metadata.capacity, used);
+                        self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
+                    }
+                } else {
+                    // Bucket usage count is unavailable (metadata.used is None).
+                    //
+                    // This can only occur during stateless validation when replaying blocks
+                    // with execution witnesses. The witness may omit the bucket usage count
+                    // to optimize witness size.
+                    //
+                    // ## Witness Size Trade-off
+                    // Including the usage count would require revealing ALL slots in the
+                    // bucket (to prove the count is correct), significantly increasing
+                    // witness size for every insertion operation.
+                    //
+                    // ## Security Model
+                    // We accept this optimization because:
+                    // 1. Omitting usage count cannot create invalid key-value pairs
+                    // 2. It can only delay bucket resizing (temporary deviation from the
+                    //    canonical state)
+                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
+                    //    its ideal capacity, degrading performance but not correctness
+                    //
+                    // ## Self-Healing Mechanism
+                    // When a legitimate sequencer performs the next insertion, it will:
+                    // 1. Compute the actual usage count from the full state
+                    // 2. Trigger resize if needed (restoring optimal bucket structure)
+                    // 3. Continue normal operations with proper load factor tracking
+                    // Even a malicious sequencer will be forced to resize the bucket when
+                    // no empty slot can be found for insertion because it has no choice
+                    // but to reveal all slots at this point.
+                    //
+                    // This approach prioritizes witness compactness while maintaining
+                    // eventual consistency of bucket structure.
                 }
                 return Ok(());
             }
         }
 
-        // Should not be possible due to load factor limits
-        unreachable!(
-            "shi_upsert: no empty slot found in bucket {} after probing all {} slots",
-            bucket_id, metadata.capacity
-        );
+        // Recovery mechanism: forced bucket expansion if no empty slot found.
+        let new_capacity = compute_resize_capacity(metadata.capacity, metadata.capacity);
+        self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
+        self.shi_upsert(bucket_id, plain_key, plain_val, out_updates)
     }
 
     /// Deletes a plain key using the SHI hash table deletion algorithm.
@@ -589,6 +617,23 @@ fn rank(hashed_key: u64, slot_id: SlotId, capacity: u64) -> SlotId {
     } else {
         slot_id + capacity - first
     }
+}
+
+/// Computes the minimum bucket capacity needed to satisfy the load factor constraint.
+///
+/// # Arguments
+/// * `capacity` - The current bucket capacity
+/// * `used` - The number of occupied slots in the bucket
+///
+/// # Returns
+/// The minimum capacity where `used/capacity` is at or below the threshold.
+/// ```
+fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
+    let mut new_capacity = capacity;
+    while used * 100 > new_capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT {
+        new_capacity *= BUCKET_RESIZE_MULTIPLIER;
+    }
+    new_capacity
 }
 
 #[cfg(test)]
@@ -1913,5 +1958,21 @@ mod tests {
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
+    }
+
+    /// Tests the `compute_resize_capacity` function.
+    #[test]
+    fn test_compute_resize_capacity() {
+        use crate::state::state::compute_resize_capacity;
+
+        let test_cases = [
+            (100, 81, 200),  // Single multiplication
+            (100, 80, 100),  // Exactly at threshold
+            (100, 320, 400), // Multiple multiplications needed
+        ];
+
+        for (capacity, used, expected) in test_cases {
+            assert_eq!(compute_resize_capacity(capacity, used), expected);
+        }
     }
 }
