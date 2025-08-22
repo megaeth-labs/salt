@@ -1,7 +1,7 @@
 //! This module export block witness's interfaces.
 use crate::{
     constant::{default_commitment, NUM_META_BUCKETS},
-    proof::{prover, ProofError, SaltProof},
+    proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -11,59 +11,6 @@ use std::{
     collections::BTreeMap,
     ops::{Range, RangeInclusive},
 };
-
-/// create a block witness from the trie
-pub fn get_block_witness<S, T>(
-    min_sub_tree: &[SaltKey],
-    state_reader: &S,
-    trie_reader: &T,
-) -> Result<BlockWitness, ProofError<S, T>>
-where
-    S: StateReader,
-    T: TrieReader,
-{
-    let mut keys = min_sub_tree.to_vec();
-
-    // Sort only if needed
-    if keys.windows(2).any(|w| w[0] > w[1]) {
-        keys.par_sort_unstable();
-    }
-    keys.dedup();
-
-    // Separate meta keys from data keys
-    let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
-    let split_index = keys.partition_point(|&k| k < threshold);
-    let (meta_keys, data_keys) = keys.split_at(split_index);
-
-    let metadata = meta_keys
-        .par_iter()
-        .filter_map(|&salt_key| {
-            let bucket_id = bucket_id_from_metadata_key(salt_key);
-            state_reader
-                .metadata(bucket_id)
-                .ok()
-                .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
-        })
-        .collect();
-
-    let kvs = data_keys
-        .par_iter()
-        .map(|&salt_key| {
-            state_reader
-                .value(salt_key)
-                .map_err(ProofError::ReadStateFailed)
-                .map(|entry| (salt_key, entry))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-
-    let proof = prover::create_salt_proof(&keys, state_reader, trie_reader)?;
-
-    Ok(BlockWitness {
-        metadata,
-        kvs,
-        proof,
-    })
-}
 
 /// Data structure used to re-execute the block in prover client
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,12 +49,59 @@ impl TrieReader for BlockWitness {
 }
 
 impl BlockWitness {
-    /// Verify the block witness
-    pub fn verify_proof<B, T>(&self, root: [u8; 32]) -> Result<(), ProofError<B, T>>
+    /// Create a block witness from the trie
+    pub fn create<Store>(
+        min_sub_tree: &[SaltKey],
+        store: &Store,
+    ) -> Result<BlockWitness, ProofError>
     where
-        B: StateReader,
-        T: TrieReader,
+        Store: StateReader + TrieReader,
     {
+        let mut keys = min_sub_tree.to_vec();
+
+        // Sort only if needed
+        if keys.windows(2).any(|w| w[0] > w[1]) {
+            keys.par_sort_unstable();
+        }
+        keys.dedup();
+
+        // Separate meta keys from data keys
+        let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
+        let split_index = keys.partition_point(|&k| k < threshold);
+        let (meta_keys, data_keys) = keys.split_at(split_index);
+
+        let metadata = meta_keys
+            .par_iter()
+            .filter_map(|&salt_key| {
+                let bucket_id = bucket_id_from_metadata_key(salt_key);
+                store
+                    .metadata(bucket_id)
+                    .ok()
+                    .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
+            })
+            .collect();
+
+        let kvs = data_keys
+            .par_iter()
+            .map(|&salt_key| {
+                store
+                    .value(salt_key)
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
+                    .map(|entry| (salt_key, entry))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+        let proof = SaltProof::create(&keys, store)?;
+
+        Ok(BlockWitness {
+            metadata,
+            kvs,
+            proof,
+        })
+    }
+
+    /// Verify the block witness
+    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError> {
         let mut keys = self
             .metadata
             .keys()
@@ -233,10 +227,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (old_trie_root, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (old_trie_root, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -248,15 +240,14 @@ mod tests {
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) =
-            trie.update(&mem_store, &mem_store, &state_updates).unwrap();
+        let (new_trie_root, mut trie_updates) = trie.update(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // 3.options in prover node
         // 3.1 verify the block witness
-        let res = block_witness.verify_proof::<MemStore, MemStore>(old_trie_root);
+        let res = block_witness.verify_proof(old_trie_root);
         assert!(res.is_ok());
 
         // 3.2 create EphemeralSaltState from block witness
@@ -267,10 +258,9 @@ mod tests {
 
         assert_eq!(state_updates, prover_updates);
 
-        let mut prover_trie = StateRoot::new();
-        let (prover_trie_root, mut prover_trie_updates) = prover_trie
-            .update(&block_witness, &block_witness, &prover_updates)
-            .unwrap();
+        let mut prover_trie = StateRoot::new(&block_witness);
+        let (prover_trie_root, mut prover_trie_updates) =
+            prover_trie.update(&prover_updates).unwrap();
 
         trie_updates
             .data
@@ -294,10 +284,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (root, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (root, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -312,10 +300,9 @@ mod tests {
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness_res =
-            get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness_res = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
-        let res = block_witness_res.verify_proof::<MemStore, MemStore>(root);
+        let res = block_witness_res.verify_proof(root);
         assert!(res.is_ok());
     }
 
@@ -329,10 +316,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (_, initial_trie_updates) = trie
-            .update(&mem_store, &mem_store, &initial_updates)
-            .unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (_, initial_trie_updates) = trie.update(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -344,7 +329,7 @@ mod tests {
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store, &mem_store).unwrap();
+        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
@@ -383,11 +368,11 @@ mod tests {
 
     /// Helper function to create a mock SaltProof for testing
     fn create_mock_proof() -> SaltProof {
-        use crate::{empty_salt::EmptySalt, proof::prover};
+        use crate::{empty_salt::EmptySalt, proof::SaltProof};
 
         // Create a minimal real proof using EmptySalt
         let salt_keys = vec![SaltKey(0)];
-        prover::create_salt_proof(&salt_keys, &EmptySalt, &EmptySalt).unwrap()
+        SaltProof::create(&salt_keys, &EmptySalt).unwrap()
     }
 
     /// Test all three cases of the BlockWitness::metadata() method

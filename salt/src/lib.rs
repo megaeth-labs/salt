@@ -11,7 +11,7 @@ pub use trie::{
     proof::PlainKeysProof,
     trie::{get_child_node, StateRoot},
     updates::TrieUpdates,
-    witness::{get_block_witness, BlockWitness},
+    witness::BlockWitness,
 };
 
 pub mod traits;
@@ -52,8 +52,8 @@ mod tests {
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes
-        let mut state_root = StateRoot::new();
-        let (root_hash, trie_updates) = state_root.update(&store, &store, &state_updates)?;
+        let mut state_root = StateRoot::new(&store);
+        let (root_hash, trie_updates) = state_root.update(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
         let (root_hash_from_scratch, _) = compute_from_scratch(&store)?;
@@ -66,10 +66,10 @@ mod tests {
         let expected_values = vec![Some(b"balance100".to_vec()), None];
 
         // Alice creates a cryptographic proof for plain key-value pairs
-        let proof = trie::proof::create_proof(&plain_keys_to_prove, &store, &store)?;
+        let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
 
         // Bob verifies the proof against its local state root
-        let is_valid = proof.verify::<MemStore, MemStore>(root_hash);
+        let is_valid = proof.verify(root_hash);
         assert!(is_valid.is_ok());
 
         let proof_plain_values = proof.get_values();

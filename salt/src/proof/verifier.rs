@@ -2,11 +2,10 @@
 use crate::{
     constant::{EMPTY_SLOT_HASH, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
     proof::{
-        calculate_fr_by_kv,
+        prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
-    traits::{StateReader, TrieReader},
     trie::trie::{get_child_node, subtrie_node_id},
     types::{BucketId, BucketMeta, NodeId, SaltKey, SaltValue},
 };
@@ -124,15 +123,11 @@ fn process_trie_queries(
 
 /// Create verifier queries.
 /// kvs have already been sorted and deduped.
-pub(crate) fn create_verifier_queries<B, T>(
+pub(crate) fn create_verifier_queries(
     path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
     kvs: Vec<(SaltKey, Option<SaltValue>)>,
     buckets_top_level: &FxHashMap<BucketId, u8>,
-) -> Result<Vec<VerifierQuery>, ProofError<B, T>>
-where
-    B: StateReader,
-    T: TrieReader,
-{
+) -> Result<Vec<VerifierQuery>, ProofError> {
     let mut bucket_ids = kvs.iter().map(|(k, _)| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
 

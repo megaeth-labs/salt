@@ -1,187 +1,22 @@
 //! This module is the implementation of generating and verifying proofs of SALT.
-use crate::{
-    constant::POLY_DEGREE,
-    traits::{StateReader, TrieReader},
-    types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
-    BucketId,
-};
-use banderwagon::{Element, Fr, PrimeField};
-use ipa_multipoint::{crs::CRS, multiproof::MultiPointProof, transcript::Transcript};
-use rustc_hash::FxHashMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
 use thiserror::Error;
-
-use prover::PRECOMPUTED_WEIGHTS;
 
 pub mod prover;
 pub mod shape;
 pub mod subtrie;
 pub mod verifier;
 
-/// Wrapper of `CommitmentBytes` for serialization.
-#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
-pub struct CommitmentBytesW(
-    #[serde(serialize_with = "serialize_commitment")]
-    #[serde(deserialize_with = "deserialize_commitment")]
-    pub CommitmentBytes,
-);
-
-impl PartialEq for CommitmentBytesW {
-    fn eq(&self, other: &Self) -> bool {
-        Element::from_bytes_unchecked_uncompressed(self.0)
-            == Element::from_bytes_unchecked_uncompressed(other.0)
-    }
-}
-
-/// Salt proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaltProof {
-    /// the node id of nodes in the path => node commitment
-    pub parents_commitments: BTreeMap<NodeId, CommitmentBytesW>,
-
-    /// the IPA proof
-    #[serde(serialize_with = "serialize_multipoint_proof")]
-    #[serde(deserialize_with = "deserialize_multipoint_proof")]
-    pub proof: MultiPointProof,
-
-    /// the top level of the buckets trie
-    /// used to let verifier determine the bucket trie level
-    pub buckets_top_level: FxHashMap<BucketId, u8>,
-}
-
-fn serialize_multipoint_proof<S>(proof: &MultiPointProof, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let bytes = proof
-        .to_bytes()
-        .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-    bytes.serialize(serializer)
-}
-
-fn deserialize_multipoint_proof<'de, D>(deserializer: D) -> Result<MultiPointProof, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes = Vec::<u8>::deserialize(deserializer)?;
-    MultiPointProof::from_bytes(&bytes, POLY_DEGREE)
-        .map_err(|e| serde::de::Error::custom(e.to_string()))
-}
-
-fn serialize_commitment<S>(commitment: &CommitmentBytes, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let element = Element::from_bytes_unchecked_uncompressed(*commitment);
-    let bytes = element.to_bytes();
-
-    bytes.serialize(serializer)
-}
-
-fn deserialize_commitment<'de, D>(deserializer: D) -> Result<CommitmentBytes, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes: [u8; 32] = <[u8; 32]>::deserialize(deserializer)?;
-    let element = Element::from_bytes(&bytes)
-        .ok_or_else(|| serde::de::Error::custom("from_bytes to an element is none"))?;
-
-    Ok(element.to_bytes_uncompressed())
-}
-
-impl SaltProof {
-    /// Check if the proof is valid.
-    pub fn check<B, T>(
-        &self,
-        keys: Vec<SaltKey>,
-        values: Vec<Option<SaltValue>>,
-        state_root: [u8; 32],
-    ) -> Result<(), ProofError<B, T>>
-    where
-        B: StateReader,
-        T: TrieReader,
-    {
-        if keys.is_empty() {
-            return Err(ProofError::VerifyFailed("empty key set".to_string()));
-        }
-        if keys.len() != values.len() {
-            return Err(ProofError::VerifyFailed(
-                "key set and values length not match".to_string(),
-            ));
-        }
-
-        let mut kvs = keys.into_iter().zip(values).collect::<Vec<_>>();
-        kvs.sort_unstable_by_key(|a| a.0);
-        kvs.dedup_by_key(|a| a.0);
-
-        let queries = verifier::create_verifier_queries(
-            &self.parents_commitments,
-            kvs,
-            &self.buckets_top_level,
-        )?;
-
-        let root = self
-            .parents_commitments
-            .get(&0)
-            .ok_or(ProofError::VerifyFailed(
-                "lack of root commitment".to_string(),
-            ))?;
-
-        let trie_root = hash_commitment(root.0);
-
-        if state_root != trie_root {
-            return Err(ProofError::VerifyFailed(format!(
-                "state root not match, expect: {trie_root:?}, got: {state_root:?}"
-            )));
-        }
-
-        let mut transcript = Transcript::new(b"st");
-
-        let crs = CRS::default();
-
-        // call MultiPointProof::check to verify the proof
-        if self
-            .proof
-            .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
-        {
-            Ok(())
-        } else {
-            Err(ProofError::VerifyFailed(
-                "multi pointproof check failed".to_string(),
-            ))
-        }
-    }
-}
+pub use prover::{CommitmentBytesW, SaltProof};
 
 /// Error type for proof.
 #[derive(Debug, Error)]
-pub enum ProofError<S, T>
-where
-    S: StateReader,
-    T: TrieReader,
-{
-    /// read  state failed
-    #[error("read state failed: {0:?}")]
-    ReadStateFailed(S::Error),
-    /// read  trie failed
-    #[error("read trie failed: {0:?}")]
-    ReadTrieFailed(T::Error),
+pub enum ProofError {
     /// Prove error
     #[error("prove failed: {0}")]
     ProveFailed(String),
     /// Verify error
     #[error("verify failed: {0}")]
     VerifyFailed(String),
-}
-
-/// Calculate the hash value of the key-value pair.
-#[inline(always)]
-pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
-    let mut data = blake3::Hasher::new();
-    data.update(entry.key());
-    data.update(entry.value());
-    Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
 }
 
 #[cfg(test)]
@@ -196,15 +31,16 @@ mod tests {
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
+        proof::prover::calculate_fr_by_kv,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         traits::{StateReader, TrieReader},
         trie::trie::{compute_from_scratch, StateRoot},
         types::{BucketId, SlotId},
-        BucketMeta,
+        BucketMeta, NodeId, SaltKey, SaltValue,
     };
     use alloy_primitives::{Address, B256};
-    use banderwagon::{CanonicalSerialize, Element, Fr};
-    use ipa_multipoint::lagrange_basis::LagrangeBasis;
+    use banderwagon::{CanonicalSerialize, Element, Fr, PrimeField};
+    use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
@@ -310,11 +146,11 @@ mod tests {
         let l0_fr = l1_commitment.map_to_scalar_field();
         let empty_root = fr_to_le_bytes(l0_fr);
 
-        let proof = prover::create_salt_proof(&salt_keys, &salt, &salt).unwrap();
+        let proof = SaltProof::create(&salt_keys, &salt).unwrap();
 
         let value = salt.value(salt_keys[0]).unwrap();
 
-        let res = proof.check::<EmptySalt, EmptySalt>(salt_keys, vec![value], empty_root);
+        let res = proof.check(salt_keys, vec![value], empty_root);
 
         assert!(res.is_ok());
     }
@@ -340,16 +176,16 @@ mod tests {
         let updates = state.update(&initial_key_values).unwrap();
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
         let value = mem_store.value(salt_key).unwrap();
 
-        let proof = prover::create_salt_proof(&[salt_key], &mem_store, &mem_store).unwrap();
+        let proof = SaltProof::create(&[salt_key], &mem_store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(vec![salt_key], vec![value], trie_root);
+        let res = proof.check(vec![salt_key], vec![value], trie_root);
         assert!(res.is_ok());
     }
 
@@ -375,8 +211,8 @@ mod tests {
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -411,8 +247,8 @@ mod tests {
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (trie_root, trie_updates) = trie.update(&mem_store, &mem_store, &updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store);
+        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -431,9 +267,9 @@ mod tests {
         values.push(None);
         values.push(None);
 
-        let proof = prover::create_salt_proof(&salt_keys, &mem_store, &mem_store).unwrap();
+        let proof = SaltProof::create(&salt_keys, &mem_store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(salt_keys, values, trie_root);
+        let res = proof.check(salt_keys, values, trie_root);
 
         assert!(res.is_ok());
     }
@@ -479,7 +315,7 @@ mod tests {
     #[test]
     fn salt_proof_in_bucket_expansion() {
         let store = MemStore::new();
-        let mut trie = StateRoot::new();
+        let mut trie = StateRoot::new(&store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let slot_id = 3;
         let salt_key: SaltKey = (bid, slot_id).into();
@@ -493,9 +329,8 @@ mod tests {
                 .collect(),
         };
 
-        let (initialize_root, initialize_trie_updates) = trie
-            .update(&store, &store, &initialize_state_updates)
-            .unwrap();
+        let (initialize_root, initialize_trie_updates) =
+            trie.update(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
 
@@ -527,8 +362,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
@@ -582,14 +416,9 @@ mod tests {
         );
 
         // sub trie L2
-        let proof =
-            prover::create_salt_proof(&[SaltKey::from((bid, 2049))], &store, &store).unwrap();
+        let proof = SaltProof::create(&[SaltKey::from((bid, 2049))], &store).unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
-            vec![SaltKey::from((bid, 2049))],
-            vec![None],
-            expansion_root,
-        );
+        let res = proof.check(vec![SaltKey::from((bid, 2049))], vec![None], expansion_root);
 
         assert!(res.is_ok());
     }
@@ -605,7 +434,7 @@ mod tests {
         }
 
         let store = MemStore::new();
-        let mut trie = StateRoot::new();
+        let mut trie = StateRoot::new(&store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let salt_key: SaltKey = (
             bid >> MIN_BUCKET_SIZE_BITS,
@@ -629,9 +458,8 @@ mod tests {
             .collect(),
         };
 
-        let (initialize_root, initialize_trie_updates) = trie
-            .update(&store, &store, &initialize_state_updates)
-            .unwrap();
+        let (initialize_root, initialize_trie_updates) =
+            trie.update(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
@@ -660,14 +488,13 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
-        let proof = prover::create_salt_proof(
+        let proof = SaltProof::create(
             &[
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -675,11 +502,10 @@ mod tests {
                 (bid, new_capacity - 1).into(),
             ],
             &store,
-            &store,
         )
         .unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
+        let res = proof.check(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -717,14 +543,13 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) =
-            trie.update(&store, &store, &expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = compute_from_scratch(&store).unwrap();
         assert_eq!(root, expansion_root);
 
-        let proof = prover::create_salt_proof(
+        let proof = SaltProof::create(
             &[
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -735,11 +560,10 @@ mod tests {
                 (bid, new_capacity2 - 1).into(),
             ],
             &store,
-            &store,
         )
         .unwrap();
 
-        let res = proof.check::<MemStore, MemStore>(
+        let res = proof.check(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),

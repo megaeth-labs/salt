@@ -71,8 +71,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box(
-                    StateRoot::new()
-                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
+                    StateRoot::new(&EmptySalt)
+                        .update(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -85,8 +85,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 1_000, &mut rng),
             |state_updates_vec| {
                 black_box(
-                    StateRoot::new()
-                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
+                    StateRoot::new(&EmptySalt)
+                        .update(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -99,12 +99,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    let mut trie = StateRoot::new();
+                    let mut trie = StateRoot::new(&EmptySalt);
                     for state_updates in state_updates_vec.iter() {
-                        trie.incremental_update(&EmptySalt, &EmptySalt, state_updates)
-                            .unwrap();
+                        trie.incremental_update(state_updates).unwrap();
                     }
-                    trie.finalize(&EmptySalt).unwrap()
+                    trie.finalize().unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -117,9 +116,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 {
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new()
-                            .update(&EmptySalt, &EmptySalt, state_updates)
-                            .unwrap();
+                        StateRoot::new(&EmptySalt).update(state_updates).unwrap();
                     }
                 }
                 black_box(())
@@ -133,12 +130,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    StateRoot::new()
-                        .update(
-                            &ExpansionSalt((65536 * 16, 512)),
-                            &ExpansionSalt((65536 * 16, 512)),
-                            &state_updates_vec[0],
-                        )
+                    StateRoot::new(&ExpansionSalt((65536 * 16, 512)))
+                        .update(&state_updates_vec[0])
                         .unwrap()
                 })
             },

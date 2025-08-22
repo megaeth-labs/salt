@@ -5,166 +5,21 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
-    constant::{NUM_META_BUCKETS, TRIE_WIDTH_BITS},
-    proof::{prover, ProofError, SaltProof},
+    constant::TRIE_WIDTH_BITS,
+    proof::{ProofError, SaltProof},
     state::{
         hasher,
         state::{probe, EphemeralSaltState},
     },
     traits::{StateReader, TrieReader},
+    trie::witness::BlockWitness,
     types::*,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, ops::RangeInclusive};
-
-/// Creates cryptographic proofs for the given plain keys.
-///
-/// Salt uses a mapping: `salt_key => salt_value(plain_key, plain_value)` where the salt_key
-/// is derived from `hash(plain_key, tree_state)`.
-///
-/// ## Key States
-/// Plain keys can exist in two states:
-/// - **Existed**: Key is stored in a Salt slot with its corresponding value
-/// - **NotExisted**: Key is not present in any Salt slot
-///
-/// ## Proof Generation Process
-///
-/// ### For Existing Keys
-/// 1. Locate the salt_key and salt_value pair
-/// 2. Generate a SaltProof for the pair
-/// 3. Verify that salt_value contains the expected plain_key
-///
-/// ### For Non-Existing Keys
-/// 1. Calculate the optimal slot using the hash function
-/// 2. Follow Salt's insertion algorithm to find the final slot position
-/// 3. Record all accessed slots during traversal for proof reconstruction
-/// 4. The final slot may be:
-///    - The optimal slot (if empty or contains lower priority key)
-///    - A subsequent slot (if optimal slot contains higher priority key)
-///
-/// All accessed salt keys, values, and bucket metadata are included in the proof
-/// to enable verification of the insertion process.
-pub fn create_proof<S, T>(
-    keys: &[Vec<u8>],
-    state_reader: &S,
-    trie_reader: &T,
-) -> Result<PlainKeysProof, ProofError<S, T>>
-where
-    S: StateReader,
-    T: TrieReader,
-{
-    // Initialize collections to store proof data
-    let mut status = Vec::with_capacity(keys.len()); // Status of each key (existed/not existed)
-    let mut metas = BTreeMap::new(); // Bucket metadata needed for verification
-    let mut sub_state = BTreeMap::new(); // Salt key-value pairs accessed during proof
-
-    // Process each plain key individually to determine its status
-    for key_buf in keys {
-        // Create a fresh ephemeral state for each key to prevent cache interference
-        // This ensures that the search process for one key doesn't affect another
-        let mut state = EphemeralSaltState::new(state_reader).cache_read();
-
-        // Calculate which bucket this key belongs to using the hash function
-        let bucket_id = hasher::bucket_id(key_buf);
-
-        // Retrieve the bucket's metadata (capacity, nonce, etc.)
-        let meta = state_reader
-            .metadata(bucket_id)
-            .map_err(ProofError::ReadStateFailed)?;
-
-        // Attempt to find the key in the Salt storage using the insertion algorithm
-        // Returns Some((slot_id, salt_value)) if found, None if not found
-        let slot_id = state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, key_buf)
-            .map_err(ProofError::ReadStateFailed)?;
-
-        match slot_id {
-            // Case 1: Key exists - found at a specific slot with its value
-            Some((slot_id, salt_value)) => {
-                // Convert bucket_id and slot_id into a salt_key for the proof
-                let salt_key = SaltKey::from((bucket_id, slot_id));
-
-                // Record that this key exists and store the salt key-value pair
-                status.push(PlainKeyStatus::Existed(salt_key));
-                sub_state.insert(salt_key, Some(salt_value));
-            }
-
-            // Case 2: Key doesn't exist - need to prove non-existence
-            None => {
-                // The cache contains all slots that were accessed during the find operation
-                // This is crucial for recreating the search path during verification
-                let cache = &state.cache;
-                if cache.is_empty() {
-                    return Err(ProofError::ProveFailed(
-                        "EphemeralSaltState cache is empty".to_string(),
-                    ));
-                }
-
-                // Calculate the optimal slot where this key would be inserted
-                // This is the starting point of Salt's linear probing algorithm
-                let optimal_slot_id = probe(
-                    hasher::hash_with_nonce(key_buf, meta.nonce),
-                    0,
-                    meta.capacity,
-                );
-
-                // Determine the final slot where the key would be inserted
-                // This logic handles bucket capacity wraparound for linear probing
-                let final_slot_id_salt_key = if optimal_slot_id + cache.len() as u64 > meta.capacity
-                {
-                    // Wraparound case: the search wrapped around the bucket boundary
-                    // Calculate the final position using modular arithmetic
-                    (
-                        bucket_id,
-                        (optimal_slot_id + cache.len() as u64 - 1) & (meta.capacity - 1),
-                    )
-                        .into()
-                } else {
-                    // Normal case: the search didn't wrap around
-                    // The final slot is the maximum key in the cache (last accessed slot)
-                    cache
-                        .keys()
-                        .max()
-                        .cloned()
-                        .ok_or(ProofError::ProveFailed("cache is empty".to_string()))?
-                };
-
-                // Record non-existence and include all necessary data for verification
-                status.push(PlainKeyStatus::NotExisted(final_slot_id_salt_key));
-                metas.insert(bucket_id, meta); // Bucket metadata needed for verification
-                sub_state.extend(cache.iter().map(|(k, v)| (*k, v.clone()))); // All accessed slots
-            }
-        };
-    }
-
-    // Collect all salt keys that need to be included in the cryptographic proof
-    // This includes both metadata keys and data keys accessed during the search
-    let mut salt_keys = Vec::with_capacity(metas.len() + sub_state.len());
-
-    // Add metadata keys: convert bucket_id to salt_key format for bucket metadata
-    // The bit manipulation extracts the trie node ID and metadata slot within that node
-    salt_keys.extend(
-        metas
-            .keys()
-            .map(|&k| SaltKey::from((k >> TRIE_WIDTH_BITS, (k & 0xFF) as u64))),
-    );
-
-    // Add all data salt keys that were accessed during the proof generation
-    salt_keys.extend(sub_state.keys().copied());
-
-    // Generate the underlying cryptographic proof for all the salt keys and values
-    // This creates a Merkle proof that these specific key-value pairs exist in the trie
-    let proof = prover::create_salt_proof(&salt_keys, state_reader, trie_reader)?;
-
-    // Construct the final proof structure containing all necessary verification data
-    Ok(PlainKeysProof {
-        keys: keys.to_vec(), // The original plain keys being proved
-        status,              // Existence status for each key
-        metas,               // Bucket metadata required for verification
-        sub_state,           // All salt key-value pairs accessed during proof generation
-        proof,               // The cryptographic proof of the above data
-    })
-}
+use std::{
+    collections::BTreeMap,
+    ops::{Range, RangeInclusive},
+};
 
 /// Status of a plain key in the Salt storage system.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,16 +40,161 @@ pub struct PlainKeysProof {
     pub(crate) keys: Vec<Vec<u8>>,
     /// The existence status for each corresponding plain key.
     pub(crate) status: Vec<PlainKeyStatus>,
-    /// Bucket metadata required for verification (implements StateReader).
-    pub(crate) metas: BTreeMap<BucketId, BucketMeta>,
-    /// Salt key-value pairs accessed during proof generation.
-    /// Used for StateReader implementation and retrieving plain values for existing keys.
-    pub(crate) sub_state: BTreeMap<SaltKey, Option<SaltValue>>,
-    /// The underlying cryptographic proof for the sub_state and metadata.
-    pub(crate) proof: SaltProof,
+    /// Block witness containing all state data and cryptographic proof.
+    pub(crate) witness: BlockWitness,
 }
 
 impl PlainKeysProof {
+    /// Creates cryptographic proofs for the given plain keys.
+    ///
+    /// Salt uses a mapping: `salt_key => salt_value(plain_key, plain_value)` where the salt_key
+    /// is derived from `hash(plain_key, tree_state)`.
+    ///
+    /// ## Key States
+    /// Plain keys can exist in two states:
+    /// - **Existed**: Key is stored in a Salt slot with its corresponding value
+    /// - **NotExisted**: Key is not present in any Salt slot
+    ///
+    /// ## Proof Generation Process
+    ///
+    /// ### For Existing Keys
+    /// 1. Locate the salt_key and salt_value pair
+    /// 2. Generate a SaltProof for the pair
+    /// 3. Verify that salt_value contains the expected plain_key
+    ///
+    /// ### For Non-Existing Keys
+    /// 1. Calculate the optimal slot using the hash function
+    /// 2. Follow Salt's insertion algorithm to find the final slot position
+    /// 3. Record all accessed slots during traversal for proof reconstruction
+    /// 4. The final slot may be:
+    ///    - The optimal slot (if empty or contains lower priority key)
+    ///    - A subsequent slot (if optimal slot contains higher priority key)
+    ///
+    /// All accessed salt keys, values, and bucket metadata are included in the proof
+    /// to enable verification of the insertion process.
+    pub fn create<Store>(keys: &[Vec<u8>], store: &Store) -> Result<PlainKeysProof, ProofError>
+    where
+        Store: StateReader + TrieReader,
+    {
+        // Initialize collections to store proof data
+        let mut status = Vec::with_capacity(keys.len()); // Status of each key (existed/not existed)
+        let mut metas: BTreeMap<BucketId, Option<BucketMeta>> = BTreeMap::new(); // Bucket metadata needed for verification
+        let mut sub_state: BTreeMap<SaltKey, Option<SaltValue>> = BTreeMap::new(); // Salt key-value pairs accessed during proof
+
+        // Process each plain key individually to determine its status
+        for key_buf in keys {
+            // Create a fresh ephemeral state for each key to prevent cache interference
+            // This ensures that the search process for one key doesn't affect another
+            let mut state = EphemeralSaltState::new(store).cache_read();
+
+            // Calculate which bucket this key belongs to using the hash function
+            let bucket_id = hasher::bucket_id(key_buf);
+
+            // Retrieve the bucket's metadata (capacity, nonce, etc.)
+            let meta = store
+                .metadata(bucket_id)
+                .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))?;
+
+            // Attempt to find the key in the Salt storage using the insertion algorithm
+            // Returns Some((slot_id, salt_value)) if found, None if not found
+            let slot_id = state
+                .shi_find(bucket_id, meta.nonce, meta.capacity, key_buf)
+                .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))?;
+
+            match slot_id {
+                // Case 1: Key exists - found at a specific slot with its value
+                Some((slot_id, salt_value)) => {
+                    // Convert bucket_id and slot_id into a salt_key for the proof
+                    let salt_key = SaltKey::from((bucket_id, slot_id));
+
+                    // Record that this key exists and store the salt key-value pair
+                    status.push(PlainKeyStatus::Existed(salt_key));
+                    sub_state.insert(salt_key, Some(salt_value));
+                }
+
+                // Case 2: Key doesn't exist - need to prove non-existence
+                None => {
+                    // The cache contains all slots that were accessed during the find operation
+                    // This is crucial for recreating the search path during verification
+                    let cache = &state.cache;
+                    if cache.is_empty() {
+                        return Err(ProofError::ProveFailed(
+                            "EphemeralSaltState cache is empty".to_string(),
+                        ));
+                    }
+
+                    // Calculate the optimal slot where this key would be inserted
+                    // This is the starting point of Salt's linear probing algorithm
+                    let optimal_slot_id = probe(
+                        hasher::hash_with_nonce(key_buf, meta.nonce),
+                        0,
+                        meta.capacity,
+                    );
+
+                    // Determine the final slot where the key would be inserted
+                    // This logic handles bucket capacity wraparound for linear probing
+                    let final_slot_id_salt_key =
+                        if optimal_slot_id + cache.len() as u64 > meta.capacity {
+                            // Wraparound case: the search wrapped around the bucket boundary
+                            // Calculate the final position using modular arithmetic
+                            (
+                                bucket_id,
+                                (optimal_slot_id + cache.len() as u64 - 1) & (meta.capacity - 1),
+                            )
+                                .into()
+                        } else {
+                            // Normal case: the search didn't wrap around
+                            // The final slot is the maximum key in the cache (last accessed slot)
+                            cache
+                                .keys()
+                                .max()
+                                .cloned()
+                                .ok_or(ProofError::ProveFailed("cache is empty".to_string()))?
+                        };
+
+                    // Record non-existence and include all necessary data for verification
+                    status.push(PlainKeyStatus::NotExisted(final_slot_id_salt_key));
+                    metas.insert(bucket_id, Some(meta)); // Bucket metadata needed for verification
+                    sub_state.extend(cache.iter().map(|(k, v)| (*k, v.clone())));
+                    // All accessed slots
+                }
+            };
+        }
+
+        // Collect all salt keys that need to be included in the cryptographic proof
+        // This includes both metadata keys and data keys accessed during the search
+        let mut salt_keys = Vec::with_capacity(metas.len() + sub_state.len());
+
+        // Add metadata keys: convert bucket_id to salt_key format for bucket metadata
+        // The bit manipulation extracts the trie node ID and metadata slot within that node
+        salt_keys.extend(
+            metas
+                .keys()
+                .map(|&k| SaltKey::from((k >> TRIE_WIDTH_BITS, (k & 0xFF) as u64))),
+        );
+
+        // Add all data salt keys that were accessed during the proof generation
+        salt_keys.extend(sub_state.keys().copied());
+
+        // Generate the underlying cryptographic proof for all the salt keys and values
+        // This creates a Merkle proof that these specific key-value pairs exist in the trie
+        let proof = SaltProof::create(&salt_keys, store)?;
+
+        // Create a BlockWitness from the collected data
+        let witness = BlockWitness {
+            metadata: metas,
+            kvs: sub_state,
+            proof,
+        };
+
+        // Construct the final proof structure containing all necessary verification data
+        Ok(PlainKeysProof {
+            keys: keys.to_vec(), // The original plain keys being proved
+            status,              // Existence status for each key
+            witness,             // Block witness containing all state data and cryptographic proof
+        })
+    }
+
     /// Verifies the cryptographic proof against the given state root.
     ///
     /// This method validates that all plain keys in the proof have the correct
@@ -206,11 +206,7 @@ impl PlainKeysProof {
     /// # Returns
     /// * `Ok(())` if the proof is valid
     /// * `Err(ProofError)` if verification fails
-    pub fn verify<B, T>(&self, root: [u8; 32]) -> Result<(), ProofError<B, T>>
-    where
-        B: StateReader,
-        T: TrieReader,
-    {
+    pub fn verify(&self, root: [u8; 32]) -> Result<(), ProofError> {
         // Sanity check: ensure each key has a corresponding status
         if self.keys.len() != self.status.len() {
             return Err(ProofError::VerifyFailed(
@@ -219,32 +215,14 @@ impl PlainKeysProof {
         }
 
         // Early validation: check if all required data is present
-        if self.sub_state.is_empty() && self.metas.is_empty() {
+        if self.witness.kvs.is_empty() && self.witness.metadata.is_empty() {
             return Err(ProofError::VerifyFailed(
                 "proof contains no data".to_string(),
             ));
         }
 
-        // Build salt_keys and salt_values in a single pass with pre-allocated capacity
-        let total_capacity = self.sub_state.len() + self.metas.len();
-        let mut salt_keys = Vec::with_capacity(total_capacity);
-        let mut salt_values = Vec::with_capacity(total_capacity);
-
-        // Process metadata entries first (order matters for proof verification)
-        for (&bucket_id, &meta) in &self.metas {
-            salt_keys.push(bucket_metadata_key(bucket_id));
-            salt_values.push(Some(SaltValue::from(meta)));
-        }
-
-        // Process sub_state entries
-        for (&salt_key, salt_value_opt) in &self.sub_state {
-            salt_keys.push(salt_key);
-            salt_values.push(salt_value_opt.clone());
-        }
-
-        // Verify the underlying cryptographic proof against the state root
-        // This ensures all the salt key-value pairs in the proof actually exist in the trie
-        self.proof.check(salt_keys, salt_values, root)?;
+        // Verify the underlying cryptographic proof using the witness
+        self.witness.verify_proof(root)?;
 
         // Verify each individual plain key according to its claimed status
         for (pkey, status) in self.keys.iter().zip(self.status.iter()) {
@@ -252,7 +230,7 @@ impl PlainKeysProof {
                 // Verification for keys claimed to exist
                 PlainKeyStatus::Existed(salt_key) => {
                     // The salt_key should be always in sub_state instead of metadata
-                    let salt_value = match self.sub_state.get(salt_key) {
+                    let salt_value = match self.witness.kvs.get(salt_key) {
                         Some(Some(value)) => value.clone(),
                         _ => {
                             return Err(ProofError::VerifyFailed(
@@ -276,7 +254,12 @@ impl PlainKeysProof {
                     let bucket_id = hasher::bucket_id(pkey);
 
                     // Get the bucket metadata from the proof
-                    let meta = self.metas.get(&bucket_id).copied().unwrap_or_default();
+                    let meta = self
+                        .witness
+                        .metadata
+                        .get(&bucket_id)
+                        .and_then(|&opt| opt)
+                        .unwrap_or_default();
 
                     // Create ephemeral state and simulate the find operation
                     let mut state = EphemeralSaltState::new(self).cache_read();
@@ -381,7 +364,7 @@ impl PlainKeysProof {
             .iter()
             .map(|status| match status {
                 PlainKeyStatus::Existed(salt_key) => {
-                    let opt_salt_value = self.sub_state.get(salt_key).cloned().flatten();
+                    let opt_salt_value = self.witness.kvs.get(salt_key).cloned().flatten();
                     opt_salt_value.map(|salt_val| salt_val.value().to_vec())
                 }
                 PlainKeyStatus::NotExisted(_) => None,
@@ -397,62 +380,37 @@ impl StateReader for PlainKeysProof {
     type Error = &'static str;
 
     /// Retrieves a salt value by its salt key from the proof data.
-    ///
-    /// This method handles two types of keys:
-    /// 1. Metadata keys (bucket_id < NUM_META_BUCKETS): Returns bucket metadata
-    /// 2. Data keys: Returns the salt value if it was accessed during proof generation
+    /// Delegates to the underlying BlockWitness implementation.
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
-        if key.bucket_id() < NUM_META_BUCKETS as BucketId {
-            // This is a metadata key - extract the actual bucket_id and return its metadata
-            let bucket_id = bucket_id_from_metadata_key(key);
-            Ok(Some(self.metadata(bucket_id)?.into()))
-        } else {
-            // This is a data key - return the value if it was included in the proof
-            // The flatten() converts Option<Option<SaltValue>> to Option<SaltValue>
-            Ok(self.sub_state.get(&key).cloned().flatten())
-        }
+        self.witness.value(key)
     }
 
     fn entries(
         &self,
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let mut result: Vec<(SaltKey, SaltValue)> = Vec::new();
-        if range.start().is_in_meta_bucket() {
-            result.extend(
-                self.metas
-                    .range(
-                        bucket_id_from_metadata_key(*range.start())
-                            ..=bucket_id_from_metadata_key(
-                                *range.end().min(METADATA_KEYS_RANGE.end()),
-                            ),
-                    )
-                    .map(|(bucket_id, meta)| (bucket_metadata_key(*bucket_id), (*meta).into())),
-            );
-        }
-        result.extend(
-            self.sub_state
-                .range(*range.start()..=*range.end())
-                .filter_map(|(k, v)| v.as_ref().map(|val| (*k, val.clone()))),
-        );
-        Ok(result)
+        self.witness.entries(range)
     }
 
     /// Returns the metadata for a specific bucket.
-    /// Returns default metadata if the bucket wasn't accessed during proof generation.
+    /// Delegates to the BlockWitness implementation which correctly handles all cases.
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        // FIXME: the following code is buggy; see BlockWitness::metadata()
-        // for the correct implementation
-        match self.metas.get(&bucket_id) {
-            Some(meta) => Ok(*meta),
-            None => {
-                let meta = BucketMeta {
-                    used: Some(self.bucket_used_slots(bucket_id)?),
-                    ..Default::default()
-                };
-                Ok(meta)
-            }
-        }
+        self.witness.metadata(bucket_id)
+    }
+}
+
+impl TrieReader for PlainKeysProof {
+    type Error = &'static str;
+
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        self.witness.commitment(node_id)
+    }
+
+    fn node_entries(
+        &self,
+        range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        self.witness.node_entries(range)
     }
 }
 
@@ -492,13 +450,13 @@ mod tests {
         let state_updates = state.update(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (root, trie_updates) = trie.update(&store, &store, &state_updates).unwrap();
+        let mut trie = StateRoot::new(&store);
+        let (root, trie_updates) = trie.update(&state_updates).unwrap();
         store.update_trie(trie_updates);
 
         // Generate a proof for the inserted key
         let plain_keys_proof =
-            create_proof(&vec![kvs.keys().next().unwrap().clone()], &store, &store).unwrap();
+            PlainKeysProof::create(&vec![kvs.keys().next().unwrap().clone()], &store).unwrap();
 
         // Test serialization round-trip
         let serialized =
@@ -508,7 +466,7 @@ mod tests {
 
         // Verify the deserialized proof is identical and still valid
         assert_eq!(plain_keys_proof, deserialized.0);
-        plain_keys_proof.verify::<MemStore, MemStore>(root).unwrap()
+        plain_keys_proof.verify(root).unwrap()
     }
 
     #[test]
@@ -531,9 +489,9 @@ mod tests {
         let store = MemStore::new();
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
-        let proof = create_proof(&[get_plain_keys(vec![6])[0].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[get_plain_keys(vec![6])[0].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(key) => key,
@@ -550,9 +508,9 @@ mod tests {
         // Insert plain_keys()[6]
         let root = insert_kvs(get_plain_keys(vec![6]), &store);
         // generate proof for plain_keys()[0]
-        let proof = create_proof(&[plain_keys()[0].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_keys()[0].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         // plain_keys()[0] is not existed
         let salt_key = match proof.status.first().unwrap() {
@@ -581,9 +539,9 @@ mod tests {
         let store = MemStore::new();
         let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
 
-        let proof = create_proof(&[plain_keys()[1].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_keys()[1].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[1] should be not existed"),
@@ -612,9 +570,9 @@ mod tests {
         let store = MemStore::new();
         let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
 
-        let proof = create_proof(&[plain_keys()[1].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_keys()[1].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[1] should be not existed"),
@@ -642,9 +600,9 @@ mod tests {
         let store = MemStore::new();
         let root = insert_kvs(get_plain_keys(vec![]), &store);
 
-        let proof = create_proof(&[plain_keys()[0].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_keys()[0].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[0] should be not existed"),
@@ -668,9 +626,9 @@ mod tests {
         let store = MemStore::new();
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
-        let proof = create_proof(&[plain_keys()[6].clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_keys()[6].clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(_) => panic!("plain_keys()[6] should be not existed"),
@@ -698,9 +656,9 @@ mod tests {
 
         let key = plain_keys()[7].clone();
 
-        let proof = create_proof(&[key], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[key], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         let salt_key = match proof.status.first().unwrap() {
             PlainKeyStatus::Existed(key) => key,
@@ -717,9 +675,9 @@ mod tests {
 
         let key = plain_keys()[8].clone();
 
-        let proof = create_proof(&[key.clone()], &store, &store).unwrap();
+        let proof = PlainKeysProof::create(&[key.clone()], &store).unwrap();
 
-        assert!(proof.verify::<MemStore, MemStore>(root).is_ok());
+        assert!(proof.verify(root).is_ok());
 
         assert_eq!(proof.keys.first().unwrap(), &key);
 
@@ -771,25 +729,24 @@ mod tests {
         let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new().update(&store, &store, &updates).unwrap();
+        let (_, trie_updates) = StateRoot::new(&store).update(&updates).unwrap();
 
         store.update_trie(trie_updates);
 
-        let plain_keys_proof = create_proof(
-            &kvs.keys().map(|k| k.clone()).collect::<Vec<_>>(),
-            &store,
-            &store,
-        )
-        .unwrap();
+        let plain_keys_proof =
+            PlainKeysProof::create(&kvs.keys().map(|k| k.clone()).collect::<Vec<_>>(), &store)
+                .unwrap();
 
         let data_keys: Vec<SaltKey> = plain_keys_proof
-            .sub_state
+            .witness
+            .kvs
             .keys()
             .map(|k| *k)
             .collect::<Vec<_>>();
 
         let mut meta_keys: Vec<SaltKey> = plain_keys_proof
-            .metas
+            .witness
+            .metadata
             .keys()
             .map(|bucket_id| bucket_metadata_key(*bucket_id))
             .collect();
@@ -823,8 +780,8 @@ mod tests {
 
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (root, trie_updates) = trie.update(store, store, &state_updates).unwrap();
+        let mut trie = StateRoot::new(store);
+        let (root, trie_updates) = trie.update(&state_updates).unwrap();
 
         store.update_trie(trie_updates);
         root

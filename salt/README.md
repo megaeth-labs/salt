@@ -100,17 +100,17 @@ store.update_trie(trie_updates);
 ### Generating Proofs
 
 ```rust,ignore
-use salt::trie::proof::create_proof;
+use salt::trie::proof::PlainKeysProof;
 
 // Define plain keys to prove (both existing and non-existing)
 let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
 let expected_values = vec![Some(b"balance100".to_vec()), None];
 
 // Alice creates a cryptographic proof for plain key-value pairs
-let proof = create_proof(&plain_keys_to_prove, &store)?;
+let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
 
 // Bob verifies the proof against its local state root
-let is_valid = proof.verify::<MemStore>(root_hash);
+let is_valid = proof.verify(root_hash);
 assert!(is_valid.is_ok());
 
 let proved_plain_values = proof.get_values();
