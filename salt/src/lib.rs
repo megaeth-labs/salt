@@ -72,7 +72,7 @@ mod tests {
         let is_valid = proof.verify(root_hash);
         assert!(is_valid.is_ok());
 
-        let proof_plain_values = proof.get_values();
+        let proof_plain_values = proof.get_values()?;
 
         assert_eq!(proof_plain_values, expected_values);
 
