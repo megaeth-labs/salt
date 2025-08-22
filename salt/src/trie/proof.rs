@@ -48,10 +48,7 @@ use std::{
 ///
 /// All accessed salt keys, values, and bucket metadata are included in the proof
 /// to enable verification of the insertion process.
-pub fn create_proof<Store>(
-    keys: &[Vec<u8>],
-    store: &Store,
-) -> Result<PlainKeysProof, ProofError<Store>>
+pub fn create_proof<Store>(keys: &[Vec<u8>], store: &Store) -> Result<PlainKeysProof, ProofError>
 where
     Store: StateReader + TrieReader,
 {
@@ -72,13 +69,13 @@ where
         // Retrieve the bucket's metadata (capacity, nonce, etc.)
         let meta = store
             .metadata(bucket_id)
-            .map_err(ProofError::ReadStateFailed)?;
+            .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))?;
 
         // Attempt to find the key in the Salt storage using the insertion algorithm
         // Returns Some((slot_id, salt_value)) if found, None if not found
         let slot_id = state
             .shi_find(bucket_id, meta.nonce, meta.capacity, key_buf)
-            .map_err(ProofError::ReadStateFailed)?;
+            .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))?;
 
         match slot_id {
             // Case 1: Key exists - found at a specific slot with its value
@@ -208,7 +205,7 @@ impl PlainKeysProof {
     /// # Returns
     /// * `Ok(())` if the proof is valid
     /// * `Err(ProofError)` if verification fails
-    pub fn verify(&self, root: [u8; 32]) -> Result<(), ProofError<Self>> {
+    pub fn verify(&self, root: [u8; 32]) -> Result<(), ProofError> {
         // Sanity check: ensure each key has a corresponding status
         if self.keys.len() != self.status.len() {
             return Err(ProofError::VerifyFailed(
@@ -224,16 +221,7 @@ impl PlainKeysProof {
         }
 
         // Verify the underlying cryptographic proof using the witness
-        self.witness.verify_proof(root).map_err(|e| match e {
-            ProofError::VerifyFailed(msg) => ProofError::VerifyFailed(msg),
-            ProofError::ProveFailed(msg) => ProofError::ProveFailed(msg),
-            ProofError::ReadStateFailed(_) => {
-                ProofError::VerifyFailed("witness verification failed".to_string())
-            }
-            ProofError::ReadTrieFailed(_) => {
-                ProofError::VerifyFailed("witness trie verification failed".to_string())
-            }
-        })?;
+        self.witness.verify_proof(root)?;
 
         // Verify each individual plain key according to its claimed status
         for (pkey, status) in self.keys.iter().zip(self.status.iter()) {

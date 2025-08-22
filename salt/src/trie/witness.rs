@@ -16,7 +16,7 @@ use std::{
 pub fn get_block_witness<Store>(
     min_sub_tree: &[SaltKey],
     store: &Store,
-) -> Result<BlockWitness, ProofError<Store>>
+) -> Result<BlockWitness, ProofError>
 where
     Store: StateReader + TrieReader,
 {
@@ -49,7 +49,7 @@ where
         .map(|&salt_key| {
             store
                 .value(salt_key)
-                .map_err(ProofError::ReadStateFailed)
+                .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
                 .map(|entry| (salt_key, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -101,7 +101,7 @@ impl TrieReader for BlockWitness {
 
 impl BlockWitness {
     /// Verify the block witness
-    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError<Self>> {
+    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError> {
         let mut keys = self
             .metadata
             .keys()

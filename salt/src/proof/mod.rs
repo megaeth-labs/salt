@@ -1,7 +1,6 @@
 //! This module is the implementation of generating and verifying proofs of SALT.
 use crate::{
     constant::POLY_DEGREE,
-    traits::{StateReader, TrieReader},
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
@@ -92,15 +91,12 @@ where
 
 impl SaltProof {
     /// Check if the proof is valid.
-    pub fn check<Store>(
+    pub fn check(
         &self,
         keys: Vec<SaltKey>,
         values: Vec<Option<SaltValue>>,
         state_root: [u8; 32],
-    ) -> Result<(), ProofError<Store>>
-    where
-        Store: StateReader + TrieReader,
-    {
+    ) -> Result<(), ProofError> {
         if keys.is_empty() {
             return Err(ProofError::VerifyFailed("empty key set".to_string()));
         }
@@ -155,16 +151,7 @@ impl SaltProof {
 
 /// Error type for proof.
 #[derive(Debug, Error)]
-pub enum ProofError<Store>
-where
-    Store: StateReader + TrieReader,
-{
-    /// read  state failed
-    #[error("read state failed: {0:?}")]
-    ReadStateFailed(<Store as StateReader>::Error),
-    /// read  trie failed
-    #[error("read trie failed: {0:?}")]
-    ReadTrieFailed(<Store as TrieReader>::Error),
+pub enum ProofError {
     /// Prove error
     #[error("prove failed: {0}")]
     ProveFailed(String),
@@ -312,7 +299,7 @@ mod tests {
 
         let value = salt.value(salt_keys[0]).unwrap();
 
-        let res = proof.check::<EmptySalt>(salt_keys, vec![value], empty_root);
+        let res = proof.check(salt_keys, vec![value], empty_root);
 
         assert!(res.is_ok());
     }
@@ -347,7 +334,7 @@ mod tests {
 
         let proof = prover::create_salt_proof(&[salt_key], &mem_store).unwrap();
 
-        let res = proof.check::<MemStore>(vec![salt_key], vec![value], trie_root);
+        let res = proof.check(vec![salt_key], vec![value], trie_root);
         assert!(res.is_ok());
     }
 
@@ -431,7 +418,7 @@ mod tests {
 
         let proof = prover::create_salt_proof(&salt_keys, &mem_store).unwrap();
 
-        let res = proof.check::<MemStore>(salt_keys, values, trie_root);
+        let res = proof.check(salt_keys, values, trie_root);
 
         assert!(res.is_ok());
     }
@@ -580,8 +567,7 @@ mod tests {
         // sub trie L2
         let proof = prover::create_salt_proof(&[SaltKey::from((bid, 2049))], &store).unwrap();
 
-        let res =
-            proof.check::<MemStore>(vec![SaltKey::from((bid, 2049))], vec![None], expansion_root);
+        let res = proof.check(vec![SaltKey::from((bid, 2049))], vec![None], expansion_root);
 
         assert!(res.is_ok());
     }
@@ -668,7 +654,7 @@ mod tests {
         )
         .unwrap();
 
-        let res = proof.check::<MemStore>(
+        let res = proof.check(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),
@@ -726,7 +712,7 @@ mod tests {
         )
         .unwrap();
 
-        let res = proof.check::<MemStore>(
+        let res = proof.check(
             vec![
                 (bid, 3).into(),
                 (bid, 5).into(),

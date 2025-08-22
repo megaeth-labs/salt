@@ -16,10 +16,7 @@ pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(TRIE_WIDTH));
 
 /// Create a new proof.
-pub fn create_salt_proof<Store>(
-    keys: &[SaltKey],
-    store: &Store,
-) -> Result<SaltProof, ProofError<Store>>
+pub fn create_salt_proof<Store>(keys: &[SaltKey], store: &Store) -> Result<SaltProof, ProofError>
 where
     Store: StateReader + TrieReader,
 {

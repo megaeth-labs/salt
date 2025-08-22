@@ -165,7 +165,7 @@ fn process_bucket_state_queries<Store: StateReader + TrieReader>(
 pub(crate) fn create_sub_trie<Store>(
     store: &Store,
     salt_keys: &[SaltKey],
-) -> Result<SubTrieInfo, ProofError<Store>>
+) -> Result<SubTrieInfo, ProofError>
 where
     Store: StateReader + TrieReader,
 {
@@ -186,7 +186,7 @@ where
             Ok((bucket_id, bucket_trie_top_level as u8))
         })
         .collect::<Result<FxHashMap<_, _>, <Store as StateReader>::Error>>()
-        .map_err(|e| ProofError::ReadStateFailed(e))?;
+        .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))?;
 
     let (bucket_trie_nodes, bucket_state_nodes) =
         bucket_trie_parents_and_points(salt_keys, &buckets_top_level);
