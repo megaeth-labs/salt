@@ -119,7 +119,7 @@ impl PlainKeysProof {
     /// * `Ok(None)` if the key does not exist
     /// * `Err(String)` if the key was not included in this proof
     pub fn get_plain_value(&self, plain_key: &Vec<u8>) -> Result<Option<Vec<u8>>, String> {
-        if self.keys.iter().find(|v| *v == plain_key).is_none() {
+        if !self.keys.iter().any(|v| v == plain_key) {
             return Err("plain_key is not proved".to_string());
         }
 
