@@ -335,9 +335,7 @@ mod tests {
         store.update_trie(initialize_trie_updates.clone());
 
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
         assert_eq!(init_trie_updates, initialize_trie_updates);
 
@@ -463,9 +461,7 @@ mod tests {
         store.update_state(initialize_state_updates.clone());
         store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
         // expand capacity and add kvs

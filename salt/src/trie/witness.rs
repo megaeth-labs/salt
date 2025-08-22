@@ -403,12 +403,8 @@ mod tests {
         let (prover_trie_root, mut prover_trie_updates) =
             prover_trie.update(&prover_updates).unwrap();
 
-        trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        prover_trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        prover_trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
         assert_eq!(trie_updates, prover_trie_updates);
 
