@@ -1,4 +1,4 @@
-//! This module implements [`StateUpdates`].
+//! Tracks state changes in SALT with before/after values for atomic updates and rollbacks.
 use crate::types::{SaltKey, SaltValue};
 use derive_more::Deref;
 use hex;
@@ -8,38 +8,32 @@ use std::{
     fmt,
 };
 
-/// Records updates to a SALT state (including both prior and new values).
+/// Tracks state changes as (old, new) value pairs for atomic updates and rollbacks.
+///
+/// Automatically deduplicates no-op changes where old equals new.
 #[derive(Clone, Debug, Deref, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct StateUpdates {
-    /// Stores the old and new state values for a slot, formatted as
-    /// `(entry_id, (old_entry, new_entry))`.
+    /// Maps keys to (old_value, new_value) pairs. None indicates absence/deletion.
     #[deref]
-    pub data: BTreeMap<SaltKey, (Option<SaltValue>, Option<SaltValue>)>,
+    pub(crate) data: BTreeMap<SaltKey, (Option<SaltValue>, Option<SaltValue>)>,
 }
 
 impl StateUpdates {
-    /// Applies another update set atop this one.
-    pub fn merge(&mut self, other: &Self) {
-        other
-            .data
-            .iter()
-            .for_each(|(k, v)| match self.data.get_mut(k) {
-                Some(slot_val) => {
-                    if slot_val.0 == v.1 {
-                        // If the new value is the same as the old value, do not merge and remove the
-                        // entry here.
-                        self.data.remove(k);
-                    } else {
-                        let _ = std::mem::replace(&mut slot_val.1, v.1.clone());
-                    }
-                }
-                None => {
-                    self.data.insert(*k, v.clone());
-                }
-            });
-    }
-
-    /// Adds a new updated entry to the state changes.
+    /// Records a state change for a key, maintaining transition chaining.
+    ///
+    /// For new keys, creates an entry tracking the change from `old_value` to `new_value`.
+    /// For existing keys, chains the transition by preserving the original old value
+    /// while updating to the new value. No-op entries are removed automatically.
+    ///
+    /// # Arguments
+    /// * `salt_key` - The key to update
+    /// * `old_value` - The expected current value
+    /// * `new_value` - The new value to set
+    ///
+    /// # Panics
+    /// Panics if transitions don't chain properly, i.e., if for any key that exists
+    /// in both `self` and `other`, the old_value in `other` doesn't match the
+    /// new_value in `self`.
     pub fn add(
         &mut self,
         salt_key: SaltKey,
@@ -47,33 +41,53 @@ impl StateUpdates {
         new_value: Option<SaltValue>,
     ) {
         match self.data.entry(salt_key) {
-            Entry::Occupied(mut entry) => {
-                debug_assert_eq!(old_value, entry.get().1);
-                if entry.get().0 == new_value {
-                    entry.remove();
+            Entry::Occupied(mut change) => {
+                assert_eq!(old_value, change.get().1, "Invalid state transition");
+                if change.get().0 == new_value {
+                    change.remove();
                 } else {
-                    entry.get_mut().1 = new_value;
+                    change.get_mut().1 = new_value;
                 }
             }
-            Entry::Vacant(entry) => {
-                entry.insert((old_value, new_value));
+            Entry::Vacant(change) => {
+                if old_value != new_value {
+                    change.insert((old_value, new_value));
+                }
             }
+        };
+    }
+
+    /// Merges another set of state updates into this one, chaining transitions
+    /// correctly.
+    ///
+    /// Logically equivalent to applying `add()` for each entry in `other`.
+    pub fn merge(&mut self, other: Self) {
+        for (key, (old_val, new_val)) in other.data {
+            self.add(key, old_val, new_val);
         }
     }
 
-    /// Generate the inverse of `StateUpdates`.
+    /// Creates inverse state updates by swapping old and new values for rollback
+    /// operations.
+    ///
+    /// This method consumes `self` and returns a new `StateUpdates` where each
+    /// (old, new) pair becomes (new, old). This is useful for creating rollback
+    /// operations that can undo the changes represented by these updates.
+    ///
+    /// # Returns
+    /// A new `StateUpdates` with all value pairs swapped
     pub fn inverse(mut self) -> Self {
-        for (old_value, new_value) in self.data.values_mut() {
-            std::mem::swap(old_value, new_value);
-        }
+        self.data
+            .values_mut()
+            .for_each(|(old, new)| std::mem::swap(old, new));
         self
     }
 }
 
+/// Formats updates for debugging, showing bucket/slot IDs and key/value hex.
 impl fmt::Display for StateUpdates {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "StateUpdates {{")?;
-
         for (salt_key, (old_value, new_value)) in &self.data {
             writeln!(
                 f,
@@ -81,26 +95,21 @@ impl fmt::Display for StateUpdates {
                 salt_key.bucket_id(),
                 salt_key.slot_id()
             )?;
-
-            // Helper closure to format SaltValue
-            let format_value = |value: &Option<SaltValue>| -> String {
-                match value {
-                    Some(salt_value) => {
-                        format!(
-                            "key:{:?} value:{:?}",
-                            hex::encode(salt_value.key()),
-                            hex::encode(salt_value.value())
-                        )
-                    }
-                    None => "None".to_string(),
-                }
+            let fmt_val = |v: &Option<SaltValue>| match v {
+                Some(salt_val) => format!(
+                    "key:{:?} value:{:?}",
+                    hex::encode(salt_val.key()),
+                    hex::encode(salt_val.value())
+                ),
+                None => "None".to_string(),
             };
-
-            writeln!(f, "    old: {}", format_value(old_value))?;
-            writeln!(f, "    new: {}", format_value(new_value))?;
-            writeln!(f, "  }}")?;
+            writeln!(
+                f,
+                "    old: {}\n    new: {}\n  }}",
+                fmt_val(old_value),
+                fmt_val(new_value)
+            )?;
         }
-
         write!(f, "}}")
     }
 }
@@ -109,78 +118,110 @@ impl fmt::Display for StateUpdates {
 mod tests {
     use super::*;
 
-    #[test]
-    fn state_updates_merge() {
-        let mut updates = StateUpdates::default();
-        let mut other = StateUpdates::default();
-
-        let salt_array = [
-            Some(SaltValue::new(&[1u8; 32], &[1u8; 32])),
-            Some(SaltValue::new(&[2u8; 32], &[1u8; 32])),
-            Some(SaltValue::new(&[3u8; 32], &[1u8; 32])),
-        ];
-
-        let entry_id0 = (1, 1).into();
-        let entry_id1 = (2, 2).into();
-        let entry_id2 = (3, 3).into();
-
-        updates.add(entry_id0, salt_array[0].clone(), None);
-        updates.add(entry_id1, salt_array[1].clone(), None);
-        other.add(entry_id0, None, salt_array[1].clone());
-        other.add(entry_id2, None, salt_array[2].clone());
-
-        updates.merge(&other);
-
-        assert_eq!(
-            updates.data.get(&entry_id0).unwrap().clone(),
-            (salt_array[0].clone(), salt_array[1].clone()),
-            "The new entry for slot 1 in table 1 should be (Some((key_array[0],val)), Some((key_array[1],val)))"
-        );
-
-        assert_eq!(
-            updates.data.get(&entry_id1).unwrap().clone(),
-            (salt_array[1].clone(), None),
-            "The new entry for slot 2 in table 2 should be (Some((key_array[1],val)), None)"
-        );
-
-        assert_eq!(
-            updates.data.get(&entry_id2).unwrap().clone(),
-            (None, salt_array[2].clone()),
-            "The new entry for slot 3 in table 3 should be (None, Some((key_array[2], val)))"
-        );
+    /// Helper to create test SaltValues with different patterns.
+    fn test_salt_value(pattern: u8) -> SaltValue {
+        SaltValue::new(&[pattern; 32], &[pattern; 32])
     }
 
+    /// Tests all add() method operations.
+    ///
+    /// Scenarios tested:
+    /// - Adding new entry to empty updates (None → Some)
+    /// - Chaining updates preserves original old value
+    /// - Deletion that results in no-op (reverting to original state)
+    /// - No-op detection for None → None transitions
     #[test]
-    fn state_updates_reverse_work() {
-        let salt_values = [
-            SaltValue::new(&[1u8; 32], &[1u8; 32]),
-            SaltValue::new(&[2u8; 32], &[2u8; 32]),
-            SaltValue::new(&[3u8; 32], &[3u8; 32]),
-        ];
+    fn test_add_operations() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2] = [test_salt_value(1), test_salt_value(2)];
+        let key = SaltKey(0);
 
-        let data1 = vec![
-            (SaltKey(0), (Some(salt_values[0].clone()), None)),
-            (SaltKey(1), (None, Some(salt_values[1].clone()))),
-            (
-                SaltKey(2),
-                (Some(salt_values[1].clone()), Some(salt_values[2].clone())),
-            ),
-        ];
-        let data2 = vec![
-            (SaltKey(0), (None, Some(salt_values[0].clone()))),
-            (SaltKey(1), (Some(salt_values[1].clone()), None)),
-            (
-                SaltKey(2),
-                (Some(salt_values[2].clone()), Some(salt_values[1].clone())),
-            ),
-        ];
+        // None → v1 → v2 (chaining preserves original)
+        updates.add(key, None, Some(v1.clone()));
+        assert_eq!(updates.data[&key], (None, Some(v1.clone())));
+        updates.add(key, Some(v1.clone()), Some(v2.clone()));
+        assert_eq!(updates.data[&key], (None, Some(v2.clone())));
 
-        let updates1 = StateUpdates {
-            data: data1.into_iter().collect(),
-        };
-        let updates2 = StateUpdates {
-            data: data2.into_iter().collect(),
-        };
-        assert_eq!(updates1.inverse(), updates2);
+        // Revert to original (v2 → None) creates no-op
+        updates.add(key, Some(v2), None);
+        assert!(updates.data.is_empty());
+
+        // None → None is filtered out
+        updates.add(key, None, None);
+        assert!(updates.data.is_empty());
+    }
+
+    /// Tests that add() panics when transitions don't chain properly.
+    ///
+    /// Scenarios tested:
+    /// - Adding v1 → v2 transition chain
+    /// - Attempting to add v3 → v1 when current state is v2 (should panic)
+    /// - Validates assertion error for non-matching transition chains
+    #[test]
+    #[should_panic(expected = "Invalid state transition")]
+    fn test_add_panics_on_non_chaining() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let key = SaltKey(0);
+
+        // First add: v1 → v2
+        updates.add(key, Some(v1.clone()), Some(v2));
+
+        // Try to add non-chaining transition: v3 → v1 (should panic)
+        updates.add(key, Some(v3), Some(v1));
+    }
+
+    /// Tests all merge operations.
+    ///
+    /// Scenarios tested:
+    /// - Basic merge with chaining transitions
+    /// - Merging with empty updates (no-op)
+    /// - Complex chaining: None → v1 → v2 → v3 results in None → v3
+    #[test]
+    fn test_merge_operations() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let key = SaltKey(0);
+
+        // Basic merge with chaining
+        updates.add(key, None, Some(v1.clone()));
+        let mut other = StateUpdates::default();
+        other.add(key, Some(v1.clone()), Some(v2.clone()));
+        updates.merge(other);
+        assert_eq!(updates.data[&key], (None, Some(v2.clone())));
+
+        // Merge with empty (no-op)
+        let len_before = updates.data.len();
+        updates.merge(StateUpdates::default());
+        assert_eq!(updates.data.len(), len_before);
+
+        // Chain multiple transitions: v2 → v3
+        let mut chain = StateUpdates::default();
+        chain.add(key, Some(v2.clone()), Some(v3.clone()));
+        updates.merge(chain);
+        assert_eq!(updates.data[&key], (None, Some(v3.clone())));
+    }
+
+    /// Tests inverse operations.
+    ///
+    /// Scenarios tested:
+    /// - Basic inverse swapping: (old, new) becomes (new, old)
+    /// - Double inverse reversibility: inverse(inverse(x)) == x
+    #[test]
+    fn test_inverse_operations() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2] = [test_salt_value(1), test_salt_value(2)];
+        let key = SaltKey(0);
+
+        // Create a transition: None -> v1 -> v2
+        updates.add(key, None, Some(v1.clone()));
+        updates.add(key, Some(v1), Some(v2.clone()));
+
+        // Test inverse swapping
+        let inverse = updates.clone().inverse();
+        assert_eq!(inverse.data[&key], (Some(v2.clone()), None));
+
+        // Test double inverse equals original
+        assert_eq!(updates, inverse.inverse());
     }
 }
