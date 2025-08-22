@@ -648,61 +648,61 @@ where
     }
 }
 
-/// Computes the state root from scratch given the SALT buckets.
-pub fn compute_from_scratch<S: StateReader>(
-    reader: &S,
-) -> Result<([u8; 32], TrieUpdates), S::Error> {
-    let trie_reader = &EmptySalt;
-    let trie = StateRoot::new(trie_reader);
-    let mut trie_updates = Vec::new();
+impl StateRoot<'_, EmptySalt> {
+    /// Computes the state root from scratch given the SALT buckets.
+    pub fn rebuild<S: StateReader>(reader: &S) -> Result<([u8; 32], TrieUpdates), S::Error> {
+        let trie_reader = &EmptySalt;
+        let trie = StateRoot::new(trie_reader);
+        let mut trie_updates = Vec::new();
 
-    // Compute bucket commitments.
-    const STEP_SIZE: usize = 256;
-    (NUM_META_BUCKETS..NUM_BUCKETS)
-        .step_by(STEP_SIZE)
-        .try_for_each(|start| {
-            let end = std::cmp::min(start + STEP_SIZE, NUM_BUCKETS) - 1;
-            // Read Bucket Metadata from store
-            let meta_start = if start == NUM_META_BUCKETS {
-                0
-            } else {
-                (start >> MIN_BUCKET_SIZE_BITS) as BucketId
-            };
-            let mut state_updates = reader
-                .entries(
-                    SaltKey::from((meta_start, 0))
-                        ..=SaltKey::from((
-                            (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
-                            BUCKET_SLOT_ID_MASK,
-                        )),
-                )?
-                .into_iter()
-                .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
-                .collect::<BTreeMap<_, _>>();
-
-            // Read buckets key-value pairs from store
-            state_updates.extend(
-                reader
+        // Compute bucket commitments.
+        const STEP_SIZE: usize = 256;
+        (NUM_META_BUCKETS..NUM_BUCKETS)
+            .step_by(STEP_SIZE)
+            .try_for_each(|start| {
+                let end = std::cmp::min(start + STEP_SIZE, NUM_BUCKETS) - 1;
+                // Read Bucket Metadata from store
+                let meta_start = if start == NUM_META_BUCKETS {
+                    0
+                } else {
+                    (start >> MIN_BUCKET_SIZE_BITS) as BucketId
+                };
+                let mut state_updates = reader
                     .entries(
-                        SaltKey::from((start as BucketId, 0))
-                            ..=SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK)),
+                        SaltKey::from((meta_start, 0))
+                            ..=SaltKey::from((
+                                (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
+                                BUCKET_SLOT_ID_MASK,
+                            )),
                     )?
                     .into_iter()
-                    .map(|(k, v)| (k, (None, Some(v)))),
-            );
+                    .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
+                    .collect::<BTreeMap<_, _>>();
 
-            let updates = trie
-                .update_leaf_nodes(&StateUpdates {
-                    data: state_updates,
-                })
-                .expect("no error in EmptySalt when update_leaf_nodes");
-            trie_updates.extend(updates);
-            Ok(())
-        })?;
+                // Read buckets key-value pairs from store
+                state_updates.extend(
+                    reader
+                        .entries(
+                            SaltKey::from((start as BucketId, 0))
+                                ..=SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK)),
+                        )?
+                        .into_iter()
+                        .map(|(k, v)| (k, (None, Some(v)))),
+                );
 
-    Ok(trie
-        .update_internal_nodes(trie_updates)
-        .expect("no error in EmptySalt when update_internal_nodes"))
+                let updates = trie
+                    .update_leaf_nodes(&StateUpdates {
+                        data: state_updates,
+                    })
+                    .expect("no error in EmptySalt when update_leaf_nodes");
+                trie_updates.extend(updates);
+                Ok(())
+            })?;
+
+        Ok(trie
+            .update_internal_nodes(trie_updates)
+            .expect("no error in EmptySalt when update_internal_nodes"))
+    }
 }
 
 // Generates a node's commitment from its entire KV store.
@@ -1037,7 +1037,7 @@ mod tests {
         let (root1, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (cmp_root, _) = compute_from_scratch(&store).unwrap();
+        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root1, cmp_root);
 
         // only ‌contract capacity
@@ -1082,7 +1082,7 @@ mod tests {
             trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates);
-        let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
+        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
         init_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
@@ -1120,7 +1120,7 @@ mod tests {
         let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, expansion_root);
         // update expansion bucket
         let expand_state_updates = StateUpdates {
@@ -1137,7 +1137,7 @@ mod tests {
         let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, expansion_root);
 
         // contract capacity and remove kvs
@@ -1173,7 +1173,7 @@ mod tests {
         let (contraction_root, trie_updates) = trie.update_fin(&contract_state_updates).unwrap();
         store.update_state(contract_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, contraction_root);
 
         let contract_state_updates = StateUpdates {
@@ -1213,7 +1213,7 @@ mod tests {
         let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root1, _) = compute_from_scratch(&store).unwrap();
+        let (root1, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, root1);
 
         // extend the trie
@@ -1250,7 +1250,7 @@ mod tests {
         let (extended_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root2, _) = compute_from_scratch(&store).unwrap();
+        let (root2, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root2, extended_root);
 
         // contract the trie
@@ -1286,7 +1286,7 @@ mod tests {
         let (contraction_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root3, _) = compute_from_scratch(&store).unwrap();
+        let (root3, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root3, contraction_root);
     }
 
@@ -1528,7 +1528,7 @@ mod tests {
 
         let (root0, _) = trie.update_fin(&state_updates).unwrap();
         mock_db.update_state(state_updates);
-        let (root1, trie_updates) = compute_from_scratch(&mock_db).unwrap();
+        let (root1, trie_updates) = StateRoot::rebuild(&mock_db).unwrap();
 
         let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
         let c = calculate_subtrie_with_all_kvs(node_id, &mock_db);
@@ -1576,7 +1576,7 @@ mod tests {
 
         let (root0, _) = trie.update_fin(&state_updates).unwrap();
         mock_db.update_state(state_updates);
-        let (root1, _) = compute_from_scratch(&mock_db).unwrap();
+        let (root1, _) = StateRoot::rebuild(&mock_db).unwrap();
 
         assert_eq!(root0, root1);
     }

@@ -25,7 +25,7 @@ pub mod mock_evm_types;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::trie::compute_from_scratch;
+    use crate::trie::trie::StateRoot;
     use std::collections::HashMap;
 
     #[test]
@@ -55,7 +55,7 @@ mod tests {
         let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
-        let (root_hash_from_scratch, _) = compute_from_scratch(&store)?;
+        let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
         assert_eq!(root_hash, root_hash_from_scratch);
 
         // "Persist" the trie updates to storage
