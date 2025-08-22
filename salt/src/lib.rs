@@ -11,7 +11,7 @@ pub use trie::{
     proof::PlainKeysProof,
     trie::{get_child_node, StateRoot},
     updates::TrieUpdates,
-    witness::{get_block_witness, BlockWitness},
+    witness::BlockWitness,
 };
 
 pub mod traits;

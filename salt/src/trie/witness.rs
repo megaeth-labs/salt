@@ -12,57 +12,6 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
-/// create a block witness from the trie
-pub fn get_block_witness<Store>(
-    min_sub_tree: &[SaltKey],
-    store: &Store,
-) -> Result<BlockWitness, ProofError>
-where
-    Store: StateReader + TrieReader,
-{
-    let mut keys = min_sub_tree.to_vec();
-
-    // Sort only if needed
-    if keys.windows(2).any(|w| w[0] > w[1]) {
-        keys.par_sort_unstable();
-    }
-    keys.dedup();
-
-    // Separate meta keys from data keys
-    let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
-    let split_index = keys.partition_point(|&k| k < threshold);
-    let (meta_keys, data_keys) = keys.split_at(split_index);
-
-    let metadata = meta_keys
-        .par_iter()
-        .filter_map(|&salt_key| {
-            let bucket_id = bucket_id_from_metadata_key(salt_key);
-            store
-                .metadata(bucket_id)
-                .ok()
-                .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
-        })
-        .collect();
-
-    let kvs = data_keys
-        .par_iter()
-        .map(|&salt_key| {
-            store
-                .value(salt_key)
-                .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
-                .map(|entry| (salt_key, entry))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-
-    let proof = prover::create_salt_proof(&keys, store)?;
-
-    Ok(BlockWitness {
-        metadata,
-        kvs,
-        proof,
-    })
-}
-
 /// Data structure used to re-execute the block in prover client
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
@@ -100,6 +49,57 @@ impl TrieReader for BlockWitness {
 }
 
 impl BlockWitness {
+    /// Create a block witness from the trie
+    pub fn create<Store>(
+        min_sub_tree: &[SaltKey],
+        store: &Store,
+    ) -> Result<BlockWitness, ProofError>
+    where
+        Store: StateReader + TrieReader,
+    {
+        let mut keys = min_sub_tree.to_vec();
+
+        // Sort only if needed
+        if keys.windows(2).any(|w| w[0] > w[1]) {
+            keys.par_sort_unstable();
+        }
+        keys.dedup();
+
+        // Separate meta keys from data keys
+        let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
+        let split_index = keys.partition_point(|&k| k < threshold);
+        let (meta_keys, data_keys) = keys.split_at(split_index);
+
+        let metadata = meta_keys
+            .par_iter()
+            .filter_map(|&salt_key| {
+                let bucket_id = bucket_id_from_metadata_key(salt_key);
+                store
+                    .metadata(bucket_id)
+                    .ok()
+                    .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
+            })
+            .collect();
+
+        let kvs = data_keys
+            .par_iter()
+            .map(|&salt_key| {
+                store
+                    .value(salt_key)
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
+                    .map(|entry| (salt_key, entry))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+        let proof = prover::create_salt_proof(&keys, store)?;
+
+        Ok(BlockWitness {
+            metadata,
+            kvs,
+            proof,
+        })
+    }
+
     /// Verify the block witness
     pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError> {
         let mut keys = self
@@ -243,7 +243,7 @@ mod tests {
         let (new_trie_root, mut trie_updates) = trie.update(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
+        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // 3.options in prover node
         // 3.1 verify the block witness
@@ -300,7 +300,7 @@ mod tests {
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness_res = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
+        let block_witness_res = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         let res = block_witness_res.verify_proof(root);
         assert!(res.is_ok());
@@ -329,7 +329,7 @@ mod tests {
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = get_block_witness(&min_sub_tree_keys, &mem_store).unwrap();
+        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
