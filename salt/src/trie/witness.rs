@@ -4,7 +4,7 @@
 //! of state data along with cryptographic proofs for stateless validation. The witness
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
-    constant::{default_commitment, NUM_META_BUCKETS},
+    constant::NUM_META_BUCKETS,
     proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -42,25 +42,6 @@ use std::{
 ///
 /// - **No Range Manipulation**: Range queries are disabled to prevent selective
 ///   omission attacks where a prover hides some keys while including others in a range.
-///
-/// ## Data Structure
-///
-/// - `metadata`: Bucket metadata, where `Some(None)` indicates default metadata
-/// - `kvs`: Key-value pairs, where `Some(None)` indicates proven non-existence
-/// - `proof`: Cryptographic proof authenticating all witnessed data
-///
-/// # Usage for Stateless Validation
-///
-/// ```rust,ignore
-/// // Safe: Distinguishes unknown from non-existent
-/// match witness.value(key)? {
-///     Some(value) => { /* Key exists with value */ }
-///     None => { /* Key is proven to not exist */ }
-/// }
-/// // Error case: Key not in witness (unknown)
-///
-/// // Unsafe: Would conflate unknown with non-existent
-/// // witness.entries(range) // <- This returns error for security
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
@@ -78,31 +59,6 @@ pub struct BlockWitness {
 
     /// Cryptographic proof authenticating all witnessed data
     pub proof: SaltProof,
-}
-
-impl TrieReader for BlockWitness {
-    type Error = &'static str;
-
-    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        Ok(self
-            .proof
-            .parents_commitments
-            .get(&node_id)
-            .map(|c| c.0)
-            .unwrap_or_else(|| default_commitment(node_id)))
-    }
-
-    fn node_entries(
-        &self,
-        range: Range<NodeId>,
-    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Ok(self
-            .proof
-            .parents_commitments
-            .range(range)
-            .map(|(&k, v)| (k, v.0))
-            .collect())
-    }
 }
 
 impl BlockWitness {
@@ -323,6 +279,36 @@ impl StateReader for BlockWitness {
     }
 }
 
+impl TrieReader for BlockWitness {
+    type Error = &'static str;
+
+    /// Retrieves the commitment for a specific trie node from the witness.
+    ///
+    /// # Security Model
+    ///
+    /// This method enforces the same security properties as other BlockWitness methods:
+    /// - Returns the commitment if the node is witnessed in the proof
+    /// - Returns an error if the node is not included in the witness
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        match self.proof.parents_commitments.get(&node_id) {
+            Some(commitment) => Ok(commitment.0),
+            None => Err("Trie node not in witness"),
+        }
+    }
+
+    /// Range queries are not supported for BlockWitness.
+    ///
+    /// **For stateless validation**: Use individual `commitment()` calls instead
+    /// of range queries. This ensures proper distinction between unknown and
+    /// default-valued nodes.
+    fn node_entries(
+        &self,
+        _range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        Err("Range queries not supported for BlockWitness")
+    }
+}
+
 #[cfg(test)]
 /// Helper function to create a mock SaltProof for testing
 pub fn create_mock_proof() -> SaltProof {
@@ -360,8 +346,13 @@ pub fn create_witness(
 mod tests {
     use super::*;
     use crate::{
-        constant::MIN_BUCKET_SIZE, mem_store::MemStore, mock_evm_types::*,
-        state::state::EphemeralSaltState, trie::trie::StateRoot,
+        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        mem_store::MemStore,
+        mock_evm_types::*,
+        proof::CommitmentBytesW,
+        state::state::EphemeralSaltState,
+        traits::TrieReader,
+        trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -519,8 +510,6 @@ mod tests {
     /// Test all three cases of the BlockWitness::metadata() method
     #[test]
     fn test_block_witness_metadata_cases() {
-        use crate::constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS};
-
         let mock_salt_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
 
         // Use valid data bucket IDs (>= NUM_META_BUCKETS)
@@ -593,7 +582,8 @@ mod tests {
         );
     }
 
-    /// Test that verifies the security properties of BlockWitness.
+    /// Test that verifies the security properties of BlockWitness StateReader
+    /// implementation.
     ///
     /// This test ensures that the witness correctly distinguishes between:
     /// - Witnessed existing values (Ok(Some(value)))
@@ -603,7 +593,7 @@ mod tests {
     /// This prevents state manipulation attacks where a malicious prover
     /// could make unknown values appear as non-existent.
     #[test]
-    fn test_witness_security_unknown_vs_nonexistent() {
+    fn test_witness_state_reader_security() {
         // Setup test keys
         let key_exists = SaltKey::from((100000, 1)); // Will be witnessed as existing
         let key_nonexistent = SaltKey::from((100000, 2)); // Will be witnessed as non-existent
@@ -761,5 +751,47 @@ mod tests {
         };
         let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
+    }
+
+    /// Test that verifies the security properties of BlockWitness TrieReader
+    /// implementation.
+    ///
+    /// This test ensures that the TrieReader correctly distinguishes between:
+    /// - Witnessed nodes (returns commitment)
+    /// - Unknown nodes not in witness (returns error)
+    ///
+    /// This prevents state manipulation attacks where a malicious prover
+    /// could omit critical trie nodes to hide state modifications.
+    #[test]
+    fn test_witness_trie_reader_security() {
+        // Build witness with two witnessed nodes
+        let mut proof = create_mock_proof();
+        proof.parents_commitments = [
+            (12345, CommitmentBytesW([1u8; 64])),
+            (67890, CommitmentBytesW([2u8; 64])),
+        ]
+        .into();
+
+        let witness = BlockWitness {
+            metadata: BTreeMap::new(),
+            kvs: BTreeMap::new(),
+            proof,
+        };
+
+        // Witnessed nodes return correct commitments
+        assert_eq!(witness.commitment(12345).unwrap(), [1u8; 64]);
+        assert_eq!(witness.commitment(67890).unwrap(), [2u8; 64]);
+
+        // Unknown nodes must return errors (critical security test)
+        assert!(
+            witness.commitment(99999).is_err(),
+            "SECURITY: Unknown node must return error, not default!"
+        );
+
+        // Range queries must be disabled
+        assert!(
+            witness.node_entries(0..1000).is_err(),
+            "SECURITY: Range queries must be disabled!"
+        );
     }
 }

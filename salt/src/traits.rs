@@ -1,14 +1,7 @@
 //! Core traits for SALT state and trie storage.
 use crate::{
-    constant::{
-        default_commitment, zero_commitment, BUCKET_SLOT_ID_MASK, STARTING_NODE_ID, TRIE_LEVELS,
-        TRIE_WIDTH,
-    },
-    trie::trie::get_child_node,
-    types::{
-        get_bfs_level, is_subtree_node, is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId,
-        SaltKey, SaltValue,
-    },
+    constant::BUCKET_SLOT_ID_MASK,
+    types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
 use std::{
@@ -160,49 +153,6 @@ pub trait TrieReader: Sync {
     /// # Returns
     /// The 64-byte cryptographic commitment for the node
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error>;
-
-    // FIXME: both the doc and the implementation need to be reworked!!!
-    // e.g., the input node_id must be valid and actually have child commitments
-
-    /// Retrieves all [`TRIE_WIDTH`] child commitments for a given parent node.
-    ///
-    /// This method ensures all children have valid commitments by:
-    /// - Fetching stored commitments for children that have been modified
-    /// - Computing default commitments for unmodified children in the main trie
-    /// - Returning zero commitments for missing children in bucket subtrees
-    ///
-    /// # Arguments
-    /// * `node_id` - The parent node whose children to retrieve
-    ///
-    /// # Returns
-    /// Vector of exactly [`TRIE_WIDTH`] commitments, one for each child position
-    fn child_commitments(&self, node_id: NodeId) -> Result<Vec<CommitmentBytes>, Self::Error> {
-        let zero = zero_commitment();
-        let child_start = get_child_node(&node_id, 0);
-        let mut children = vec![zero; TRIE_WIDTH];
-        let cache = self.node_entries(child_start as NodeId..child_start + TRIE_WIDTH as NodeId)?;
-        // Fill in actual values where they exist
-        for (k, v) in cache {
-            children[k as usize - child_start as usize] = v;
-        }
-
-        // Because the trie did not store the default value when init,
-        // so meta nodes needs to update the default commitment.
-        let child_level = get_bfs_level(node_id) + 1;
-        if !is_subtree_node(node_id)
-            && child_level < TRIE_LEVELS
-            && node_id < STARTING_NODE_ID[child_level] as NodeId
-        {
-            for i in child_start..child_start + TRIE_WIDTH as NodeId {
-                let j = (i - child_start) as usize;
-                if children[j] == zero {
-                    children[j] = default_commitment(i);
-                }
-            }
-        }
-
-        Ok(children)
-    }
 
     /// Retrieves commitments for a range of trie nodes.
     ///
