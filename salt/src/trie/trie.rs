@@ -19,9 +19,6 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Don't use parallel processing in computing vector commitments if the total
-/// number of updated elements is below this threshold.
-const MIN_TASK_SIZE: usize = 64;
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
 
@@ -46,6 +43,8 @@ pub struct StateRoot<'a, Store> {
     pub cache: HashMap<NodeId, CommitmentBytes>,
     /// Shared committer instance for cryptographic operations.
     committer: Arc<Committer>,
+    /// Minimum task size for parallel processing.
+    min_task_size: usize,
 }
 
 impl<'a, Store> StateRoot<'a, Store>
@@ -59,7 +58,14 @@ where
             updates: HashMap::new(),
             cache: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
+            min_task_size: 64,
         }
+    }
+
+    /// Configure the minimum task size for parallel processing.
+    pub fn with_min_task_size(mut self, min_task_size: usize) -> Self {
+        self.min_task_size = min_task_size;
+        self
     }
 
     /// Merge the trie updates into the existing trie.
@@ -157,7 +163,9 @@ where
     {
         let committer = &self.committer;
         let num_tasks = 10 * rayon::current_num_threads();
-        let task_size = std::cmp::max(MIN_TASK_SIZE, child_updates.len().div_ceil(num_tasks));
+        let task_size = self
+            .min_task_size
+            .max(child_updates.len().div_ceil(num_tasks));
 
         // Sort the child updates by their positions within the VCs.
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
@@ -554,7 +562,9 @@ where
     {
         let committer = &self.committer;
         let num_tasks = 10 * rayon::current_num_threads();
-        let task_size = std::cmp::max(MIN_TASK_SIZE, state_updates.len().div_ceil(num_tasks));
+        let task_size = self
+            .min_task_size
+            .max(state_updates.len().div_ceil(num_tasks));
 
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
