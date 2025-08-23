@@ -3,8 +3,8 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
-        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID,
-        SUB_TRIE_LEVELS, TRIE_LEVELS,
+        META_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS,
+        STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -755,21 +755,17 @@ impl StateRoot<'_, EmptySalt> {
             .try_for_each(|start| {
                 let end = std::cmp::min(start + STEP_SIZE, NUM_BUCKETS) - 1;
                 // Read Bucket Metadata from store
-                let meta_start = if start == NUM_META_BUCKETS {
-                    0
-                } else {
-                    (start >> MIN_BUCKET_SIZE_BITS) as BucketId
-                };
+                let meta_start = (start / META_BUCKET_SIZE) as BucketId;
                 let mut state_updates = reader
                     .entries(
                         SaltKey::from((meta_start, 0))
                             ..=SaltKey::from((
-                                (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
+                                (end / META_BUCKET_SIZE) as BucketId,
                                 BUCKET_SLOT_ID_MASK,
                             )),
                     )?
                     .into_iter()
-                    .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
+                    .map(|(k, v)| (k, (Some(BucketMeta::default().into()), Some(v))))
                     .collect::<BTreeMap<_, _>>();
 
                 // Read buckets key-value pairs from store

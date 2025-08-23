@@ -7,6 +7,8 @@ pub const MIN_BUCKET_SIZE_BITS: usize = 8;
 /// Capacity of a default SALT bucket. Buckets are dynamically resized but their capacities cannot
 /// drop below this value.
 pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
+pub const META_BUCKET_SIZE: usize = MIN_BUCKET_SIZE;
+
 /// Number of levels in the SALT trie. Level 0 is the root. Buckets are located at the last level.
 pub const TRIE_LEVELS: usize = 4;
 /// Number of levels in the sub-trie of the bucket. The root node is stored in the SALT trie,
