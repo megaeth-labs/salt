@@ -1620,7 +1620,7 @@ mod tests {
 
         // bucket nonce changes
         state_updates.data.insert(
-            (0, 0).into(),
+            (256, 0).into(),
             (
                 Some(SaltValue::from(BucketMeta::default())),
                 Some(SaltValue::from(bucket_meta(10, MIN_BUCKET_SIZE as SlotId))),
