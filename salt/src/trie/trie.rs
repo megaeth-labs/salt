@@ -99,7 +99,7 @@ where
     }
 
     /// Finalizes and returns the state root after a series of calls to `incremental_update`.
-    pub fn finalize(&mut self) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         // FIXME: avoid converting between different collections?
         // Retrieve trie_updates from the cache
         let trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
@@ -124,7 +124,7 @@ where
     pub fn update_fin(
         &mut self,
         state_updates: &StateUpdates,
-    ) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         self.update(state_updates)?;
         self.finalize()
     }
@@ -132,7 +132,7 @@ where
     fn update_internal_nodes(
         &self,
         mut trie_updates: TrieUpdates,
-    ) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         let mut updates = trie_updates
             .iter()
             .filter_map(|(id, c)| {
@@ -743,7 +743,7 @@ where
 
 impl StateRoot<'_, EmptySalt> {
     /// Computes the state root from scratch given the SALT buckets.
-    pub fn rebuild<S: StateReader>(reader: &S) -> Result<([u8; 32], TrieUpdates), S::Error> {
+    pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
         let trie_reader = &EmptySalt;
         let trie = StateRoot::new(trie_reader);
         let mut trie_updates = Vec::new();
@@ -801,7 +801,7 @@ impl StateRoot<'_, EmptySalt> {
 /// Generates a 256-bit secure hash from the bucket entry.
 /// Note: as a special case, empty entries are hashed to 0.
 #[inline(always)]
-fn kv_hash(entry: &Option<SaltValue>) -> [u8; 32] {
+fn kv_hash(entry: &Option<SaltValue>) -> ScalarBytes {
     entry.as_ref().map_or_else(
         || EMPTY_SLOT_HASH,
         |salt_value| {
