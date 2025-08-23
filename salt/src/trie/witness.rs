@@ -324,6 +324,39 @@ impl StateReader for BlockWitness {
 }
 
 #[cfg(test)]
+/// Helper function to create a mock SaltProof for testing
+pub fn create_mock_proof() -> SaltProof {
+    use crate::{empty_salt::EmptySalt, proof::SaltProof};
+
+    // Create a minimal real proof using EmptySalt
+    let salt_keys = vec![SaltKey(0)];
+    SaltProof::create(&salt_keys, &EmptySalt).unwrap()
+}
+
+#[cfg(test)]
+/// Helper function to create a BlockWitness for testing
+pub fn create_witness(
+    bucket_id: BucketId,
+    metadata: Option<BucketMeta>,
+    slots: Vec<(u64, Option<SaltValue>)>,
+) -> BlockWitness {
+    let metadata = if let Some(meta) = metadata {
+        [(bucket_id, Some(meta))].into()
+    } else {
+        BTreeMap::new()
+    };
+    let kvs = slots
+        .into_iter()
+        .map(|(slot, val)| (SaltKey::from((bucket_id, slot)), val))
+        .collect();
+    BlockWitness {
+        metadata,
+        kvs,
+        proof: create_mock_proof(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -481,15 +514,6 @@ mod tests {
             res.insert(pk.encode(), pv);
         });
         res
-    }
-
-    /// Helper function to create a mock SaltProof for testing
-    fn create_mock_proof() -> SaltProof {
-        use crate::{empty_salt::EmptySalt, proof::SaltProof};
-
-        // Create a minimal real proof using EmptySalt
-        let salt_keys = vec![SaltKey(0)];
-        SaltProof::create(&salt_keys, &EmptySalt).unwrap()
     }
 
     /// Test all three cases of the BlockWitness::metadata() method
@@ -670,27 +694,6 @@ mod tests {
     fn test_bucket_used_slots() {
         let bucket_id = 100000;
         let val = SaltValue::new(&[1u8; 32], &[2u8; 32]);
-
-        fn create_witness(
-            bucket_id: BucketId,
-            metadata: Option<BucketMeta>,
-            slots: Vec<(u64, Option<SaltValue>)>,
-        ) -> BlockWitness {
-            let metadata_map = if let Some(meta) = metadata {
-                [(bucket_id, Some(meta))].into()
-            } else {
-                BTreeMap::new()
-            };
-            let kvs = slots
-                .into_iter()
-                .map(|(slot, val)| (SaltKey::from((bucket_id, slot)), val))
-                .collect();
-            BlockWitness {
-                metadata: metadata_map,
-                kvs,
-                proof: create_mock_proof(),
-            }
-        }
 
         // Test 1: Missing metadata
         let witness = create_witness(bucket_id, None, vec![]);

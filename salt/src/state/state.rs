@@ -1015,6 +1015,22 @@ mod tests {
         }
     }
 
+    /// Tests the `compute_resize_capacity` function.
+    #[test]
+    fn test_compute_resize_capacity() {
+        use crate::state::state::compute_resize_capacity;
+
+        let test_cases = [
+            (100, 81, 200),  // Single multiplication
+            (100, 80, 100),  // Exactly at threshold
+            (100, 320, 400), // Multiple multiplications needed
+        ];
+
+        for (capacity, used, expected) in test_cases {
+            assert_eq!(compute_resize_capacity(capacity, used), expected);
+        }
+    }
+
     /// Comprehensive test for plain_value() method covering all key scenarios.
     ///
     /// Tests: non-existent keys, successful retrieval with hash collisions,
@@ -1603,6 +1619,94 @@ mod tests {
         }
     }
 
+    /// Tests shi_upsert when the bucket usage count is unknown (incomplete witness).
+    #[test]
+    fn test_shi_upsert_without_usage_count() {
+        use crate::trie::witness::create_witness;
+
+        // Create BlockWitness with incomplete metadata (used: None)
+        let key_to_insert = [1u8; 32];
+        let hashed = hasher::hash_with_nonce(&key_to_insert, 0);
+        let slots = vec![(probe(hashed, 0, 4), None)];
+
+        let witness = create_witness(
+            TEST_BUCKET,
+            Some(BucketMeta {
+                nonce: 0,
+                capacity: 4,
+                used: None,
+            }),
+            slots,
+        );
+
+        let mut state = EphemeralSaltState::new(&witness);
+        let mut updates = StateUpdates::default();
+
+        // This should take the else branch with metadata.used = None
+        let result = state.shi_upsert(TEST_BUCKET, &key_to_insert, &[2u8; 32], &mut updates);
+        assert!(
+            result.is_ok(),
+            "Insert should succeed despite unknown usage count"
+        );
+
+        // Verify the value is retrievable from state
+        let salt_key = SaltKey::from((TEST_BUCKET, probe(hashed, 0, 4)));
+        let retrieved = state.value(salt_key).unwrap().unwrap();
+        assert_eq!(retrieved.value(), [2u8; 32].as_slice());
+
+        // Verify side effects: no cache update, no resize
+        assert!(state.bucket_used_cache.is_empty());
+        assert_eq!(state.metadata(TEST_BUCKET, false).unwrap().capacity, 4);
+    }
+
+    /// Tests shi_upsert recovery mechanism when bucket is completely full.
+    #[test]
+    fn test_shi_upsert_recovery_when_bucket_full() {
+        use crate::trie::witness::create_witness;
+
+        // Create a completely full bucket (capacity 4, all slots occupied)
+        let key_to_insert = [1u8; 32];
+        let hashed = hasher::hash_with_nonce(&key_to_insert, 0);
+
+        // Fill all 4 slots with different keys so no empty slot exists
+        let occupied_slots = (0..4)
+            .map(|i| {
+                let slot = probe(hashed, i, 4);
+                let dummy_key = [i as u8; 32]; // Different key for each slot
+                (slot, Some(SaltValue::new(&dummy_key, &[i as u8; 32])))
+            })
+            .collect();
+
+        let witness = create_witness(
+            TEST_BUCKET,
+            Some(BucketMeta {
+                nonce: 0,
+                capacity: 4,
+                used: Some(4),
+            }),
+            occupied_slots,
+        );
+
+        let mut state = EphemeralSaltState::new(&witness);
+        let mut updates = StateUpdates::default();
+
+        // This should trigger recovery mechanism since all probe slots are full
+        let result = state.shi_upsert(TEST_BUCKET, &key_to_insert, &[99u8; 32], &mut updates);
+        assert!(result.is_ok());
+
+        // Verify that rehash was triggered by checking if capacity increased
+        let new_metadata = state.metadata(TEST_BUCKET, true).unwrap();
+        assert!(
+            new_metadata.capacity > 4,
+            "Bucket should have been expanded during recovery"
+        );
+
+        // Verify the new key-value pair is retrievable from state
+        let salt_key = SaltKey::from((TEST_BUCKET, probe(hashed, 0, new_metadata.capacity)));
+        let retrieved = state.value(salt_key).unwrap().unwrap();
+        assert_eq!(retrieved.value(), [99u8; 32].as_slice());
+    }
+
     /// Comprehensive test for shi_rehash method covering various scenarios.
     #[test]
     fn test_shi_rehash() {
@@ -1958,21 +2062,5 @@ mod tests {
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
-    }
-
-    /// Tests the `compute_resize_capacity` function.
-    #[test]
-    fn test_compute_resize_capacity() {
-        use crate::state::state::compute_resize_capacity;
-
-        let test_cases = [
-            (100, 81, 200),  // Single multiplication
-            (100, 80, 100),  // Exactly at threshold
-            (100, 320, 400), // Multiple multiplications needed
-        ];
-
-        for (capacity, used, expected) in test_cases {
-            assert_eq!(compute_resize_capacity(capacity, used), expected);
-        }
     }
 }
