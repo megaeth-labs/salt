@@ -16,8 +16,11 @@ use banderwagon::{salt_committer::Committer, Element};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Range,
+};
 
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
@@ -31,6 +34,8 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> =
 /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
 pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 type SaltUpdates<'a> = Vec<(&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValue>))>;
+/// List of commitment deltas to be applied to specific nodes.
+type DeltaList = Vec<(NodeId, Element)>;
 
 /// Used to compute or update the root node of a SALT trie.
 #[derive(Debug)]
@@ -212,7 +217,7 @@ where
             .flatten()
             .collect();
 
-        self.apply_deltas(c_deltas, task_size)
+        self.par_update_node_commitments(c_deltas, task_size)
     }
 
     /// Given the state updates, generates the commitment updates of the leaf nodes
@@ -594,71 +599,134 @@ where
             })
             .collect();
 
-        self.apply_deltas(c_deltas, task_size)
+        self.par_update_node_commitments(c_deltas, task_size)
     }
 
-    /// Updates node commitments by adding up the precomputed deltas.
-    fn apply_deltas(
+    /// Applies cryptographic commitment deltas to trie nodes efficiently in parallel.
+    ///
+    /// This method takes a list of commitment changes (deltas) for various nodes and
+    /// applies them atomically, returning the old and new commitment values for each
+    /// affected node.
+    ///
+    /// # Arguments
+    /// * `c_deltas` - Vector of (NodeId, Element) pairs representing commitment changes.
+    ///   Multiple deltas for the same NodeId will be summed together.
+    /// * `task_size` - Target chunk size for parallel processing.
+    ///
+    /// # Returns
+    /// `TrieUpdates` - Vector of (NodeId, (old_commitment, new_commitment)) tuples.
+    ///
+    /// # Algorithm
+    /// 1. Sorts deltas by NodeId to group changes for the same node
+    /// 2. Creates chunks for parallel processing, never splitting deltas for the same node
+    /// 3. Processes each chunk in parallel: accumulates deltas, applies to old commitments
+    /// 4. Uses batch cryptographic operations for efficiency
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Input: deltas for nodes 1 and 2
+    /// let deltas = vec![(1, δ1), (1, δ2), (2, δ3)];
+    /// let updates = trie.apply_deltas(deltas, 64)?;
+    /// // Output: [(1, (old_c1, old_c1 + δ1 + δ2)), (2, (old_c2, old_c2 + δ3))]
+    /// ```
+    fn par_update_node_commitments(
         &self,
-        mut c_deltas: Vec<(NodeId, Element)>,
+        mut commitment_deltas: DeltaList,
         task_size: usize,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
-        // Sort the updated elements by their parent node IDs.
-        c_deltas.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Sort deltas by NodeId to group changes for the same node together
+        // This enables efficient accumulation and ensures deterministic ordering
+        commitment_deltas.par_sort_unstable_by_key(|&(node_id, _)| node_id);
 
-        // Split the elements into chunks of roughly the same size.
-        let mut splits = vec![0];
-        let mut next_split = task_size;
-        while next_split < c_deltas.len() {
-            // Check if the current position is an eligible split point: i.e.,
-            // the next element must belong to a different parent node.
-            if c_deltas[next_split].0 == c_deltas[next_split - 1].0 {
-                next_split += 1;
-            } else {
-                splits.push(next_split);
-                next_split += task_size;
-            }
-        }
-        splits.push(c_deltas.len());
-        let ranges: Vec<_> = splits
-            .iter()
-            .zip(splits.iter().skip(1))
-            .map(|(&a, &b)| (a, b))
+        // Create node-aligned chunks for parallel processing
+        let chunks = self.create_node_aligned_chunks(&commitment_deltas, task_size);
+
+        // Process each chunk in parallel and collect results
+        let results: Result<Vec<_>, _> = chunks
+            .par_iter()
+            .map(|chunk_range| self.accumulate_chunk_deltas(&commitment_deltas, chunk_range))
             .collect();
 
-        // Process chunks in parallel and collect the results.
-        Ok(ranges
-            .par_iter()
-            .map(|(start, end)| {
-                let mut last_node = NodeId::MAX;
-                let mut new_e_vec = vec![];
-                let mut node_vec = vec![];
+        // Flatten results from all chunks
+        Ok(results?.into_iter().flatten().collect())
+    }
 
-                // Sum the deltas of nodes with the same id
-                for (cur_node, e) in &c_deltas[*start..*end] {
-                    if *cur_node == last_node {
-                        *new_e_vec.last_mut().expect("last value in new_e_vec exist") += *e;
-                    } else {
-                        let old_c = self
-                            .commitment(*cur_node)
-                            .expect("node should exist in trie");
-                        new_e_vec.push(Element::from_bytes_unchecked_uncompressed(old_c) + *e);
-                        node_vec.push((*cur_node, old_c));
-                        last_node = *cur_node;
-                    }
+    /// Helper for `par_update_node_commitments`: Creates chunks for parallel
+    /// processing that never split commitment deltas for the same node.
+    fn create_node_aligned_chunks(
+        &self,
+        deltas: &DeltaList,
+        task_size: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        let mut chunk_boundaries = Vec::with_capacity(deltas.len() / task_size + 2);
+        chunk_boundaries.push(0);
+
+        let mut next_boundary = task_size;
+        while next_boundary < deltas.len() {
+            // Find next valid boundary: must be at a node boundary
+            // Extend chunk if current position would split a node's deltas
+            while next_boundary < deltas.len()
+                && deltas[next_boundary].0 == deltas[next_boundary - 1].0
+            {
+                next_boundary += 1;
+            }
+
+            if next_boundary < deltas.len() {
+                chunk_boundaries.push(next_boundary);
+                next_boundary += task_size;
+            }
+        }
+        chunk_boundaries.push(deltas.len());
+
+        // Convert boundaries to ranges
+        chunk_boundaries
+            .windows(2)
+            .map(|window| window[0]..window[1])
+            .collect()
+    }
+
+    /// Helper for `par_update_node_commitments`: Accumulates deltas for nodes
+    /// in a single chunk, computing updated commitments.
+    fn accumulate_chunk_deltas(
+        &self,
+        deltas: &DeltaList,
+        chunk_range: &Range<usize>,
+    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        let chunk_deltas = &deltas[chunk_range.clone()];
+        let estimated_nodes = chunk_deltas.len().min(chunk_range.len());
+        let mut accumulated_elements = Vec::with_capacity(estimated_nodes);
+        let mut nodes_with_old_commitments = Vec::with_capacity(estimated_nodes);
+        let mut current_node_id = NodeId::MAX;
+
+        // Accumulate deltas for each node in this chunk
+        for &(node_id, delta) in chunk_deltas {
+            if node_id == current_node_id {
+                // Same node: accumulate delta with previous deltas
+                if let Some(last_element) = accumulated_elements.last_mut() {
+                    *last_element += delta;
                 }
+            } else {
+                // New node: start fresh accumulation
+                let old_commitment = self.commitment(node_id)?;
+                let new_element =
+                    Element::from_bytes_unchecked_uncompressed(old_commitment) + delta;
 
-                let new_c_vec = Element::batch_to_commitments(&new_e_vec);
+                accumulated_elements.push(new_element);
+                nodes_with_old_commitments.push((node_id, old_commitment));
+                current_node_id = node_id;
+            }
+        }
 
-                node_vec
-                    .iter()
-                    .zip(new_c_vec.iter())
-                    .map(|((id, old_c), new_c)| (*id, (*old_c, *new_c)))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
+        // Batch convert all accumulated elements to commitment bytes
+        let new_commitments = Element::batch_to_commitments(&accumulated_elements);
+
+        // Combine into final (NodeId, (old_commitment, new_commitment)) format
+        Ok(nodes_with_old_commitments
             .into_iter()
-            .flatten()
+            .zip(new_commitments)
+            .map(|((node_id, old_commitment), new_commitment)| {
+                (node_id, (old_commitment, new_commitment))
+            })
             .collect())
     }
 
@@ -913,7 +981,6 @@ mod tests {
     /// changes at once to a fresh trie).
     #[test]
     fn test_incremental_vs_batch_update() {
-
         let mut trie = StateRoot::new(&EmptySalt); // Trie for incremental updates
         let mut cumulative = StateUpdates::default(); // Tracks all changes for batch comparison
 
@@ -1562,7 +1629,9 @@ mod tests {
         let ranges = get_delta_ranges(&c_deltas, task_size);
         assert_eq!(vec![(0, 3), (3, 7), (7, 11)], ranges);
 
-        let updates = trie.apply_deltas(c_deltas.clone(), task_size).unwrap();
+        let updates = trie
+            .par_update_node_commitments(c_deltas.clone(), task_size)
+            .unwrap();
 
         let exp_id_vec = [0 as NodeId, 1, 2, 3, 4];
         assert_eq!(exp_id_vec.len(), updates.len());
