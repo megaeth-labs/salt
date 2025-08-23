@@ -11,7 +11,7 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 pub const META_BUCKET_SIZE: usize = MIN_BUCKET_SIZE;
 
 /// Number of levels in the SALT trie. Level 0 is the root. Buckets are located at the last level.
-pub const TRIE_LEVELS: usize = 4;
+pub const MAIN_TRIE_LEVELS: usize = 4;
 /// Number of levels in the sub-trie of the bucket. The root node is stored in the SALT trie,
 /// while the remaining nodes are stored in the sub-trie. The node numbers of the sub-trie are
 /// generated according to the 40-bit full encoding rule.
@@ -26,7 +26,7 @@ pub const TRIE_WIDTH_BITS: usize = 8;
 /// Branch factor of the SALT trie nodes. Always a power of two.
 pub const TRIE_WIDTH: usize = 1 << TRIE_WIDTH_BITS;
 /// Number of buckets (i.e., leaf nodes) in the SALT trie.
-pub const NUM_BUCKETS: usize = 1 << ((TRIE_LEVELS - 1) * TRIE_WIDTH_BITS);
+pub const NUM_BUCKETS: usize = 1 << ((MAIN_TRIE_LEVELS - 1) * TRIE_WIDTH_BITS);
 /// Number of meta buckets in the SALT trie. Meta buckets are used to store metadata for each
 /// bucket. The remaining buckets are used to store key-value pairs.
 pub const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
@@ -111,7 +111,7 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     // Precomputed node commitment at each level of an empty SALT trie.
     // Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
     // info.
-    static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
+    static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); MAIN_TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,
             b512!("5f0ee344a7c4c41456f239be83cda66eb4e1311b64ea69c7be03df42e5d5650c2abbf663ac56db88332dfea35f3d65c1365f413d5890cf90232b15f26d33cb03"),

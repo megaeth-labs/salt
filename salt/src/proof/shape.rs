@@ -47,7 +47,9 @@
 // ...
 
 use crate::{
-    constant::{BUCKET_SLOT_BITS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS, TRIE_WIDTH_BITS},
+    constant::{
+        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_WIDTH_BITS,
+    },
     trie::node_utils::subtrie_node_id,
     BucketId, NodeId, SaltKey, SlotId,
 };
@@ -413,7 +415,7 @@ fn process_bucket_state_nodes(
 /// # Returns
 ///
 /// The calculated path
-pub const fn bucket_id_to_path(bucket_id: BucketId) -> [u8; TRIE_LEVELS - 1] {
+pub const fn bucket_id_to_path(bucket_id: BucketId) -> [u8; MAIN_TRIE_LEVELS - 1] {
     [
         ((bucket_id >> (TRIE_WIDTH_BITS * 2)) & 0xFF) as u8,
         ((bucket_id >> TRIE_WIDTH_BITS) & 0xFF) as u8,

@@ -10,8 +10,8 @@
 use std::ops::RangeInclusive;
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-    NUM_META_BUCKETS, TRIE_LEVELS, TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAIN_TRIE_LEVELS, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
+    NUM_BUCKETS, NUM_META_BUCKETS, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -404,14 +404,14 @@ pub fn parse_node_id(node_id: NodeId) -> NodeType {
     if bucket_id == 0 {
         // Main trie node
         let level = get_bfs_level(node_id);
-        if level < TRIE_LEVELS - 1 {
+        if level < MAIN_TRIE_LEVELS - 1 {
             NodeType::MainTrieNode {
                 level,
                 position: node_id,
             }
         } else {
             // Level 3 - bucket roots
-            let bucket_level_start = leftmost_node((TRIE_LEVELS - 1) as u32).unwrap();
+            let bucket_level_start = leftmost_node((MAIN_TRIE_LEVELS - 1) as u32).unwrap();
             let bucket_id = (node_id - bucket_level_start) as BucketId;
             if bucket_id < NUM_META_BUCKETS as BucketId {
                 NodeType::MetaBucketRoot { bucket_id }
@@ -895,7 +895,7 @@ mod tests {
     /// Tests the parse_node_id function for bucket root nodes.
     #[test]
     fn parse_node_id_bucket_roots() {
-        let bucket_level_start = leftmost_node((TRIE_LEVELS - 1) as u32).unwrap();
+        let bucket_level_start = leftmost_node((MAIN_TRIE_LEVELS - 1) as u32).unwrap();
 
         // Test metadata bucket root (bucket 0)
         match parse_node_id(bucket_level_start) {

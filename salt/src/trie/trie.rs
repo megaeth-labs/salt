@@ -2,9 +2,9 @@
 
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, META_BUCKET_SIZE, MIN_BUCKET_SIZE,
-        MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
-        TRIE_LEVELS,
+        default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, META_BUCKET_SIZE,
+        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID,
+        SUB_TRIE_LEVELS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -51,8 +51,8 @@ pub struct StateRoot<'a, Store> {
     cache: HashMap<NodeId, CommitmentBytes>,
     /// Shared committer instance for cryptographic operations.
     committer: Arc<Committer>,
-    /// Minimum task size for parallel processing.
-    min_task_size: usize,
+    /// Minimum task batch size for parallel processing.
+    min_par_batch_size: usize,
 }
 
 impl<'a, Store> StateRoot<'a, Store>
@@ -66,13 +66,13 @@ where
             updates: HashMap::new(),
             cache: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
-            min_task_size: 64,
+            min_par_batch_size: 64,
         }
     }
 
-    /// Configure the minimum task size for parallel processing.
-    pub fn with_min_task_size(mut self, min_task_size: usize) -> Self {
-        self.min_task_size = min_task_size;
+    /// Configure the minimum task batch size for parallel processing.
+    pub fn with_min_par_batch_size(mut self, min_task_size: usize) -> Self {
+        self.min_par_batch_size = min_task_size;
         self
     }
 
@@ -83,7 +83,8 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        let updates = self.update_leaf_nodes(state_updates)?;
+        // FIXME: we are calling update_bucket_subtrees here, so we are only updating L3 commitments (~16M)?
+        let updates = self.update_bucket_subtrees(state_updates)?;
         // Cache the results of incremental calculations.
         for (k, v) in updates {
             self.cache
@@ -104,7 +105,7 @@ where
         // Retrieve trie_updates from the cache
         let trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
 
-        let result = self.update_internal_nodes(trie_updates);
+        let result = self.update_main_trie(trie_updates);
 
         // Update cache with the final computed TrieUpdates
         if let Ok((_, ref final_trie_updates)) = result {
@@ -129,100 +130,68 @@ where
         self.finalize()
     }
 
-    fn update_internal_nodes(
+    /// Propagates commitment updates from leaf nodes up through all internal nodes to the root.
+    ///
+    /// This is the main orchestrator for updating the main trie's cryptographic commitments
+    /// in a bottom-up manner. It processes the trie level by level, starting from the deepest
+    /// internal nodes and working toward the root, ensuring that all affected nodes in the
+    /// path from changed leaves to root are updated consistently.
+    ///
+    /// # Arguments
+    /// * `trie_updates` - Initial updates from leaf/subtree nodes to propagate upward
+    ///
+    /// # Returns
+    /// * `ScalarBytes` - The new root commitment hash
+    /// * `TrieUpdates` - Complete list of all node updates from leaves to root
+    ///
+    /// # Algorithm
+    /// 1. Filters out subtree nodes (handled separately from main trie)
+    /// 2. Processes each trie level from bottom to top (TRIE_LEVELS-2 down to 0)
+    /// 3. For each level, computes parent node updates based on child changes
+    /// 4. Accumulates all updates for final return
+    /// 5. Extracts the root commitment from the final update
+    fn update_main_trie(
         &self,
         mut trie_updates: TrieUpdates,
     ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+        // FIXME: use splice
+        // Filter out subtree nodes - they use different update patterns and are
+        // handled separately from the main trie structure
         let mut updates = trie_updates
             .iter()
             .filter_map(|(id, c)| {
                 if is_subtree_node(*id) {
-                    None
+                    None // Skip subtree nodes - they don't participate in main trie updates
                 } else {
-                    Some((*id, *c))
+                    Some((*id, *c)) // Include main trie nodes for propagation
                 }
             })
             .collect::<Vec<_>>();
 
-        // Update the state trie in descending order of depth.
-        (0..TRIE_LEVELS - 1).rev().try_for_each(|level| {
-            updates = self.update_internal_nodes_inner(&mut updates, level, get_parent_id)?;
-            // Record updates in `trie_updates`.
+        // Update the state trie in descending order of depth (bottom-up).
+        // Process from level TRIE_LEVELS-2 (deepest internal nodes) to level 0 (root)
+        (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|level| {
+            // Compute updates for parent nodes at this level based on child changes
+            updates = self.update_internal_commitments(&mut updates, level, get_parent_id)?;
+
+            // Record the new parent updates in the complete trie_updates collection
             trie_updates.extend(updates.iter());
             Ok(())
         })?;
 
+        // Extract the root commitment from the last update, or fetch from storage if no updates
         let root_commitment = if let Some(c) = trie_updates.last() {
-            c.1 .1
+            c.1 .1 // Get the new commitment from the last update (should be root)
         } else {
-            self.store.commitment(0)?
+            self.store.commitment(0)? // No updates occurred, fetch current root
         };
 
         Ok((hash_commitment(root_commitment), trie_updates))
     }
 
-    /// Given the commitment updates at the lower level, generate the commitment
-    /// updates of the internal trie nodes at the current level.
-    fn update_internal_nodes_inner<P>(
-        &self,
-        child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
-        level: usize,
-        get_parent_id: P,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
-    where
-        P: Fn(&NodeId, usize) -> NodeId + Sync + Send,
-    {
-        let committer = &self.committer;
-        let num_tasks = 10 * rayon::current_num_threads();
-        let task_size = self
-            .min_task_size
-            .max(child_updates.len().div_ceil(num_tasks));
-
-        // Sort the child updates by their positions within the VCs.
-        child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            get_child_idx(a, level + 1).cmp(&get_child_idx(b, level + 1))
-        });
-
-        // Compute the commitment deltas to be applied to the parent nodes.
-        let c_deltas = child_updates
-            .par_chunks(task_size)
-            .map(|c_updates| {
-                let c_vec: Vec<CommitmentBytes> = c_updates
-                    .iter()
-                    .flat_map(|(_, (old_c, new_c))| vec![old_c, new_c])
-                    .copied()
-                    .collect();
-
-                // Hash (interleaving) old and new commitments into scalar bytes
-                let scalar_bytes = Element::hash_commitments(&c_vec);
-
-                // Collect the commitment deltas, indexed by parent node IDs.
-                c_updates
-                    .iter()
-                    .zip(scalar_bytes.chunks_exact(2))
-                    .map(|((id, _), scalars)| {
-                        (
-                            get_parent_id(id, level + 1),
-                            committer.gi_mul_delta(
-                                &scalars[0],
-                                &scalars[1],
-                                get_child_idx(id, level + 1),
-                            ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect();
-
-        self.update_node_commitments(c_deltas, task_size)
-    }
-
     /// Given the state updates, generates the commitment updates of the leaf nodes
     /// (i.e., the SALT buckets).
-    fn update_leaf_nodes(
+    fn update_bucket_subtrees(
         &self,
         state_updates: &StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
@@ -363,8 +332,8 @@ where
             })
             .collect::<Vec<_>>();
         // Compute the commitment of the non-expansion kvs.
-        let mut trie_updates = self.update_leaf_nodes_inner(&mut normal_updates, |salt_key| {
-            salt_key.bucket_id() as NodeId + STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId
+        let mut trie_updates = self.update_leaf_commitments(&mut normal_updates, |salt_key| {
+            salt_key.bucket_id() as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
         })?;
 
         trie_updates.extend(pending_updates[SUB_TRIE_LEVELS].iter());
@@ -418,7 +387,7 @@ where
             assert!(info.old_capacity > info.new_capacity);
             // Add the contracted bucket to the uncomputed_updates
             let mut updates_map = BTreeMap::new();
-            let bucket_id = (info.root_id - STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId)
+            let bucket_id = (info.root_id - STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId)
                 << BUCKET_SLOT_BITS as NodeId;
             insert_uncomputed_node(
                 info.new_top_id,
@@ -435,7 +404,7 @@ where
                 // um = uncomputed map
                 // |--caculate nodes---|---caculates in um--|---uncomputed in um--|
                 //level start    pending start        pending end            level end
-                let pending_end = bucket_id + start - (start & (MIN_BUCKET_SIZE - 1) as NodeId)
+                let pending_end = bucket_id + start - (start % MIN_BUCKET_SIZE as NodeId)
                     + MIN_BUCKET_SIZE as NodeId
                     + STARTING_NODE_ID[level] as NodeId;
                 let range = bucket_id + start + STARTING_NODE_ID[level] as NodeId..pending_end;
@@ -487,10 +456,10 @@ where
                 break;
             }
             updates = if level == SUB_TRIE_LEVELS - 1 {
-                self.update_leaf_nodes_inner(&mut expansion_updates, subtrie_node_id)
+                self.update_leaf_commitments(&mut expansion_updates, subtrie_node_id)
                     .expect("update leaf nodes for subtrie failed")
             } else {
-                self.update_internal_nodes_inner(&mut updates, level, subtrie_parent_id)
+                self.update_internal_commitments(&mut updates, level, subtrie_parent_id)
                     .expect("update internal nodes for subtrie failed")
             };
             // If there are subtrie events that need to be processed,
@@ -563,43 +532,132 @@ where
     }
 
     /// Updates the leaf nodes (i.e., the SALT buckets) based on the given state updates.
-    fn update_leaf_nodes_inner<N>(
+    fn update_leaf_commitments<N>(
         &self,
         state_updates: &mut SaltUpdates<'_>,
-        get_node_id: N,
+        get_leaf_id: N,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
     where
         N: Fn(&SaltKey) -> NodeId + Sync + Send,
     {
-        let committer = &self.committer;
-        let num_tasks = 10 * rayon::current_num_threads();
-        let task_size = self
-            .min_task_size
-            .max(state_updates.len().div_ceil(num_tasks));
-
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            (a.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId)
-                .cmp(&(b.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId))
+            (a.slot_id() % MIN_BUCKET_SIZE as SlotId)
+                .cmp(&(b.slot_id() % MIN_BUCKET_SIZE as SlotId))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
+        let batch_size = self.par_batch_size(state_updates.len());
         let c_deltas: DeltaList = state_updates
             .par_iter()
-            .with_min_len(task_size)
+            .with_min_len(batch_size)
             .map(|(salt_key, (old_value, new_value))| {
                 (
-                    get_node_id(salt_key),
-                    committer.gi_mul_delta(
+                    get_leaf_id(salt_key),
+                    self.committer.gi_mul_delta(
                         &kv_hash(old_value),
                         &kv_hash(new_value),
-                        (salt_key.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId) as usize,
+                        (salt_key.slot_id() % MIN_BUCKET_SIZE as SlotId) as usize,
                     ),
                 )
             })
             .collect();
 
-        self.update_node_commitments(c_deltas, task_size)
+        self.update_node_commitments(c_deltas, batch_size)
+    }
+
+    /// Computes commitment updates for parent nodes at a single trie level using delta-based updates.
+    ///
+    /// This method implements the core delta-based algorithm for updating vector commitments
+    /// in the SALT trie. Instead of recomputing entire parent commitments, it efficiently
+    /// computes and applies only the changes (deltas) caused by child node updates.
+    ///
+    /// # Arguments
+    /// * `child_updates` - Updates from child nodes: (node_id, (old_commitment, new_commitment))
+    /// * `level` - The target level for parent nodes (child nodes are at level + 1)
+    /// * `get_parent_id` - Function to compute parent node ID from child node ID and level
+    ///
+    /// # Returns
+    /// * `TrieUpdates` - Updates for parent nodes: (parent_id, (old_commitment, new_commitment))
+    ///
+    /// # Algorithm
+    /// 1. **Parallel Setup**: Determines optimal task size for multi-core processing
+    /// 2. **Sorting**: Orders child updates by their index within parent vector commitments
+    /// 3. **Delta Computation**: For each chunk in parallel:
+    ///    - Hashes old/new commitments to get scalar representations
+    ///    - Computes delta = G[child_index] * (new_scalar - old_scalar)
+    ///    - Groups deltas by parent node ID
+    /// 4. **Accumulation**: Applies all deltas to compute new parent commitments
+    ///
+    /// # Vector Commitment Mathematics
+    /// Each parent's commitment is: C = Σ(G[i] * child_commitment[i])
+    /// When child[j] changes: new_C = old_C + G[j] * (new_child[j] - old_child[j])
+    /// This delta approach avoids recomputing the entire sum.
+    fn update_internal_commitments<P>(
+        &self,
+        child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
+        level: usize,
+        get_parent_id: P,
+    ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
+    where
+        P: Fn(&NodeId, usize) -> NodeId + Sync + Send,
+    {
+        // Sort child updates by their position within parent vector commitments.
+        // This ensures cache-friendly access patterns and deterministic ordering
+        // for consistent parallel processing results.
+        child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+            get_child_idx(a, level + 1).cmp(&get_child_idx(b, level + 1))
+        });
+
+        // Compute commitment deltas in parallel chunks to be applied to parent nodes.
+        // Each chunk processes a subset of child updates independently.
+        let batch_size = self.par_batch_size(child_updates.len());
+        let c_deltas = child_updates
+            .par_chunks(batch_size)
+            .map(|c_updates| {
+                // Collect all old and new commitments for this chunk, interleaved
+                // Format: [old_c1, new_c1, old_c2, new_c2, ...]
+                let c_vec: Vec<CommitmentBytes> = c_updates
+                    .iter()
+                    .flat_map(|(_, (old_c, new_c))| vec![old_c, new_c])
+                    .copied()
+                    .collect();
+
+                // Hash all commitments to scalar bytes in batch for efficiency
+                // Returns: [old_scalar1, new_scalar1, old_scalar2, new_scalar2, ...]
+                let scalar_bytes = Element::hash_commitments(&c_vec);
+
+                // For each child update, compute the delta contribution to its parent
+                c_updates
+                    .iter()
+                    .zip(scalar_bytes.chunks_exact(2))
+                    .map(|((id, _), scalars)| {
+                        (
+                            get_parent_id(id, level + 1), // Which parent node to update
+                            // Compute delta: G[child_index] * (new_scalar - old_scalar)
+                            // This represents the change needed in parent's vector commitment
+                            self.committer.gi_mul_delta(
+                                &scalars[0],                  // old commitment as scalar
+                                &scalars[1],                  // new commitment as scalar
+                                get_child_idx(id, level + 1), // position within parent's VC
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Accumulate all deltas per parent node and compute new commitments
+        self.update_node_commitments(c_deltas, batch_size)
+    }
+
+    /// Computes a reasonable task batch size for parallel processing in rayon.
+    fn par_batch_size(&self, num_tasks: usize) -> usize {
+        let num_batches = 10 * rayon::current_num_threads();
+        self.min_par_batch_size.max(num_tasks.div_ceil(num_batches))
     }
 
     /// Applies cryptographic commitment deltas to trie nodes efficiently in parallel.
@@ -811,7 +869,7 @@ impl StateRoot<'_, EmptySalt> {
                 // `update_leaf_nodes` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
                 let chunk_trie_updates = trie
-                    .update_leaf_nodes(&StateUpdates {
+                    .update_bucket_subtrees(&StateUpdates {
                         data: chunk_updates,
                     })
                     .unwrap();
@@ -821,7 +879,7 @@ impl StateRoot<'_, EmptySalt> {
             })?;
 
         // Step 4: Compute commitments for all internal nodes in the main trie
-        Ok(trie.update_internal_nodes(all_trie_updates).unwrap())
+        Ok(trie.update_main_trie(all_trie_updates).unwrap())
     }
 }
 
@@ -867,7 +925,7 @@ impl SubtrieChangeInfo {
             + STARTING_NODE_ID[old_top_level] as NodeId;
         let new_top_id = ((bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId)
             + STARTING_NODE_ID[new_top_level] as NodeId;
-        let root_id = (bucket_id as NodeId) + STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId;
+        let root_id = (bucket_id as NodeId) + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
         Self {
             old_capacity,
             old_top_level,
@@ -892,7 +950,7 @@ mod tests {
     use rand::Rng;
 
     use crate::{
-        constant::{default_commitment, zero_commitment, STARTING_NODE_ID, TRIE_LEVELS},
+        constant::{default_commitment, zero_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
     use std::collections::HashMap;
@@ -948,7 +1006,7 @@ mod tests {
         let mut bucket_range_end = node_position_in_level + 1;
 
         // Expand range through each level below until reaching leaf buckets
-        for _ in node_level + 1..TRIE_LEVELS {
+        for _ in node_level + 1..MAIN_TRIE_LEVELS {
             bucket_range_start *= MIN_BUCKET_SIZE as NodeId;
             bucket_range_end *= MIN_BUCKET_SIZE as NodeId;
         }
@@ -1037,7 +1095,7 @@ mod tests {
         // Iteratively combine child commitments into parent commitments,
         // working our way up the tree until we reach the target node level.
 
-        for _ in (node_level + 1..TRIE_LEVELS).rev() {
+        for _ in (node_level + 1..MAIN_TRIE_LEVELS).rev() {
             // Group child nodes by their parent node
             // Map structure: parent_index -> (child_slot_indices, child_commitments)
             let mut parent_to_children = BTreeMap::new();
@@ -1775,7 +1833,7 @@ mod tests {
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
-        let bottom_level = TRIE_LEVELS - 1;
+        let bottom_level = MAIN_TRIE_LEVELS - 1;
         let bottom_level_start = STARTING_NODE_ID[bottom_level] as NodeId;
         let kv_none = kv_hash(&None);
 
@@ -1797,7 +1855,7 @@ mod tests {
             Some(SaltValue::from(bucket_meta(5, MIN_BUCKET_SIZE as SlotId))),
         );
 
-        let salt_updates = trie.update_leaf_nodes(&state_updates).unwrap();
+        let salt_updates = trie.update_bucket_subtrees(&state_updates).unwrap();
 
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
@@ -1839,7 +1897,7 @@ mod tests {
 
     #[test]
     fn trie_update_internal_nodes() {
-        let bottom_level = TRIE_LEVELS - 1;
+        let bottom_level = MAIN_TRIE_LEVELS - 1;
         let trie = StateRoot::new(&EmptySalt);
         let committer = &trie.committer;
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
@@ -1864,7 +1922,7 @@ mod tests {
         // Check and handle the commitment updates of the bottom-level node
         let cur_level = bottom_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes_inner(&mut updates, cur_level, get_parent_id)
+            .update_internal_commitments(&mut updates, cur_level, get_parent_id)
             .unwrap();
 
         let bytes_indices =
@@ -1893,7 +1951,7 @@ mod tests {
         // Check and handle the commitment updates of the second-level node
         let cur_level = cur_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes_inner(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_commitments(&mut unprocess_updates, cur_level, get_parent_id)
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
@@ -1913,7 +1971,7 @@ mod tests {
 
         let cur_level = cur_level - 1;
         let unprocess_updates = trie
-            .update_internal_nodes_inner(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_commitments(&mut unprocess_updates, cur_level, get_parent_id)
             .unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
@@ -1939,8 +1997,9 @@ mod tests {
         let fr1 = kv_hash(&kv1);
         let fr2 = kv_hash(&kv2);
         let kv_none = kv_hash(&None);
-        let default_bucket_data =
-            default_commitment((STARTING_NODE_ID[TRIE_LEVELS - 1] + NUM_META_BUCKETS) as NodeId);
+        let default_bucket_data = default_commitment(
+            (STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] + NUM_META_BUCKETS) as NodeId,
+        );
 
         // Prepare the state updates
         let bucket_ids = [
@@ -1966,11 +2025,11 @@ mod tests {
             trie_updates[0..2],
             vec![
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId + bucket_ids[1] as NodeId,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId + bucket_ids[1] as NodeId,
                     (default_bucket_data, c1)
                 ),
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId + bucket_ids[0] as NodeId,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId + bucket_ids[0] as NodeId,
                     (default_bucket_data, c2)
                 ),
             ]
@@ -1989,11 +2048,13 @@ mod tests {
             trie_updates[2..4],
             vec![
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 2] as NodeId + bucket_ids[1] as NodeId / 256,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 2] as NodeId
+                        + bucket_ids[1] as NodeId / 256,
                     (default_l3_c, c3)
                 ),
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 2] as NodeId + bucket_ids[0] as NodeId / 256,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 2] as NodeId
+                        + bucket_ids[0] as NodeId / 256,
                     (default_l3_c, c4)
                 ),
             ]
@@ -2012,11 +2073,13 @@ mod tests {
             trie_updates[4..6],
             vec![
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 3] as NodeId + bucket_ids[1] as NodeId / 65536,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 3] as NodeId
+                        + bucket_ids[1] as NodeId / 65536,
                     (default_l2_c, c5)
                 ),
                 (
-                    STARTING_NODE_ID[TRIE_LEVELS - 3] as NodeId + bucket_ids[0] as NodeId / 65536,
+                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 3] as NodeId
+                        + bucket_ids[0] as NodeId / 65536,
                     (default_l2_c, c6)
                 ),
             ]
@@ -2042,7 +2105,7 @@ mod tests {
     #[test]
     fn trie_level_default_committment() {
         let zero = zero_commitment();
-        let mut default_committment_vec = vec![(zero, zero); TRIE_LEVELS];
+        let mut default_committment_vec = vec![(zero, zero); MAIN_TRIE_LEVELS];
         let len_vec = [1, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE];
 
         let store = MemStore::new();
@@ -2058,9 +2121,9 @@ mod tests {
         //  C2_0_META ... C2_255_META C2_256_KV...
         //  C3_0_META ... C3_65535_META C3_65536_KV...
 
-        for i in (0..TRIE_LEVELS).rev() {
+        for i in (0..MAIN_TRIE_LEVELS).rev() {
             let (meta_delta_indices, data_delta_indices) =
-                if i == TRIE_LEVELS - 1 {
+                if i == MAIN_TRIE_LEVELS - 1 {
                     let meta_delta_indices = (0..len_vec[i])
                         .map(|i| (i, [0u8; 32], kv_hash(&Some(BucketMeta::default().into()))))
                         .collect::<Vec<_>>();
