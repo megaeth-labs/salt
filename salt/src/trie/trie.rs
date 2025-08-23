@@ -37,10 +37,13 @@ type SaltUpdates<'a> = Vec<(&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValu
 pub struct StateRoot<'a, Store> {
     /// Storage backend providing both trie and state access.
     store: &'a Store,
+    // FIXME: explain why this is needed (hint: because update() uses an incremental
+    // algorithm that only computes the state root after finalize())
+    // after finalize() or update_fin(), this field will be cleared out!
     /// Cache the incremental updates of the trie nodes.
-    pub updates: HashMap<NodeId, (CommitmentBytes, CommitmentBytes)>,
+    updates: HashMap<NodeId, (CommitmentBytes, CommitmentBytes)>,
     /// Cache the latest commitments of each updated trie node.
-    pub cache: HashMap<NodeId, CommitmentBytes>,
+    cache: HashMap<NodeId, CommitmentBytes>,
     /// Shared committer instance for cryptographic operations.
     committer: Arc<Committer>,
     /// Minimum task size for parallel processing.
@@ -68,16 +71,6 @@ where
         self
     }
 
-    /// Merge the trie updates into the existing trie.
-    pub fn add_deltas(&mut self, trie_updates: &TrieUpdates) {
-        for (k, v) in trie_updates {
-            self.cache
-                .entry(*k)
-                .and_modify(|change| *change = v.1)
-                .or_insert(v.1);
-        }
-    }
-
     /// Updates the trie conservatively. This function defers the computation of
     /// the state root to `finalize` to avoid updating the same node commitments
     /// at the upper levels over and over again when more state updates arrive.
@@ -102,10 +95,23 @@ where
 
     /// Finalizes and returns the state root after a series of calls to `incremental_update`.
     pub fn finalize(&mut self) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+        // FIXME: avoid converting between different collections?
         // Retrieve trie_updates from the cache
         let trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
 
-        self.update_internal_nodes(trie_updates)
+        let result = self.update_internal_nodes(trie_updates);
+
+        // Update cache with the final computed TrieUpdates
+        if let Ok((_, ref final_trie_updates)) = result {
+            for (k, v) in final_trie_updates {
+                self.cache
+                    .entry(*k)
+                    .and_modify(|change| *change = v.1)
+                    .or_insert(v.1);
+            }
+        }
+
+        result
     }
 
     /// Updates the state root (and all the internal commitments on the trie)
@@ -902,50 +908,52 @@ mod tests {
         commitments[0].1
     }
 
+    /// Tests incremental trie updates (applying changes sequentially to the same
+    /// trie instance) produce identical results to batch updates (applying all
+    /// changes at once to a fresh trie).
     #[test]
-    fn trie_add_deltas() {
-        let trie_reader = &EmptySalt;
-        let mut trie = StateRoot::new(trie_reader);
-        let empty_reader = &EmptySalt;
-        // Total updates of the state
-        let mut state_updates = StateUpdates::default();
+    fn test_incremental_vs_batch_update() {
 
-        let key1 = SaltKey::from((65538, 0));
-        let key2 = SaltKey::from((65538, 1));
-        let key3 = SaltKey::from((65538, 2));
-        let value1 = SaltValue::new(&[1; 32], &[1; 32]);
-        let value2 = SaltValue::new(&[2; 32], &[2; 32]);
-        let value3 = SaltValue::new(&[3; 32], &[3; 32]);
+        let mut trie = StateRoot::new(&EmptySalt); // Trie for incremental updates
+        let mut cumulative = StateUpdates::default(); // Tracks all changes for batch comparison
 
-        let mut state_updates1 = StateUpdates::default();
-        state_updates1.add(key1, None, Some(value1.clone()));
-        state_updates1.add(key2, None, Some(value2.clone()));
-        state_updates1.add(key3, None, Some(value3));
-        state_updates.merge(state_updates1.clone());
+        // Test data: 3 keys in bucket 65538
+        let (k1, k2, k3) = (
+            SaltKey::from((65538, 0)),
+            SaltKey::from((65538, 1)),
+            SaltKey::from((65538, 2)),
+        );
+        let (v1, v2, v3) = (
+            SaltValue::new(&[1; 32], &[1; 32]),
+            SaltValue::new(&[2; 32], &[2; 32]),
+            SaltValue::new(&[3; 32], &[3; 32]),
+        );
 
-        // Update the trie with the first set of state updates, and check the root.
-        let (_root1, trie_updates1) = trie.update_fin(&state_updates1).unwrap();
-        let mut state_updates2 = StateUpdates::default();
-        state_updates2.add(key1, Some(value1.clone()), Some(value2.clone()));
-        state_updates.merge(state_updates2.clone());
-        // after add deltas, trie's state with state_updates1
-        trie.add_deltas(&trie_updates1);
-        let (root2, trie_updates2) = trie.update_fin(&state_updates2).unwrap();
+        // Update 1: Insert 3 keys
+        let mut updates1 = StateUpdates::default();
+        updates1.add(k1, None, Some(v1.clone()));
+        updates1.add(k2, None, Some(v2.clone()));
+        updates1.add(k3, None, Some(v3));
+        cumulative.merge(updates1.clone());
+        trie.update_fin(&updates1).unwrap();
 
-        let (new_root2, _) = StateRoot::new(empty_reader)
-            .update_fin(&state_updates)
-            .unwrap();
-        assert_eq!(root2, new_root2);
+        // Update 2: k1: v1 → v2
+        let mut updates2 = StateUpdates::default();
+        updates2.add(k1, Some(v1.clone()), Some(v2.clone()));
+        cumulative.merge(updates2.clone());
 
-        let mut state_updates3 = StateUpdates::default();
-        state_updates3.add(key2, Some(value2), Some(value1));
-        state_updates.merge(state_updates3.clone());
-        trie.add_deltas(&trie_updates2);
-        let (root3, _) = trie.update_fin(&state_updates3).unwrap();
-        let (new_root3, _) = StateRoot::new(empty_reader)
-            .update_fin(&state_updates)
-            .unwrap();
-        assert_eq!(root3, new_root3);
+        let (incremental_root2, _) = trie.update_fin(&updates2).unwrap();
+        let (batch_root2, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
+        assert_eq!(incremental_root2, batch_root2);
+
+        // Update 3: k2: v2 → v1
+        let mut updates3 = StateUpdates::default();
+        updates3.add(k2, Some(v2), Some(v1));
+        cumulative.merge(updates3.clone());
+
+        let (incremental_root3, _) = trie.update_fin(&updates3).unwrap();
+        let (batch_root3, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
+        assert_eq!(incremental_root3, batch_root3);
     }
 
     #[test]
