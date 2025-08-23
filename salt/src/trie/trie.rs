@@ -217,7 +217,7 @@ where
             .flatten()
             .collect();
 
-        self.par_update_node_commitments(c_deltas, task_size)
+        self.update_node_commitments(c_deltas, task_size)
     }
 
     /// Given the state updates, generates the commitment updates of the leaf nodes
@@ -584,7 +584,7 @@ where
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
-        let c_deltas: Vec<(NodeId, Element)> = state_updates
+        let c_deltas: DeltaList = state_updates
             .par_iter()
             .with_min_len(task_size)
             .map(|(salt_key, (old_value, new_value))| {
@@ -599,7 +599,7 @@ where
             })
             .collect();
 
-        self.par_update_node_commitments(c_deltas, task_size)
+        self.update_node_commitments(c_deltas, task_size)
     }
 
     /// Applies cryptographic commitment deltas to trie nodes efficiently in parallel.
@@ -629,7 +629,7 @@ where
     /// let updates = trie.apply_deltas(deltas, 64)?;
     /// // Output: [(1, (old_c1, old_c1 + δ1 + δ2)), (2, (old_c2, old_c2 + δ3))]
     /// ```
-    fn par_update_node_commitments(
+    fn update_node_commitments(
         &self,
         mut commitment_deltas: DeltaList,
         task_size: usize,
@@ -898,109 +898,194 @@ mod tests {
     use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
-    /// Generates a node's commitment from its entire KV store.
-    ///       - - - - -
-    ///    - - [node] - -
-    ///  - - -  /  \ - - - -
-    /// - - -  /    \ - - - - -
-    ///- - - [kv]...[kv] - - - - -
-    fn calculate_subtrie_with_all_kvs<S: StateReader>(
+    /// Rebuilds a main trie node commitment from storage for testing purposes.
+    ///
+    /// **WARNING: This method does NOT handle expanded buckets (capacity > 256).**
+    /// It assumes all buckets have the default capacity of 256 slots and will
+    /// produce incorrect results for buckets that have been resized.
+    ///
+    /// # Purpose
+    ///
+    /// This is a test-only helper method used to verify that incremental trie updates
+    /// produce the same commitments as computing from scratch. It should NOT be used
+    /// in production code.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Range Calculation**: Determines all bucket IDs that are descendants
+    ///    of the given node by expanding the range level by level
+    /// 2. **Default State Setup**: Creates default commitments for meta and data buckets
+    /// 3. **Bucket Processing**: For each bucket in the range:
+    ///    - Reads all KV pairs from storage
+    ///    - Computes deltas from default state to actual state
+    ///    - Generates bucket-level commitment
+    /// 4. **Bottom-Up Aggregation**: Iteratively computes parent commitments
+    ///    from child commitments until reaching the target node level
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The node whose subtree commitment should be computed
+    /// * `store` - Storage reader to fetch KV pairs from
+    ///
+    /// # Returns
+    ///
+    /// The commitment bytes for the specified node
+    fn rebuild_subtrie_without_expanded_buckets<S: StateReader>(
         node_id: NodeId,
         store: &S,
     ) -> CommitmentBytes {
-        let level = get_bfs_level(node_id);
+        let node_level = get_bfs_level(node_id);
         let committer = SHARED_COMMITTER.as_ref();
-        let zero = Committer::zero();
-        let mut start = node_id - STARTING_NODE_ID[level] as NodeId;
-        let mut end = start + 1;
-        for _i in level + 1..TRIE_LEVELS {
-            start *= MIN_BUCKET_SIZE as NodeId;
-            end *= MIN_BUCKET_SIZE as NodeId;
+        let zero_commitment = Committer::zero();
+
+        // ========== Step 1: Calculate descendant bucket range ==========
+        // For a node at a given level, calculate all bucket IDs in its subtree.
+        // Example: Node at level 2, position 5 within that level:
+        //   -> Level 3: covers buckets [5*256, 6*256) = [1280, 1536)
+        //   -> Level 4: covers buckets [1280*256, 1536*256) = [327680, 393216)
+        let node_position_in_level = node_id - STARTING_NODE_ID[node_level] as NodeId;
+        let mut bucket_range_start = node_position_in_level;
+        let mut bucket_range_end = node_position_in_level + 1;
+
+        // Expand range through each level below until reaching leaf buckets
+        for _ in node_level + 1..TRIE_LEVELS {
+            bucket_range_start *= MIN_BUCKET_SIZE as NodeId;
+            bucket_range_end *= MIN_BUCKET_SIZE as NodeId;
         }
 
+        // ========== Step 2: Create default bucket commitments ==========
+        // These represent empty buckets and serve as the base for delta computation.
+        // Meta buckets default to containing BucketMeta::default() in all slots.
+        // Data buckets default to being completely empty (None in all slots).
+
         let meta_delta_indices = (0..MIN_BUCKET_SIZE)
-            .map(|i| (i, [0u8; 32], kv_hash(&Some(BucketMeta::default().into()))))
+            .map(|slot_index| {
+                let old_value = [0u8; 32];
+                let new_value = kv_hash(&Some(BucketMeta::default().into()));
+                (slot_index, old_value, new_value)
+            })
             .collect::<Vec<_>>();
         let data_delta_indices = (0..MIN_BUCKET_SIZE)
-            .map(|i| (i, [0u8; 32], kv_hash(&None)))
-            .collect::<Vec<_>>();
-
-        let default_bucket_meta = committer
-            .add_deltas(zero, &meta_delta_indices)
-            .to_bytes_uncompressed();
-        let default_bucket_data = committer
-            .add_deltas(zero, &data_delta_indices)
-            .to_bytes_uncompressed();
-
-        // compute bucket commitments
-        let mut commitments = (start..end)
-            .into_par_iter()
-            .map(|id| {
-                let bucket_id = id as BucketId;
-                let kvs = store
-                    .entries(SaltKey::bucket_range(bucket_id, bucket_id))
-                    .unwrap();
-                let delta_indices = kvs
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let old_bytes = if k.is_in_meta_bucket() {
-                            kv_hash(&Some(BucketMeta::default().into()))
-                        } else {
-                            kv_hash(&None)
-                        };
-                        (
-                            k.slot_id() as usize % MIN_BUCKET_SIZE,
-                            old_bytes,
-                            kv_hash(&Some(v)),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let default_c = if bucket_id < NUM_META_BUCKETS as BucketId {
-                    default_bucket_meta
-                } else {
-                    default_bucket_data
-                };
-                let new_c = if delta_indices.is_empty() {
-                    default_c
-                } else {
-                    committer
-                        .add_deltas(default_c, &delta_indices)
-                        .to_bytes_uncompressed()
-                };
-                (bucket_id as usize, new_c)
+            .map(|slot_index| {
+                let old_value = [0u8; 32];
+                let new_value = kv_hash(&None);
+                (slot_index, old_value, new_value)
             })
             .collect::<Vec<_>>();
 
-        // compute commitment upon bucket commitment level
-        for _i in (level + 1..TRIE_LEVELS).rev() {
-            let mut datas: BTreeMap<usize, (Vec<usize>, Vec<CommitmentBytes>)> = BTreeMap::new();
-            for (id, c) in commitments {
-                let fid = id / MIN_BUCKET_SIZE;
-                let ds = datas.entry(fid).or_insert((vec![], vec![]));
-                ds.0.push(id % MIN_BUCKET_SIZE);
-                ds.1.push(c);
+        let default_bucket_meta = committer
+            .add_deltas(zero_commitment, &meta_delta_indices)
+            .to_bytes_uncompressed();
+        let default_bucket_data = committer
+            .add_deltas(zero_commitment, &data_delta_indices)
+            .to_bytes_uncompressed();
+
+        // ========== Step 3: Compute bucket commitments in parallel ==========
+        // For each bucket in the range: read KV pairs, compute deltas from default
+        // state, and generate the final bucket commitment.
+
+        let mut level_commitments = (bucket_range_start..bucket_range_end)
+            .into_par_iter()
+            .map(|bucket_index| {
+                let bucket_id = bucket_index as BucketId;
+
+                // Read all KV pairs for this bucket
+                let kv_pairs = store
+                    .entries(SaltKey::bucket_range(bucket_id, bucket_id))
+                    .unwrap();
+
+                // Choose the appropriate default commitment based on bucket type
+                let default_commitment = if bucket_id < NUM_META_BUCKETS as BucketId {
+                    default_bucket_meta // Meta bucket
+                } else {
+                    default_bucket_data // Data bucket
+                };
+
+                // If bucket is empty, use default commitment
+                if kv_pairs.is_empty() {
+                    return (bucket_index as usize, default_commitment);
+                }
+
+                // Build delta indices: (slot_index, old_hash, new_hash)
+                let delta_indices = kv_pairs
+                    .into_iter()
+                    .map(|(key, value)| {
+                        // Determine old value hash based on bucket type
+                        let old_value_hash = if key.is_in_meta_bucket() {
+                            kv_hash(&Some(BucketMeta::default().into())) // Meta bucket default
+                        } else {
+                            kv_hash(&None) // Data bucket default (empty)
+                        };
+
+                        let slot_index = key.slot_id() as usize % MIN_BUCKET_SIZE;
+                        let new_value_hash = kv_hash(&Some(value));
+
+                        (slot_index, old_value_hash, new_value_hash)
+                    })
+                    .collect::<Vec<_>>();
+
+                // Apply deltas to get final bucket commitment
+                let bucket_commitment = committer
+                    .add_deltas(default_commitment, &delta_indices)
+                    .to_bytes_uncompressed();
+
+                (bucket_index as usize, bucket_commitment)
+            })
+            .collect::<Vec<_>>();
+
+        // ========== Step 4: Bottom-up aggregation to target node ==========
+        // Iteratively combine child commitments into parent commitments,
+        // working our way up the tree until we reach the target node level.
+
+        for _ in (node_level + 1..TRIE_LEVELS).rev() {
+            // Group child nodes by their parent node
+            // Map structure: parent_index -> (child_slot_indices, child_commitments)
+            let mut parent_to_children = BTreeMap::new();
+
+            for (child_node_index, child_commitment) in level_commitments {
+                let parent_node_index = child_node_index / MIN_BUCKET_SIZE;
+                let child_slot_in_parent = child_node_index % MIN_BUCKET_SIZE;
+
+                let parent_entry = parent_to_children
+                    .entry(parent_node_index)
+                    .or_insert((vec![], vec![]));
+                parent_entry.0.push(child_slot_in_parent);
+                parent_entry.1.push(child_commitment);
             }
-            commitments = datas
+
+            // Compute parent commitments from their children
+            level_commitments = parent_to_children
                 .into_par_iter()
-                .map(|(fid, (ids, cs))| {
-                    let hash_bytes = Element::hash_commitments(&cs);
-                    let delta_indices = hash_bytes
+                .map(|(parent_index, (child_slot_indices, child_commitments))| {
+                    // Hash the child commitments to get elements for delta computation
+                    let hashed_children = Element::hash_commitments(&child_commitments);
+
+                    // Create delta indices: (slot_index, old_hash, new_hash)
+                    let parent_delta_indices = hashed_children
                         .into_iter()
-                        .zip(ids)
-                        .map(|(e, i)| (i, [0u8; 32], e))
+                        .zip(child_slot_indices)
+                        .map(|(child_hash, slot_index)| {
+                            let old_value = [0u8; 32];
+                            (slot_index, old_value, child_hash)
+                        })
                         .collect::<Vec<_>>();
-                    (
-                        fid,
-                        committer
-                            .add_deltas(zero, &delta_indices)
-                            .to_bytes_uncompressed(),
-                    )
+
+                    // Compute parent commitment by applying deltas to zero commitment
+                    let parent_commitment = committer
+                        .add_deltas(zero_commitment, &parent_delta_indices)
+                        .to_bytes_uncompressed();
+
+                    (parent_index, parent_commitment)
                 })
                 .collect();
         }
 
-        assert!(commitments.len() > 0);
-        commitments[0].1
+        // At this point, we should have exactly one commitment: our target node
+        assert!(
+            !level_commitments.is_empty(),
+            "Should have at least one commitment after aggregation"
+        );
+        level_commitments[0].1
     }
 
     /// Tests incremental trie updates (applying changes sequentially to the same
@@ -1578,7 +1663,7 @@ mod tests {
         let (root1, trie_updates) = StateRoot::rebuild(&mock_db).unwrap();
 
         let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
-        let c = calculate_subtrie_with_all_kvs(node_id, &mock_db);
+        let c = rebuild_subtrie_without_expanded_buckets(node_id, &mock_db);
         mock_db.update_trie(trie_updates);
         assert_eq!(
             hash_commitment(c),
@@ -1657,7 +1742,7 @@ mod tests {
         assert_eq!(vec![(0, 3), (3, 7), (7, 11)], ranges);
 
         let updates = trie
-            .par_update_node_commitments(c_deltas.clone(), task_size)
+            .update_node_commitments(c_deltas.clone(), task_size)
             .unwrap();
 
         let exp_id_vec = [0 as NodeId, 1, 2, 3, 4];
@@ -1961,9 +2046,10 @@ mod tests {
         let len_vec = [1, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE];
 
         let store = MemStore::new();
-        let c = calculate_subtrie_with_all_kvs(260, &store);
+        let c = rebuild_subtrie_without_expanded_buckets(260, &store);
         assert_eq!(c, default_commitment(STARTING_NODE_ID[2] as NodeId));
-        let c = calculate_subtrie_with_all_kvs(260 + STARTING_NODE_ID[2] as NodeId, &store);
+        let c =
+            rebuild_subtrie_without_expanded_buckets(260 + STARTING_NODE_ID[2] as NodeId, &store);
         assert_eq!(c, default_commitment((STARTING_NODE_ID[3] - 1) as NodeId));
 
         // default commitments of main trie like this
