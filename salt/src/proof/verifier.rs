@@ -1,13 +1,13 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{EMPTY_SLOT_HASH, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
+    constant::{EMPTY_SLOT_HASH, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
     proof::{
         prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
     trie::trie::{get_child_node, subtrie_node_id},
-    types::{BucketId, BucketMeta, NodeId, SaltKey, SaltValue},
+    types::{BucketId, NodeId, SaltKey, SaltValue},
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::multiproof::VerifierQuery;
@@ -170,14 +170,10 @@ pub(crate) fn create_verifier_queries(
 
                     let slot_id = key.slot_id() & 0xff;
 
-                    let result = if bucket_id < NUM_META_BUCKETS as BucketId && val.is_none() {
-                        calculate_fr_by_kv(&(BucketMeta::default().into()))
-                    } else {
-                        val.as_ref().map_or(
-                            Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
-                            calculate_fr_by_kv,
-                        )
-                    };
+                    let result = val.as_ref().map_or(
+                        Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
+                        calculate_fr_by_kv,
+                    );
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];
 

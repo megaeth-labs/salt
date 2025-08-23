@@ -85,22 +85,22 @@ impl BlockWitness {
 
         let metadata = meta_keys
             .par_iter()
-            .filter_map(|&salt_key| {
+            .map(|&salt_key| {
                 let bucket_id = bucket_id_from_metadata_key(salt_key);
                 store
                     .metadata(bucket_id)
-                    .ok()
                     .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))
             })
-            .collect();
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
 
         let kvs = data_keys
             .par_iter()
             .map(|&salt_key| {
                 store
                     .value(salt_key)
-                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
                     .map(|entry| (salt_key, entry))
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read value: {e:?}")))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
@@ -132,7 +132,7 @@ impl BlockWitness {
         // Handle metadata entries - preserve None for non-existent metadata
         for (&bucket_id, &meta_opt) in &self.metadata {
             keys.push(bucket_metadata_key(bucket_id));
-            vals.push(meta_opt.map(|m| m.into())); // Preserve None for default metadata
+            vals.push(Some(meta_opt.unwrap_or_default().into()));
         }
 
         // Handle regular KV entries - preserve None for non-existent values
@@ -351,6 +351,7 @@ mod tests {
         mock_evm_types::*,
         proof::CommitmentBytesW,
         state::state::EphemeralSaltState,
+        state::updates::StateUpdates,
         traits::TrieReader,
         trie::trie::StateRoot,
     };
@@ -793,5 +794,19 @@ mod tests {
             witness.node_entries(0..1000).is_err(),
             "SECURITY: Range queries must be disabled!"
         );
+    }
+
+    #[test]
+    fn test_default_bucket_meta_proof() {
+        let mem_store = MemStore::new();
+
+        let mut trie = StateRoot::new(&mem_store);
+        let (root, _) = trie.update(&StateUpdates::default()).unwrap();
+
+        let bucket_id: BucketId = 100000;
+        let salt_key = bucket_metadata_key(bucket_id);
+        let witness = BlockWitness::create(&[salt_key], &mem_store).unwrap();
+        let res = witness.verify_proof(root);
+        assert!(res.is_ok());
     }
 }

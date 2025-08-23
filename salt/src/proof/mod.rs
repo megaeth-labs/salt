@@ -23,7 +23,7 @@ pub enum ProofError {
 mod tests {
     use super::*;
     use crate::{
-        bucket_metadata_key,
+        bucket_id_from_metadata_key, bucket_metadata_key,
         constant::{
             default_commitment, EMPTY_SLOT_HASH, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
             NUM_META_BUCKETS, STARTING_NODE_ID,
@@ -148,9 +148,11 @@ mod tests {
 
         let proof = SaltProof::create(&salt_keys, &salt).unwrap();
 
-        let value = salt.value(salt_keys[0]).unwrap();
+        let value = salt
+            .metadata(bucket_id_from_metadata_key(salt_keys[0]))
+            .unwrap();
 
-        let res = proof.check(salt_keys, vec![value], empty_root);
+        let res = proof.check(salt_keys, vec![Some(value.into())], empty_root);
 
         assert!(res.is_ok());
     }
