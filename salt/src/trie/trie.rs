@@ -2,9 +2,9 @@
 
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
-        META_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS,
-        STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS,
+        default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, META_BUCKET_SIZE, MIN_BUCKET_SIZE,
+        MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
+        TRIE_LEVELS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -746,65 +746,48 @@ impl StateRoot<'_, EmptySalt> {
     ///
     /// This method reads all bucket metadata and key-value pairs from storage and
     /// rebuilds the complete trie structure, including proper handling of expanded
-    /// buckets (capacity > 256). It's essential for recovery, verification, and
-    /// migration scenarios.
+    /// buckets (capacity > 256).
     ///
     /// # Algorithm
     ///
-    /// 1. Processes data buckets in chunks for memory efficiency
+    /// 1. Processes data buckets in chunks for compute efficiency
     /// 2. For each chunk:
     ///    - Reads metadata from meta buckets, simulating changes from default values
     ///    - Reads key-value pairs from data buckets as insertions
-    ///    - Updates trie structure, automatically triggering expansion logic
-    /// 3. Computes commitments for all internal trie nodes
+    ///    - Updates bucket subtree structure, automatically triggering expansion logic
+    ///    - Computes the bucket commitment
+    /// 3. Computes commitments for all main trie nodes above the leaves
     ///
     /// # Expanded Buckets Handling
     ///
     /// The key insight for handling buckets with capacity > 256 is setting metadata
     /// old values to `BucketMeta::default()` (capacity=256). When `update_leaf_nodes`
     /// sees this "change" from default to actual capacity, it automatically triggers
-    /// the expansion logic, creating the proper multi-level subtrie structure.
+    /// the expansion logic, creating the proper multi-level bucket subtree structure.
     ///
     /// # Returns
     ///
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
     /// * `Err(S::Error)` - If reading from storage fails
-    ///
-    /// # Use Cases
-    ///
-    /// - **Recovery**: Rebuild trie after corruption or data loss
-    /// - **Verification**: Validate trie consistency against stored data
-    /// - **Migration**: Reconstruct trie when moving between systems
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
         let trie = StateRoot::new(&EmptySalt);
+        let mut all_trie_updates = Vec::new();
 
-        // Pre-allocate with estimated capacity for better performance
-        // Rough estimate: 2 updates per bucket (metadata + potential subtrie nodes)
-        let estimated_capacity = (NUM_BUCKETS - NUM_META_BUCKETS) * 2;
-        let mut all_trie_updates = Vec::with_capacity(estimated_capacity);
-
-        // Process data buckets in chunks to limit memory usage
-        // Chunk size of 256 balances memory efficiency with processing overhead
-        const CHUNK_SIZE: usize = 256;
+        // Process data buckets in chunks (chunk size must be multiples of 256)
+        const CHUNK_SIZE: usize = META_BUCKET_SIZE;
         (NUM_META_BUCKETS..NUM_BUCKETS)
             .step_by(CHUNK_SIZE)
             .try_for_each(|chunk_start| {
-                let chunk_end = std::cmp::min(chunk_start + CHUNK_SIZE, NUM_BUCKETS) - 1;
+                let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
                 // Step 1: Read metadata for all buckets in this chunk
-                // Key strategy: Map actual metadata to appear as "change" from default
-                // This triggers expansion logic in update_leaf_nodes for capacity > 256
                 let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
                 let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
                 let mut chunk_updates = reader
-                    .entries(
-                        SaltKey::from((meta_bucket_start, 0))
-                            ..=SaltKey::from((meta_bucket_end, BUCKET_SLOT_ID_MASK)),
-                    )?
+                    .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
                     .into_iter()
                     .map(|(key, actual_metadata)| {
-                        // Simulate metadata change: default(capacity=256) -> actual
-                        // For expanded buckets, this triggers creation of multi-level subtries
+                        // Simulate metadata change: default -> actual
                         (
                             key,
                             (Some(BucketMeta::default().into()), Some(actual_metadata)),
@@ -816,36 +799,29 @@ impl StateRoot<'_, EmptySalt> {
                 // Treat as insertions since we're rebuilding from scratch
                 chunk_updates.extend(
                     reader
-                        .entries(
-                            SaltKey::from((chunk_start as BucketId, 0))
-                                ..=SaltKey::from((chunk_end as BucketId, BUCKET_SLOT_ID_MASK)),
-                        )?
+                        .entries(SaltKey::bucket_range(
+                            chunk_start as BucketId,
+                            chunk_end as BucketId,
+                        ))?
                         .into_iter()
-                        .map(|(key, value)| {
-                            // All entries are insertions: old=None, new=Some(value)
-                            // Works for both regular (256) and expanded buckets
-                            (key, (None, Some(value)))
-                        }),
+                        .map(|(key, value)| (key, (None, Some(value)))),
                 );
 
                 // Step 3: Apply updates to trie, handling expansion automatically
-                // The expansion logic detects metadata capacity changes and creates
+                // `update_leaf_nodes` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
                 let chunk_trie_updates = trie
                     .update_leaf_nodes(&StateUpdates {
                         data: chunk_updates,
                     })
-                    .expect("EmptySalt reader never fails");
+                    .unwrap();
 
                 all_trie_updates.extend(chunk_trie_updates);
                 Ok(())
             })?;
 
-        // Step 4: Compute commitments for all internal nodes in the trie
-        // This finalizes the reconstruction by updating parent node commitments
-        Ok(trie
-            .update_internal_nodes(all_trie_updates)
-            .expect("EmptySalt reader never fails"))
+        // Step 4: Compute commitments for all internal nodes in the main trie
+        Ok(trie.update_internal_nodes(all_trie_updates).unwrap())
     }
 }
 
@@ -962,7 +938,7 @@ mod tests {
             .map(|id| {
                 let bucket_id = id as BucketId;
                 let kvs = store
-                    .entries((bucket_id, 0).into()..=(bucket_id, BUCKET_SLOT_ID_MASK).into())
+                    .entries(SaltKey::bucket_range(bucket_id, bucket_id))
                     .unwrap();
                 let delta_indices = kvs
                     .into_iter()
@@ -1564,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_from_scratch_small() {
+    fn test_rebuild_small() {
         let mock_db = MemStore::new();
         let mut trie = StateRoot::new(&mock_db);
         let mut state_updates = StateUpdates::default();
@@ -1613,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_from_scratch_large() {
+    fn test_rebuild_large() {
         let mock_db = MemStore::new();
         let mut trie = StateRoot::new(&mock_db);
         let mut state_updates = StateUpdates::default();

@@ -167,6 +167,23 @@ impl SaltKey {
     pub const fn is_in_meta_bucket(&self) -> bool {
         self.bucket_id() < NUM_META_BUCKETS as BucketId
     }
+
+    /// Creates an inclusive range covering all possible SaltKeys within the given
+    /// bucket range.
+    ///
+    /// This method generates a range from the first slot (0) of the start bucket
+    /// to the last slot (BUCKET_SLOT_ID_MASK) of the end bucket.
+    ///
+    /// # Arguments
+    /// * `start_bucket` - The first bucket ID in the range (inclusive)
+    /// * `end_bucket` - The last bucket ID in the range (inclusive)
+    ///
+    /// # Returns
+    /// An inclusive range covering all keys in the specified buckets.
+    /// ```
+    pub fn bucket_range(start_bucket: BucketId, end_bucket: BucketId) -> RangeInclusive<SaltKey> {
+        SaltKey::from((start_bucket, 0))..=SaltKey::from((end_bucket, BUCKET_SLOT_ID_MASK))
+    }
 }
 
 impl From<(BucketId, SlotId)> for SaltKey {
