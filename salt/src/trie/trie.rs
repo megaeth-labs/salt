@@ -229,23 +229,23 @@ where
         // Helper closure for contraction optimization: marks nodes as having zero commitment
         // This is used when buckets shrink - nodes beyond the new capacity become irrelevant
         let insert_uncomputed_node =
-            |mut id: NodeId,
-             start: usize,
-             end: usize,
-             updates: &mut BTreeMap<u64, (CommitmentBytes, CommitmentBytes)>| {
-                for level in (start..end).rev() {
-                    if updates.contains_key(&id) {
+            |mut node_id: NodeId,
+             start_level: usize,
+             end_level: usize,
+             uncomputed_nodes: &mut BTreeMap<u64, (CommitmentBytes, CommitmentBytes)>| {
+                for level in (start_level..end_level).rev() {
+                    if uncomputed_nodes.contains_key(&node_id) {
                         break;
                     }
-                    updates.insert(
-                        id,
+                    uncomputed_nodes.insert(
+                        node_id,
                         (
-                            self.commitment(id).expect("node should exist in trie"),
-                            default_commitment(id), // Zero commitment for removed nodes
+                            self.commitment(node_id).expect("node should exist in trie"),
+                            default_commitment(node_id), // Zero commitment for removed nodes
                         ),
                     );
-                    if level != start {
-                        id = get_parent_node(&id);
+                    if level != start_level {
+                        node_id = get_parent_node(&node_id);
                     }
                 }
             };
@@ -278,74 +278,74 @@ where
         let mut normal_updates = state_updates
             .data
             .iter()
-            .filter(|(k, v)| {
-                let bid = k.bucket_id();
-                if bid < NUM_META_BUCKETS as BucketId {
+            .filter(|(key, update_pair)| {
+                let current_bucket_id = key.bucket_id();
+                if current_bucket_id < NUM_META_BUCKETS as BucketId {
                     is_expansion = false;
                     // Record the bucket id and capacity when expansion or contraction occurs.
                     let old_meta: BucketMeta =
-                        v.0.clone()
+                        update_pair.0.clone()
                             .expect("old meta exist in updates")
                             .try_into()
                             .expect("old meta should be valid");
                     let new_meta: BucketMeta =
-                        v.1.clone()
+                        update_pair.1.clone()
                             .expect("new meta exist in updates")
                             .try_into()
                             .expect("new meta should be valid");
-                    let id = (bid << MIN_BUCKET_SIZE_BITS) + k.slot_id() as BucketId;
-                    capacity_changes.insert(id, (old_meta.capacity, new_meta.capacity));
-                } else if bid != bucket_id {
+                    let node_id = (current_bucket_id << MIN_BUCKET_SIZE_BITS) + key.slot_id() as BucketId;
+                    capacity_changes.insert(node_id, (old_meta.capacity, new_meta.capacity));
+                } else if current_bucket_id != bucket_id {
                     // Read the new bucket meta from state_updates, otherwise get the old one.
                     (old_capacity, new_capacity) =
-                        capacity_changes.remove(&bid).unwrap_or_else(|| {
+                        capacity_changes.remove(&current_bucket_id).unwrap_or_else(|| {
                             let bucket_capacity = self
                                 .store
-                                .metadata(bid)
+                                .metadata(current_bucket_id)
                                 .expect("bucket capacity should exist")
                                 .capacity;
                             (bucket_capacity, bucket_capacity)
                         });
                     (bucket_id, is_expansion) = (
-                        bid,
+                        current_bucket_id,
                         std::cmp::max(old_capacity, new_capacity) > MIN_BUCKET_SIZE as u64,
                     );
                     if is_expansion {
-                        let info = SubtrieChangeInfo::new(bid, old_capacity, new_capacity);
+                        let subtree_change = SubtrieChangeInfo::new(current_bucket_id, old_capacity, new_capacity);
                         // Both downsizing and expanding need to handle new root node events
-                        event_levels[info.new_top_level].insert(bid, info.clone());
+                        event_levels[subtree_change.new_top_level].insert(current_bucket_id, subtree_change.clone());
 
-                        if info.old_capacity > info.new_capacity {
+                        if subtree_change.old_capacity > subtree_change.new_capacity {
                             // Handle bucket contraction (capacity decreased)
-                            contractions.push(info.clone());
+                            contractions.push(subtree_change.clone());
 
                             // If this slot is being removed, record the root change
-                            if k.slot_id() >= info.new_capacity {
+                            if key.slot_id() >= subtree_change.new_capacity {
                                 pending_updates[MAX_SUBTREE_LEVELS].push((
-                                    info.root_id,
+                                    subtree_change.root_id,
                                     (
-                                        self.commitment(info.root_id)
+                                        self.commitment(subtree_change.root_id)
                                             .expect("node should exist in trie"),
-                                        self.commitment(info.new_top_id)
+                                        self.commitment(subtree_change.new_top_id)
                                             .expect("node should exist in trie"),
                                     ),
                                 ));
                             }
                         } else {
                             // Handle bucket expansion (capacity increased)
-                            event_levels[info.old_top_level].insert(bid, info.clone());
+                            event_levels[subtree_change.old_top_level].insert(current_bucket_id, subtree_change.clone());
 
                             // Check if this is a new slot in the expanded area
-                            let is_new_slot_in_expanded_area = info.old_top_level
-                                > info.new_top_level
-                                && k.slot_id() >= info.old_capacity;
+                            let is_new_slot_in_expanded_area = subtree_change.old_top_level
+                                > subtree_change.new_top_level
+                                && key.slot_id() >= subtree_change.old_capacity;
 
                             if is_new_slot_in_expanded_area {
-                                pending_updates[info.old_top_level].push((
-                                    info.old_top_id,
+                                pending_updates[subtree_change.old_top_level].push((
+                                    subtree_change.old_top_id,
                                     (
-                                        default_commitment(info.old_top_id),
-                                        self.commitment(info.root_id)
+                                        default_commitment(subtree_change.old_top_id),
+                                        self.commitment(subtree_change.root_id)
                                             .expect("node should exist in trie"),
                                     ),
                                 ));
@@ -355,13 +355,13 @@ where
                 };
                 if is_expansion {
                     // Handle expansion bucket updates and contraction optimization
-                    if k.slot_id() < new_capacity {
+                    if key.slot_id() < new_capacity {
                         // Slot is within new capacity - add to expansion updates
-                        expansion_updates.push((k, v));
+                        expansion_updates.push((key, update_pair));
                     } else {
                         // Slot beyond new capacity - mark as zero commitment (contraction optimization)
                         insert_uncomputed_node(
-                            subtree_leaf_for_key(k),
+                            subtree_leaf_for_key(key),
                             subtree_root_level(old_capacity) + 1,
                             MAX_SUBTREE_LEVELS,
                             &mut uncomputed_updates,
@@ -384,19 +384,19 @@ where
         // Process buckets that changed capacity but have no key-value updates
         // These require subtree restructuring when the depth changes
         for (bid, (old_capacity, new_capacity)) in capacity_changes {
-            let info = SubtrieChangeInfo::new(bid, old_capacity, new_capacity);
+            let subtree_change = SubtrieChangeInfo::new(bid, old_capacity, new_capacity);
             // filtor out load and nonce change or level not changed
-            match info.old_top_level.cmp(&info.new_top_level) {
+            match subtree_change.old_top_level.cmp(&subtree_change.new_top_level) {
                 std::cmp::Ordering::Greater => {
                     // If the top level changes, it is an expansion.
                     // The leaves (kv) of the subtrie do not change,
                     // and the upper old level nodes need to be calculated.
-                    event_levels[info.new_top_level].insert(bid, info.clone());
-                    pending_updates[info.old_top_level].push((
-                        info.old_top_id,
+                    event_levels[subtree_change.new_top_level].insert(bid, subtree_change.clone());
+                    pending_updates[subtree_change.old_top_level].push((
+                        subtree_change.old_top_id,
                         (
-                            default_commitment(info.old_top_id),
-                            self.commitment(info.root_id)?,
+                            default_commitment(subtree_change.old_top_id),
+                            self.commitment(subtree_change.root_id)?,
                         ),
                     ));
                 }
@@ -404,21 +404,21 @@ where
                     // If the top level changes, it is a contraction.
                     // The leaves (kv) of the subtrie do not change,
                     // and calculate the upper new level nodes and update trie_updates.
-                    let mut updates_map = BTreeMap::new();
+                    let mut contraction_updates = BTreeMap::new();
                     insert_uncomputed_node(
-                        info.new_top_id,
-                        info.old_top_level,
-                        info.new_top_level,
-                        &mut updates_map,
+                        subtree_change.new_top_id,
+                        subtree_change.old_top_level,
+                        subtree_change.new_top_level,
+                        &mut contraction_updates,
                     );
                     trie_updates.push((
-                        info.root_id,
+                        subtree_change.root_id,
                         (
-                            self.commitment(info.root_id)?,
-                            self.commitment(info.new_top_id)?,
+                            self.commitment(subtree_change.root_id)?,
+                            self.commitment(subtree_change.new_top_id)?,
                         ),
                     ));
-                    trie_updates.extend(updates_map.into_iter());
+                    trie_updates.extend(contraction_updates.into_iter());
                 }
                 _ => {}
             };
@@ -427,45 +427,45 @@ where
         // === PHASE 3: APPLY CONTRACTION OPTIMIZATIONS ===
         // For buckets that shrank, optimize by distributing zero-commitment nodes
         // across appropriate levels to avoid unnecessary computation
-        for info in contractions {
-            assert!(info.old_capacity > info.new_capacity);
+        for subtree_change in contractions {
+            assert!(subtree_change.old_capacity > subtree_change.new_capacity);
             // Add the contracted bucket to the uncomputed_updates
-            let mut updates_map = BTreeMap::new();
-            let bucket_id = (info.root_id - STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId)
-                << BUCKET_SLOT_BITS as NodeId;
+            let mut contraction_node_updates = BTreeMap::new();
+            let bucket_root_offset = subtree_change.root_id - STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+            let bucket_id = bucket_root_offset << BUCKET_SLOT_BITS as NodeId;
             insert_uncomputed_node(
-                info.new_top_id,
-                info.old_top_level,
-                info.new_top_level,
-                &mut updates_map,
+                subtree_change.new_top_id,
+                subtree_change.old_top_level,
+                subtree_change.new_top_level,
+                &mut contraction_node_updates,
             );
-            let (mut start, mut end) = (
-                info.new_capacity >> MIN_BUCKET_SIZE_BITS as NodeId,
-                info.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId,
-            );
-            for level in (info.new_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
+            let capacity_start_index = subtree_change.new_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
+            let capacity_end_index = subtree_change.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
+            let (mut start, mut end) = (capacity_start_index, capacity_end_index);
+            for level in (subtree_change.new_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
                 // Add the uncomputed nodes to pending_updates for calculate the parent node
                 // um = uncomputed map
                 // |--caculate nodes---|---caculates in um--|---uncomputed in um--|
                 //level start    pending start        pending end            level end
-                let pending_end = bucket_id + start - (start % MIN_BUCKET_SIZE as NodeId)
+                let aligned_start = start - (start % MIN_BUCKET_SIZE as NodeId);
+                let pending_end = bucket_id + aligned_start
                     + MIN_BUCKET_SIZE as NodeId
                     + STARTING_NODE_ID[level] as NodeId;
-                let range = bucket_id + start + STARTING_NODE_ID[level] as NodeId..pending_end;
-                let updates: Vec<_> = uncomputed_updates
-                    .range(range)
-                    .map(|(k, u)| (*k, *u))
+                let pending_range = bucket_id + start + STARTING_NODE_ID[level] as NodeId..pending_end;
+                let uncomputed_nodes: Vec<_> = uncomputed_updates
+                    .range(pending_range)
+                    .map(|(node_key, update_value)| (*node_key, *update_value))
                     .collect();
-                pending_updates[level].extend(updates.iter());
+                pending_updates[level].extend(uncomputed_nodes.iter());
 
                 // Add the uncomputed nodes to the trie_updates
-                let level_end = bucket_id + end + STARTING_NODE_ID[level] as u64;
-                if pending_end < level_end {
-                    let uncomputeds: Vec<_> = uncomputed_updates
-                        .range(pending_end..level_end)
-                        .map(|(k, u)| (*k, *u))
+                let level_end_node_id = bucket_id + end + STARTING_NODE_ID[level] as u64;
+                if pending_end < level_end_node_id {
+                    let uncomputed_nodes: Vec<_> = uncomputed_updates
+                        .range(pending_end..level_end_node_id)
+                        .map(|(node_key, update_value)| (*node_key, *update_value))
                         .collect();
-                    trie_updates.extend(uncomputeds.iter());
+                    trie_updates.extend(uncomputed_nodes.iter());
                 }
                 (start, end) = (
                     start >> MIN_BUCKET_SIZE_BITS as u64,
@@ -473,23 +473,25 @@ where
                 );
             }
             // Add the uncomputed nodes upper new level to the trie_updates
-            let range = if info.new_top_level == MAX_SUBTREE_LEVELS - 1 {
-                bucket_id..bucket_id + (1 << (BUCKET_SLOT_BITS - MIN_BUCKET_SIZE_BITS) as NodeId)
+            let upper_level_range = if subtree_change.new_top_level == MAX_SUBTREE_LEVELS - 1 {
+                let max_level_offset = 1 << (BUCKET_SLOT_BITS - MIN_BUCKET_SIZE_BITS) as NodeId;
+                bucket_id..bucket_id + max_level_offset
             } else {
-                bucket_id..bucket_id + STARTING_NODE_ID[info.new_top_level + 1] as NodeId
+                let next_level_offset = STARTING_NODE_ID[subtree_change.new_top_level + 1] as NodeId;
+                bucket_id..bucket_id + next_level_offset
             };
-            let uncomputeds: Vec<_> = uncomputed_updates
-                .range(range)
-                .map(|(k, u)| (*k, *u))
+            let uncomputed_nodes: Vec<_> = uncomputed_updates
+                .range(upper_level_range)
+                .map(|(node_key, update_value)| (*node_key, *update_value))
                 .collect();
-            updates_map.extend(uncomputeds.into_iter());
-            trie_updates.extend(updates_map.into_iter());
+            contraction_node_updates.extend(uncomputed_nodes.into_iter());
+            trie_updates.extend(contraction_node_updates.into_iter());
         }
 
         // === PHASE 4: BOTTOM-UP SUBTREE PROCESSING ===
         // Process expansion buckets level by level from leaves to root
         // Handle subtree events where bucket capacity changes affect tree structure
-        let mut updates = vec![];
+        let mut current_level_updates = vec![];
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
             // Early exit: if no more subtree events remain at this or lower levels, we're done
             let total_remaining_events: usize = event_levels
@@ -502,63 +504,63 @@ where
             }
 
             // Update nodes at current level
-            updates = if level == MAX_SUBTREE_LEVELS - 1 {
+            current_level_updates = if level == MAX_SUBTREE_LEVELS - 1 {
                 // Leaf level: process expansion updates
                 self.update_leaf_nodes(&mut expansion_updates, true)
                     .expect("update leaf nodes for subtrie failed")
             } else {
                 // Internal level: propagate updates from children
-                self.update_internal_nodes(&mut updates)
+                self.update_internal_nodes(&mut current_level_updates)
                     .expect("update internal nodes for subtrie failed")
             };
 
             // Handle subtree events at this level (if any)
             if !event_levels[level].is_empty() {
-                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = updates
+                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = current_level_updates
                     .into_par_iter()
-                    .map(|(id, (old_c, mut new_c))| {
-                        let bid = (id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
-                        // Handle events for the bucket with  id = bid
-                        if let Some(info) = event_levels[level].get(&bid) {
-                            if info.old_top_level == level {
+                    .map(|(node_id, (old_commitment, mut new_commitment))| {
+                        let current_bucket_id = (node_id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
+                        // Handle events for the bucket with  id = current_bucket_id
+                        if let Some(subtree_change) = event_levels[level].get(&current_bucket_id) {
+                            if subtree_change.old_top_level == level {
                                 // Process the root node of the original subtrie
-                                if id == info.old_top_id {
+                                if node_id == subtree_change.old_top_id {
                                     // info.old_top_id not store in subtrie, so need to get from trie and add it,
                                     // then subtract the default commitment
-                                    let c = self
-                                        .commitment(info.root_id)
+                                    let root_commitment = self
+                                        .commitment(subtree_change.root_id)
                                         .expect("root node should exist in trie");
-                                    let new_e = Element::from_bytes_unchecked_uncompressed(c)
-                                        + Element::from_bytes_unchecked_uncompressed(new_c);
+                                    let new_element = Element::from_bytes_unchecked_uncompressed(root_commitment)
+                                        + Element::from_bytes_unchecked_uncompressed(new_commitment);
                                     // subtract the default commitment
-                                    let new_e = new_e
+                                    let new_element = new_element
                                         - Element::from_bytes_unchecked_uncompressed(
-                                            default_commitment(id),
+                                            default_commitment(node_id),
                                         );
-                                    new_c = new_e.to_bytes_uncompressed();
+                                    new_commitment = new_element.to_bytes_uncompressed();
                                     // When expanding, if there is no level change,
                                     // the subtree calculation is over.
-                                    if info.new_top_level == info.old_top_level {
-                                        return (vec![], vec![(info.root_id, (c, new_c))]);
+                                    if subtree_change.new_top_level == subtree_change.old_top_level {
+                                        return (vec![], vec![(subtree_change.root_id, (root_commitment, new_commitment))]);
                                     }
                                 }
                                 (
-                                    vec![(id, (default_commitment(info.old_top_id), new_c))],
+                                    vec![(node_id, (default_commitment(subtree_change.old_top_id), new_commitment))],
                                     vec![],
                                 )
-                            } else if info.new_top_level == level {
+                            } else if subtree_change.new_top_level == level {
                                 // Process the root node of the new subtrie
-                                assert_eq!(info.new_top_id, id);
-                                let c = self
-                                    .commitment(info.root_id)
+                                assert_eq!(subtree_change.new_top_id, node_id);
+                                let root_commitment = self
+                                    .commitment(subtree_change.root_id)
                                     .expect("root node should exist in trie");
-                                (vec![], vec![(info.root_id, (c, new_c))])
+                                (vec![], vec![(subtree_change.root_id, (root_commitment, new_commitment))])
                             } else {
                                 // Undefined event
-                                (vec![(id, (old_c, new_c))], vec![])
+                                (vec![(node_id, (old_commitment, new_commitment))], vec![])
                             }
                         } else {
-                            (vec![(id, (old_c, new_c))], vec![])
+                            (vec![(node_id, (old_commitment, new_commitment))], vec![])
                         }
                     })
                     .unzip();
@@ -569,12 +571,12 @@ where
                         .collect::<Vec<_>>()
                         .iter(),
                 );
-                updates = subtrie_updates.into_iter().flatten().collect();
+                current_level_updates = subtrie_updates.into_iter().flatten().collect();
             }
 
             // Add any pending updates for this level
-            updates.extend(pending_updates[level].iter());
-            trie_updates.extend(updates.iter());
+            current_level_updates.extend(pending_updates[level].iter());
+            trie_updates.extend(current_level_updates.iter());
         }
 
         Ok(trie_updates)
