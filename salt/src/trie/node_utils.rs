@@ -8,11 +8,11 @@
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE,
-        MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID, TRIE_WIDTH, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS,
+        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID, TRIE_WIDTH, TRIE_WIDTH_BITS,
     },
     get_local_number,
-    types::{get_bfs_level, NodeId, SaltKey},
+    types::{get_bfs_level, BucketId, NodeId, SaltKey},
 };
 
 /// Determines the position of a node within its parent's vector commitment.
@@ -114,7 +114,7 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 /// // Parent ID = 0 + STARTING_NODE_ID[1] = 0 + 1 = 1
 /// let parent = get_parent_id(&300, 2);
 /// assert_eq!(parent, 1);
-pub(crate) fn get_parent_id(node_id: &NodeId, level: usize) -> NodeId {
+pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
     // Calculate relative position from the start of current level
     let relative_position = *node_id as usize - STARTING_NODE_ID[level];
 
@@ -152,9 +152,10 @@ pub(crate) fn get_parent_id(node_id: &NodeId, level: usize) -> NodeId {
 /// # Example
 /// // For a node in bucket 100 at subtrie level 4
 /// // Parent will be at level 3 within the same bucket
-/// let child_id = subtrie_node_id(&SaltKey::from((100, 42)));
+/// let child_id = subtree_leaf_for_key(&SaltKey::from((100, 42)));
 /// let parent_id = subtrie_parent_id(&child_id, 4);
 pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
+    // FIXME: merge with get_parent_node?
     // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
     let node_id = *id & BUCKET_SLOT_ID_MASK;
     let bucket_id = *id - node_id;
@@ -166,45 +167,42 @@ pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
     // Parent's relative position
 }
 
-/// Converts a SaltKey to its corresponding NodeId in the bucket's subtrie.
+/// Maps a bucket ID to its subtree root node in the main trie.
 ///
-/// This function maps data keys to their storage locations in the trie structure.
-/// SaltKeys encode both bucket identification and slot position, which this function
-/// translates into a NodeId that can be used to navigate the subtrie.
-///
-/// # SaltKey Structure
-/// ```text
-/// SaltKey (64-bit) = [24-bit bucket_id][40-bit slot_id]
-/// ```
-///
-/// # Algorithm
-/// 1. Extract bucket ID (upper 24 bits) and shift left by 40 bits
-/// 2. Extract slot ID (lower 40 bits) and divide by 256 to get node position
-/// 3. Add the starting position of the deepest subtrie level
-/// 4. Combine to form the final NodeId
+/// This function calculates the NodeId of a bucket's root node at the main trie level.
+/// It works for both expanded and unexpanded buckets - the bucket root is always at
+/// the same position regardless of whether the bucket has been expanded into a subtree.
 ///
 /// # Arguments
-/// * `key` - The SaltKey to convert to a NodeId
+/// * `bucket_id` - The bucket identifier to locate in the main trie
 ///
 /// # Returns
-/// The NodeId representing this key's location in the bucket subtrie
+/// The NodeId of the bucket's root node at the main trie level (level 3)
+pub(crate) fn bucket_root_node_id(bucket_id: BucketId) -> NodeId {
+    bucket_id as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
+}
+
+/// Converts a SaltKey to the NodeId of its corresponding subtree leaf node.
 ///
-/// # Example
-/// let key = SaltKey::from((100, 1024)); // Bucket 100, slot 1024
-/// let node_id = subtrie_node_id(&key);
-/// // node_id encodes: bucket 100, position 4 (1024 >> 8), at deepest level
-pub(crate) fn subtrie_node_id(key: &SaltKey) -> NodeId {
-    // Extract bucket ID (24 bits) and place in upper portion of NodeId
-    let bucket_component = (key.bucket_id() as NodeId) << BUCKET_SLOT_BITS;
-
-    // Extract slot ID and convert to node position by dividing by 256
-    // This maps slot ranges to subtrie leaf nodes: slots 0-255 → node 0, etc.
-    let node_position = (key.slot_id() >> MIN_BUCKET_SIZE_BITS) as NodeId;
-
-    // Start from the deepest subtrie level and add relative position
-    let base_position = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId;
-
-    bucket_component + node_position + base_position
+/// This function maps data keys to their containing leaf nodes within bucket subtrees.
+/// It ONLY works for keys belonging to expanded buckets that have subtree structures.
+/// The returned leaf node is always at the deepest subtree level and represents
+/// a segment of 256 consecutive slots within the bucket.
+///
+/// # Prerequisites
+/// The bucket containing this key must be expanded (have a subtree structure).
+/// This function should not be used for keys in unexpanded buckets.
+///
+/// # Arguments
+/// * `key` - The SaltKey to locate within the subtree structure
+///
+/// # Returns
+/// The NodeId of the subtree leaf node containing this key's 256-slot segment
+pub(crate) fn subtree_leaf_for_key(key: &SaltKey) -> NodeId {
+    // bucket_id (24 bits) | starting_node_at_L4 + slot_id/256 (40 bits)
+    ((key.bucket_id() as u64) << BUCKET_SLOT_BITS)
+        + (key.slot_id() >> MIN_BUCKET_SIZE_BITS)
+        + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
 }
 
 /// Determines the top (shallowest) level of a bucket's subtrie based on its capacity.
@@ -252,12 +250,12 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
 
 /// Converts a subtrie NodeId back to the starting SaltKey of its slot range.
 ///
-/// This function performs the inverse operation of `subtrie_node_id`, taking a NodeId
+/// This function performs the inverse operation of `subtree_leaf_for_key`, taking a NodeId
 /// from a bucket's subtrie and calculating which SaltKey range it represents.
 /// Each subtrie leaf node covers a range of 256 consecutive slots.
 ///
 /// # Prerequisites
-/// The input `node_id` must be a result from `subtrie_node_id()` or equivalent,
+/// The input `node_id` must be a result from `subtree_leaf_for_key()` or equivalent,
 /// representing a valid node in a bucket's subtrie structure.
 ///
 /// # Algorithm
@@ -267,14 +265,14 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
 /// 4. Combine bucket ID and slot ID to form the SaltKey
 ///
 /// # Arguments
-/// * `id` - A NodeId from a bucket subtrie (typically from `subtrie_node_id()`)
+/// * `id` - A NodeId from a bucket subtrie (typically from `subtree_leaf_for_key()`)
 ///
 /// # Returns
 /// The SaltKey representing the first slot in the range covered by this node
 ///
 /// # Example
 /// // Node covering slots 1024-1279 in bucket 100
-/// let node_id = subtrie_node_id(&SaltKey::from((100, 1024)));
+/// let node_id = subtree_leaf_for_key(&SaltKey::from((100, 1024)));
 /// let start_key = subtrie_salt_key_start(&node_id);
 /// assert_eq!(start_key, SaltKey::from((100, 1024))); // First slot of the range
 pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
@@ -363,6 +361,78 @@ mod tests {
                 result,
                 TRIE_WIDTH,
                 description
+            );
+        }
+    }
+
+    /// Tests the bucket_root_node_id function for various bucket types and IDs.
+    ///
+    /// Verifies that bucket IDs are correctly mapped to their root nodes at the
+    /// main trie level (level 3).
+    #[test]
+    fn test_bucket_root_node_id() {
+        let starting_l3_node = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1];
+        let test_cases = [
+            (0, starting_l3_node, "First bucket"),
+            (100, starting_l3_node + 100, "Bucket 100"),
+            (65535, starting_l3_node + 65535, "Last meta bucket"),
+            (65536, starting_l3_node + 65536, "First data bucket"),
+            (16777215, starting_l3_node + 16777215, "Max bucket ID"),
+        ];
+
+        for (bucket_id, expected, description) in test_cases {
+            let result = bucket_root_node_id(bucket_id);
+            assert_eq!(
+                result, expected as NodeId,
+                "Failed for {}: bucket_id={}, expected={}, got={}",
+                description, bucket_id, expected, result
+            );
+        }
+    }
+
+    /// Tests the subtree_leaf_for_key function for various key patterns.
+    ///
+    /// Verifies that SaltKeys are correctly mapped to their subtree leaf nodes
+    /// at the deepest subtree level (level 4).
+    #[test]
+    fn test_subtree_leaf_for_key() {
+        let starting_l4_node = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
+
+        let test_cases = [
+            (
+                (0, 0),
+                (0u64 << BUCKET_SLOT_BITS) + 0 + starting_l4_node,
+                "Bucket 0, slot 0",
+            ),
+            (
+                (0, 255),
+                (0u64 << BUCKET_SLOT_BITS) + 0 + starting_l4_node,
+                "Bucket 0, slots 0-255 same leaf",
+            ),
+            (
+                (0, 256),
+                (0u64 << BUCKET_SLOT_BITS) + 1 + starting_l4_node,
+                "Bucket 0, slots 256-511",
+            ),
+            (
+                (100, 1024),
+                (100u64 << BUCKET_SLOT_BITS) + 4 + starting_l4_node,
+                "Bucket 100, segment 4",
+            ),
+            (
+                (16777215, 512),
+                (16777215u64 << BUCKET_SLOT_BITS) + 2 + starting_l4_node,
+                "Max bucket, segment 2",
+            ),
+        ];
+
+        for ((bucket_id, slot_id), expected, description) in test_cases {
+            let key = SaltKey::from((bucket_id, slot_id));
+            let result = subtree_leaf_for_key(&key);
+            assert_eq!(
+                result, expected,
+                "Failed for {}: key=({}, {}), expected={}, got={}",
+                description, bucket_id, slot_id, expected, result
             );
         }
     }

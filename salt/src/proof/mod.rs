@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_sub_trie_top_level() {
         use crate::trie::node_utils::{
-            get_child_node, sub_trie_top_level, subtrie_node_id, subtrie_parent_id,
+            get_child_node, sub_trie_top_level, subtree_leaf_for_key, subtrie_parent_id,
             subtrie_salt_key_start,
         };
 
@@ -296,7 +296,7 @@ mod tests {
         //assert_eq!(vc_position_in_parent(&72061992101282049), 0);
 
         assert_eq!(
-            subtrie_node_id(&SaltKey(72061992084439043)),
+            subtree_leaf_for_key(&SaltKey(72061992084439043)),
             72061992101282049
         );
 

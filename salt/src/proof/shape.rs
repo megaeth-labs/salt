@@ -50,7 +50,7 @@ use crate::{
     constant::{
         BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID, TRIE_WIDTH_BITS,
     },
-    trie::node_utils::subtrie_node_id,
+    trie::node_utils::subtree_leaf_for_key,
     BucketId, NodeId, SaltKey, SlotId,
 };
 use iter_tools::Itertools;
@@ -393,7 +393,7 @@ fn process_bucket_state_nodes(
     let state_nodes = keys
         .chunk_by(|&x, &y| x.slot_id() >> 8 == y.slot_id() >> 8)
         .map(|chunk| {
-            let subtrie_node_id = subtrie_node_id(&chunk[0]);
+            let subtrie_node_id = subtree_leaf_for_key(&chunk[0]);
             let slot_ids = chunk
                 .iter()
                 .map(|key| (key.slot_id() & 0xFF) as u8)

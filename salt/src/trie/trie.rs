@@ -172,7 +172,7 @@ where
         // Process from level TRIE_LEVELS-2 (deepest internal nodes) to level 0 (root)
         (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|level| {
             // Compute updates for parent nodes at this level based on child changes
-            updates = self.update_internal_nodes(&mut updates, level, get_parent_id)?;
+            updates = self.update_internal_nodes(&mut updates, level, get_parent_node)?;
 
             // Record the new parent updates in the complete trie_updates collection
             trie_updates.extend(updates.iter());
@@ -321,7 +321,7 @@ where
                     } else {
                         // Set the zero commitment of the contracted bucket node
                         insert_uncomputed_node(
-                            subtrie_node_id(k),
+                            subtree_leaf_for_key(k),
                             sub_trie_top_level(old_capacity) + 1,
                             MAX_SUBTREE_LEVELS,
                             &mut uncomputed_updates,
@@ -333,7 +333,7 @@ where
             .collect::<Vec<_>>();
         // Compute the commitment of the non-expansion kvs.
         let mut trie_updates = self.update_leaf_nodes(&mut normal_updates, |salt_key| {
-            salt_key.bucket_id() as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
+            bucket_root_node_id(salt_key.bucket_id())
         })?;
 
         trie_updates.extend(pending_updates[MAX_SUBTREE_LEVELS].iter());
@@ -456,7 +456,7 @@ where
                 break;
             }
             updates = if level == MAX_SUBTREE_LEVELS - 1 {
-                self.update_leaf_nodes(&mut expansion_updates, subtrie_node_id)
+                self.update_leaf_nodes(&mut expansion_updates, subtree_leaf_for_key)
                     .expect("update leaf nodes for subtrie failed")
             } else {
                 self.update_internal_nodes(&mut updates, level, subtrie_parent_id)
@@ -924,7 +924,7 @@ impl SubtrieChangeInfo {
             + STARTING_NODE_ID[old_top_level] as NodeId;
         let new_top_id = ((bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId)
             + STARTING_NODE_ID[new_top_level] as NodeId;
-        let root_id = (bucket_id as NodeId) + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+        let root_id = bucket_root_node_id(bucket_id);
         Self {
             old_capacity,
             old_top_level,
@@ -1924,7 +1924,7 @@ mod tests {
         // Check and handle the commitment updates of the bottom-level node
         let cur_level = bottom_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes(&mut updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut updates, cur_level, get_parent_node)
             .unwrap();
 
         let bytes_indices =
@@ -1953,7 +1953,7 @@ mod tests {
         // Check and handle the commitment updates of the second-level node
         let cur_level = cur_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_node)
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
@@ -1973,7 +1973,7 @@ mod tests {
 
         let cur_level = cur_level - 1;
         let unprocess_updates = trie
-            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_node)
             .unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
@@ -1999,9 +1999,8 @@ mod tests {
         let fr1 = kv_hash(&kv1);
         let fr2 = kv_hash(&kv2);
         let kv_none = kv_hash(&None);
-        let default_bucket_data = default_commitment(
-            (STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] + NUM_META_BUCKETS) as NodeId,
-        );
+        let default_bucket_data =
+            default_commitment(bucket_root_node_id(NUM_META_BUCKETS as BucketId));
 
         // Prepare the state updates
         let bucket_ids = [
@@ -2027,11 +2026,11 @@ mod tests {
             trie_updates[0..2],
             vec![
                 (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId + bucket_ids[1] as NodeId,
+                    bucket_root_node_id(bucket_ids[1]),
                     (default_bucket_data, c1)
                 ),
                 (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId + bucket_ids[0] as NodeId,
+                    bucket_root_node_id(bucket_ids[0]),
                     (default_bucket_data, c2)
                 ),
             ]
