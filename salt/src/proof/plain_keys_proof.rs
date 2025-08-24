@@ -5,10 +5,10 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
+    proof::witness::BlockWitness,
     proof::ProofError,
     state::state::EphemeralSaltState,
     traits::{StateReader, TrieReader},
-    trie::witness::BlockWitness,
     types::*,
 };
 use serde::{Deserialize, Serialize};

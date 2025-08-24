@@ -1,13 +1,13 @@
 //! This module return all-needed queries for a given kv list by create_sub_trie()
 use crate::{
     constant::{default_commitment, EMPTY_SLOT_HASH, NUM_META_BUCKETS, TRIE_WIDTH},
-    get_child_node,
     proof::{
         prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
     traits::{StateReader, TrieReader},
+    trie::trie::get_child_node,
     trie::trie::{sub_trie_top_level, subtrie_salt_key_start},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
