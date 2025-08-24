@@ -39,51 +39,36 @@ pub(crate) fn vc_position_in_parent(node_id: &NodeId) -> usize {
 
 /// Computes the NodeId of a specific child given its parent and child index.
 ///
-/// This function navigates from a parent node to one of its 256 children in the SALT trie.
-/// It handles both main trie nodes and bucket subtrie nodes by preserving the bucket ID
-/// and calculating the child's position using BFS numbering.
-///
-/// # NodeId Structure
-/// ```text
-/// NodeId = [24-bit bucket_id][40-bit node_position]
-/// ```
-///
-/// # Algorithm
-/// 1. Extract bucket ID (upper 24 bits) and node position (lower 40 bits)
-/// 2. Calculate parent's relative position within its level
-/// 3. Left-shift by 8 bits (TRIE_WIDTH_BITS) to account for 256 children per node
-/// 4. Add the starting position of the child level
-/// 5. Add the specific child index (0-255)
-/// 6. Combine with bucket ID
+/// This function navigates from a parent node to one of its 256 children in the
+/// SALT trie. It handles both main trie and bucket subtree nodes by preserving
+/// the bucket ID and calculating the child's position using BFS numbering.
 ///
 /// # Arguments
-/// * `parent_id` - The NodeId of the parent node
+/// * `parent` - The NodeId of the parent node
 /// * `child_idx` - The child index (0-255) to navigate to
 ///
 /// # Returns
 /// The NodeId of the specified child node
-///
-/// # Panics
-/// Panics if the parent's level is >= SUB_TRIE_LEVELS (invalid for child calculation)
-///
-/// # Example
-/// // Navigate from root (0) to its 42nd child
-/// let child = get_child_node(&0, 42);
-/// assert_eq!(child, 43); // Root children start at ID 1
-pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
-    // Split NodeId into bucket ID (upper 24 bits) and node position (lower 40 bits)
-    let node_id = *parent_id & BUCKET_SLOT_ID_MASK;
-    let bucket_id = *parent_id - node_id;
+pub fn get_child_node(parent: &NodeId, child_idx: usize) -> NodeId {
+    // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
+    let local_node_id = get_local_number(*parent);
+    let bucket_id = *parent - local_node_id;
 
     // Determine which level the parent is on
-    let level = get_bfs_level(node_id);
-    assert!(level < MAX_SUBTREE_LEVELS);
+    let level = get_bfs_level(local_node_id);
 
-    // Calculate child NodeId using BFS numbering:
-    bucket_id // Preserve the bucket context
-        + ((node_id - STARTING_NODE_ID[level] as NodeId) << TRIE_WIDTH_BITS) // Parent's relative position * 256
-        + STARTING_NODE_ID[level + 1] as NodeId // Child level starting position
-        + child_idx as NodeId // Specific child index (0-255)
+    // Calculate parent's relative position from the start of its level
+    let parent_relative_position = local_node_id - STARTING_NODE_ID[level] as NodeId;
+
+    // Get the starting position for the child level
+    let child_level_start = STARTING_NODE_ID[level + 1] as NodeId;
+
+    // Multiply parent's position by 256 then add the child level start and the
+    // specific child index
+    bucket_id
+        + child_level_start
+        + (parent_relative_position << TRIE_WIDTH_BITS)
+        + child_idx as NodeId
 }
 
 /// Computes the parent NodeId for a given node in the canonical SALT trie.
@@ -92,11 +77,6 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 /// upward from a child to its parent using BFS numbering. It works by reversing
 /// the child calculation: dividing the relative position by 256 to find which
 /// parent slot this child belongs to.
-///
-/// # Algorithm
-/// 1. Calculate the node's relative position within its level
-/// 2. Right-shift by 8 bits (divide by 256) to determine parent's relative position
-/// 3. Add the parent level's starting position
 ///
 /// # Arguments
 /// * `node_id` - The NodeId of the child node
@@ -107,13 +87,6 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 ///
 /// # Panics
 /// Implicitly panics if level is 0 (root has no parent) due to underflow
-///
-/// # Example
-/// // Node 300 at level 2 (relative position 43 = 300-257)
-/// // Parent position = 43 >> 8 = 0 (first parent at level 1)
-/// // Parent ID = 0 + STARTING_NODE_ID[1] = 0 + 1 = 1
-/// let parent = get_parent_id(&300, 2);
-/// assert_eq!(parent, 1);
 pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
     // Calculate relative position from the start of current level
     let relative_position = *node_id as usize - STARTING_NODE_ID[level];
@@ -121,7 +94,7 @@ pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
     // Divide by 256 (right-shift by 8) to get parent's relative position
     // Each parent has 256 children, so child positions 0-255 → parent 0,
     // positions 256-511 → parent 1, etc.
-    let parent_relative_position = relative_position >> MIN_BUCKET_SIZE_BITS;
+    let parent_relative_position = relative_position >> TRIE_WIDTH_BITS;
 
     // Add parent level's starting position to get absolute parent ID
     (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
@@ -362,6 +335,78 @@ mod tests {
                 TRIE_WIDTH,
                 description
             );
+        }
+    }
+
+
+    /// Tests the get_child_node function for various parent-child navigation
+    /// scenarios.
+    ///
+    /// Verifies correct child NodeId calculation across different trie levels
+    /// and child indices.
+    #[test]
+    fn test_get_child_node() {
+        // Test cases: (parent_id, child_idx, expected_child_id, description)
+        let test_cases = [
+            // Level 0 (root) to level 1
+            (0, 0, 1, "Root to first child"),
+            (0, 127, 128, "Root to middle child"),
+            (0, 255, 256, "Root to last child"),
+            // Level 1 to level 2
+            (1, 0, 257, "First L1 node to first child"),
+            (128, 0, 257 + 127 * 256, "Middle L1 node to first child"),
+            // Bucket subtree navigation
+            (
+                (100u64 << BUCKET_SLOT_BITS) | 1,
+                0,
+                (100u64 << BUCKET_SLOT_BITS) | 257,
+                "Bucket subtree navigation",
+            ),
+        ];
+
+        for (parent, child_idx, expected, description) in test_cases {
+            let result = get_child_node(&parent, child_idx);
+            assert_eq!(result, expected, "Failed: {}", description);
+        }
+    }
+
+    /// Tests the get_parent_node function for various child-parent navigation
+    /// scenarios.
+    ///
+    /// Verifies correct parent NodeId calculation and tests the inverse relationship
+    /// with get_child_node.
+    #[test]
+    fn test_get_parent_node() {
+        // Test cases: (child_id, level, expected_parent_id, description)
+        let test_cases = [
+            // Level 1 to level 0 (root)
+            (1, 1, 0, "First child back to root"),
+            (128, 1, 0, "Middle child back to root"),
+            (256, 1, 0, "Last child back to root"),
+            // Level 2 to level 1
+            (257, 2, 1, "First L2 node to parent"),
+            (257 + 256, 2, 2, "Second group L2 node to parent"),
+            (257 + 127 * 256, 2, 128, "Complex L2 node to parent"),
+        ];
+
+        for (child, level, expected_parent, description) in test_cases {
+            let result = get_parent_node(&child, level);
+            assert_eq!(result, expected_parent, "Failed: {}", description);
+        }
+
+        // Test inverse relationship: parent -> child -> parent
+        let test_parents = [0, 1, 128];
+        for parent in test_parents {
+            for child_idx in [0, 127, 255] {
+                let child = get_child_node(&parent, child_idx);
+                let child_level = get_bfs_level(get_local_number(child));
+                let recovered_parent = get_parent_node(&child, child_level);
+                assert_eq!(
+                    recovered_parent, parent,
+                    "Inverse relationship failed: parent={}, child_idx={}",
+                    parent, child_idx
+                );
+            }
         }
     }
 
