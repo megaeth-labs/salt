@@ -3,15 +3,13 @@
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{ProofError, SaltProof};
+pub use proof::{BlockWitness, PlainKeysProof, ProofError, SaltProof};
 pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
-    proof::PlainKeysProof,
     trie::{get_child_node, StateRoot},
     updates::TrieUpdates,
-    witness::BlockWitness,
 };
 
 pub mod traits;
