@@ -41,7 +41,7 @@
 
 use super::{hasher, updates::StateUpdates};
 use crate::{
-    constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER},
+    constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
     traits::StateReader,
     types::*,
 };
@@ -452,6 +452,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         new_capacity: u64,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
+        assert!(
+            new_capacity <= BUCKET_SLOT_ID_MASK,
+            "Exceeds max bucket capacity: {new_capacity} > {BUCKET_SLOT_ID_MASK}"
+        );
+
         // Step 1: Extract all existing entries (but do not clear the cache yet)
         let old_metadata = self.metadata(bucket_id, true)?;
         let mut old_bucket = BTreeMap::new();
