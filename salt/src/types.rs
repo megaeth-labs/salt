@@ -323,6 +323,12 @@ impl TryFrom<SaltValue> for BucketMeta {
 /// - Bucket 100000's internal node at position 256: NodeId = (100000 << 40) | 256
 pub type NodeId = u64;
 
+/// Returns the local number of a node within its trie (either the main trie or
+/// a bucket subtree) by clearing out the highest 24 bits in `NodeId`.
+pub fn get_local_number(node_id: NodeId) -> u64 {
+    node_id & BUCKET_SLOT_ID_MASK
+}
+
 /// Returns true if the given NodeId addresses a node in a bucket subtree.
 ///
 /// This is a convenience wrapper around [`parse_node_id`] that returns `true` only for

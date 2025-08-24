@@ -293,7 +293,7 @@ mod tests {
 
         assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256 * 256), 0); // 0
 
-        //assert_eq!(get_child_idx(&72061992101282049, 4), 0);
+        //assert_eq!(vc_position_in_parent(&72061992101282049), 0);
 
         assert_eq!(
             subtrie_node_id(&SaltKey(72061992084439043)),

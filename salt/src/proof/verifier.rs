@@ -1,7 +1,7 @@
 //! Verifier for the Salt proof
 use crate::{
     constant::{
-        EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID, MAX_SUBTREE_LEVELS,
+        EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID,
     },
     proof::{
         prover::calculate_fr_by_kv,

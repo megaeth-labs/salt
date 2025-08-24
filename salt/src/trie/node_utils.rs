@@ -8,44 +8,33 @@
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
-        STARTING_NODE_ID, MAX_SUBTREE_LEVELS, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE,
+        MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID, TRIE_WIDTH, TRIE_WIDTH_BITS,
     },
+    get_local_number,
     types::{get_bfs_level, NodeId, SaltKey},
 };
 
-/// Calculates the index position of a node among its siblings at the same level.
+/// Determines the position of a node within its parent's vector commitment.
 ///
-/// In the SALT trie, each internal node has exactly 256 children (TRIE_WIDTH = 256).
-/// This function determines which child position (0-255) a given node occupies
-/// under its parent by using breadth-first search (BFS) numbering.
-///
-/// # Algorithm
-/// 1. Subtract the level's starting node ID to get the relative position
-/// 2. Mask with 255 (MIN_BUCKET_SIZE - 1) to get the position within the 256-child group
+/// Both the main trie and bucket subtrees use complete 256-ary tries as their
+/// cryptographic structure. Each parent node maintains a vector commitment (VC)
+/// with exactly 256 positions (TRIE_WIDTH = 256), one for each possible child.
+/// This function calculates which position (0-255) a given node occupies in its
+/// parent's vector commitment.
 ///
 /// # Arguments
 /// * `node_id` - The unique identifier of the node
-/// * `level` - The tree level where this node resides (0 = root)
 ///
 /// # Returns
-/// The child index (0-255) representing this node's position among its siblings
-///
-/// # Example
-/// ```
-/// // At level 2, nodes start at ID 257
-/// // Node 300 has relative position (300 - 257) = 43
-/// // So it's the 44th child (0-indexed) of its parent
-/// let idx = get_child_idx(&300, 2);
-/// assert_eq!(idx, 43);
-/// ```
-pub(crate) fn get_child_idx(node_id: &NodeId, level: usize) -> usize {
-    // Calculate relative position from the start of this level
-    let relative_position = *node_id as usize - STARTING_NODE_ID[level];
+/// The position (0-255) within the parent's 256-element vector commitment
+pub(crate) fn vc_position_in_parent(node_id: &NodeId) -> usize {
+    let local_number = get_local_number(*node_id);
+    let trie_level = get_bfs_level(local_number);
 
-    // Extract the child index by masking with 255 (0xFF)
-    // This gives us the position within a group of 256 siblings
-    relative_position & (MIN_BUCKET_SIZE - 1)
+    // Calculate relative position from the start of this level
+    let relative_pos = local_number as usize - STARTING_NODE_ID[trie_level];
+    relative_pos % TRIE_WIDTH
 }
 
 /// Computes the NodeId of a specific child given its parent and child index.
@@ -78,11 +67,9 @@ pub(crate) fn get_child_idx(node_id: &NodeId, level: usize) -> usize {
 /// Panics if the parent's level is >= SUB_TRIE_LEVELS (invalid for child calculation)
 ///
 /// # Example
-/// ```
 /// // Navigate from root (0) to its 42nd child
 /// let child = get_child_node(&0, 42);
 /// assert_eq!(child, 43); // Root children start at ID 1
-/// ```
 pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
     // Split NodeId into bucket ID (upper 24 bits) and node position (lower 40 bits)
     let node_id = *parent_id & BUCKET_SLOT_ID_MASK;
@@ -122,13 +109,11 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 /// Implicitly panics if level is 0 (root has no parent) due to underflow
 ///
 /// # Example
-/// ```
 /// // Node 300 at level 2 (relative position 43 = 300-257)
 /// // Parent position = 43 >> 8 = 0 (first parent at level 1)
 /// // Parent ID = 0 + STARTING_NODE_ID[1] = 0 + 1 = 1
 /// let parent = get_parent_id(&300, 2);
 /// assert_eq!(parent, 1);
-/// ```
 pub(crate) fn get_parent_id(node_id: &NodeId, level: usize) -> NodeId {
     // Calculate relative position from the start of current level
     let relative_position = *node_id as usize - STARTING_NODE_ID[level];
@@ -165,12 +150,10 @@ pub(crate) fn get_parent_id(node_id: &NodeId, level: usize) -> NodeId {
 /// The NodeId of the parent node within the same bucket's subtrie
 ///
 /// # Example
-/// ```
 /// // For a node in bucket 100 at subtrie level 4
 /// // Parent will be at level 3 within the same bucket
 /// let child_id = subtrie_node_id(&SaltKey::from((100, 42)));
 /// let parent_id = subtrie_parent_id(&child_id, 4);
-/// ```
 pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
     // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
     let node_id = *id & BUCKET_SLOT_ID_MASK;
@@ -179,7 +162,8 @@ pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
     // Calculate parent within the subtrie structure:
     bucket_id // Preserve bucket context
         + STARTING_NODE_ID[level - 1] as NodeId // Parent level's base position
-        + ((node_id - STARTING_NODE_ID[level] as NodeId) >> MIN_BUCKET_SIZE_BITS) // Parent's relative position
+        + ((node_id - STARTING_NODE_ID[level] as NodeId) >> MIN_BUCKET_SIZE_BITS)
+    // Parent's relative position
 }
 
 /// Converts a SaltKey to its corresponding NodeId in the bucket's subtrie.
@@ -206,11 +190,9 @@ pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
 /// The NodeId representing this key's location in the bucket subtrie
 ///
 /// # Example
-/// ```
 /// let key = SaltKey::from((100, 1024)); // Bucket 100, slot 1024
 /// let node_id = subtrie_node_id(&key);
 /// // node_id encodes: bucket 100, position 4 (1024 >> 8), at deepest level
-/// ```
 pub(crate) fn subtrie_node_id(key: &SaltKey) -> NodeId {
     // Extract bucket ID (24 bits) and place in upper portion of NodeId
     let bucket_component = (key.bucket_id() as NodeId) << BUCKET_SLOT_BITS;
@@ -251,11 +233,9 @@ pub(crate) fn subtrie_node_id(key: &SaltKey) -> NodeId {
 /// The subtrie level (0-4) that should serve as the root for this capacity
 ///
 /// # Example
-/// ```
 /// assert_eq!(sub_trie_top_level(256), 4);     // Minimal subtrie
 /// assert_eq!(sub_trie_top_level(1024), 3);    // Needs one more level
 /// assert_eq!(sub_trie_top_level(65536), 2);   // Needs two more levels
-/// ```
 pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
@@ -263,8 +243,8 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
     // Work upward until capacity fits in a single level
     // Each level up can handle 256x more slots
     while capacity > MIN_BUCKET_SIZE as u64 {
-        level -= 1;                                    // Move up one level
-        capacity >>= MIN_BUCKET_SIZE_BITS;            // Divide capacity by 256
+        level -= 1; // Move up one level
+        capacity >>= MIN_BUCKET_SIZE_BITS; // Divide capacity by 256
     }
 
     level
@@ -293,12 +273,10 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
 /// The SaltKey representing the first slot in the range covered by this node
 ///
 /// # Example
-/// ```
 /// // Node covering slots 1024-1279 in bucket 100
 /// let node_id = subtrie_node_id(&SaltKey::from((100, 1024)));
 /// let start_key = subtrie_salt_key_start(&node_id);
 /// assert_eq!(start_key, SaltKey::from((100, 1024))); // First slot of the range
-/// ```
 pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
     // Extract node position (lower 40 bits) and bucket ID (upper 24 bits)
     let node_id = *id & BUCKET_SLOT_ID_MASK;
@@ -313,4 +291,79 @@ pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
 
     // Combine bucket and slot components into final SaltKey
     SaltKey(bucket_id + slot_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests the vc_position_in_parent function for various node types and positions.
+    ///
+    /// Verifies that the function correctly calculates vector commitment positions (0-255)
+    /// for both main trie nodes and bucket subtree nodes, ensuring proper modulo arithmetic.
+    #[test]
+    fn test_vc_position_in_parent() {
+        // Test cases: (node_id, expected_position, description)
+        let test_cases = [
+            // Main trie level 1 nodes (children of root at level 0)
+            (1, 0, "First child of root"),
+            (128, 127, "Middle child of root"),
+            (256, 255, "Last child of root"),
+            // Main trie level 2 nodes
+            (257, 0, "First node at level 2"),
+            (257 + 255, 255, "256th node at level 2"),
+            (257 + 256, 0, "257th node wraps to position 0"),
+            (257 + 511, 255, "512nd node at level 2"),
+            (257 + 512, 0, "513rd node wraps to position 0"),
+            // Main trie level 3 nodes (bucket roots)
+            (65793, 0, "First bucket root (bucket 0)"),
+            (65793 + 255, 255, "256th bucket root"),
+            (65793 + 256, 0, "257th bucket root wraps to 0"),
+            // Subtree nodes in bucket 100000
+            (
+                (100000u64 << BUCKET_SLOT_BITS) | 1,
+                0,
+                "First subtree node in bucket 100000",
+            ),
+            (
+                (100000u64 << BUCKET_SLOT_BITS) | 256,
+                255,
+                "Last child of first subtree parent",
+            ),
+            (
+                (100000u64 << BUCKET_SLOT_BITS) | 257,
+                0,
+                "First child of second subtree parent",
+            ),
+            (
+                (100000u64 << BUCKET_SLOT_BITS) | 512,
+                255,
+                "Complex subtree position",
+            ),
+            // Edge case: maximum bucket ID
+            (
+                (16777215u64 << BUCKET_SLOT_BITS) | 1000,
+                231,
+                "Max bucket ID with position 1000 (1000-769=231)",
+            ),
+        ];
+
+        for (node_id, expected, description) in test_cases {
+            let result = vc_position_in_parent(&node_id);
+            assert_eq!(
+                result, expected,
+                "Failed for {}: node_id={}, expected={}, got={}",
+                description, node_id, expected, result
+            );
+
+            // Verify position is always in valid range
+            assert!(
+                result < TRIE_WIDTH,
+                "Position {} should be < {} for {}",
+                result,
+                TRIE_WIDTH,
+                description
+            );
+        }
+    }
 }

@@ -48,7 +48,7 @@
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, STARTING_NODE_ID, MAX_SUBTREE_LEVELS, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID, TRIE_WIDTH_BITS,
     },
     trie::node_utils::subtrie_node_id,
     BucketId, NodeId, SaltKey, SlotId,

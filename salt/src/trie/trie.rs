@@ -2,9 +2,9 @@
 
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, META_BUCKET_SIZE,
-        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, POLY_DEGREE,
-        STARTING_NODE_ID, MAX_SUBTREE_LEVELS,
+        default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS,
+        MAX_SUBTREE_LEVELS, META_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
+        NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -542,7 +542,7 @@ where
     {
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            (a.slot_id() as usize % POLY_DEGREE).cmp(&(b.slot_id() as usize % POLY_DEGREE))
+            (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
@@ -556,7 +556,7 @@ where
                     self.committer.gi_mul_delta(
                         &kv_hash(old_value),
                         &kv_hash(new_value),
-                        salt_key.slot_id() as usize % POLY_DEGREE,
+                        salt_key.slot_id() as usize % TRIE_WIDTH,
                     ),
                 )
             })
@@ -605,7 +605,7 @@ where
         // This ensures cache-friendly access patterns and deterministic ordering
         // for consistent parallel processing results.
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            get_child_idx(a, level + 1).cmp(&get_child_idx(b, level + 1))
+            vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
 
         // Compute commitment deltas in parallel chunks to be applied to parent nodes.
@@ -636,9 +636,9 @@ where
                             // Compute delta: G[child_index] * (new_scalar - old_scalar)
                             // This represents the change needed in parent's vector commitment
                             self.committer.gi_mul_delta(
-                                &scalars[0],                  // old commitment as scalar
-                                &scalars[1],                  // new commitment as scalar
-                                get_child_idx(id, level + 1), // position within parent's VC
+                                &scalars[0],               // old commitment as scalar
+                                &scalars[1],               // new commitment as scalar
+                                vc_position_in_parent(id), // position within parent's VC
                             ),
                         )
                     })
@@ -1486,7 +1486,10 @@ mod tests {
         assert_eq!(sub_trie_top_level(256 * 256), MAX_SUBTREE_LEVELS - 2);
         assert_eq!(sub_trie_top_level(256 * 256 * 2), MAX_SUBTREE_LEVELS - 3);
         assert_eq!(sub_trie_top_level(256 * 256 * 256), MAX_SUBTREE_LEVELS - 3);
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 2), MAX_SUBTREE_LEVELS - 4);
+        assert_eq!(
+            sub_trie_top_level(256 * 256 * 256 * 2),
+            MAX_SUBTREE_LEVELS - 4
+        );
         assert_eq!(
             sub_trie_top_level(256 * 256 * 256 * 256),
             MAX_SUBTREE_LEVELS - 4
