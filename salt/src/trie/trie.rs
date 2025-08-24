@@ -3,8 +3,8 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, META_BUCKET_SIZE,
-        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, STARTING_NODE_ID,
-        SUB_TRIE_LEVELS,
+        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, POLY_DEGREE,
+        STARTING_NODE_ID, MAX_SUBTREE_LEVELS,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -172,7 +172,7 @@ where
         // Process from level TRIE_LEVELS-2 (deepest internal nodes) to level 0 (root)
         (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|level| {
             // Compute updates for parent nodes at this level based on child changes
-            updates = self.update_internal_commitments(&mut updates, level, get_parent_id)?;
+            updates = self.update_internal_nodes(&mut updates, level, get_parent_id)?;
 
             // Record the new parent updates in the complete trie_updates collection
             trie_updates.extend(updates.iter());
@@ -198,7 +198,7 @@ where
         // expansion kvs and non-expansion kvs are sorted separately
         let mut expansion_updates: SaltUpdates<'_> = vec![];
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
-            vec![HashMap::new(); SUB_TRIE_LEVELS];
+            vec![HashMap::new(); MAX_SUBTREE_LEVELS];
         let (mut bucket_id, mut is_expansion, mut old_capacity, mut new_capacity) = (
             u32::MAX,
             false,
@@ -234,7 +234,7 @@ where
         // Record the nodes that need extra processing during the subtrie calculation
         // from 0 to SUB_TRIE_LEVELS-1. The last group records the nodes that have been
         // calculated and directly updates to trie_updates.
-        let mut pending_updates = vec![vec![]; SUB_TRIE_LEVELS + 1];
+        let mut pending_updates = vec![vec![]; MAX_SUBTREE_LEVELS + 1];
         // Record the information of buckets that have been downsized, used to distinguish
         // between nodes in uncomputed_updates that need to participate in the calculation
         // and those that do not.
@@ -284,7 +284,7 @@ where
                             if k.slot_id() >= info.new_capacity {
                                 // During contraction, subtrie not changed and need to record roots
                                 // changed
-                                pending_updates[SUB_TRIE_LEVELS].push((
+                                pending_updates[MAX_SUBTREE_LEVELS].push((
                                     info.root_id,
                                     (
                                         self.commitment(info.root_id)
@@ -323,7 +323,7 @@ where
                         insert_uncomputed_node(
                             subtrie_node_id(k),
                             sub_trie_top_level(old_capacity) + 1,
-                            SUB_TRIE_LEVELS,
+                            MAX_SUBTREE_LEVELS,
                             &mut uncomputed_updates,
                         );
                     }
@@ -332,11 +332,11 @@ where
             })
             .collect::<Vec<_>>();
         // Compute the commitment of the non-expansion kvs.
-        let mut trie_updates = self.update_leaf_commitments(&mut normal_updates, |salt_key| {
+        let mut trie_updates = self.update_leaf_nodes(&mut normal_updates, |salt_key| {
             salt_key.bucket_id() as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
         })?;
 
-        trie_updates.extend(pending_updates[SUB_TRIE_LEVELS].iter());
+        trie_updates.extend(pending_updates[MAX_SUBTREE_LEVELS].iter());
 
         // Record (bucket, capacity changes) of unchanged KV but changed capacity to
         // expansion_updates. it is used to compute the commitment of the subtrie.
@@ -399,7 +399,7 @@ where
                 info.new_capacity >> MIN_BUCKET_SIZE_BITS as NodeId,
                 info.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId,
             );
-            for level in (info.new_top_level + 1..SUB_TRIE_LEVELS).rev() {
+            for level in (info.new_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
                 // Add the uncomputed nodes to pending_updates for calculate the parent node
                 // um = uncomputed map
                 // |--caculate nodes---|---caculates in um--|---uncomputed in um--|
@@ -429,7 +429,7 @@ where
                 );
             }
             // Add the uncomputed nodes upper new level to the trie_updates
-            let range = if info.new_top_level == SUB_TRIE_LEVELS - 1 {
+            let range = if info.new_top_level == MAX_SUBTREE_LEVELS - 1 {
                 bucket_id..bucket_id + (1 << (BUCKET_SLOT_BITS - MIN_BUCKET_SIZE_BITS) as NodeId)
             } else {
                 bucket_id..bucket_id + STARTING_NODE_ID[info.new_top_level + 1] as NodeId
@@ -444,7 +444,7 @@ where
 
         // calculate the commitments of the subtrie by leaves (KVS) changes
         let mut updates = vec![];
-        for level in (0..SUB_TRIE_LEVELS).rev() {
+        for level in (0..MAX_SUBTREE_LEVELS).rev() {
             // // If there is no subtrie that needs to be calculated, exit the loop directly.
             if event_levels
                 .iter()
@@ -455,11 +455,11 @@ where
             {
                 break;
             }
-            updates = if level == SUB_TRIE_LEVELS - 1 {
-                self.update_leaf_commitments(&mut expansion_updates, subtrie_node_id)
+            updates = if level == MAX_SUBTREE_LEVELS - 1 {
+                self.update_leaf_nodes(&mut expansion_updates, subtrie_node_id)
                     .expect("update leaf nodes for subtrie failed")
             } else {
-                self.update_internal_commitments(&mut updates, level, subtrie_parent_id)
+                self.update_internal_nodes(&mut updates, level, subtrie_parent_id)
                     .expect("update internal nodes for subtrie failed")
             };
             // If there are subtrie events that need to be processed,
@@ -532,7 +532,7 @@ where
     }
 
     /// Updates the leaf nodes (i.e., the SALT buckets) based on the given state updates.
-    fn update_leaf_commitments<N>(
+    fn update_leaf_nodes<N>(
         &self,
         state_updates: &mut SaltUpdates<'_>,
         get_leaf_id: N,
@@ -542,8 +542,7 @@ where
     {
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            (a.slot_id() % MIN_BUCKET_SIZE as SlotId)
-                .cmp(&(b.slot_id() % MIN_BUCKET_SIZE as SlotId))
+            (a.slot_id() as usize % POLY_DEGREE).cmp(&(b.slot_id() as usize % POLY_DEGREE))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
@@ -557,13 +556,13 @@ where
                     self.committer.gi_mul_delta(
                         &kv_hash(old_value),
                         &kv_hash(new_value),
-                        (salt_key.slot_id() % MIN_BUCKET_SIZE as SlotId) as usize,
+                        salt_key.slot_id() as usize % POLY_DEGREE,
                     ),
                 )
             })
             .collect();
 
-        self.update_node_commitments(c_deltas, batch_size)
+        self.add_commitment_deltas(c_deltas, batch_size)
     }
 
     /// Computes commitment updates for parent nodes at a single trie level using delta-based updates.
@@ -593,7 +592,7 @@ where
     /// Each parent's commitment is: C = Σ(G[i] * child_commitment[i])
     /// When child[j] changes: new_C = old_C + G[j] * (new_child[j] - old_child[j])
     /// This delta approach avoids recomputing the entire sum.
-    fn update_internal_commitments<P>(
+    fn update_internal_nodes<P>(
         &self,
         child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
         level: usize,
@@ -651,7 +650,7 @@ where
             .collect();
 
         // Accumulate all deltas per parent node and compute new commitments
-        self.update_node_commitments(c_deltas, batch_size)
+        self.add_commitment_deltas(c_deltas, batch_size)
     }
 
     /// Computes a reasonable task batch size for parallel processing in rayon.
@@ -684,10 +683,10 @@ where
     /// ```ignore
     /// // Input: deltas for nodes 1 and 2
     /// let deltas = vec![(1, δ1), (1, δ2), (2, δ3)];
-    /// let updates = trie.apply_deltas(deltas, 64)?;
+    /// let updates = trie.add_commitment_deltas(deltas, 64)?;
     /// // Output: [(1, (old_c1, old_c1 + δ1 + δ2)), (2, (old_c2, old_c2 + δ3))]
     /// ```
-    fn update_node_commitments(
+    fn add_commitment_deltas(
         &self,
         mut commitment_deltas: DeltaList,
         task_size: usize,
@@ -1482,24 +1481,24 @@ mod tests {
 
     #[test]
     fn scan_sub_trie_top_level() {
-        assert_eq!(sub_trie_top_level(256), SUB_TRIE_LEVELS - 1);
-        assert_eq!(sub_trie_top_level(512), SUB_TRIE_LEVELS - 2);
-        assert_eq!(sub_trie_top_level(256 * 256), SUB_TRIE_LEVELS - 2);
-        assert_eq!(sub_trie_top_level(256 * 256 * 2), SUB_TRIE_LEVELS - 3);
-        assert_eq!(sub_trie_top_level(256 * 256 * 256), SUB_TRIE_LEVELS - 3);
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 2), SUB_TRIE_LEVELS - 4);
+        assert_eq!(sub_trie_top_level(256), MAX_SUBTREE_LEVELS - 1);
+        assert_eq!(sub_trie_top_level(512), MAX_SUBTREE_LEVELS - 2);
+        assert_eq!(sub_trie_top_level(256 * 256), MAX_SUBTREE_LEVELS - 2);
+        assert_eq!(sub_trie_top_level(256 * 256 * 2), MAX_SUBTREE_LEVELS - 3);
+        assert_eq!(sub_trie_top_level(256 * 256 * 256), MAX_SUBTREE_LEVELS - 3);
+        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 2), MAX_SUBTREE_LEVELS - 4);
         assert_eq!(
             sub_trie_top_level(256 * 256 * 256 * 256),
-            SUB_TRIE_LEVELS - 4
+            MAX_SUBTREE_LEVELS - 4
         );
         assert_eq!(
             sub_trie_top_level(256 * 256 * 256 * 256 * 2),
-            SUB_TRIE_LEVELS - 5
+            MAX_SUBTREE_LEVELS - 5
         );
         // test with max capacity 40bits
         assert_eq!(
             sub_trie_top_level(256 * 256 * 256 * 256 * 256),
-            SUB_TRIE_LEVELS - 5
+            MAX_SUBTREE_LEVELS - 5
         );
     }
 
@@ -1772,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_deltas() {
+    fn test_add_commitment_deltas() {
         let store = EmptySalt;
         let elements: Vec<Element> = create_commitments(11)
             .iter()
@@ -1800,7 +1799,7 @@ mod tests {
         assert_eq!(vec![(0, 3), (3, 7), (7, 11)], ranges);
 
         let updates = trie
-            .update_node_commitments(c_deltas.clone(), task_size)
+            .add_commitment_deltas(c_deltas.clone(), task_size)
             .unwrap();
 
         let exp_id_vec = [0 as NodeId, 1, 2, 3, 4];
@@ -1922,7 +1921,7 @@ mod tests {
         // Check and handle the commitment updates of the bottom-level node
         let cur_level = bottom_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_commitments(&mut updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut updates, cur_level, get_parent_id)
             .unwrap();
 
         let bytes_indices =
@@ -1951,7 +1950,7 @@ mod tests {
         // Check and handle the commitment updates of the second-level node
         let cur_level = cur_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_commitments(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_id)
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
@@ -1971,7 +1970,7 @@ mod tests {
 
         let cur_level = cur_level - 1;
         let unprocess_updates = trie
-            .update_internal_commitments(&mut unprocess_updates, cur_level, get_parent_id)
+            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_id)
             .unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
@@ -2194,10 +2193,10 @@ mod tests {
         }
 
         // Check the default commitments of subtrie
-        let mut default_subtrie_c_vec = vec![zero; SUB_TRIE_LEVELS];
+        let mut default_subtrie_c_vec = vec![zero; MAX_SUBTREE_LEVELS];
         let bucket_id = (65536 as NodeId) << BUCKET_SLOT_BITS as NodeId;
-        for i in (0..SUB_TRIE_LEVELS).rev() {
-            let data_delta_indices = if i == SUB_TRIE_LEVELS - 1 {
+        for i in (0..MAX_SUBTREE_LEVELS).rev() {
+            let data_delta_indices = if i == MAX_SUBTREE_LEVELS - 1 {
                 let data_delta_indices = (0..MIN_BUCKET_SIZE)
                     .map(|i| (i, [0u8; 32], kv_hash(&None)))
                     .collect::<Vec<_>>();

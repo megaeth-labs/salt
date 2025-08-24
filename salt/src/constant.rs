@@ -20,7 +20,7 @@ pub const MAIN_TRIE_LEVELS: usize = 4;
 /// the below:               |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
 /// trie                  /                         \
 /// |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]| |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
-pub const SUB_TRIE_LEVELS: usize = 5;
+pub const MAX_SUBTREE_LEVELS: usize = 5;
 /// Number of bits to represent `TRIE_WIDTH`.
 pub const TRIE_WIDTH_BITS: usize = 8;
 /// Branch factor of the SALT trie nodes. Always a power of two.
@@ -40,7 +40,7 @@ pub const EMPTY_SLOT_HASH: [u8; 32] = [1u8; 32];
 /// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
 /// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
 /// array) at level i.
-pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
+pub const STARTING_NODE_ID: [usize; MAX_SUBTREE_LEVELS] = [
     0,
     1,
     TRIE_WIDTH + 1,
@@ -135,7 +135,7 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     ];
 
     // Precomputed node commitment at each level of an empty SALT SubTrie.
-    static SUBTRIE_DEFAULT_COMMITMENT:[CommitmentBytes; SUB_TRIE_LEVELS] = [
+    static SUBTRIE_DEFAULT_COMMITMENT:[CommitmentBytes; MAX_SUBTREE_LEVELS] = [
         b512!("5a4458230b52d0445f846b078df60f4aba2130f015eff95bf6530098bdcfbc570331d402f243631ee94f2b59af6c41b9014eb1a767ff4d4e692889ea546a3c01"),
         b512!("26e37bc889bd763289bc5ca3fd88babef8c4477ea0c0d0ec457d165c7a37e1449bf45aaa4d7fdf0c6a43aa579243015ad99e70dfa4fb66137fc6733be79a4803"),
         b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),

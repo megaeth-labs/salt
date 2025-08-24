@@ -1,7 +1,7 @@
 //! Verifier for the Salt proof
 use crate::{
     constant::{
-        EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID, SUB_TRIE_LEVELS,
+        EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID, MAX_SUBTREE_LEVELS,
     },
     proof::{
         prover::calculate_fr_by_kv,
@@ -183,7 +183,7 @@ pub(crate) fn create_verifier_queries(
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];
 
-                    let parent_id = if bucket_trie_top_level == SUB_TRIE_LEVELS as u8 - 1 {
+                    let parent_id = if bucket_trie_top_level == MAX_SUBTREE_LEVELS as u8 - 1 {
                         bucket_id as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
                     } else {
                         subtrie_node_id(key)

@@ -48,7 +48,7 @@
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, STARTING_NODE_ID, MAX_SUBTREE_LEVELS, TRIE_WIDTH_BITS,
     },
     trie::node_utils::subtrie_node_id,
     BucketId, NodeId, SaltKey, SlotId,
@@ -243,7 +243,7 @@ fn process_bucket_trie_nodes(
     l3_paths: &[(u8, u8, u8)],
     l4_paths: &[(u8, u8, u8, u8)],
 ) -> Vec<(NodeId, NodeId, Vec<u8>)> {
-    if top_level == (SUB_TRIE_LEVELS - 1) as u8 {
+    if top_level == (MAX_SUBTREE_LEVELS - 1) as u8 {
         return vec![];
     }
 
@@ -380,7 +380,7 @@ fn process_bucket_state_nodes(
     top_level: u8,
     keys: &[SaltKey],
 ) -> (BucketId, Vec<(NodeId, Vec<u8>)>) {
-    if top_level == (SUB_TRIE_LEVELS - 1) as u8 {
+    if top_level == (MAX_SUBTREE_LEVELS - 1) as u8 {
         return (
             bucket_id,
             vec![(
@@ -433,7 +433,7 @@ pub const fn bucket_id_to_path(bucket_id: BucketId) -> [u8; MAIN_TRIE_LEVELS - 1
 /// # Returns
 ///
 /// The calculated path
-pub const fn slot_id_to_node_path(slot: SlotId) -> [u8; SUB_TRIE_LEVELS - 1] {
+pub const fn slot_id_to_node_path(slot: SlotId) -> [u8; MAX_SUBTREE_LEVELS - 1] {
     [
         ((slot >> (TRIE_WIDTH_BITS * 4)) & 0xFF) as u8,
         ((slot >> (TRIE_WIDTH_BITS * 3)) & 0xFF) as u8,
