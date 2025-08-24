@@ -8,8 +8,8 @@
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS,
-        MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID, TRIE_WIDTH, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE,
+        MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID, TRIE_WIDTH, TRIE_WIDTH_BITS,
     },
     get_local_number,
     types::{get_bfs_level, BucketId, NodeId, SaltKey},
@@ -143,6 +143,38 @@ pub(crate) fn subtree_leaf_for_key(key: &SaltKey) -> NodeId {
         + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
 }
 
+/// Returns the starting SaltKey for a subtree leaf node's bucket segment.
+///
+/// This function is the inverse of `subtree_leaf_for_key()`. Given a subtree leaf
+/// NodeId, it calculates which SaltKey represents the first slot in the 256-slot
+/// range that this leaf node covers.
+///
+/// **IMPORTANT**: This function ONLY works with subtree leaf nodes at level 4
+/// (the deepest subtree level). It will not produce correct results for other
+/// types of nodes.
+///
+/// # Arguments
+/// * `node_id` - A subtree leaf NodeId (must be from level 4)
+///
+/// # Returns
+/// The SaltKey representing the first slot in the 256-slot segment covered by
+/// this leaf
+pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
+    // Extract node position (lower 40 bits) and bucket ID (upper 24 bits)
+    let local_node_number = get_local_number(*node_id);
+    let bucket_id = *node_id - local_node_number;
+
+    // Calculate relative position within the deepest subtree level
+    let relative_position = local_node_number - STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
+
+    // Convert back to slot ID by multiplying by 256
+    // Each subtree node represents a range of 256 consecutive slots
+    let slot_id = relative_position << MIN_BUCKET_SIZE_BITS;
+
+    // Combine bucket and slot components into final SaltKey
+    SaltKey(bucket_id + slot_id)
+}
+
 /// Determines the top level of a bucket's subtree based on its capacity.
 ///
 /// Different bucket capacities require different subtree depths to efficiently
@@ -175,49 +207,6 @@ pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     }
 
     level
-}
-
-/// Converts a subtree NodeId back to the starting SaltKey of its slot range.
-///
-/// This function performs the inverse operation of `subtree_leaf_for_key`, taking a NodeId
-/// from a bucket's subtree and calculating which SaltKey range it represents.
-/// Each subtree leaf node covers a range of 256 consecutive slots.
-///
-/// # Prerequisites
-/// The input `node_id` must be a result from `subtree_leaf_for_key()` or equivalent,
-/// representing a valid node in a bucket's subtree structure.
-///
-/// # Algorithm
-/// 1. Extract bucket ID (upper 24 bits) and node position (lower 40 bits)
-/// 2. Calculate relative position within the deepest subtree level
-/// 3. Multiply by 256 to get the starting slot ID for this node's range
-/// 4. Combine bucket ID and slot ID to form the SaltKey
-///
-/// # Arguments
-/// * `id` - A NodeId from a bucket subtree (typically from `subtree_leaf_for_key()`)
-///
-/// # Returns
-/// The SaltKey representing the first slot in the range covered by this node
-///
-/// # Example
-/// // Node covering slots 1024-1279 in bucket 100
-/// let node_id = subtree_leaf_for_key(&SaltKey::from((100, 1024)));
-/// let start_key = subtree_salt_key_start(&node_id);
-/// assert_eq!(start_key, SaltKey::from((100, 1024))); // First slot of the range
-pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
-    // Extract node position (lower 40 bits) and bucket ID (upper 24 bits)
-    let node_id = *id & BUCKET_SLOT_ID_MASK;
-    let bucket_id = *id - node_id;
-
-    // Calculate relative position within the deepest subtree level
-    let relative_position = node_id - STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
-
-    // Convert back to slot ID by multiplying by 256
-    // Each subtree node represents a range of 256 consecutive slots
-    let slot_id = relative_position << MIN_BUCKET_SIZE_BITS;
-
-    // Combine bucket and slot components into final SaltKey
-    SaltKey(bucket_id + slot_id)
 }
 
 #[cfg(test)]
@@ -478,6 +467,34 @@ mod tests {
                 "Failed for {}: key=({}, {}), expected={}, got={}",
                 description, bucket_id, slot_id, expected, result
             );
+        }
+    }
+
+    /// Tests the subtree_leaf_start_key function's inverse relationship with subtree_leaf_for_key.
+    #[test]
+    fn test_subtree_leaf_start_key() {
+        // Test cases: (bucket_id, slot_id)
+        let cases = [
+            (0, 0),
+            (0, 255),
+            (0, 256),
+            (0, 511),
+            (0, 512),
+            (100, 1024),
+            (100, 1279),
+            (100, 1280),
+            (16777215, 0),
+            (16777215, 65535),
+        ];
+
+        for (bucket_id, slot_id) in cases {
+            let key = SaltKey::from((bucket_id, slot_id));
+            let leaf_node = subtree_leaf_for_key(&key);
+            let start_key = subtree_leaf_start_key(&leaf_node);
+
+            // Start key should be the first slot in the 256-slot range
+            let expected_start_slot = (slot_id / 256) * 256;
+            assert_eq!(start_key, SaltKey::from((bucket_id, expected_start_slot)));
         }
     }
 

@@ -8,7 +8,7 @@ use crate::{
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::get_child_node,
-    trie::node_utils::{subtree_root_level, subtrie_salt_key_start},
+    trie::node_utils::{subtree_leaf_start_key, subtree_root_level},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
@@ -124,7 +124,7 @@ fn process_bucket_state_queries<Store: StateReader + TrieReader>(
                                 let salt_key_start = if node_id < &256u64.pow(5) {
                                     (*bucket_id, 0u64).into()
                                 } else {
-                                    subtrie_salt_key_start(node_id)
+                                    subtree_leaf_start_key(node_id)
                                 };
 
                                 let mut default_frs = if *bucket_id < 65536 {
