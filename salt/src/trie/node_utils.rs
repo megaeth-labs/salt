@@ -1,10 +1,193 @@
-//! Utilities for working with NodeId in the SALT trie structure.
+
+//! Utilities for navigating and manipulating nodes in the SALT trie structure.
 //!
-//! This module provides functions for:
-//! - Converting between different node representations
-//! - Navigating the trie hierarchy (parent/child relationships)
-//! - Mapping between SaltKeys and NodeIds
-//! - Determining subtree levels and structure
+//! This module provides core functionality for working with the hierarchical node
+//! organization in SALT's authenticated data structure, which combines a main 256-ary
+//! trie with dynamically-allocated bucket subtrees.
+//!
+//! # Architecture Overview
+//!
+//! SALT uses a two-tier trie structure:
+//!
+//! ```text
+//! Main Trie (Levels 0-3):
+//!     Level 0: Root node (single node)
+//!     Level 1: 256 nodes (children of root)
+//!     Level 2: 65,536 nodes (256² nodes)
+//!     Level 3: 16,777,216 bucket roots (256³ nodes)
+//!
+//! Bucket Subtrees (Levels 0-4):
+//!     Each bucket can expand into a 256-ary subtree
+//!     Subtree depth depends on bucket capacity
+//!     Leaf nodes represent 256-slot segments
+//! ```
+//!
+//! # Node Identification Scheme
+//!
+//! Nodes are identified by 64-bit `NodeId` values encoding two components:
+//!
+//! - **Bits 0-23**: Bucket ID (0 for main trie nodes, 1-16777215 for subtree nodes)
+//! - **Bits 24-63**: Local node number using BFS ordering within the trie
+//!
+//! ## BFS Numbering
+//!
+//! Nodes are numbered using breadth-first search (BFS) traversal:
+//!
+//! ```text
+//! Level 0: [0]
+//! Level 1: [1, 2, 3, ..., 256]
+//! Level 2: [257, 258, ..., 65792]
+//! Level 3: [65793, 65794, ..., 16843008]
+//! Level 4: [16843009, 16843010, ..., 4311810304]
+//! ```
+//!
+//! The starting node ID for each level is precomputed in `STARTING_NODE_ID`.
+//!
+//! # Vector Commitment Positions
+//!
+//! Each parent node maintains a 256-element vector commitment (VC) for its children.
+//! Children are mapped to VC positions 0-255 based on their relative position within
+//! their parent's child set.
+//!
+//! ## Example
+//!
+//! ```text
+//! Parent at Level 1, Node 5:
+//!   - First child: Node 257 + (4 * 256) = 1281 → VC position 0
+//!   - Last child:  Node 257 + (4 * 256) + 255 = 1536 → VC position 255
+//! ```
+//!
+//! # Bucket Organization
+//!
+//! The 16,777,216 buckets at level 3 of the main trie are divided into:
+//!
+//! - **Meta buckets** (0-65535): Store bucket metadata, fixed 256-slot capacity
+//! - **Data buckets** (65536-16777215): Store key-value pairs, dynamic capacity
+//!
+//! ## Bucket Expansion
+//!
+//! When a bucket's capacity exceeds 256 slots, it expands into a subtree. The subtree
+//! root node is **dynamically positioned** based on the bucket's capacity - it starts
+//! at the deepest level and moves upward as capacity increases.
+//!
+//! ### Dynamic Root Positioning
+//!
+//! The subtree root's NodeId for a bucket is calculated as:
+//! ```
+//! root_node_id = (bucket_id << 40) | STARTING_NODE_ID[subtree_root_level(capacity)]
+//! ```
+//!
+//! As capacity grows, the root "climbs" the subtree hierarchy:
+//!
+//! ```text
+//! Capacity ≤ 256 (2^8):
+//!     Root at Level 4 (leaf level)
+//!     NodeId = (bucket_id << 40) | 16843009
+//!     No internal nodes needed - direct slot storage
+//!
+//! Capacity ≤ 65,536 (2^16):
+//!     Root at Level 3
+//!     NodeId = (bucket_id << 40) | 65793
+//!     └─ Up to 256 Level 4 leaf nodes
+//!
+//! Capacity ≤ 16,777,216 (2^24):
+//!     Root at Level 2
+//!     NodeId = (bucket_id << 40) | 257
+//!     ├─ Up to 256 Level 3 nodes
+//!     └─ Up to 65,536 Level 4 leaf nodes
+//!
+//! Capacity ≤ 4,294,967,296 (2^32):
+//!     Root at Level 1
+//!     NodeId = (bucket_id << 40) | 1
+//!     ├─ Up to 256 Level 2 nodes
+//!     ├─ Up to 65,536 Level 3 nodes
+//!     └─ Up to 16,777,216 Level 4 leaf nodes
+//!
+//! Capacity > 4,294,967,296:
+//!     Root at Level 0
+//!     NodeId = (bucket_id << 40) | 0
+//!     Full 5-level subtree structure
+//! ```
+//!
+//! ### Key Insights
+//!
+//! - The root node is always the **first node** at its level within the bucket's subtree namespace
+//! - The `subtree_root_level()` function determines which level can accommodate the capacity
+//! - The root NodeId changes as the bucket expands - it's not a fixed value
+//! - All subtree nodes share the same bucket ID in their upper 24 bits
+//!
+//! # Key-to-Node Mapping
+//!
+//! SaltKeys encode both bucket ID and slot ID:
+//!
+//! ```text
+//! SaltKey (64 bits):
+//!   Bits 0-23: Bucket ID (24 bits)
+//!   Bits 24-63:  Slot ID within bucket (40 bits)
+//! ```
+//!
+//! For expanded buckets, slots map to subtree leaves:
+//! - Slots 0-255 → Leaf 0
+//! - Slots 256-511 → Leaf 1
+//! - Slots 512-767 → Leaf 2
+//! - And so on...
+//!
+//! # Module Functions
+//!
+//! ## Navigation Functions
+//!
+//! - [`vc_position_in_parent`]: Calculate a node's position (0-255) in parent's VC
+//! - [`get_child_node`]: Navigate from parent to specific child by index
+//! - [`get_parent_node`]: Navigate from child back to parent node
+//!
+//! ## Bucket Functions
+//!
+//! - [`bucket_root_node_id`]: Get the main trie node ID for a bucket
+//! - [`subtree_root_level`]: Determine subtree depth needed for capacity
+//!
+//! ## Subtree Functions
+//!
+//! - [`subtree_leaf_for_key`]: Map a SaltKey to its containing subtree leaf
+//! - [`subtree_leaf_start_key`]: Get the first SaltKey in a leaf's range
+//!
+//! # Usage Examples
+//!
+//! ## Navigating the Main Trie
+//!
+//! ```rust
+//! use salt::trie::node_utils::{get_child_node, get_parent_node, vc_position_in_parent};
+//!
+//! // Navigate from root to a specific path
+//! let root = 0;
+//! let child_at_idx_42 = get_child_node(&root, 42);  // Node at level 1, position 42
+//! let grandchild = get_child_node(&child_at_idx_42, 100);  // Continue down
+//!
+//! // Find position in parent's vector commitment
+//! let pos = vc_position_in_parent(&grandchild);  // Returns 100
+//!
+//! // Navigate back up
+//! let parent = get_parent_node(&grandchild, 2);  // Level 2 back to level 1
+//! ```
+//!
+//! ## Working with Buckets
+//!
+//! ```rust
+//! use salt::trie::node_utils::{bucket_root_node_id, subtree_leaf_for_key};
+//! use salt::types::SaltKey;
+//!
+//! // Get the main trie node for bucket 100000
+//! let bucket_100000_root = bucket_root_node_id(100000);
+//!
+//! // Map a key to its subtree leaf (for expanded buckets)
+//! let key = SaltKey::from((100000, 1500));  // Bucket 100000, slot 1500
+//! let leaf_node = subtree_leaf_for_key(&key);  // Leaf covering slots 1280-1535
+//! ```
+//!
+//! # Related Modules
+//!
+//! - [`crate::constant`]: Defines trie dimensions and precomputed values
+//! - [`crate::types`]: Core type definitions (NodeId, BucketId, SaltKey)
+//! - [`crate::trie`]: Higher-level trie operations using these utilities
 
 use crate::{
     constant::{
