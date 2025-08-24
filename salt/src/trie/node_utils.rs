@@ -88,8 +88,12 @@ pub fn get_child_node(parent: &NodeId, child_idx: usize) -> NodeId {
 /// # Panics
 /// Implicitly panics if level is 0 (root has no parent) due to underflow
 pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
+    // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
+    let local_node_id = get_local_number(*node_id);
+    let bucket_id = *node_id - local_node_id;
+
     // Calculate relative position from the start of current level
-    let relative_position = *node_id as usize - STARTING_NODE_ID[level];
+    let relative_position = local_node_id as usize - STARTING_NODE_ID[level];
 
     // Divide by 256 (right-shift by 8) to get parent's relative position
     // Each parent has 256 children, so child positions 0-255 → parent 0,
@@ -97,48 +101,10 @@ pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
     let parent_relative_position = relative_position >> TRIE_WIDTH_BITS;
 
     // Add parent level's starting position to get absolute parent ID
-    (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
+    // and preserve the bucket ID for subtree nodes
+    bucket_id + (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
 }
 
-/// Computes the parent NodeId for a node within a bucket's subtrie structure.
-///
-/// Unlike `get_parent_id` which works on the canonical trie, this function handles
-/// navigation within bucket subtries. Bucket subtries use a different numbering
-/// scheme where nodes are organized to optimize storage and access patterns for
-/// key-value pairs within individual buckets.
-///
-/// # Subtrie Structure
-/// Each bucket can have its own subtrie with up to 5 levels (SUB_TRIE_LEVELS).
-/// The subtrie's depth depends on the bucket's capacity:
-/// - Level 4: 256 slots (MIN_BUCKET_SIZE)
-/// - Level 3: 65,536 slots
-/// - Level 2: 16,777,216 slots
-/// - Level 1: 4,294,967,296 slots
-///
-/// # Arguments
-/// * `id` - The NodeId of the child node in the subtrie
-/// * `level` - The subtrie level of the child node (1..=4)
-///
-/// # Returns
-/// The NodeId of the parent node within the same bucket's subtrie
-///
-/// # Example
-/// // For a node in bucket 100 at subtrie level 4
-/// // Parent will be at level 3 within the same bucket
-/// let child_id = subtree_leaf_for_key(&SaltKey::from((100, 42)));
-/// let parent_id = subtrie_parent_id(&child_id, 4);
-pub(crate) fn subtrie_parent_id(id: &NodeId, level: usize) -> NodeId {
-    // FIXME: merge with get_parent_node?
-    // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
-    let node_id = *id & BUCKET_SLOT_ID_MASK;
-    let bucket_id = *id - node_id;
-
-    // Calculate parent within the subtrie structure:
-    bucket_id // Preserve bucket context
-        + STARTING_NODE_ID[level - 1] as NodeId // Parent level's base position
-        + ((node_id - STARTING_NODE_ID[level] as NodeId) >> MIN_BUCKET_SIZE_BITS)
-    // Parent's relative position
-}
 
 /// Maps a bucket ID to its subtree root node in the main trie.
 ///
@@ -338,7 +304,6 @@ mod tests {
         }
     }
 
-
     /// Tests the get_child_node function for various parent-child navigation
     /// scenarios.
     ///
@@ -374,19 +339,53 @@ mod tests {
     /// scenarios.
     ///
     /// Verifies correct parent NodeId calculation and tests the inverse relationship
-    /// with get_child_node.
+    /// with get_child_node for both main trie and subtree nodes.
     #[test]
     fn test_get_parent_node() {
-        // Test cases: (child_id, level, expected_parent_id, description)
+        // Test direct parent calculation for both main trie and subtree nodes
+        let bucket_id = 100000u64;
         let test_cases = [
-            // Level 1 to level 0 (root)
+            // Main trie: Level 1 to level 0 (root)
             (1, 1, 0, "First child back to root"),
             (128, 1, 0, "Middle child back to root"),
             (256, 1, 0, "Last child back to root"),
-            // Level 2 to level 1
+            // Main trie: Level 2 to level 1
             (257, 2, 1, "First L2 node to parent"),
             (257 + 256, 2, 2, "Second group L2 node to parent"),
             (257 + 127 * 256, 2, 128, "Complex L2 node to parent"),
+            // Subtree: Level 2 to level 1
+            (
+                (bucket_id << BUCKET_SLOT_BITS) | 257,
+                2,
+                (bucket_id << BUCKET_SLOT_BITS) | 1,
+                "Subtree L2 first node to parent",
+            ),
+            (
+                (bucket_id << BUCKET_SLOT_BITS) | (257 + 256),
+                2,
+                (bucket_id << BUCKET_SLOT_BITS) | 2,
+                "Subtree L2 second group to parent",
+            ),
+            // Subtree: Level 3 to level 2
+            (
+                (bucket_id << BUCKET_SLOT_BITS) | 65793,
+                3,
+                (bucket_id << BUCKET_SLOT_BITS) | 257,
+                "Subtree L3 first node to parent",
+            ),
+            (
+                (bucket_id << BUCKET_SLOT_BITS) | (65793 + 1024),
+                3,
+                (bucket_id << BUCKET_SLOT_BITS) | (257 + 4),
+                "Subtree L3 node to parent (1024/256=4)",
+            ),
+            // Subtree: Level 4 to level 3
+            (
+                (bucket_id << BUCKET_SLOT_BITS) | 16843009,
+                4,
+                (bucket_id << BUCKET_SLOT_BITS) | 65793,
+                "Subtree L4 first node to parent",
+            ),
         ];
 
         for (child, level, expected_parent, description) in test_cases {
@@ -394,8 +393,18 @@ mod tests {
             assert_eq!(result, expected_parent, "Failed: {}", description);
         }
 
-        // Test inverse relationship: parent -> child -> parent
-        let test_parents = [0, 1, 128];
+        // Test inverse relationship: parent -> child -> parent for both main trie and subtree
+        let test_parents = [
+            // Main trie parents
+            0,
+            1,
+            128,
+            // Subtree parents (bucket 100000)
+            (bucket_id << BUCKET_SLOT_BITS) | 1,     // Level 1
+            (bucket_id << BUCKET_SLOT_BITS) | 257,   // Level 2
+            (bucket_id << BUCKET_SLOT_BITS) | 65793, // Level 3
+        ];
+
         for parent in test_parents {
             for child_idx in [0, 127, 255] {
                 let child = get_child_node(&parent, child_idx);
@@ -403,7 +412,7 @@ mod tests {
                 let recovered_parent = get_parent_node(&child, child_level);
                 assert_eq!(
                     recovered_parent, parent,
-                    "Inverse relationship failed: parent={}, child_idx={}",
+                    "Inverse relationship failed: parent={:#x}, child_idx={}",
                     parent, child_idx
                 );
             }

@@ -223,7 +223,7 @@ where
                         ),
                     );
                     if level != start {
-                        id = subtrie_parent_id(&id, level);
+                        id = get_parent_node(&id, level);
                     }
                 }
             };
@@ -459,7 +459,7 @@ where
                 self.update_leaf_nodes(&mut expansion_updates, subtree_leaf_for_key)
                     .expect("update leaf nodes for subtrie failed")
             } else {
-                self.update_internal_nodes(&mut updates, level, subtrie_parent_id)
+                self.update_internal_nodes(&mut updates, level, get_parent_node)
                     .expect("update internal nodes for subtrie failed")
             };
             // If there are subtrie events that need to be processed,
