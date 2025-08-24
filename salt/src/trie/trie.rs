@@ -189,17 +189,17 @@ where
         Ok((hash_commitment(root_commitment), trie_updates))
     }
 
-    /// Updates bucket subtrees based on state changes, handling both normal updates 
+    /// Updates bucket subtrees based on state changes, handling both normal updates
     /// and bucket capacity changes (expansions/contractions).
-    /// 
+    ///
     /// This method processes state updates to generate commitment updates for all affected
     /// trie nodes. It handles several complex scenarios:
-    /// 
+    ///
     /// 1. **Normal buckets**: Simple key-value updates without capacity changes
     /// 2. **Expansion buckets**: Buckets that can change capacity (> MIN_BUCKET_SIZE)
     /// 3. **Contraction optimization**: Efficiently handles bucket size decreases
     /// 4. **Subtree restructuring**: Manages depth changes when bucket capacity changes
-    /// 
+    ///
     /// The algorithm uses a complex filter to categorize updates while tracking capacity
     /// changes and subtree events. It then processes updates bottom-up through the trie
     /// levels, handling special cases where subtree roots change due to capacity changes.
@@ -209,21 +209,21 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // === DATA STRUCTURES SETUP ===
         // Separate containers for different types of updates and events
-        
+
         // expansion kvs and non-expansion kvs are sorted separately
         let mut expansion_updates: SaltUpdates<'_> = vec![];
         // Track subtree events at each level (bucket capacity changes that affect structure)
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
             vec![HashMap::new(); MAX_SUBTREE_LEVELS];
-        
+
         // State tracking variables used during the complex filter operation
         let (mut bucket_id, mut is_expansion, mut old_capacity, mut new_capacity) = (
-            u32::MAX,                    // Current bucket being processed
-            false,                       // Whether current bucket is "expansion type"
-            MIN_BUCKET_SIZE as u64,     // Current bucket's old capacity
-            MIN_BUCKET_SIZE as u64,     // Current bucket's new capacity
+            u32::MAX,               // Current bucket being processed
+            false,                  // Whether current bucket is "expansion type"
+            MIN_BUCKET_SIZE as u64, // Current bucket's old capacity
+            MIN_BUCKET_SIZE as u64, // Current bucket's new capacity
         );
-        
+
         // Maps bucket_id -> (old_capacity, new_capacity) from metadata updates
         let mut capacity_changes = HashMap::new();
         // Helper closure for contraction optimization: marks nodes as having zero commitment
@@ -249,18 +249,18 @@ where
                     }
                 }
             };
-            
+
         // === CONTRACTION OPTIMIZATION DATA STRUCTURES ===
         // When buckets shrink, many nodes become irrelevant and can be set to zero commitment
         // These structures track which nodes can be optimized away
-        
+
         // Maps node_id -> (old_commitment, zero_commitment) for nodes being removed
         let mut uncomputed_updates = BTreeMap::new();
-        
+
         // Nodes that need processing at each subtree level [0..MAX_SUBTREE_LEVELS]
         // The last group (MAX_SUBTREE_LEVELS) goes directly to final trie_updates
         let mut pending_updates = vec![vec![]; MAX_SUBTREE_LEVELS + 1];
-        
+
         // List of buckets being contracted (capacity decreased)
         // Used to optimize computation by avoiding work on removed nodes
         let mut contractions = vec![];
@@ -268,13 +268,13 @@ where
         // === COMPLEX FILTER OPERATION ===
         // This filter serves multiple purposes:
         // 1. Separates normal updates from expansion updates
-        // 2. Extracts capacity changes from metadata buckets  
+        // 2. Extracts capacity changes from metadata buckets
         // 3. Tracks subtree events when bucket capacity changes
         // 4. Applies contraction optimization for removed slots
-        // 
+        //
         // WARNING: This filter has side effects! It modifies several variables above.
         // The filter predicate (!is_expansion) determines which updates go to normal_updates
-        
+
         let mut normal_updates = state_updates
             .data
             .iter()
@@ -314,11 +314,13 @@ where
                         let info = SubtrieChangeInfo::new(bid, old_capacity, new_capacity);
                         // Both downsizing and expanding need to handle new root node events
                         event_levels[info.new_top_level].insert(bid, info.clone());
+
                         if info.old_capacity > info.new_capacity {
+                            // Handle bucket contraction (capacity decreased)
                             contractions.push(info.clone());
+
+                            // If this slot is being removed, record the root change
                             if k.slot_id() >= info.new_capacity {
-                                // During contraction, subtrie not changed and need to record roots
-                                // changed
                                 pending_updates[MAX_SUBTREE_LEVELS].push((
                                     info.root_id,
                                     (
@@ -330,13 +332,15 @@ where
                                 ));
                             }
                         } else {
-                            // When expanding, old root node events need to be handled
+                            // Handle bucket expansion (capacity increased)
                             event_levels[info.old_top_level].insert(bid, info.clone());
-                            if info.old_top_level > info.new_top_level
-                                && k.slot_id() >= info.old_capacity
-                            {
-                                // During expansion, original subtrie not changed and need to be
-                                // updated above level
+
+                            // Check if this is a new slot in the expanded area
+                            let is_new_slot_in_expanded_area = info.old_top_level
+                                > info.new_top_level
+                                && k.slot_id() >= info.old_capacity;
+
+                            if is_new_slot_in_expanded_area {
                                 pending_updates[info.old_top_level].push((
                                     info.old_top_id,
                                     (
@@ -350,11 +354,12 @@ where
                     }
                 };
                 if is_expansion {
-                    // optimize contraction kvs and commitments
+                    // Handle expansion bucket updates and contraction optimization
                     if k.slot_id() < new_capacity {
+                        // Slot is within new capacity - add to expansion updates
                         expansion_updates.push((k, v));
                     } else {
-                        // Set the zero commitment of the contracted bucket node
+                        // Slot beyond new capacity - mark as zero commitment (contraction optimization)
                         insert_uncomputed_node(
                             subtree_leaf_for_key(k),
                             subtree_root_level(old_capacity) + 1,
@@ -362,11 +367,13 @@ where
                             &mut uncomputed_updates,
                         );
                     }
+                    false // Expansion buckets don't go to normal_updates
+                } else {
+                    true // Normal buckets go to normal_updates
                 }
-                !is_expansion
             })
             .collect::<Vec<_>>();
-            
+
         // === PHASE 1: PROCESS NORMAL UPDATES ===
         // Handle buckets that don't change capacity (simple key-value updates)
         let mut trie_updates = self.update_leaf_nodes(&mut normal_updates, false)?;
@@ -484,28 +491,29 @@ where
         // Handle subtree events where bucket capacity changes affect tree structure
         let mut updates = vec![];
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
-            // // If there is no subtrie that needs to be calculated, exit the loop directly.
-            if event_levels
+            // Early exit: if no more subtree events remain at this or lower levels, we're done
+            let total_remaining_events: usize = event_levels
                 .iter()
                 .take(level + 1)
-                .map(|x| x.len())
-                .sum::<usize>()
-                == 0
-            {
+                .map(|events| events.len())
+                .sum();
+            if total_remaining_events == 0 {
                 break;
             }
+
+            // Update nodes at current level
             updates = if level == MAX_SUBTREE_LEVELS - 1 {
+                // Leaf level: process expansion updates
                 self.update_leaf_nodes(&mut expansion_updates, true)
                     .expect("update leaf nodes for subtrie failed")
             } else {
+                // Internal level: propagate updates from children
                 self.update_internal_nodes(&mut updates)
                     .expect("update internal nodes for subtrie failed")
             };
-            // If there are subtrie events that need to be processed,
-            // handle the corresponding subtrie.
-            updates = if event_levels[level].is_empty() {
-                updates
-            } else {
+
+            // Handle subtree events at this level (if any)
+            if !event_levels[level].is_empty() {
                 let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = updates
                     .into_par_iter()
                     .map(|(id, (old_c, mut new_c))| {
@@ -561,8 +569,10 @@ where
                         .collect::<Vec<_>>()
                         .iter(),
                 );
-                subtrie_updates.into_iter().flatten().collect()
-            };
+                updates = subtrie_updates.into_iter().flatten().collect();
+            }
+
+            // Add any pending updates for this level
             updates.extend(pending_updates[level].iter());
             trie_updates.extend(updates.iter());
         }
