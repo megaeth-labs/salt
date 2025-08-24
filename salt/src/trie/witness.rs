@@ -1,6 +1,10 @@
-//! This module export block witness's interfaces.
+//! Block witness implementation for stateless validation.
+//!
+//! This module provides the `BlockWitness` data structure, which contains a subset
+//! of state data along with cryptographic proofs for stateless validation. The witness
+//! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
-    constant::{default_commitment, NUM_META_BUCKETS},
+    constant::NUM_META_BUCKETS,
     proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -12,40 +16,52 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
-/// Data structure used to re-execute the block in prover client
+/// Block witness for stateless validation with security guarantees.
+///
+/// A `BlockWitness` contains a curated subset of state data along with cryptographic
+/// proofs that allow stateless validators to verify state transitions without having
+/// access to the full state tree.
+///
+/// # Security Model
+///
+/// The witness enforces a critical distinction between three types of keys:
+///
+/// ## Key States
+/// 1. **Witnessed Existing**: Key is in the witness with a value (`Some(Some(value))`)
+/// 2. **Witnessed Non-existent**: Key is in the witness as absent (`Some(None)`)
+/// 3. **Unknown**: Key is not included in the witness at all (`None`)
+///
+/// ## Security Properties
+///
+/// - **No State Hiding**: A malicious prover cannot make an existing key appear
+///   as non-existent by omitting it from the witness. Unknown keys always return
+///   errors, preventing confusion with proven non-existence.
+///
+/// - **Proof Integrity**: The cryptographic proof ensures that all witnessed data
+///   (both existing and non-existent) is correctly authenticated against the state root.
+///
+/// - **No Range Manipulation**: Range queries are disabled to prevent selective
+///   omission attacks where a prover hides some keys while including others in a range.
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
-    /// bucket metadata in sub state
+    /// Bucket metadata witnessed in this proof.
+    /// - `Some(Some(meta))`: Explicit metadata stored
+    /// - `Some(None)`: Default metadata stored
+    /// - Missing key: Bucket not witnessed (unknown)
+    ///
+    /// Unlike regular data buckets, metadata bucket slots can never be empty.
+    /// `Some(None)` is just a storage-level optimization for default metadata.
     pub metadata: BTreeMap<BucketId, Option<BucketMeta>>,
-    /// kvs in sub state
+
+    /// Key-value pairs witnessed in this proof.
+    /// - `Some(Some(value))`: Key exists with value
+    /// - `Some(None)`: Key proven to not exist
+    /// - Missing key: Key not witnessed (unknown)
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
-    /// salt proof to prove the metadata + kvs
+
+    /// Cryptographic proof authenticating all witnessed data
     pub proof: SaltProof,
-}
-
-impl TrieReader for BlockWitness {
-    type Error = &'static str;
-
-    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        Ok(self
-            .proof
-            .parents_commitments
-            .get(&node_id)
-            .map(|c| c.0)
-            .unwrap_or_else(|| default_commitment(node_id)))
-    }
-
-    fn node_entries(
-        &self,
-        range: Range<NodeId>,
-    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Ok(self
-            .proof
-            .parents_commitments
-            .range(range)
-            .map(|(&k, v)| (k, v.0))
-            .collect())
-    }
 }
 
 impl BlockWitness {
@@ -72,22 +88,22 @@ impl BlockWitness {
 
         let metadata = meta_keys
             .par_iter()
-            .filter_map(|&salt_key| {
+            .map(|&salt_key| {
                 let bucket_id = bucket_id_from_metadata_key(salt_key);
                 store
                     .metadata(bucket_id)
-                    .ok()
                     .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))
             })
-            .collect();
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
 
         let kvs = data_keys
             .par_iter()
             .map(|&salt_key| {
                 store
                     .value(salt_key)
-                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))
                     .map(|entry| (salt_key, entry))
+                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read value: {e:?}")))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
@@ -100,21 +116,33 @@ impl BlockWitness {
         })
     }
 
-    /// Verify the block witness
+    /// Verify the block witness against the given state root.
+    ///
+    /// This method verifies that the witness correctly represents the state by
+    /// checking the cryptographic proof. Importantly, it preserves the distinction
+    /// between non-existent values (None) and existing values (Some) in the proof.
+    ///
+    /// # Security Note
+    ///
+    /// This verification ensures that:
+    /// - All witnessed keys are correctly proven against the state root
+    /// - Non-existent values (None) are properly verified as absent
+    /// - The proof cannot be manipulated to hide or fabricate state
     pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError> {
-        let mut keys = self
-            .metadata
-            .keys()
-            .map(|&bucket_id| bucket_metadata_key(bucket_id))
-            .collect::<Vec<_>>();
-        keys.extend(self.kvs.keys().copied());
+        let mut keys = Vec::new();
+        let mut vals = Vec::new();
 
-        let mut vals = self
-            .metadata
-            .values()
-            .map(|&meta_opt| Some(meta_opt.unwrap_or_default().into()))
-            .collect::<Vec<_>>();
-        vals.extend(self.kvs.values().cloned());
+        // Handle metadata entries - convert None to default metadata values
+        for (&bucket_id, &meta_opt) in &self.metadata {
+            keys.push(bucket_metadata_key(bucket_id));
+            vals.push(Some(meta_opt.unwrap_or_default().into()));
+        }
+
+        // Handle regular KV entries - preserve None for non-existent values
+        for (&key, value_opt) in &self.kvs {
+            keys.push(key);
+            vals.push(value_opt.clone());
+        }
 
         self.proof.check(keys, vals, root)?;
         Ok(())
@@ -124,45 +152,52 @@ impl BlockWitness {
 impl StateReader for BlockWitness {
     type Error = &'static str;
 
+    /// Retrieves a state value by key from the witness.
+    ///
+    /// # Security Model
+    ///
+    /// This method enforces a critical distinction for stateless validation:
+    /// - `Ok(Some(value))` - Key exists with the given value (witnessed)
+    /// - `Ok(None)` - Key is proven to not exist OR has default metadata (witnessed as absent)
+    /// - `Err(_)` - Key was not included in the witness (unknown state)
+    ///
+    /// **Security Property**: A malicious prover cannot make an unknown key appear
+    /// as non-existent by omitting it from the witness. Unknown keys will always
+    /// return an error, preventing state manipulation attacks.
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         if key.is_in_meta_bucket() {
             let bucket_id = bucket_id_from_metadata_key(key);
-            Ok(self
-                .metadata
-                .get(&bucket_id)
-                .and_then(|&opt| opt)
-                .map(Into::into))
+            match self.metadata.get(&bucket_id) {
+                Some(Some(meta)) => Ok(Some((*meta).into())), // Explicit metadata stored
+                Some(None) => Ok(None), // Default metadata (appear as None at the storage layer)
+                None => Err("Key not in witness"), // Unknown - not witnessed
+            }
         } else {
-            Ok(self.kvs.get(&key).cloned().flatten())
+            match self.kvs.get(&key) {
+                Some(Some(value)) => Ok(Some(value.clone())), // Exists with value
+                Some(None) => Ok(None),                       // Witnessed as non-existent
+                None => Err("Key not in witness"),            // Unknown - not witnessed
+            }
         }
     }
 
+    /// Range queries are not supported for BlockWitness.
+    ///
+    /// # Security Rationale
+    ///
+    /// Range queries cannot be safely implemented for witnesses because we cannot
+    /// guarantee that all keys in the requested range are included in the witness.
+    /// A malicious prover could selectively omit keys from the witness, making
+    /// them appear as non-existent when they are actually unknown.
+    ///
+    /// **For stateless validation**: Use individual `value()` calls instead of
+    /// range queries. This ensures proper distinction between unknown and
+    /// non-existent keys.
     fn entries(
         &self,
-        range: RangeInclusive<SaltKey>,
+        _range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        let mut result: Vec<(SaltKey, SaltValue)> = Vec::new();
-        if range.start().is_in_meta_bucket() {
-            result.extend(
-                self.metadata
-                    .range(
-                        bucket_id_from_metadata_key(*range.start())
-                            ..=bucket_id_from_metadata_key(
-                                *range.end().min(METADATA_KEYS_RANGE.end()),
-                            ),
-                    )
-                    .filter_map(|(bucket_id, meta)| {
-                        meta.as_ref()
-                            .map(|m| (bucket_metadata_key(*bucket_id), (*m).into()))
-                    }),
-            );
-        }
-        result.extend(
-            self.kvs
-                .range(*range.start()..=*range.end())
-                .filter_map(|(k, v)| v.as_ref().map(|val| (*k, val.clone()))),
-        );
-        Ok(result)
+        Err("Range queries not supported for BlockWitness")
     }
 
     /// Retrieves metadata for a specific bucket from the witness.
@@ -192,8 +227,10 @@ impl StateReader for BlockWitness {
             }
             Some(None) => {
                 // Case 2: Bucket exists in proof but has default metadata
+                // We cannot reliably compute used count since the witness may not
+                // contain all entries in the bucket
                 let meta = BucketMeta {
-                    used: Some(self.bucket_used_slots(bucket_id)?),
+                    used: None, // Unknown - cannot determine from partial witness
                     ..Default::default()
                 };
                 Ok(meta)
@@ -204,13 +241,126 @@ impl StateReader for BlockWitness {
             }
         }
     }
+
+    /// Counts occupied slots in a bucket by checking every slot in the witness.
+    ///
+    /// This method provides an accurate count of occupied slots, but only if ALL slots
+    /// in the bucket are included in the witness. If any slot is missing from the witness,
+    /// this method returns an error to maintain security guarantees.
+    ///
+    /// # Security Model
+    ///
+    /// - **Complete coverage required**: Returns error if ANY slot in the bucket is not witnessed
+    /// - **No partial counts**: Either counts ALL slots accurately or fails with error
+    /// - **Malicious prover protection**: Cannot be tricked by selective slot omission
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The bucket ID to count slots for
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)` - Number of occupied slots if all slots are witnessed
+    /// - `Err(_)` - If bucket metadata is missing or any slot is not witnessed
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        // Follow the convention of the default implementation
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
+        // Get bucket metadata to determine capacity
+        let metadata = self.metadata(bucket_id)?;
+        let capacity = metadata.capacity;
+
+        let mut used_count = 0u64;
+
+        // Check every slot in the bucket
+        for slot in 0..capacity {
+            let salt_key = SaltKey::from((bucket_id, slot));
+            // Returns error if any slot is not witnessed (`Err` from `value()`)
+            if self.value(salt_key)?.is_some() {
+                used_count += 1;
+            }
+        }
+
+        Ok(used_count)
+    }
+}
+
+impl TrieReader for BlockWitness {
+    type Error = &'static str;
+
+    /// Retrieves the commitment for a specific trie node from the witness.
+    ///
+    /// # Security Model
+    ///
+    /// This method enforces the same security properties as other BlockWitness methods:
+    /// - Returns the commitment if the node is witnessed in the proof
+    /// - Returns an error if the node is not included in the witness
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        match self.proof.parents_commitments.get(&node_id) {
+            Some(commitment) => Ok(commitment.0),
+            None => Err("Trie node not in witness"),
+        }
+    }
+
+    /// Range queries are not supported for BlockWitness.
+    ///
+    /// **For stateless validation**: Use individual `commitment()` calls instead
+    /// of range queries. This ensures proper distinction between unknown and
+    /// default-valued nodes.
+    fn node_entries(
+        &self,
+        _range: Range<NodeId>,
+    ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+        Err("Range queries not supported for BlockWitness")
+    }
+}
+
+#[cfg(test)]
+/// Helper function to create a mock SaltProof for testing
+pub fn create_mock_proof() -> SaltProof {
+    use crate::{empty_salt::EmptySalt, proof::SaltProof};
+
+    // Create a minimal real proof using EmptySalt
+    let salt_keys = vec![SaltKey(0)];
+    SaltProof::create(&salt_keys, &EmptySalt).unwrap()
+}
+
+#[cfg(test)]
+/// Helper function to create a BlockWitness for testing
+pub fn create_witness(
+    bucket_id: BucketId,
+    metadata: Option<BucketMeta>,
+    slots: Vec<(u64, Option<SaltValue>)>,
+) -> BlockWitness {
+    let metadata = if let Some(meta) = metadata {
+        [(bucket_id, Some(meta))].into()
+    } else {
+        BTreeMap::new()
+    };
+    let kvs = slots
+        .into_iter()
+        .map(|(slot, val)| (SaltKey::from((bucket_id, slot)), val))
+        .collect();
+    BlockWitness {
+        metadata,
+        kvs,
+        proof: create_mock_proof(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        mem_store::MemStore, mock_evm_types::*, state::state::EphemeralSaltState,
+        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        mem_store::MemStore,
+        mock_evm_types::*,
+        proof::CommitmentBytesW,
+        state::state::EphemeralSaltState,
+        state::updates::StateUpdates,
+        traits::TrieReader,
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
@@ -366,20 +516,9 @@ mod tests {
         res
     }
 
-    /// Helper function to create a mock SaltProof for testing
-    fn create_mock_proof() -> SaltProof {
-        use crate::{empty_salt::EmptySalt, proof::SaltProof};
-
-        // Create a minimal real proof using EmptySalt
-        let salt_keys = vec![SaltKey(0)];
-        SaltProof::create(&salt_keys, &EmptySalt).unwrap()
-    }
-
     /// Test all three cases of the BlockWitness::metadata() method
     #[test]
     fn test_block_witness_metadata_cases() {
-        use crate::constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS};
-
         let mock_salt_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
 
         // Use valid data bucket IDs (>= NUM_META_BUCKETS)
@@ -435,7 +574,7 @@ mod tests {
         let result = witness.metadata(bucket2).unwrap();
         assert_eq!(result.nonce, 0); // Default value
         assert_eq!(result.capacity, MIN_BUCKET_SIZE as u64); // Default value
-        assert_eq!(result.used, Some(3)); // Computed from 3 kvs entries
+        assert_eq!(result.used, None); // Cannot compute reliably from partial witness
 
         // Test Case 3: Bucket not in proof (None)
         let witness = BlockWitness {
@@ -450,5 +589,232 @@ mod tests {
             result.unwrap_err(),
             "Bucket metadata not available in proof"
         );
+    }
+
+    /// Test that verifies the security properties of BlockWitness StateReader
+    /// implementation.
+    ///
+    /// This test ensures that the witness correctly distinguishes between:
+    /// - Witnessed existing values (Ok(Some(value)))
+    /// - Witnessed non-existent values (Ok(None))
+    /// - Unknown values not in witness (Err)
+    ///
+    /// This prevents state manipulation attacks where a malicious prover
+    /// could make unknown values appear as non-existent.
+    #[test]
+    fn test_witness_state_reader_security() {
+        // Setup test keys
+        let key_exists = SaltKey::from((100000, 1)); // Will be witnessed as existing
+        let key_nonexistent = SaltKey::from((100000, 2)); // Will be witnessed as non-existent
+        let key_unknown = SaltKey::from((100000, 3)); // Will NOT be in witness (unknown)
+
+        // Create witness with partial data
+        let mut kvs = BTreeMap::new();
+        kvs.insert(key_exists, Some(SaltValue::new(&[1; 32], &[2; 32]))); // Exists
+        kvs.insert(key_nonexistent, None); // Proven non-existent
+                                           // key_unknown is intentionally omitted (unknown)
+
+        let witness = BlockWitness {
+            metadata: BTreeMap::new(),
+            kvs,
+            proof: create_mock_proof(),
+        };
+
+        // Test witnessed existing key
+        match witness.value(key_exists) {
+            Ok(Some(_)) => {} // Correct: witnessed as existing
+            other => panic!("Expected Ok(Some(_)), got {:?}", other),
+        }
+
+        // Test witnessed non-existent key
+        match witness.value(key_nonexistent) {
+            Ok(None) => {} // Correct: witnessed as non-existent
+            other => panic!("Expected Ok(None), got {:?}", other),
+        }
+
+        // Test unknown key (not in witness) - CRITICAL SECURITY TEST
+        match witness.value(key_unknown) {
+            Err(_) => {}, // Correct: unknown key returns error
+            Ok(None) => panic!("SECURITY VIOLATION: Unknown key returned Ok(None) - could be exploited by malicious prover!"),
+            Ok(Some(_)) => panic!("SECURITY VIOLATION: Unknown key returned Ok(Some(_)) - impossible case!"),
+        }
+
+        // Test that range queries are disabled for security
+        assert!(witness.entries(key_exists..=key_unknown).is_err());
+
+        // Test that bucket_used_slots requires complete bucket witness
+        assert!(witness.bucket_used_slots(100000).is_err());
+
+        // Test metadata security properties
+        let bucket_exists = 100000;
+        let bucket_default = 100001;
+        let bucket_unknown = 100002;
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            bucket_exists,
+            Some(BucketMeta {
+                nonce: 42,
+                capacity: 512,
+                used: Some(10),
+            }),
+        );
+        metadata.insert(bucket_default, None); // Default metadata
+                                               // bucket_unknown intentionally omitted
+
+        let witness_meta = BlockWitness {
+            metadata,
+            kvs: BTreeMap::new(),
+            proof: create_mock_proof(),
+        };
+
+        // Existing metadata
+        assert!(witness_meta.metadata(bucket_exists).is_ok());
+
+        // Default metadata
+        let default_meta = witness_meta.metadata(bucket_default).unwrap();
+        assert_eq!(default_meta.nonce, 0);
+        assert_eq!(default_meta.capacity, MIN_BUCKET_SIZE as u64);
+        assert_eq!(default_meta.used, None); // Cannot compute from partial witness
+
+        // Unknown metadata - should error
+        assert!(witness_meta.metadata(bucket_unknown).is_err());
+    }
+
+    /// Comprehensive tests for the bucket_used_slots method.
+    ///
+    /// Tests all scenarios:
+    /// - Error when bucket metadata is missing
+    /// - Successful counting with fully witnessed bucket
+    /// - Error when some slots are not witnessed
+    /// - Correct counting with mix of occupied and empty slots
+    /// - Handling of default metadata buckets
+    #[test]
+    fn test_bucket_used_slots() {
+        let bucket_id = 100000;
+        let val = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+
+        // Test 1: Missing metadata
+        let witness = create_witness(bucket_id, None, vec![]);
+        assert_eq!(
+            witness.bucket_used_slots(bucket_id).unwrap_err(),
+            "Bucket metadata not available in proof"
+        );
+
+        // Test 2: Fully witnessed bucket
+        let meta = BucketMeta {
+            nonce: 0,
+            capacity: 8,
+            used: Some(3),
+        };
+        let slots = vec![
+            (0, Some(val.clone())),
+            (1, None),
+            (2, Some(val.clone())),
+            (3, None),
+            (4, None),
+            (5, Some(val.clone())),
+            (6, None),
+            (7, None),
+        ];
+        let witness = create_witness(bucket_id, Some(meta), slots);
+        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), 3);
+
+        // Test 3: Partial witness (missing slots)
+        let meta = BucketMeta {
+            nonce: 0,
+            capacity: 5,
+            used: None,
+        };
+        let slots = vec![(0, Some(val.clone())), (1, None), (2, Some(val.clone()))];
+        let witness = create_witness(bucket_id, Some(meta), slots);
+        assert_eq!(
+            witness.bucket_used_slots(bucket_id).unwrap_err(),
+            "Key not in witness"
+        );
+
+        // Test 4: Empty bucket
+        let meta = BucketMeta {
+            nonce: 0,
+            capacity: 3,
+            used: None,
+        };
+        let slots = vec![(0, None), (1, None), (2, None)];
+        let witness = create_witness(bucket_id, Some(meta), slots);
+        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), 0);
+
+        // Test 5: Default metadata bucket
+        let witness = BlockWitness {
+            metadata: [(bucket_id, None)].into(),
+            kvs: (0..MIN_BUCKET_SIZE as u64)
+                .map(|slot| {
+                    let val_opt = if slot % 3 == 0 {
+                        Some(val.clone())
+                    } else {
+                        None
+                    };
+                    (SaltKey::from((bucket_id, slot)), val_opt)
+                })
+                .collect(),
+            proof: create_mock_proof(),
+        };
+        let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
+        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
+    }
+
+    /// Test that verifies the security properties of BlockWitness TrieReader
+    /// implementation.
+    ///
+    /// This test ensures that the TrieReader correctly distinguishes between:
+    /// - Witnessed nodes (returns commitment)
+    /// - Unknown nodes not in witness (returns error)
+    ///
+    /// This prevents state manipulation attacks where a malicious prover
+    /// could omit critical trie nodes to hide state modifications.
+    #[test]
+    fn test_witness_trie_reader_security() {
+        // Build witness with two witnessed nodes
+        let mut proof = create_mock_proof();
+        proof.parents_commitments = [
+            (12345, CommitmentBytesW([1u8; 64])),
+            (67890, CommitmentBytesW([2u8; 64])),
+        ]
+        .into();
+
+        let witness = BlockWitness {
+            metadata: BTreeMap::new(),
+            kvs: BTreeMap::new(),
+            proof,
+        };
+
+        // Witnessed nodes return correct commitments
+        assert_eq!(witness.commitment(12345).unwrap(), [1u8; 64]);
+        assert_eq!(witness.commitment(67890).unwrap(), [2u8; 64]);
+
+        // Unknown nodes must return errors (critical security test)
+        assert!(
+            witness.commitment(99999).is_err(),
+            "SECURITY: Unknown node must return error, not default!"
+        );
+
+        // Range queries must be disabled
+        assert!(
+            witness.node_entries(0..1000).is_err(),
+            "SECURITY: Range queries must be disabled!"
+        );
+    }
+
+    #[test]
+    fn test_default_bucket_meta_proof() {
+        let mem_store = MemStore::new();
+
+        let mut trie = StateRoot::new(&mem_store);
+        let (root, _) = trie.update(&StateUpdates::default()).unwrap();
+
+        let bucket_id: BucketId = 100000;
+        let salt_key = bucket_metadata_key(bucket_id);
+        let witness = BlockWitness::create(&[salt_key], &mem_store).unwrap();
+        let res = witness.verify_proof(root);
+        assert!(res.is_ok());
     }
 }
