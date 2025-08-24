@@ -42,7 +42,7 @@ pub type BucketId = u32;
 pub type SlotId = u64;
 
 /// Metadata for a bucket containing nonce, capacity, and usage statistics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BucketMeta {
     /// Nonce for SHI hash table operations.
     pub nonce: u32,
@@ -123,6 +123,26 @@ impl BucketMeta {
     /// `true` if this metadata has default `nonce` and `capacity` values, `false` otherwise.
     pub fn is_default(&self) -> bool {
         self.nonce == 0 && self.capacity == MIN_BUCKET_SIZE as u64
+    }
+}
+
+impl Serialize for BucketMeta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = self.to_bytes();
+        bytes.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BucketMeta {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: [u8; 12] = <[u8; 12]>::deserialize(deserializer)?;
+        BucketMeta::try_from(&bytes[..]).map_err(serde::de::Error::custom)
     }
 }
 
@@ -640,6 +660,19 @@ mod tests {
         assert_eq!(recovered.capacity, meta.capacity);
         assert_eq!(recovered.used, None); // Used field is not serialized
         assert_eq!(bytes.len(), 12);
+
+        // Serialize using bincode (which will use our custom serde implementation)
+        let bincode_bytes =
+            bincode::serde::encode_to_vec(&meta, bincode::config::legacy()).unwrap();
+
+        assert_eq!(bincode_bytes, bytes);
+
+        let bincode_recovered: BucketMeta =
+            bincode::serde::decode_from_slice(&bincode_bytes, bincode::config::legacy())
+                .unwrap()
+                .0;
+
+        assert_eq!(bincode_recovered, recovered);
     }
 
     /// Tests BucketMeta default constructor. Verifies that default values match
