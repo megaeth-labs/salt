@@ -322,7 +322,7 @@ where
                         // Set the zero commitment of the contracted bucket node
                         insert_uncomputed_node(
                             subtree_leaf_for_key(k),
-                            sub_trie_top_level(old_capacity) + 1,
+                            subtree_root_level(old_capacity) + 1,
                             MAX_SUBTREE_LEVELS,
                             &mut uncomputed_updates,
                         );
@@ -918,8 +918,8 @@ struct SubtrieChangeInfo {
 
 impl SubtrieChangeInfo {
     fn new(bucket_id: BucketId, old_capacity: u64, new_capacity: u64) -> Self {
-        let old_top_level = sub_trie_top_level(old_capacity);
-        let new_top_level = sub_trie_top_level(new_capacity);
+        let old_top_level = subtree_root_level(old_capacity);
+        let new_top_level = subtree_root_level(new_capacity);
         let old_top_id = ((bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId)
             + STARTING_NODE_ID[old_top_level] as NodeId;
         let new_top_id = ((bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId)
@@ -1477,32 +1477,6 @@ mod tests {
         store.update_trie(trie_updates);
         let (root3, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root3, contraction_root);
-    }
-
-    #[test]
-    fn scan_sub_trie_top_level() {
-        assert_eq!(sub_trie_top_level(256), MAX_SUBTREE_LEVELS - 1);
-        assert_eq!(sub_trie_top_level(512), MAX_SUBTREE_LEVELS - 2);
-        assert_eq!(sub_trie_top_level(256 * 256), MAX_SUBTREE_LEVELS - 2);
-        assert_eq!(sub_trie_top_level(256 * 256 * 2), MAX_SUBTREE_LEVELS - 3);
-        assert_eq!(sub_trie_top_level(256 * 256 * 256), MAX_SUBTREE_LEVELS - 3);
-        assert_eq!(
-            sub_trie_top_level(256 * 256 * 256 * 2),
-            MAX_SUBTREE_LEVELS - 4
-        );
-        assert_eq!(
-            sub_trie_top_level(256 * 256 * 256 * 256),
-            MAX_SUBTREE_LEVELS - 4
-        );
-        assert_eq!(
-            sub_trie_top_level(256 * 256 * 256 * 256 * 2),
-            MAX_SUBTREE_LEVELS - 5
-        );
-        // test with max capacity 40bits
-        assert_eq!(
-            sub_trie_top_level(256 * 256 * 256 * 256 * 256),
-            MAX_SUBTREE_LEVELS - 5
-        );
     }
 
     #[test]

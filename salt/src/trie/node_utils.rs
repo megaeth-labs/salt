@@ -4,7 +4,7 @@
 //! - Converting between different node representations
 //! - Navigating the trie hierarchy (parent/child relationships)
 //! - Mapping between SaltKeys and NodeIds
-//! - Determining subtrie levels and structure
+//! - Determining subtree levels and structure
 
 use crate::{
     constant::{
@@ -105,7 +105,6 @@ pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
     bucket_id + (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
 }
 
-
 /// Maps a bucket ID to its subtree root node in the main trie.
 ///
 /// This function calculates the NodeId of a bucket's root node at the main trie level.
@@ -144,13 +143,13 @@ pub(crate) fn subtree_leaf_for_key(key: &SaltKey) -> NodeId {
         + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
 }
 
-/// Determines the top (shallowest) level of a bucket's subtrie based on its capacity.
+/// Determines the top level of a bucket's subtree based on its capacity.
 ///
-/// Different bucket capacities require different subtrie depths to efficiently
-/// organize their slots. This function calculates the minimal subtrie depth needed
+/// Different bucket capacities require different subtree depths to efficiently
+/// organize their slots. This function calculates the minimal subtree depth needed
 /// to accommodate the given capacity.
 ///
-/// # Subtrie Level Mapping
+/// # Subtree Level Mapping
 /// ```text
 /// Level 0: Root (capacity = 1)              [root:0]
 /// Level 1: Small (capacity ≤ 256)          [0] [1] ... [256]
@@ -159,21 +158,12 @@ pub(crate) fn subtree_leaf_for_key(key: &SaltKey) -> NodeId {
 /// Level 4: Extra Large (capacity ≤ 2^32)   [0]...[16777216] [16777217]...[2^32]
 /// ```
 ///
-/// # Algorithm
-/// Start from the deepest level (4) and work upward, dividing capacity by 256
-/// at each step. When capacity ≤ 256, we've found the appropriate top level.
-///
 /// # Arguments
 /// * `capacity` - The total number of slots the bucket needs to accommodate
 ///
 /// # Returns
-/// The subtrie level (0-4) that should serve as the root for this capacity
-///
-/// # Example
-/// assert_eq!(sub_trie_top_level(256), 4);     // Minimal subtrie
-/// assert_eq!(sub_trie_top_level(1024), 3);    // Needs one more level
-/// assert_eq!(sub_trie_top_level(65536), 2);   // Needs two more levels
-pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
+/// The subtree level (0-4) that should serve as the root for this capacity
+pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
 
@@ -181,30 +171,30 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
     // Each level up can handle 256x more slots
     while capacity > MIN_BUCKET_SIZE as u64 {
         level -= 1; // Move up one level
-        capacity >>= MIN_BUCKET_SIZE_BITS; // Divide capacity by 256
+        capacity = (capacity + MIN_BUCKET_SIZE as u64 - 1) >> MIN_BUCKET_SIZE_BITS;
     }
 
     level
 }
 
-/// Converts a subtrie NodeId back to the starting SaltKey of its slot range.
+/// Converts a subtree NodeId back to the starting SaltKey of its slot range.
 ///
 /// This function performs the inverse operation of `subtree_leaf_for_key`, taking a NodeId
-/// from a bucket's subtrie and calculating which SaltKey range it represents.
-/// Each subtrie leaf node covers a range of 256 consecutive slots.
+/// from a bucket's subtree and calculating which SaltKey range it represents.
+/// Each subtree leaf node covers a range of 256 consecutive slots.
 ///
 /// # Prerequisites
 /// The input `node_id` must be a result from `subtree_leaf_for_key()` or equivalent,
-/// representing a valid node in a bucket's subtrie structure.
+/// representing a valid node in a bucket's subtree structure.
 ///
 /// # Algorithm
 /// 1. Extract bucket ID (upper 24 bits) and node position (lower 40 bits)
-/// 2. Calculate relative position within the deepest subtrie level
+/// 2. Calculate relative position within the deepest subtree level
 /// 3. Multiply by 256 to get the starting slot ID for this node's range
 /// 4. Combine bucket ID and slot ID to form the SaltKey
 ///
 /// # Arguments
-/// * `id` - A NodeId from a bucket subtrie (typically from `subtree_leaf_for_key()`)
+/// * `id` - A NodeId from a bucket subtree (typically from `subtree_leaf_for_key()`)
 ///
 /// # Returns
 /// The SaltKey representing the first slot in the range covered by this node
@@ -212,18 +202,18 @@ pub(crate) fn sub_trie_top_level(mut capacity: u64) -> usize {
 /// # Example
 /// // Node covering slots 1024-1279 in bucket 100
 /// let node_id = subtree_leaf_for_key(&SaltKey::from((100, 1024)));
-/// let start_key = subtrie_salt_key_start(&node_id);
+/// let start_key = subtree_salt_key_start(&node_id);
 /// assert_eq!(start_key, SaltKey::from((100, 1024))); // First slot of the range
 pub(crate) fn subtrie_salt_key_start(id: &NodeId) -> SaltKey {
     // Extract node position (lower 40 bits) and bucket ID (upper 24 bits)
     let node_id = *id & BUCKET_SLOT_ID_MASK;
     let bucket_id = *id - node_id;
 
-    // Calculate relative position within the deepest subtrie level
+    // Calculate relative position within the deepest subtree level
     let relative_position = node_id - STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
 
     // Convert back to slot ID by multiplying by 256
-    // Each subtrie node represents a range of 256 consecutive slots
+    // Each subtree node represents a range of 256 consecutive slots
     let slot_id = relative_position << MIN_BUCKET_SIZE_BITS;
 
     // Combine bucket and slot components into final SaltKey
@@ -487,6 +477,35 @@ mod tests {
                 result, expected,
                 "Failed for {}: key=({}, {}), expected={}, got={}",
                 description, bucket_id, slot_id, expected, result
+            );
+        }
+    }
+
+    /// Tests the subtree_root_level function for various capacity values.
+    ///
+    /// Verifies that the function returns the correct subtree level based on
+    /// capacity thresholds and level transitions.
+    #[test]
+    fn test_subtree_root_level() {
+        // Test cases: (capacity, expected_level)
+        let cases = [
+            (1, 4),          // Single slot → deepest level
+            (256, 4),        // Exactly one leaf node
+            (257, 3),        // Just over one leaf → level 3
+            (65536, 3),      // 256^2 slots → still level 3
+            (65537, 2),      // Just over 256^2 → level 2
+            (16777216, 2),   // 256^3 slots → still level 2
+            (16777217, 1),   // Just over 256^3 → level 1
+            (4294967296, 1), // 256^4 slots → still level 1
+            (4294967297, 0), // Just over 256^4 → root level
+        ];
+
+        for (capacity, expected) in cases {
+            assert_eq!(
+                subtree_root_level(capacity),
+                expected,
+                "capacity={}",
+                capacity
             );
         }
     }

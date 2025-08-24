@@ -8,7 +8,7 @@ use crate::{
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::get_child_node,
-    trie::node_utils::{sub_trie_top_level, subtrie_salt_key_start},
+    trie::node_utils::{subtree_root_level, subtrie_salt_key_start},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
@@ -182,7 +182,7 @@ where
             }
 
             let meta = store.metadata(bucket_id)?;
-            let bucket_trie_top_level = sub_trie_top_level(meta.capacity);
+            let bucket_trie_top_level = subtree_root_level(meta.capacity);
             Ok((bucket_id, bucket_trie_top_level as u8))
         })
         .collect::<Result<FxHashMap<_, _>, <Store as StateReader>::Error>>()

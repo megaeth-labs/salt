@@ -275,44 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sub_trie_top_level() {
-        use crate::trie::node_utils::{
-            get_child_node, get_parent_node, sub_trie_top_level, subtree_leaf_for_key,
-            subtrie_salt_key_start,
-        };
-
-        assert_eq!(sub_trie_top_level(256), 4); // 4
-
-        assert_eq!(sub_trie_top_level(256 * 256), 3); // 3
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256), 2); // 2
-
-        assert_eq!(sub_trie_top_level(131072), 2); // 2
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256), 1); // 1
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256 * 256), 0); // 0
-
-        //assert_eq!(vc_position_in_parent(&72061992101282049), 0);
-
-        assert_eq!(
-            subtree_leaf_for_key(&SaltKey(72061992084439043)),
-            72061992101282049
-        );
-
-        assert_eq!(get_parent_node(&72061992101282049, 3), 72061992084504833);
-
-        assert_eq!(
-            subtrie_salt_key_start(&72061992101282049),
-            SaltKey(72061992084439040)
-        );
-
-        assert_eq!(get_child_node(&72061992084439041, 0), 72061992084439297);
-        assert_eq!(get_child_node(&72061992084439297, 0), 72061992084504833);
-        assert_eq!(get_child_node(&72061992084504833, 0), 72061992101282049);
-    }
-
-    #[test]
     fn salt_proof_in_bucket_expansion() {
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
