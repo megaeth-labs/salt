@@ -30,23 +30,18 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                 .map(|_| rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId))
                 .collect();
             bids.sort();
-            StateUpdates {
-                data: bids
-                    .into_iter()
-                    .map(|bid| {
-                        (
-                            SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
-                            (
-                                None,
-                                Some(SaltValue::new(
-                                    &rng.gen::<[u8; 20]>(),
-                                    &rng.gen::<[u8; 32]>(),
-                                )),
-                            ),
-                        )
-                    })
-                    .collect(),
+            let mut state_updates = StateUpdates::default();
+            for bid in bids {
+                state_updates.add(
+                    SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
+                    None,
+                    Some(SaltValue::new(
+                        &rng.gen::<[u8; 20]>(),
+                        &rng.gen::<[u8; 32]>(),
+                    )),
+                );
             }
+            state_updates
         })
         .collect()
 }
@@ -147,7 +142,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
 pub struct ExpansionSalt((u64, u64));
 
 impl TrieReader for ExpansionSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
@@ -162,10 +157,17 @@ impl TrieReader for ExpansionSalt {
 }
 
 impl StateReader for ExpansionSalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
+    }
+
+    fn entries(
+        &self,
+        _range: RangeInclusive<SaltKey>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(vec![])
     }
 
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {

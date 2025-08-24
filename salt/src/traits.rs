@@ -11,6 +11,7 @@ use crate::{
     },
     BucketId,
 };
+use core::error::Error;
 use std::{
     fmt::Debug,
     ops::{Range, RangeInclusive},
@@ -29,9 +30,10 @@ use std::{
 /// rehashed).
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
-pub trait StateReader: Debug + Send + Sync {
+#[auto_impl::auto_impl(&, Arc)]
+pub trait StateReader: Send + Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Error + Send + Sync + 'static;
 
     /// Retrieves a state value by key.
     ///
@@ -142,6 +144,7 @@ pub trait StateReader: Debug + Send + Sync {
 /// explicitly stored, ensuring the trie behaves as if fully materialized.
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
     type Error: Debug + Send;

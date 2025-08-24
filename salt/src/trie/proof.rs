@@ -149,7 +149,7 @@ impl PlainKeysProof {
 // This allows the proof to be used as a state reader during verification,
 // providing only the data that was included in the proof
 impl StateReader for PlainKeysProof {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves a salt value by its salt key from the proof data.
     /// Delegates to the underlying BlockWitness implementation.
@@ -172,7 +172,7 @@ impl StateReader for PlainKeysProof {
 }
 
 impl TrieReader for PlainKeysProof {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         self.witness.commitment(node_id)

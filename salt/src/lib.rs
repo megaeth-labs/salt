@@ -5,11 +5,15 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
+pub use state::{
+    hasher,
+    state::{EphemeralSaltState, EphemeralSaltStateCache, PlainStateProvider},
+    updates::StateUpdates,
+};
 pub mod trie;
 pub use trie::{
     proof::PlainKeysProof,
-    trie::{get_child_node, StateRoot},
+    trie::{compute_from_scratch, get_child_node, StateRoot},
     updates::TrieUpdates,
     witness::BlockWitness,
 };

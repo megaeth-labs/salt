@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+enable-hugepages = ["banderwagon/enable-hugepages"]
 
 [dependencies]
 # megaeth dependencies
@@ -14,6 +15,7 @@ ipa-multipoint = { path = "../ipa-multipoint" }
 megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
 
 # standard dependencies
+auto_impl = "1"
 blake3 = "1.8"
 bytes = "1.5"
 derive_more = { version = "2", default-features = false, features = ["full"] }
