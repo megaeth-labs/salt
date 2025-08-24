@@ -1,4 +1,3 @@
-
 //! Utilities for navigating and manipulating nodes in the SALT trie structure.
 //!
 //! This module provides core functionality for working with the hierarchical node
@@ -73,7 +72,7 @@
 //! ### Dynamic Root Positioning
 //!
 //! The subtree root's NodeId for a bucket is calculated as:
-//! ```
+//! ```ignore
 //! root_node_id = (bucket_id << 40) | STARTING_NODE_ID[subtree_root_level(capacity)]
 //! ```
 //!
@@ -154,7 +153,7 @@
 //!
 //! ## Navigating the Main Trie
 //!
-//! ```rust
+//! ```ignore
 //! use salt::trie::node_utils::{get_child_node, get_parent_node, vc_position_in_parent};
 //!
 //! // Navigate from root to a specific path
@@ -166,12 +165,12 @@
 //! let pos = vc_position_in_parent(&grandchild);  // Returns 100
 //!
 //! // Navigate back up
-//! let parent = get_parent_node(&grandchild, 2);  // Level 2 back to level 1
+//! let parent = get_parent_node(&grandchild);  // Navigate back to level 1
 //! ```
 //!
 //! ## Working with Buckets
 //!
-//! ```rust
+//! ```ignore
 //! use salt::trie::node_utils::{bucket_root_node_id, subtree_leaf_for_key};
 //! use salt::types::SaltKey;
 //!
@@ -263,17 +262,19 @@ pub fn get_child_node(parent: &NodeId, child_idx: usize) -> NodeId {
 ///
 /// # Arguments
 /// * `node_id` - The NodeId of the child node
-/// * `level` - The level where the child node resides
 ///
 /// # Returns
 /// The NodeId of the parent node at level-1
 ///
 /// # Panics
-/// Implicitly panics if level is 0 (root has no parent) due to underflow
-pub(crate) fn get_parent_node(node_id: &NodeId, level: usize) -> NodeId {
+/// Implicitly panics if the node is the root (level 0) since root has no parent
+pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
     // Extract the node position (lower 40 bits) and bucket ID (upper 24 bits)
     let local_node_id = get_local_number(*node_id);
     let bucket_id = *node_id - local_node_id;
+
+    // Determine which level this node is on
+    let level = get_bfs_level(local_node_id);
 
     // Calculate relative position from the start of current level
     let relative_position = local_node_id as usize - STARTING_NODE_ID[level];
@@ -508,50 +509,45 @@ mod tests {
         let bucket_id = 100000u64;
         let test_cases = [
             // Main trie: Level 1 to level 0 (root)
-            (1, 1, 0, "First child back to root"),
-            (128, 1, 0, "Middle child back to root"),
-            (256, 1, 0, "Last child back to root"),
+            (1, 0, "First child back to root"),
+            (128, 0, "Middle child back to root"),
+            (256, 0, "Last child back to root"),
             // Main trie: Level 2 to level 1
-            (257, 2, 1, "First L2 node to parent"),
-            (257 + 256, 2, 2, "Second group L2 node to parent"),
-            (257 + 127 * 256, 2, 128, "Complex L2 node to parent"),
+            (257, 1, "First L2 node to parent"),
+            (257 + 256, 2, "Second group L2 node to parent"),
+            (257 + 127 * 256, 128, "Complex L2 node to parent"),
             // Subtree: Level 2 to level 1
             (
                 (bucket_id << BUCKET_SLOT_BITS) | 257,
-                2,
                 (bucket_id << BUCKET_SLOT_BITS) | 1,
                 "Subtree L2 first node to parent",
             ),
             (
                 (bucket_id << BUCKET_SLOT_BITS) | (257 + 256),
-                2,
                 (bucket_id << BUCKET_SLOT_BITS) | 2,
                 "Subtree L2 second group to parent",
             ),
             // Subtree: Level 3 to level 2
             (
                 (bucket_id << BUCKET_SLOT_BITS) | 65793,
-                3,
                 (bucket_id << BUCKET_SLOT_BITS) | 257,
                 "Subtree L3 first node to parent",
             ),
             (
                 (bucket_id << BUCKET_SLOT_BITS) | (65793 + 1024),
-                3,
                 (bucket_id << BUCKET_SLOT_BITS) | (257 + 4),
                 "Subtree L3 node to parent (1024/256=4)",
             ),
             // Subtree: Level 4 to level 3
             (
                 (bucket_id << BUCKET_SLOT_BITS) | 16843009,
-                4,
                 (bucket_id << BUCKET_SLOT_BITS) | 65793,
                 "Subtree L4 first node to parent",
             ),
         ];
 
-        for (child, level, expected_parent, description) in test_cases {
-            let result = get_parent_node(&child, level);
+        for (child, expected_parent, description) in test_cases {
+            let result = get_parent_node(&child);
             assert_eq!(result, expected_parent, "Failed: {}", description);
         }
 
@@ -570,8 +566,7 @@ mod tests {
         for parent in test_parents {
             for child_idx in [0, 127, 255] {
                 let child = get_child_node(&parent, child_idx);
-                let child_level = get_bfs_level(get_local_number(child));
-                let recovered_parent = get_parent_node(&child, child_level);
+                let recovered_parent = get_parent_node(&child);
                 assert_eq!(
                     recovered_parent, parent,
                     "Inverse relationship failed: parent={:#x}, child_idx={}",

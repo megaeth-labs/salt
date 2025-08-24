@@ -170,9 +170,9 @@ where
 
         // Update the state trie in descending order of depth (bottom-up).
         // Process from level TRIE_LEVELS-2 (deepest internal nodes) to level 0 (root)
-        (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|level| {
+        (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|_| {
             // Compute updates for parent nodes at this level based on child changes
-            updates = self.update_internal_nodes(&mut updates, level, get_parent_node)?;
+            updates = self.update_internal_nodes(&mut updates, get_parent_node)?;
 
             // Record the new parent updates in the complete trie_updates collection
             trie_updates.extend(updates.iter());
@@ -223,7 +223,7 @@ where
                         ),
                     );
                     if level != start {
-                        id = get_parent_node(&id, level);
+                        id = get_parent_node(&id);
                     }
                 }
             };
@@ -459,7 +459,7 @@ where
                 self.update_leaf_nodes(&mut expansion_updates, subtree_leaf_for_key)
                     .expect("update leaf nodes for subtrie failed")
             } else {
-                self.update_internal_nodes(&mut updates, level, get_parent_node)
+                self.update_internal_nodes(&mut updates, get_parent_node)
                     .expect("update internal nodes for subtrie failed")
             };
             // If there are subtrie events that need to be processed,
@@ -595,11 +595,10 @@ where
     fn update_internal_nodes<P>(
         &self,
         child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
-        level: usize,
         get_parent_id: P,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
     where
-        P: Fn(&NodeId, usize) -> NodeId + Sync + Send,
+        P: Fn(&NodeId) -> NodeId + Sync + Send,
     {
         // Sort child updates by their position within parent vector commitments.
         // This ensures cache-friendly access patterns and deterministic ordering
@@ -632,7 +631,7 @@ where
                     .zip(scalar_bytes.chunks_exact(2))
                     .map(|((id, _), scalars)| {
                         (
-                            get_parent_id(id, level + 1), // Which parent node to update
+                            get_parent_id(id), // Which parent node to update
                             // Compute delta: G[child_index] * (new_scalar - old_scalar)
                             // This represents the change needed in parent's vector commitment
                             self.committer.gi_mul_delta(
@@ -1898,7 +1897,7 @@ mod tests {
         // Check and handle the commitment updates of the bottom-level node
         let cur_level = bottom_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes(&mut updates, cur_level, get_parent_node)
+            .update_internal_nodes(&mut updates, get_parent_node)
             .unwrap();
 
         let bytes_indices =
@@ -1927,7 +1926,7 @@ mod tests {
         // Check and handle the commitment updates of the second-level node
         let cur_level = cur_level - 1;
         let mut unprocess_updates = trie
-            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_node)
+            .update_internal_nodes(&mut unprocess_updates, get_parent_node)
             .unwrap();
 
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
@@ -1947,7 +1946,7 @@ mod tests {
 
         let cur_level = cur_level - 1;
         let unprocess_updates = trie
-            .update_internal_nodes(&mut unprocess_updates, cur_level, get_parent_node)
+            .update_internal_nodes(&mut unprocess_updates, get_parent_node)
             .unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
