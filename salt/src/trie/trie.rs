@@ -189,23 +189,45 @@ where
         Ok((hash_commitment(root_commitment), trie_updates))
     }
 
-    /// Given the state updates, generates the commitment updates of the leaf nodes
-    /// (i.e., the SALT buckets).
+    /// Updates bucket subtrees based on state changes, handling both normal updates 
+    /// and bucket capacity changes (expansions/contractions).
+    /// 
+    /// This method processes state updates to generate commitment updates for all affected
+    /// trie nodes. It handles several complex scenarios:
+    /// 
+    /// 1. **Normal buckets**: Simple key-value updates without capacity changes
+    /// 2. **Expansion buckets**: Buckets that can change capacity (> MIN_BUCKET_SIZE)
+    /// 3. **Contraction optimization**: Efficiently handles bucket size decreases
+    /// 4. **Subtree restructuring**: Manages depth changes when bucket capacity changes
+    /// 
+    /// The algorithm uses a complex filter to categorize updates while tracking capacity
+    /// changes and subtree events. It then processes updates bottom-up through the trie
+    /// levels, handling special cases where subtree roots change due to capacity changes.
     fn update_bucket_subtrees(
         &self,
         state_updates: &StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        // === DATA STRUCTURES SETUP ===
+        // Separate containers for different types of updates and events
+        
         // expansion kvs and non-expansion kvs are sorted separately
         let mut expansion_updates: SaltUpdates<'_> = vec![];
+        // Track subtree events at each level (bucket capacity changes that affect structure)
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
             vec![HashMap::new(); MAX_SUBTREE_LEVELS];
+        
+        // State tracking variables used during the complex filter operation
         let (mut bucket_id, mut is_expansion, mut old_capacity, mut new_capacity) = (
-            u32::MAX,
-            false,
-            MIN_BUCKET_SIZE as u64,
-            MIN_BUCKET_SIZE as u64,
+            u32::MAX,                    // Current bucket being processed
+            false,                       // Whether current bucket is "expansion type"
+            MIN_BUCKET_SIZE as u64,     // Current bucket's old capacity
+            MIN_BUCKET_SIZE as u64,     // Current bucket's new capacity
         );
+        
+        // Maps bucket_id -> (old_capacity, new_capacity) from metadata updates
         let mut capacity_changes = HashMap::new();
+        // Helper closure for contraction optimization: marks nodes as having zero commitment
+        // This is used when buckets shrink - nodes beyond the new capacity become irrelevant
         let insert_uncomputed_node =
             |mut id: NodeId,
              start: usize,
@@ -219,7 +241,7 @@ where
                         id,
                         (
                             self.commitment(id).expect("node should exist in trie"),
-                            default_commitment(id),
+                            default_commitment(id), // Zero commitment for removed nodes
                         ),
                     );
                     if level != start {
@@ -227,19 +249,32 @@ where
                     }
                 }
             };
-        // When optimizing for contraction, the commitment of the contracted bucket is zero,
-        // so it is directly updated to reduce computation.
-        // uncomputed_updates is used to record uncomputed nodes
+            
+        // === CONTRACTION OPTIMIZATION DATA STRUCTURES ===
+        // When buckets shrink, many nodes become irrelevant and can be set to zero commitment
+        // These structures track which nodes can be optimized away
+        
+        // Maps node_id -> (old_commitment, zero_commitment) for nodes being removed
         let mut uncomputed_updates = BTreeMap::new();
-        // Record the nodes that need extra processing during the subtrie calculation
-        // from 0 to SUB_TRIE_LEVELS-1. The last group records the nodes that have been
-        // calculated and directly updates to trie_updates.
+        
+        // Nodes that need processing at each subtree level [0..MAX_SUBTREE_LEVELS]
+        // The last group (MAX_SUBTREE_LEVELS) goes directly to final trie_updates
         let mut pending_updates = vec![vec![]; MAX_SUBTREE_LEVELS + 1];
-        // Record the information of buckets that have been downsized, used to distinguish
-        // between nodes in uncomputed_updates that need to participate in the calculation
-        // and those that do not.
+        
+        // List of buckets being contracted (capacity decreased)
+        // Used to optimize computation by avoiding work on removed nodes
         let mut contractions = vec![];
 
+        // === COMPLEX FILTER OPERATION ===
+        // This filter serves multiple purposes:
+        // 1. Separates normal updates from expansion updates
+        // 2. Extracts capacity changes from metadata buckets  
+        // 3. Tracks subtree events when bucket capacity changes
+        // 4. Applies contraction optimization for removed slots
+        // 
+        // WARNING: This filter has side effects! It modifies several variables above.
+        // The filter predicate (!is_expansion) determines which updates go to normal_updates
+        
         let mut normal_updates = state_updates
             .data
             .iter()
@@ -331,13 +366,16 @@ where
                 !is_expansion
             })
             .collect::<Vec<_>>();
-        // Compute the commitment of the non-expansion kvs.
+            
+        // === PHASE 1: PROCESS NORMAL UPDATES ===
+        // Handle buckets that don't change capacity (simple key-value updates)
         let mut trie_updates = self.update_leaf_nodes(&mut normal_updates, false)?;
 
         trie_updates.extend(pending_updates[MAX_SUBTREE_LEVELS].iter());
 
-        // Record (bucket, capacity changes) of unchanged KV but changed capacity to
-        // expansion_updates. it is used to compute the commitment of the subtrie.
+        // === PHASE 2: HANDLE CAPACITY-ONLY CHANGES ===
+        // Process buckets that changed capacity but have no key-value updates
+        // These require subtree restructuring when the depth changes
         for (bid, (old_capacity, new_capacity)) in capacity_changes {
             let info = SubtrieChangeInfo::new(bid, old_capacity, new_capacity);
             // filtor out load and nonce change or level not changed
@@ -379,8 +417,9 @@ where
             };
         }
 
-        // Distinguish between nodes in uncomputed_updates that need to participate
-        // in the calculation and those that do not during downsizing.
+        // === PHASE 3: APPLY CONTRACTION OPTIMIZATIONS ===
+        // For buckets that shrank, optimize by distributing zero-commitment nodes
+        // across appropriate levels to avoid unnecessary computation
         for info in contractions {
             assert!(info.old_capacity > info.new_capacity);
             // Add the contracted bucket to the uncomputed_updates
@@ -440,7 +479,9 @@ where
             trie_updates.extend(updates_map.into_iter());
         }
 
-        // calculate the commitments of the subtrie by leaves (KVS) changes
+        // === PHASE 4: BOTTOM-UP SUBTREE PROCESSING ===
+        // Process expansion buckets level by level from leaves to root
+        // Handle subtree events where bucket capacity changes affect tree structure
         let mut updates = vec![];
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
             // // If there is no subtrie that needs to be calculated, exit the loop directly.
