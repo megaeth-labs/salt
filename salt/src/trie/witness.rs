@@ -47,8 +47,11 @@ use std::{
 pub struct BlockWitness {
     /// Bucket metadata witnessed in this proof.
     /// - `Some(Some(meta))`: Explicit metadata stored
-    /// - `Some(None)`: Default metadata (proven absent)
+    /// - `Some(None)`: Default metadata stored
     /// - Missing key: Bucket not witnessed (unknown)
+    ///
+    /// Unlike regular data buckets, metadata bucket slots can never be empty.
+    /// `Some(None)` is just a storage-level optimization for default metadata.
     pub metadata: BTreeMap<BucketId, Option<BucketMeta>>,
 
     /// Key-value pairs witnessed in this proof.
@@ -129,7 +132,7 @@ impl BlockWitness {
         let mut keys = Vec::new();
         let mut vals = Vec::new();
 
-        // Handle metadata entries - preserve None for non-existent metadata
+        // Handle metadata entries - convert None to default metadata values
         for (&bucket_id, &meta_opt) in &self.metadata {
             keys.push(bucket_metadata_key(bucket_id));
             vals.push(Some(meta_opt.unwrap_or_default().into()));
@@ -138,7 +141,7 @@ impl BlockWitness {
         // Handle regular KV entries - preserve None for non-existent values
         for (&key, value_opt) in &self.kvs {
             keys.push(key);
-            vals.push(value_opt.clone()); // Preserve None for non-existent values
+            vals.push(value_opt.clone());
         }
 
         self.proof.check(keys, vals, root)?;
@@ -166,7 +169,7 @@ impl StateReader for BlockWitness {
             let bucket_id = bucket_id_from_metadata_key(key);
             match self.metadata.get(&bucket_id) {
                 Some(Some(meta)) => Ok(Some((*meta).into())), // Explicit metadata stored
-                Some(None) => Ok(None), // Default metadata (witnessed as absent)
+                Some(None) => Ok(None), // Default metadata (appear as None at the storage layer)
                 None => Err("Key not in witness"), // Unknown - not witnessed
             }
         } else {
@@ -260,6 +263,11 @@ impl StateReader for BlockWitness {
     /// - `Ok(count)` - Number of occupied slots if all slots are witnessed
     /// - `Err(_)` - If bucket metadata is missing or any slot is not witnessed
     fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        // Follow the convention of the default implementation
+        if !is_valid_data_bucket(bucket_id) {
+            return Ok(0);
+        }
+
         // Get bucket metadata to determine capacity
         let metadata = self.metadata(bucket_id)?;
         let capacity = metadata.capacity;
