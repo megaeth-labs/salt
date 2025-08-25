@@ -421,7 +421,7 @@ where
 
         // === PHASE 1: PROCESS NORMAL UPDATES ===
         // Handle buckets that don't change capacity (simple key-value updates)
-        let mut trie_updates = self.update_leaf_nodes(&mut normal_updates, false)?;
+        let mut trie_updates = self.update_leaf_nodes(normal_updates, false)?;
 
         trie_updates.extend(pending_updates[MAX_SUBTREE_LEVELS].iter());
 
@@ -559,7 +559,8 @@ where
             // Update nodes at current level
             current_level_updates = if level == MAX_SUBTREE_LEVELS - 1 {
                 // Leaf level: process expansion updates
-                self.update_leaf_nodes(&mut expansion_updates, true)
+                let expansion_updates = std::mem::take(&mut expansion_updates);
+                self.update_leaf_nodes(expansion_updates, true)
                     .expect("update leaf nodes for subtrie failed")
             } else {
                 // Internal level: propagate updates from children
@@ -668,9 +669,9 @@ where
     /// This delta approach avoids recomputing the entire 256-element sum.
     ///
     /// # Arguments
-    /// * `state_updates` - Represents key-value changes in the underlying state.
-    ///   These key-value pairs are not part of the trie itself but are committed
-    ///   to by the trie's leaf nodes. Will be sorted in-place.
+    /// * `state_updates` - Key-value changes in the underlying state. These K-V pairs
+    ///   are not part of the trie itself but are committed to by the trie's leaf nodes.
+    ///   The method consumes this input.
     /// * `is_subtree` - Determines which leaf nodes to update:
     ///   - `false`: Updates main trie leaf nodes
     ///   - `true`: Updates subtree leaf nodes
@@ -679,10 +680,11 @@ where
     /// * `TrieUpdates` - Commitment updates for the affected leaf nodes
     fn update_leaf_nodes(
         &self,
-        state_updates: &mut StateUpdateList,
+        mut state_updates: StateUpdateList,
         is_subtree: bool,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
-        // Sort the state updates by positions in parent vector commitments
+        // Sort state updates by their position within parent vector commitments
+        // to improve cache locality when accessing the ecmul precomputation table.
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
         });
@@ -711,40 +713,30 @@ where
         self.add_commitment_deltas(delta_list, batch_size)
     }
 
-    /// Computes commitment updates for parent nodes at a single trie level using delta-based updates.
+    /// Propagates commitment updates from child nodes to their parent nodes.
     ///
-    /// This method implements the core delta-based algorithm for updating vector commitments
-    /// in the SALT trie. Instead of recomputing entire parent commitments, it efficiently
-    /// computes and applies only the changes (deltas) caused by child node updates.
+    /// Similar to `update_leaf_nodes`, this method uses the delta-based approach to
+    /// efficiently update parent commitments when their children change. It processes
+    /// a single trie level, computing new parent commitments based on child updates.
     ///
     /// # Arguments
-    /// * `child_updates` - Updates from child nodes: (node_id, (old_commitment, new_commitment))
-    /// * `level` - The target level for parent nodes (child nodes are at level + 1)
-    /// * `get_parent_id` - Function to compute parent node ID from child node ID and level
+    /// * `child_updates` - Commitment changes from child nodes that need to be
+    ///   propagated to their parents.
     ///
     /// # Returns
-    /// * `TrieUpdates` - Updates for parent nodes: (parent_id, (old_commitment, new_commitment))
+    /// * `TrieUpdates` - Commitment updates for the parent nodes
     ///
-    /// # Algorithm
-    /// 1. **Parallel Setup**: Determines optimal task size for multi-core processing
-    /// 2. **Sorting**: Orders child updates by their index within parent vector commitments
-    /// 3. **Delta Computation**: For each chunk in parallel:
-    ///    - Hashes old/new commitments to get scalar representations
-    ///    - Computes delta = G[child_index] * (new_scalar - old_scalar)
-    ///    - Groups deltas by parent node ID
-    /// 4. **Accumulation**: Applies all deltas to compute new parent commitments
+    /// # Delta Computation
+    /// For each child update, computes: delta = G[child_index] * (new_child - old_child)
+    /// where child_index is the child's position (0-255) within its parent's vector commitment.
+    /// All deltas for the same parent are accumulated to produce the parent's new commitment.
     ///
-    /// # Vector Commitment Mathematics
-    /// Each parent's commitment is: C = Σ(G[i] * child_commitment[i])
-    /// When child[j] changes: new_C = old_C + G[j] * (new_child[j] - old_child[j])
-    /// This delta approach avoids recomputing the entire sum.
+    /// See `update_leaf_nodes` for the vector commitment model details.
     fn update_internal_nodes(
         &self,
         mut child_updates: TrieUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort child updates by their position within parent vector commitments.
-        // This ensures cache-friendly access patterns and deterministic ordering
-        // for consistent parallel processing results.
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
@@ -752,7 +744,7 @@ where
         // Compute commitment deltas in parallel chunks to be applied to parent nodes.
         // Each chunk processes a subset of child updates independently.
         let batch_size = self.par_batch_size(child_updates.len());
-        let c_deltas = child_updates
+        let delta_list = child_updates
             .par_chunks(batch_size)
             .map(|c_updates| {
                 // Collect all old and new commitments for this chunk, interleaved
@@ -790,12 +782,23 @@ where
             .flatten()
             .collect();
 
-        // Accumulate all deltas per parent node and compute new commitments
-        self.add_commitment_deltas(c_deltas, batch_size)
+        self.add_commitment_deltas(delta_list, batch_size)
     }
 
-    /// Computes a reasonable task batch size for parallel processing in rayon.
+    /// Computes a resonable batch size for parallel processing to balance workload
+    /// and overhead.
+    ///
+    /// This method determines how to divide tasks among parallel threads to maximize
+    /// performance. It aims to create enough batches for good work distribution while
+    /// avoiding the overhead of too many small batches.
+    ///
+    /// # Arguments
+    /// * `num_tasks` - Total number of tasks to be processed in parallel
+    ///
+    /// # Returns
+    /// The batch size to use for parallel chunks, guaranteed to be at least `min_par_batch_size`
     fn par_batch_size(&self, num_tasks: usize) -> usize {
+        // Factor of 10 provides a sweet spot for most workloads
         let num_batches = 10 * rayon::current_num_threads();
         self.min_par_batch_size.max(num_tasks.div_ceil(num_batches))
     }
@@ -807,8 +810,8 @@ where
     /// affected node.
     ///
     /// # Arguments
-    /// * `c_deltas` - Vector of (NodeId, Element) pairs representing commitment changes.
-    ///   Multiple deltas for the same NodeId will be summed together.
+    /// * `commitment_deltas` - Vector of (NodeId, Element) pairs representing commitment
+    ///   changes. Multiple deltas for the same NodeId will be summed together.
     /// * `task_size` - Target chunk size for parallel processing.
     ///
     /// # Returns
