@@ -169,7 +169,7 @@ impl MemStore {
     /// * `updates` - Batch of trie node commitment changes to apply
     pub fn update_trie(&self, updates: TrieUpdates) {
         let mut trie = self.trie.write().unwrap();
-        for (node_id, (_, new_val)) in updates.data {
+        for (node_id, (_, new_val)) in updates {
             trie.insert(node_id, new_val);
         }
     }
@@ -489,9 +489,7 @@ mod tests {
 
         // Store custom commitment
         let custom_commitment = [3u8; 64];
-        let updates = TrieUpdates {
-            data: vec![(node_id, ([0u8; 64], custom_commitment))],
-        };
+        let updates = vec![(node_id, ([0u8; 64], custom_commitment))];
         store.update_trie(updates);
 
         // Retrieve custom commitment

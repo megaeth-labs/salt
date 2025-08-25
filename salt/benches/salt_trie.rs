@@ -7,10 +7,10 @@ use salt::{
     empty_salt::EmptySalt,
     state::updates::*,
     traits::*,
-    trie::trie::{get_global_committer, StateRoot},
+    trie::trie::StateRoot,
     types::*,
 };
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 
 /// Generates a series of fixed-size state updates.
 ///
@@ -30,23 +30,18 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                 .map(|_| rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId))
                 .collect();
             bids.sort();
-            StateUpdates {
-                data: bids
-                    .into_iter()
-                    .map(|bid| {
-                        (
-                            SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
-                            (
-                                None,
-                                Some(SaltValue::new(
-                                    &rng.gen::<[u8; 20]>(),
-                                    &rng.gen::<[u8; 32]>(),
-                                )),
-                            ),
-                        )
-                    })
-                    .collect(),
+            let mut updates = StateUpdates::default();
+            for bid in bids {
+                updates.add(
+                    SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
+                    None,
+                    Some(SaltValue::new(
+                        &rng.gen::<[u8; 20]>(),
+                        &rng.gen::<[u8; 32]>(),
+                    )),
+                );
             }
+            updates
         })
         .collect()
 }
@@ -61,10 +56,9 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
 /// - Updating the state trie 10 times with a total of 1,000 KVs.
 fn salt_trie_bench(_c: &mut Criterion) {
     let mut bench = Criterion::default();
-
     let mut rng = StdRng::seed_from_u64(42);
-    // Initialize the global committer, avoid including computation time in the benchmark
-    let _ = get_global_committer();
+    // Initialize the committer by creating a StateRoot instance before benchmarking
+    let _ = StateRoot::new(&EmptySalt);
 
     bench.bench_function("salt trie update 100k KVs", |b| {
         b.iter_batched(
@@ -72,7 +66,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -86,7 +80,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap(),
                 )
             },
@@ -101,7 +95,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
                 black_box({
                     let mut trie = StateRoot::new(&EmptySalt);
                     for state_updates in state_updates_vec.iter() {
-                        trie.incremental_update(state_updates).unwrap();
+                        trie.update(state_updates).unwrap();
                     }
                     trie.finalize().unwrap()
                 })
@@ -116,7 +110,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 {
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new(&EmptySalt).update(state_updates).unwrap();
+                        StateRoot::new(&EmptySalt)
+                            .update_fin(state_updates)
+                            .unwrap();
                     }
                 }
                 black_box(())
@@ -131,7 +127,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 black_box({
                     StateRoot::new(&ExpansionSalt((65536 * 16, 512)))
-                        .update(&state_updates_vec[0])
+                        .update_fin(&state_updates_vec[0])
                         .unwrap()
                 })
             },
@@ -179,6 +175,13 @@ impl StateReader for ExpansionSalt {
             ..Default::default()
         };
         Ok(meta)
+    }
+
+    fn entries(
+        &self,
+        _range: std::ops::RangeInclusive<SaltKey>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(vec![])
     }
 }
 

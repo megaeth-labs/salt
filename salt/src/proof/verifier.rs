@@ -1,12 +1,12 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{EMPTY_SLOT_HASH, STARTING_NODE_ID, SUB_TRIE_LEVELS, TRIE_LEVELS},
+    constant::{EMPTY_SLOT_HASH, MAX_SUBTREE_LEVELS},
     proof::{
         prover::calculate_fr_by_kv,
         shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
         CommitmentBytesW, ProofError,
     },
-    trie::trie::{get_child_node, subtrie_node_id},
+    trie::node_utils::{bucket_root_node_id, get_child_node, subtree_leaf_for_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
 };
 use banderwagon::{Element, Fr, PrimeField};
@@ -177,10 +177,10 @@ pub(crate) fn create_verifier_queries(
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];
 
-                    let parent_id = if bucket_trie_top_level == SUB_TRIE_LEVELS as u8 - 1 {
-                        bucket_id as NodeId + STARTING_NODE_ID[TRIE_LEVELS - 1] as NodeId
+                    let parent_id = if bucket_trie_top_level == MAX_SUBTREE_LEVELS as u8 - 1 {
+                        bucket_root_node_id(bucket_id)
                     } else {
-                        subtrie_node_id(key)
+                        subtree_leaf_for_key(key)
                     };
 
                     let l3_commitment = path_commitments

@@ -8,8 +8,8 @@ pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
-    trie::{get_child_node, StateRoot},
-    updates::TrieUpdates,
+    node_utils::get_child_node,
+    trie::{StateRoot, TrieUpdates},
 };
 
 pub mod traits;
@@ -24,7 +24,7 @@ pub mod mock_evm_types;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::trie::compute_from_scratch;
+    use crate::trie::trie::StateRoot;
     use std::collections::HashMap;
 
     #[test]
@@ -51,10 +51,10 @@ mod tests {
 
         // Incremental state root computation from the SALT-encoded state changes
         let mut state_root = StateRoot::new(&store);
-        let (root_hash, trie_updates) = state_root.update(&state_updates)?;
+        let (root_hash, trie_updates) = state_root.update_fin(state_updates)?;
 
         // Or compute from scratch based on the previously updated state
-        let (root_hash_from_scratch, _) = compute_from_scratch(&store)?;
+        let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
         assert_eq!(root_hash, root_hash_from_scratch);
 
         // "Persist" the trie updates to storage
