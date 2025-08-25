@@ -38,7 +38,7 @@ mod tests {
         proof::prover::calculate_fr_by_kv,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         traits::{StateReader, TrieReader},
-        trie::trie::{compute_from_scratch, StateRoot},
+        trie::trie::StateRoot,
         types::{BucketId, SlotId},
         BucketMeta, NodeId, SaltKey, SaltValue,
     };
@@ -183,7 +183,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
@@ -218,7 +218,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -254,7 +254,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update(&updates).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -281,44 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sub_trie_top_level() {
-        use crate::trie::trie::{
-            get_child_node, sub_trie_top_level, subtrie_node_id, subtrie_parent_id,
-            subtrie_salt_key_start,
-        };
-
-        assert_eq!(sub_trie_top_level(256), 4); // 4
-
-        assert_eq!(sub_trie_top_level(256 * 256), 3); // 3
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256), 2); // 2
-
-        assert_eq!(sub_trie_top_level(131072), 2); // 2
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256), 1); // 1
-
-        assert_eq!(sub_trie_top_level(256 * 256 * 256 * 256 * 256), 0); // 0
-
-        //assert_eq!(get_child_idx(&72061992101282049, 4), 0);
-
-        assert_eq!(
-            subtrie_node_id(&SaltKey(72061992084439043)),
-            72061992101282049
-        );
-
-        assert_eq!(subtrie_parent_id(&72061992101282049, 3), 72061992084504833);
-
-        assert_eq!(
-            subtrie_salt_key_start(&72061992101282049),
-            SaltKey(72061992084439040)
-        );
-
-        assert_eq!(get_child_node(&72061992084439041, 0), 72061992084439297);
-        assert_eq!(get_child_node(&72061992084439297, 0), 72061992084504833);
-        assert_eq!(get_child_node(&72061992084504833, 0), 72061992101282049);
-    }
-
-    #[test]
     fn salt_proof_in_bucket_expansion() {
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
@@ -336,14 +298,12 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update(&initialize_state_updates).unwrap();
-        store.update_state(initialize_state_updates.clone());
+            trie.update_fin(initialize_state_updates.clone()).unwrap();
+        store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
 
-        let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
         assert_eq!(init_trie_updates, initialize_trie_updates);
 
@@ -368,12 +328,12 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
 
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, expansion_root);
 
         let crs = CRS::default();
@@ -465,13 +425,11 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update(&initialize_state_updates).unwrap();
-        store.update_state(initialize_state_updates.clone());
+            trie.update_fin(initialize_state_updates.clone()).unwrap();
+        store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
-        let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates
-            .data
-            .sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
         // expand capacity and add kvs
@@ -494,10 +452,10 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(
@@ -549,10 +507,10 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = compute_from_scratch(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(
