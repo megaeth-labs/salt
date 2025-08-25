@@ -1,4 +1,23 @@
-//! This module implements [`StateRoot`].
+//! State root computation and incremental trie updates.
+//!
+//! This module provides [`StateRoot`], the core engine for computing and maintaining
+//! cryptographic commitments in SALT's authenticated trie. It implements an efficient
+//! incremental update mechanism that minimizes redundant computation when processing
+//! multiple state updates.
+//!
+//! # Incremental Updates
+//!
+//! - **Update phase**: Accumulates changes at the bucket level without propagating upward
+//! - **Finalize phase**: Propagates all changes through the trie hierarchy to compute root
+//!
+//! This design allows batching multiple updates before expensive trie recomputation.
+//!
+//! # Key Operations
+//!
+//! - [`StateRoot::update`]: Accumulate state changes (can call multiple times)
+//! - [`StateRoot::finalize`]: Complete computation and return root hash
+//! - [`StateRoot::update_fin`]: Single-shot update and finalize
+//! - [`StateRoot::rebuild`]: Reconstruct entire trie from storage
 
 use crate::{
     constant::{
