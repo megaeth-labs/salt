@@ -657,20 +657,39 @@ where
         Ok(trie_updates)
     }
 
-    /// Updates the leaf nodes (i.e., the SALT buckets) based on the given state updates.
+    /// Updates leaf node commitments in the trie based on state key-value changes.
+    ///
+    /// When key-value pairs in the underlying state change, this method efficiently
+    /// updates the commitments stored in the trie's leaf nodes using a delta approach.
+    ///
+    /// # Vector Commitment Model
+    /// Each leaf node stores: C = Σ(G[i] * hash(kv[i])) for i in 0..256
+    /// When kv[j] changes: new_C = old_C + G[j] * (hash(new_kv[j]) - hash(old_kv[j]))
+    /// This delta approach avoids recomputing the entire 256-element sum.
+    ///
+    /// # Arguments
+    /// * `state_updates` - Represents key-value changes in the underlying state.
+    ///   These key-value pairs are not part of the trie itself but are committed
+    ///   to by the trie's leaf nodes. Will be sorted in-place.
+    /// * `is_subtree` - Determines which leaf nodes to update:
+    ///   - `false`: Updates main trie leaf nodes
+    ///   - `true`: Updates subtree leaf nodes
+    ///
+    /// # Returns
+    /// * `TrieUpdates` - Commitment updates for the affected leaf nodes
     fn update_leaf_nodes(
         &self,
         state_updates: &mut StateUpdateList,
         is_subtree: bool,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
-        // Sort the state updates by slot IDs
+        // Sort the state updates by positions in parent vector commitments
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
         });
 
-        // Compute the commitment deltas to be applied to the parent nodes.
+        // Compute the commitment deltas to be applied to the leaf nodes.
         let batch_size = self.par_batch_size(state_updates.len());
-        let c_deltas: DeltaList = state_updates
+        let delta_list = state_updates
             .par_iter()
             .with_min_len(batch_size)
             .map(|(salt_key, (old_value, new_value))| {
@@ -689,7 +708,7 @@ where
             })
             .collect();
 
-        self.add_commitment_deltas(c_deltas, batch_size)
+        self.add_commitment_deltas(delta_list, batch_size)
     }
 
     /// Computes commitment updates for parent nodes at a single trie level using delta-based updates.
