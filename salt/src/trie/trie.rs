@@ -736,50 +736,35 @@ where
         &self,
         mut child_updates: TrieUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
-        // Sort child updates by their position within parent vector commitments.
+        // Sort by position within parent vector commitments for cache locality
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
 
-        // Compute commitment deltas in parallel chunks to be applied to parent nodes.
-        // Each chunk processes a subset of child updates independently.
         let batch_size = self.par_batch_size(child_updates.len());
         let delta_list = child_updates
             .par_chunks(batch_size)
-            .map(|c_updates| {
-                // Collect all old and new commitments for this chunk, interleaved
-                // Format: [old_c1, new_c1, old_c2, new_c2, ...]
-                let c_vec: Vec<CommitmentBytes> = c_updates
-                    .iter()
-                    .flat_map(|(_, (old_c, new_c))| vec![old_c, new_c])
-                    .copied()
-                    .collect();
+            .flat_map(|c_updates| {
+                // Interleave old and new commitments for efficient batch hashing
+                let hashes = Element::hash_commitments(
+                    &c_updates
+                        .iter()
+                        .flat_map(|(_, (old_c, new_c))| [*old_c, *new_c])
+                        .collect::<Vec<_>>(),
+                );
 
-                // Hash all commitments to scalar bytes in batch for efficiency
-                // Returns: [old_scalar1, new_scalar1, old_scalar2, new_scalar2, ...]
-                let scalar_bytes = Element::hash_commitments(&c_vec);
-
-                // For each child update, compute the delta contribution to its parent
                 c_updates
                     .iter()
-                    .zip(scalar_bytes.chunks_exact(2))
-                    .map(|((id, _), scalars)| {
+                    .zip(hashes.chunks_exact(2))
+                    .map(|((id, _), h)| {
                         (
-                            get_parent_node(id), // Which parent node to update
-                            // Compute delta: G[child_index] * (new_scalar - old_scalar)
-                            // This represents the change needed in parent's vector commitment
-                            self.committer.gi_mul_delta(
-                                &scalars[0],               // old commitment as scalar
-                                &scalars[1],               // new commitment as scalar
-                                vc_position_in_parent(id), // position within parent's VC
-                            ),
+                            get_parent_node(id),
+                            self.committer
+                                .gi_mul_delta(&h[0], &h[1], vc_position_in_parent(id)),
                         )
                     })
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
             .collect();
 
         self.add_commitment_deltas(delta_list, batch_size)
