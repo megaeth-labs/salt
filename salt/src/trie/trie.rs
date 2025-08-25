@@ -34,7 +34,8 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> =
 /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
 pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 
-type SaltUpdates = Vec<(SaltKey, (Option<SaltValue>, Option<SaltValue>))>;
+/// Records updates to the SALT key-value pairs.
+type StateUpdateList = Vec<(SaltKey, (Option<SaltValue>, Option<SaltValue>))>;
 
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
@@ -179,51 +180,48 @@ where
     /// path from changed leaves to root are updated consistently.
     ///
     /// # Arguments
-    /// * `trie_updates` - Initial updates from leaf/subtree nodes to propagate upward
+    /// * `trie_updates` - Contains commitment updates from the update phase:
+    ///   - **Main trie bucket roots**:
+    ///     These are the roots of individual buckets in the main trie
+    ///   - **Bucket subtree nodes**: Internal nodes within bucket subtrees,
+    ///     present when buckets have expanded beyond MIN_BUCKET_SIZE
+    ///
+    ///   During execution, this collection is progressively expanded with:
+    ///   - **Level 2 updates**: Parent nodes of modified bucket roots
+    ///   - **Level 1 updates**: Grandparent nodes
+    ///   - **Level 0 update**: The root node
     ///
     /// # Returns
     /// * `ScalarBytes` - The new root commitment hash
-    ///
-    /// # Algorithm
-    /// 1. Filters out subtree nodes (handled separately from main trie)
-    /// 2. Processes each trie level from bottom to top (TRIE_LEVELS-2 down to 0)
-    /// 3. For each level, computes parent node updates based on child changes
-    /// 4. Accumulates all updates for final return
-    /// 5. Extracts the root commitment from the final update
     fn update_main_trie(
         &self,
         trie_updates: &mut TrieUpdates,
     ) -> Result<ScalarBytes, <Store as TrieReader>::Error> {
-        // FIXME: use splice
-        // Filter out subtree nodes - they use different update patterns and are
-        // handled separately from the main trie structure
-        let mut updates = trie_updates
+        // Filter out subtree nodes to get commitment updates at L3
+        let mut level_updates = trie_updates
             .iter()
-            .filter_map(|(id, c)| {
-                if is_subtree_node(*id) {
-                    None // Skip subtree nodes - they don't participate in main trie updates
+            .filter_map(|(node_id, change)| {
+                if is_subtree_node(*node_id) {
+                    None
                 } else {
-                    Some((*id, *c)) // Include main trie nodes for propagation
+                    Some((*node_id, *change))
                 }
             })
             .collect::<Vec<_>>();
 
-        // Update the state trie in descending order of depth (bottom-up).
-        // Process from level TRIE_LEVELS-2 (deepest internal nodes) to level 0 (root)
-        (0..MAIN_TRIE_LEVELS - 1).rev().try_for_each(|_| {
-            // Compute updates for parent nodes at this level based on child changes
-            updates = self.update_internal_nodes(&mut updates)?;
+        // Propagate updates level by level from deepest (level 3) to root (level 0).
+        // Each iteration processes one level, computing parent updates from child changes.
+        for _ in (0..MAIN_TRIE_LEVELS - 1).rev() {
+            level_updates = self.update_internal_nodes(level_updates)?;
+            trie_updates.extend(level_updates.iter());
+        }
 
-            // Record the new parent updates in the complete trie_updates collection
-            trie_updates.extend(updates.iter());
-            Ok(())
-        })?;
-
-        // Extract the root commitment from the last update, or fetch from storage if no updates
-        let root_commitment = if let Some(c) = trie_updates.last() {
-            c.1 .1 // Get the new commitment from the last update (should be root)
+        // Extract the root commitment from the last update, or fetch from storage
+        // if root wasn't modified
+        let root_commitment = if let Some((0, (_, c))) = trie_updates.last() {
+            *c
         } else {
-            self.store.commitment(0)? // No updates occurred, fetch current root
+            self.store.commitment(0)?
         };
 
         Ok(hash_commitment(root_commitment))
@@ -251,7 +249,7 @@ where
         // Separate containers for different types of updates and events
 
         // expansion kvs and non-expansion kvs are sorted separately
-        let mut expansion_updates: SaltUpdates = vec![];
+        let mut expansion_updates = vec![];
         // Track subtree events at each level (bucket capacity changes that affect structure)
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
             vec![HashMap::new(); MAX_SUBTREE_LEVELS];
@@ -565,7 +563,7 @@ where
                     .expect("update leaf nodes for subtrie failed")
             } else {
                 // Internal level: propagate updates from children
-                self.update_internal_nodes(&mut current_level_updates)
+                self.update_internal_nodes(current_level_updates)
                     .expect("update internal nodes for subtrie failed")
             };
 
@@ -662,7 +660,7 @@ where
     /// Updates the leaf nodes (i.e., the SALT buckets) based on the given state updates.
     fn update_leaf_nodes(
         &self,
-        state_updates: &mut SaltUpdates,
+        state_updates: &mut StateUpdateList,
         is_subtree: bool,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort the state updates by slot IDs
@@ -723,7 +721,7 @@ where
     /// This delta approach avoids recomputing the entire sum.
     fn update_internal_nodes(
         &self,
-        child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
+        mut child_updates: TrieUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort child updates by their position within parent vector commitments.
         // This ensures cache-friendly access patterns and deterministic ordering
@@ -2011,7 +2009,7 @@ mod tests {
         let bottom_level_start = STARTING_NODE_ID[bottom_level] as NodeId;
         let cs = create_commitments(3);
 
-        let mut updates = vec![
+        let updates = vec![
             (bottom_level_start + 1, (bottom_meta_c, cs[0])),
             (
                 bottom_level_start + KV_BUCKET_OFFSET + 1,
@@ -2025,7 +2023,7 @@ mod tests {
 
         // Check and handle the commitment updates of the bottom-level node
         let cur_level = bottom_level - 1;
-        let mut unprocess_updates = trie.update_internal_nodes(&mut updates).unwrap();
+        let unprocess_updates = trie.update_internal_nodes(updates).unwrap();
 
         let bytes_indices =
             Element::hash_commitments(&[bottom_data_c, bottom_meta_c, cs[0], cs[1], cs[2]]);
@@ -2052,7 +2050,7 @@ mod tests {
 
         // Check and handle the commitment updates of the second-level node
         let cur_level = cur_level - 1;
-        let mut unprocess_updates = trie.update_internal_nodes(&mut unprocess_updates).unwrap();
+        let unprocess_updates = trie.update_internal_nodes(unprocess_updates).unwrap();
 
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
         let l2_meta_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
@@ -2070,7 +2068,7 @@ mod tests {
         );
 
         let cur_level = cur_level - 1;
-        let unprocess_updates = trie.update_internal_nodes(&mut unprocess_updates).unwrap();
+        let unprocess_updates = trie.update_internal_nodes(unprocess_updates).unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let c5 = committer
