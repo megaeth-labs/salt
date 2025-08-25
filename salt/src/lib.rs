@@ -53,7 +53,7 @@ mod tests {
 
         // Incremental state root computation from the SALT-encoded state changes
         let mut state_root = StateRoot::new(&store);
-        let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
+        let (root_hash, trie_updates) = state_root.update_fin(state_updates)?;
 
         // Or compute from scratch based on the previously updated state
         let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;

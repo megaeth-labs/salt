@@ -33,25 +33,69 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> =
 /// Stores the old and new commitment values of the trie nodes,
 /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
 pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
-type SaltUpdates<'a> = Vec<(&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValue>))>;
+
+type SaltUpdates = Vec<(SaltKey, (Option<SaltValue>, Option<SaltValue>))>;
+
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
 
-/// Used to compute or update the root node of a SALT trie.
+/// Manages computation and incremental updates of SALT trie commitments.
+///
+/// `StateRoot` provides an efficient two-phase commit mechanism for updating the
+/// cryptographic commitments in a SALT trie. It implements an incremental update
+/// algorithm that:
+///
+/// 1. **Update Phase**: Accumulates state changes without immediately propagating
+///    them to upper trie levels. Multiple `update()` calls can be batched together.
+/// 2. **Finalize Phase**: Propagates all accumulated changes through the trie
+///    hierarchy and computes the final state root.
+///
+/// This design avoids redundant recomputation of upper-level node commitments when
+/// processing multiple state updates in sequence. The struct maintains internal
+/// caches to track both incremental changes and current commitment values during
+/// the update process.
+///
+/// # Example Flow
+/// - Call `update()` multiple times to accumulate state changes
+/// - Call `finalize()` once to compute the final state root
+/// - Alternatively, use `update_fin()` for single-shot update and finalization
 #[derive(Debug)]
 pub struct StateRoot<'a, Store> {
-    /// Storage backend providing both trie and state access.
+    /// Storage backend providing access to both trie nodes and state data.
+    ///
+    /// Must implement both `TrieReader` for accessing node commitments and
+    /// `StateReader` for accessing bucket entries and metadata.
     store: &'a Store,
-    // FIXME: explain why this is needed (hint: because update() uses an incremental
-    // algorithm that only computes the state root after finalize())
-    // after finalize() or update_fin(), this field will be cleared out!
-    /// Cache the incremental updates of the trie nodes.
+
+    /// Accumulates commitment changes during the update phase.
+    ///
+    /// This field tracks (old_commitment, new_commitment) pairs for each modified
+    /// node. It's essential for the incremental update algorithm because:
+    /// - `update()` only computes changes at the bucket level
+    /// - Upper trie levels remain unchanged until `finalize()` is called
+    /// - This avoids redundant recomputation when processing multiple updates
+    ///
+    /// The map is cleared after `finalize()` or `update_fin()` completes.
     updates: HashMap<NodeId, (CommitmentBytes, CommitmentBytes)>,
-    /// Cache the latest commitments of each updated trie node.
+
+    /// Maintains the latest commitment values for modified nodes.
+    ///
+    /// Unlike `updates` which tracks old->new transitions, this cache holds only
+    /// the current commitment values. It persists across multiple `update()` calls
+    /// within the same update session to ensure consistency when nodes are modified
+    /// multiple times.
     cache: HashMap<NodeId, CommitmentBytes>,
-    /// Shared committer instance for cryptographic operations.
+
+    /// Shared IPA committer for computing vector commitments.
+    ///
+    /// Uses a globally shared instance with precomputed tables (window size 11)
+    /// to accelerate cryptographic operations across all `StateRoot` instances.
     committer: Arc<Committer>,
-    /// Minimum task batch size for parallel processing.
+
+    /// Minimum number of tasks per batch for parallel processing.
+    ///
+    /// Controls when to use parallel computation via rayon. Operations with fewer
+    /// tasks than this threshold execute sequentially. Default: 64.
     min_par_batch_size: usize,
 }
 
@@ -76,55 +120,52 @@ where
         self
     }
 
-    /// Updates the trie conservatively. This function defers the computation of
-    /// the state root to `finalize` to avoid updating the same node commitments
-    /// at the upper levels over and over again when more state updates arrive.
+    /// Updates the trie incrementally without computing the final state root.
+    ///
+    /// This method implements the "update phase" of the two-phase commit algorithm.
+    /// It processes state changes and updates bucket commitments (main trie leaves)
+    /// but deliberately avoids propagating changes to upper trie levels. This lazy
+    /// approach allows multiple `update()` calls to be batched together efficiently.
+    ///
+    /// Changes are accumulated internally until `finalize()` is called to complete
+    /// the computation. This avoids redundant updates of upper-level node commitments
+    /// when processing sequential state updates.
     pub fn update(
         &mut self,
-        state_updates: &StateUpdates,
+        state_updates: StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        // FIXME: we are calling update_bucket_subtrees here, so we are only updating L3 commitments (~16M)?
-        let updates = self.update_bucket_subtrees(state_updates)?;
-        // Cache the results of incremental calculations.
-        for (k, v) in updates {
-            self.cache
-                .entry(k)
-                .and_modify(|change| *change = v.1)
-                .or_insert(v.1);
+        for (node_id, (old, new)) in self.update_bucket_subtrees(state_updates)? {
+            self.cache.insert(node_id, new);
             self.updates
-                .entry(k)
-                .and_modify(|change| change.1 = v.1)
-                .or_insert(v);
+                .entry(node_id)
+                .and_modify(|change| change.1 = new)
+                .or_insert((old, new));
         }
         Ok(())
     }
 
-    /// Finalizes and returns the state root after a series of calls to `incremental_update`.
+    /// Completes the two-phase commit and returns the final state root.
+    ///
+    /// This method implements the "finalize phase" by propagating all accumulated
+    /// changes from the `updates` cache through the upper main trie levels (L2-L0)
+    /// to compute the final state root commitment.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
-        // FIXME: avoid converting between different collections?
-        // Retrieve trie_updates from the cache
-        let trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
-
-        let result = self.update_main_trie(trie_updates);
-
-        // Update cache with the final computed TrieUpdates
-        if let Ok((_, ref final_trie_updates)) = result {
-            for (k, v) in final_trie_updates {
-                self.cache
-                    .entry(*k)
-                    .and_modify(|change| *change = v.1)
-                    .or_insert(v.1);
-            }
+        let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
+        let root_hash = self.update_main_trie(&mut trie_updates)?;
+        for (node_id, (_, new)) in &trie_updates {
+            self.cache.insert(*node_id, *new);
         }
-
-        result
+        Ok((root_hash, trie_updates))
     }
 
-    /// Updates the state root (and all the internal commitments on the trie)
-    /// based on the given state updates.
+    /// Convenience method that combines `update()` and `finalize()` in one call.
+    ///
+    /// This method is equivalent to calling `update(state_updates)` followed by
+    /// `finalize()`. Use this for single-shot updates when you don't need to
+    /// batch multiple state changes together.
     pub fn update_fin(
         &mut self,
-        state_updates: &StateUpdates,
+        state_updates: StateUpdates,
     ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         self.update(state_updates)?;
         self.finalize()
@@ -142,7 +183,6 @@ where
     ///
     /// # Returns
     /// * `ScalarBytes` - The new root commitment hash
-    /// * `TrieUpdates` - Complete list of all node updates from leaves to root
     ///
     /// # Algorithm
     /// 1. Filters out subtree nodes (handled separately from main trie)
@@ -152,8 +192,8 @@ where
     /// 5. Extracts the root commitment from the final update
     fn update_main_trie(
         &self,
-        mut trie_updates: TrieUpdates,
-    ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+        trie_updates: &mut TrieUpdates,
+    ) -> Result<ScalarBytes, <Store as TrieReader>::Error> {
         // FIXME: use splice
         // Filter out subtree nodes - they use different update patterns and are
         // handled separately from the main trie structure
@@ -186,7 +226,7 @@ where
             self.store.commitment(0)? // No updates occurred, fetch current root
         };
 
-        Ok((hash_commitment(root_commitment), trie_updates))
+        Ok(hash_commitment(root_commitment))
     }
 
     /// Updates bucket subtrees based on state changes, handling both normal updates
@@ -205,13 +245,13 @@ where
     /// levels, handling special cases where subtree roots change due to capacity changes.
     fn update_bucket_subtrees(
         &self,
-        state_updates: &StateUpdates,
+        state_updates: StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // === DATA STRUCTURES SETUP ===
         // Separate containers for different types of updates and events
 
         // expansion kvs and non-expansion kvs are sorted separately
-        let mut expansion_updates: SaltUpdates<'_> = vec![];
+        let mut expansion_updates: SaltUpdates = vec![];
         // Track subtree events at each level (bucket capacity changes that affect structure)
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
             vec![HashMap::new(); MAX_SUBTREE_LEVELS];
@@ -274,7 +314,7 @@ where
 
         let mut normal_updates = Vec::new();
 
-        for (key, update_pair) in state_updates.data.iter() {
+        for (key, update_pair) in state_updates.data.into_iter() {
             let current_bucket_id = key.bucket_id();
 
             // Process metadata buckets
@@ -283,13 +323,13 @@ where
                 // Record the bucket id and capacity when expansion or contraction occurs.
                 let old_meta: BucketMeta = update_pair
                     .0
-                    .clone()
+                    .as_ref()
                     .expect("old meta exist in updates")
                     .try_into()
                     .expect("old meta should be valid");
                 let new_meta: BucketMeta = update_pair
                     .1
-                    .clone()
+                    .as_ref()
                     .expect("new meta exist in updates")
                     .try_into()
                     .expect("new meta should be valid");
@@ -368,7 +408,7 @@ where
                 } else {
                     // Slot beyond new capacity - mark as zero commitment (contraction optimization)
                     insert_uncomputed_node(
-                        subtree_leaf_for_key(key),
+                        subtree_leaf_for_key(&key),
                         subtree_root_level(old_capacity) + 1,
                         MAX_SUBTREE_LEVELS,
                         &mut uncomputed_updates,
@@ -622,7 +662,7 @@ where
     /// Updates the leaf nodes (i.e., the SALT buckets) based on the given state updates.
     fn update_leaf_nodes(
         &self,
-        state_updates: &mut SaltUpdates<'_>,
+        state_updates: &mut SaltUpdates,
         is_subtree: bool,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort the state updates by slot IDs
@@ -952,7 +992,7 @@ impl StateRoot<'_, EmptySalt> {
                 // `update_leaf_nodes` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
                 let chunk_trie_updates = trie
-                    .update_bucket_subtrees(&StateUpdates {
+                    .update_bucket_subtrees(StateUpdates {
                         data: chunk_updates,
                     })
                     .unwrap();
@@ -962,7 +1002,8 @@ impl StateRoot<'_, EmptySalt> {
             })?;
 
         // Step 4: Compute commitments for all internal nodes in the main trie
-        Ok(trie.update_main_trie(all_trie_updates).unwrap())
+        let root_hash = trie.update_main_trie(&mut all_trie_updates).unwrap();
+        Ok((root_hash, all_trie_updates))
     }
 }
 
@@ -1255,15 +1296,17 @@ mod tests {
         updates1.add(k2, None, Some(v2.clone()));
         updates1.add(k3, None, Some(v3));
         cumulative.merge(updates1.clone());
-        trie.update_fin(&updates1).unwrap();
+        trie.update_fin(updates1).unwrap();
 
         // Update 2: k1: v1 → v2
         let mut updates2 = StateUpdates::default();
         updates2.add(k1, Some(v1.clone()), Some(v2.clone()));
         cumulative.merge(updates2.clone());
 
-        let (incremental_root2, _) = trie.update_fin(&updates2).unwrap();
-        let (batch_root2, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
+        let (incremental_root2, _) = trie.update_fin(updates2).unwrap();
+        let (batch_root2, _) = StateRoot::new(&EmptySalt)
+            .update_fin(cumulative.clone())
+            .unwrap();
         assert_eq!(incremental_root2, batch_root2);
 
         // Update 3: k2: v2 → v1
@@ -1271,8 +1314,8 @@ mod tests {
         updates3.add(k2, Some(v2), Some(v1));
         cumulative.merge(updates3.clone());
 
-        let (incremental_root3, _) = trie.update_fin(&updates3).unwrap();
-        let (batch_root3, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
+        let (incremental_root3, _) = trie.update_fin(updates3).unwrap();
+        let (batch_root3, _) = StateRoot::new(&EmptySalt).update_fin(cumulative).unwrap();
         assert_eq!(incremental_root3, batch_root3);
     }
 
@@ -1291,7 +1334,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
 
@@ -1307,7 +1350,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (root1, trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (root1, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
         let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
@@ -1325,7 +1368,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (root1, _) = trie.update_fin(&state_updates).unwrap();
+        let (root1, _) = trie.update_fin(state_updates).unwrap();
         assert_eq!(root1, root);
     }
 
@@ -1352,7 +1395,7 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(&initialize_state_updates).unwrap();
+            trie.update_fin(initialize_state_updates.clone()).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates);
         let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
@@ -1390,7 +1433,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = StateRoot::rebuild(&store).unwrap();
@@ -1407,7 +1450,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = StateRoot::rebuild(&store).unwrap();
@@ -1443,7 +1486,8 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (contraction_root, trie_updates) = trie.update_fin(&contract_state_updates).unwrap();
+        let (contraction_root, trie_updates) =
+            trie.update_fin(contract_state_updates.clone()).unwrap();
         store.update_state(contract_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = StateRoot::rebuild(&store).unwrap();
@@ -1460,7 +1504,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (contraction_root, _) = trie.update_fin(&contract_state_updates).unwrap();
+        let (contraction_root, _) = trie.update_fin(contract_state_updates).unwrap();
 
         assert_eq!(initialize_root, contraction_root);
     }
@@ -1483,7 +1527,7 @@ mod tests {
             }
         }
 
-        let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
         let (root1, _) = StateRoot::rebuild(&store).unwrap();
@@ -1520,7 +1564,7 @@ mod tests {
             }
         }
 
-        let (extended_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (extended_root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
         let (root2, _) = StateRoot::rebuild(&store).unwrap();
@@ -1556,7 +1600,7 @@ mod tests {
                 );
             }
         }
-        let (contraction_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (contraction_root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
         let (root3, _) = StateRoot::rebuild(&store).unwrap();
@@ -1637,9 +1681,9 @@ mod tests {
 
         let trie_reader = &EmptySalt;
         let mut trie = StateRoot::new(trie_reader);
-        trie.update(&state_updates1).unwrap();
+        trie.update(state_updates1.clone()).unwrap();
         state_updates.merge(state_updates1);
-        trie.update(&state_updates2).unwrap();
+        trie.update(state_updates2.clone()).unwrap();
         state_updates.merge(state_updates2);
         let (root, mut trie_updates) = trie.finalize().unwrap();
 
@@ -1689,7 +1733,7 @@ mod tests {
         assert_eq!(cmp_state_updates, state_updates);
 
         let mut trie = StateRoot::new(trie_reader);
-        let (cmp_root, mut cmp_trie_updates) = trie.update_fin(&cmp_state_updates).unwrap();
+        let (cmp_root, mut cmp_trie_updates) = trie.update_fin(cmp_state_updates).unwrap();
         assert_eq!(root, cmp_root);
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         cmp_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -1709,7 +1753,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
         let total_state_updates = state.update(&kvs).unwrap();
-        let (root, mut total_trie_updates) = trie.update_fin(&total_state_updates).unwrap();
+        let (root, mut total_trie_updates) = trie.update_fin(total_state_updates.clone()).unwrap();
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
             .into_iter()
@@ -1723,7 +1767,7 @@ mod tests {
         let mut final_state_updates = StateUpdates::default();
         for kvs in &sub_kvs {
             let state_updates = state.update(kvs).unwrap();
-            trie.update(&state_updates).unwrap();
+            trie.update(state_updates.clone()).unwrap();
             final_state_updates.merge(state_updates);
         }
         let (final_root, mut final_trie_updates) = trie.finalize().unwrap();
@@ -1776,7 +1820,7 @@ mod tests {
             (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
         );
 
-        let (root0, _) = trie.update_fin(&state_updates).unwrap();
+        let (root0, _) = trie.update_fin(state_updates.clone()).unwrap();
         mock_db.update_state(state_updates);
         let (root1, trie_updates) = StateRoot::rebuild(&mock_db).unwrap();
 
@@ -1824,7 +1868,7 @@ mod tests {
             }
         }
 
-        let (root0, _) = trie.update_fin(&state_updates).unwrap();
+        let (root0, _) = trie.update_fin(state_updates.clone()).unwrap();
         mock_db.update_state(state_updates);
         let (root1, _) = StateRoot::rebuild(&mock_db).unwrap();
 
@@ -1915,7 +1959,7 @@ mod tests {
             Some(SaltValue::from(bucket_meta(5, MIN_BUCKET_SIZE as SlotId))),
         );
 
-        let salt_updates = trie.update_bucket_subtrees(&state_updates).unwrap();
+        let salt_updates = trie.update_bucket_subtrees(state_updates).unwrap();
 
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
@@ -2063,7 +2107,7 @@ mod tests {
         state_updates.add((bucket_ids[0], 9).into(), None, kv2.clone());
         state_updates.add((bucket_ids[1], 9).into(), kv1, kv2);
 
-        let (_, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
+        let (_, mut trie_updates) = trie.update_fin(state_updates).unwrap();
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
 
         // Check the commitment updates of the bottom-level node
