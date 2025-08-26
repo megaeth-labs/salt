@@ -8,7 +8,8 @@ use crate::{
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::get_child_node,
-    trie::node_utils::{subtree_leaf_start_key, subtree_root_level},
+    trie::node_utils::subtree_leaf_start_key,
+    types::subtree_root_level,
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };

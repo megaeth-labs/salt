@@ -10,8 +10,8 @@
 use std::ops::RangeInclusive;
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-    NUM_META_BUCKETS, TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE,
+    MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -488,6 +488,40 @@ pub fn bucket_metadata_key(bucket_id: BucketId) -> SaltKey {
     ))
 }
 
+/// Determines the top level of a bucket's subtree based on its capacity.
+///
+/// Different bucket capacities require different subtree depths to efficiently
+/// organize their slots. This function calculates the minimal subtree depth needed
+/// to accommodate the given capacity.
+///
+/// # Subtree Level Mapping
+/// ```text
+/// Level 0: Root (capacity = 1)              [root:0]
+/// Level 1: Small (capacity ≤ 256)          [0] [1] ... [256]
+/// Level 2: Medium (capacity ≤ 65,536)      [0]...[256] [257]...[65536]
+/// Level 3: Large (capacity ≤ 16,777,216)   [0]...[65536] [65537]...[16777216]
+/// Level 4: Extra Large (capacity ≤ 2^32)   [0]...[16777216] [16777217]...[2^32]
+/// ```
+///
+/// # Arguments
+/// * `capacity` - The total number of slots the bucket needs to accommodate
+///
+/// # Returns
+/// The subtree level (0-4) that should serve as the root for this capacity
+pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
+    // Start from the deepest possible level
+    let mut level = MAX_SUBTREE_LEVELS - 1;
+
+    // Work upward until capacity fits in a single level
+    // Each level up can handle 256x more slots
+    while capacity > MIN_BUCKET_SIZE as u64 {
+        level -= 1; // Move up one level
+        capacity = (capacity + MIN_BUCKET_SIZE as u64 - 1) >> MIN_BUCKET_SIZE_BITS;
+    }
+
+    level
+}
+
 /// Extract the original bucket ID from a metadata storage key.
 ///
 /// This is the inverse operation of [`bucket_metadata_key`]. Given a SaltKey that points
@@ -876,5 +910,34 @@ mod tests {
         assert_eq!(get_bfs_level(72340172838076673), 8, "First level 8 node");
         assert_eq!(get_bfs_level(9446744073709551615), 8, "Middle level 8 node");
         assert_eq!(get_bfs_level(u64::MAX), 8, "Largest node number in u64");
+    }
+
+    /// Tests the subtree_root_level function for various capacity values.
+    ///
+    /// Verifies that the function returns the correct subtree level based on
+    /// capacity thresholds and level transitions.
+    #[test]
+    fn test_subtree_root_level() {
+        // Test cases: (capacity, expected_level)
+        let cases = [
+            (1, 4),          // Single slot → deepest level
+            (256, 4),        // Exactly one leaf node
+            (257, 3),        // Just over one leaf → level 3
+            (65536, 3),      // 256^2 slots → still level 3
+            (65537, 2),      // Just over 256^2 → level 2
+            (16777216, 2),   // 256^3 slots → still level 2
+            (16777217, 1),   // Just over 256^3 → level 1
+            (4294967296, 1), // 256^4 slots → still level 1
+            (4294967297, 0), // Just over 256^4 → root level
+        ];
+
+        for (capacity, expected) in cases {
+            assert_eq!(
+                subtree_root_level(capacity),
+                expected,
+                "capacity={}",
+                capacity
+            );
+        }
     }
 }
