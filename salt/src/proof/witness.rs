@@ -4,7 +4,7 @@
 //! of state data along with cryptographic proofs for stateless validation. The witness
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
-    constant::NUM_META_BUCKETS,
+    constant::{MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
     proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -284,6 +284,24 @@ impl StateReader for BlockWitness {
         }
 
         Ok(used_count)
+    }
+
+    /// Get the number of levels in a bucket's subtree.
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The ID of the bucket whose subtree levels to compute
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(levels)` - Number of levels in the subtree (1-5)
+    /// - `Err(_)` - If there's an error reading salt proof
+    fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
+        let root_level = self
+            .proof
+            .buckets_top_level
+            .get(&bucket_id)
+            .ok_or("Bucket top level not available in proof")?;
+        Ok(MAX_SUBTREE_LEVELS - *root_level as usize)
     }
 }
 
