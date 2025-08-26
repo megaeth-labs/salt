@@ -243,20 +243,24 @@ where
         Ok(hash_commitment(root_commitment))
     }
 
-    /// Updates bucket subtrees based on state changes, handling both normal updates
-    /// and bucket capacity changes (expansions/contractions).
+    /// Updates bucket subtree commitments in response to state changes.
     ///
-    /// This method processes state updates to generate commitment updates for all affected
-    /// trie nodes. It handles several complex scenarios:
+    /// # Use Cases
     ///
-    /// 1. **Normal buckets**: Simple key-value updates without capacity changes
-    /// 2. **Expansion buckets**: Buckets that can change capacity (> MIN_BUCKET_SIZE)
-    /// 3. **Contraction optimization**: Efficiently handles bucket size decreases
-    /// 4. **Subtree restructuring**: Manages depth changes when bucket capacity changes
+    /// * **Data updates**: Key-value changes within expanded buckets
+    /// * **Expansion**: Bucket capacity increases, creating new subtree levels
+    /// * **Contraction**: Bucket capacity decreases, removing subtree levels
+    /// * **Mixed updates**: Simultaneous data and capacity changes
     ///
-    /// The algorithm uses a complex filter to categorize updates while tracking capacity
-    /// changes and subtree events. It then processes updates bottom-up through the trie
-    /// levels, handling special cases where subtree roots change due to capacity changes.
+    /// # Arguments
+    /// * `state_updates` - State changes including:
+    ///   - Key-value pair updates (insertions, modifications, deletions)
+    ///   - Bucket metadata updates (capacity changes)
+    ///   - Or both types together
+    ///
+    /// # Returns
+    /// * `Ok(TrieUpdates)` - Commitment updates for all affected trie nodes
+    /// * `Err` - On store failures or invalid metadata
     fn update_bucket_subtrees(
         &self,
         state_updates: StateUpdates,
