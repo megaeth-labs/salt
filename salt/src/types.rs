@@ -404,7 +404,7 @@ pub fn is_subtree_node(node_id: NodeId) -> bool {
 /// // Level 2: BFS number = 257 (since there are 1 + 256 nodes at levels 0 and 1)
 /// assert_eq!(leftmost_node(2), Some(257));
 /// ```
-const fn leftmost_node(level: u32) -> Option<u64> {
+pub const fn leftmost_node(level: u32) -> Option<u64> {
     if level == 0 {
         return Some(0);
     }

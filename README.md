@@ -73,148 +73,195 @@ While the main SALT tree is static, the buckets are not. A bucket is initialized
            (256 slots)       (256 slots)       (256 slots)
 ```
 
-### DoS Attacks
+### Proof
 
-TODO: meta buckets
+SALT provides cryptographic proofs for both the existence (membership) and non-existence (non-membership) of keys in the authenticated key-value store. These proofs leverage the deterministic properties of the SHI (Strongly History-Independent) hash table to create compact, verifiable witnesses.
 
-### (Non-)Membership Proof
+#### Membership Proof (Key Exists)
 
-### Decoupling authentication and storage
+To prove that a key exists in SALT, the proof simply includes:
+1. **The bucket slot** containing the key-value pair
+2. **The SALT path** from the bucket to the root
+3. **The IPA proof** for the bucket's vector commitment
 
-authentication layer: contains all commitments; map from nodeId to commitments
+Since the key is present at a specific slot determined by the SHI algorithm, verifiers can:
+- Confirm the key-value pair exists at the claimed slot
+- Verify the cryptographic path to the state root
+- Validate that the value matches the expected data
 
-storage layer: contains all data items; map from salt key to plainKV
+#### Non-Membership Proof (Key Doesn't Exist)
+
+Proving non-existence is more complex due to the SHI hash table's linear probing mechanism. The proof must demonstrate that the key cannot exist anywhere in its probe sequence:
+
+1. **Probe Sequence**: Starting from the slot determined by `hash(key, nonce) % capacity`, the proof includes all slots in the linear probe sequence until reaching either:
+   - An **empty slot** - indicating the key was never inserted
+   - A slot containing a **lexicographically smaller key** - due to SHI's ordering property, the target key cannot exist beyond this point
+
+2. **SHI Ordering Invariant**: The SHI algorithm maintains that during insertion, smaller keys displace larger keys. Therefore, if we encounter a key smaller than our target during probing, we know the target key cannot exist in the bucket.
+
+3. **Proof Contents**: The non-membership proof includes:
+   - All bucket slots in the probe sequence (potentially multiple consecutive slots)
+   - The SALT path from the bucket to the root
+   - The IPA proof covering all accessed slots
+
+#### Example
+
+Consider proving non-existence of key "foo" in a bucket:
+```
+Bucket slots:
+[0]: "bar"    <- hash("foo") maps here, but "bar" < "foo", continue probing
+[1]: "qux"    <- "qux" > "foo", continue probing
+[2]: "xyz"    <- "xyz" > "foo", continue probing
+[3]: empty    <- Empty slot found, "foo" doesn't exist
+
+Proof includes: slots 0-3 with their values
+```
+
+Or with early termination:
+```
+Bucket slots:
+[0]: "bar"    <- hash("foo") maps here, but "bar" < "foo", continue probing
+[1]: "egg"    <- "egg" < "foo", stop here (SHI ordering violated)
+
+Proof includes: slots 0-1 with their values
+```
+
+This approach ensures that proofs are minimal (only including necessary slots) while remaining cryptographically sound and efficiently verifiable.
 
 ## Project Architecture
 
-This project consists of three main components organized as a Rust workspace:
+SALT is implemented as a Rust workspace with three main crates that work together to provide an efficient authenticated key-value store:
 
-### 1. Banderwagon (`banderwagon/`)
-- **Purpose**: Elliptic curve group operations over the Bandersnatch curve
+### Core Components
+
+#### 1. Banderwagon (`banderwagon/`)
+**Purpose**: High-performance elliptic curve operations over the Bandersnatch curve
+
 - **Key Features**:
-  - Prime subgroup implementation over Bandersnatch curve
-  - Multi-scalar multiplication (MSM) with precomputation
-  - Efficient serialization and point operations
-  - Memory-optimized operations with hugepage support
-- **Core Types**: `Element`, `Fr` (field elements)
+  - Optimized group operations for the prime subgroup of Bandersnatch
+  - Multi-scalar multiplication (MSM) with precomputation tables
+  - Memory-efficient operations with optional hugepage support
+  - SIMD-optimized scalar multiplication
+- **Core Types**:
+  - `Element`: Group elements on the curve
+  - `Fr`: Scalar field elements
+  - `Committer`: High-level commitment interface for SALT
 
-### 2. IPA Multipoint (`ipa-multipoint/`)
-- **Purpose**: Inner Product Argument-based polynomial commitment scheme
+#### 2. IPA Multipoint (`ipa-multipoint/`)
+**Purpose**: Vector commitment scheme using Inner Product Arguments
+
 - **Key Features**:
-  - Polynomial commitments for opening multiple polynomials at different points
-  - Vector commitment scheme using homomorphic properties
-  - Transcript-based proofs following BCMS20 scheme
-  - Lagrange basis operations and precomputed weights
-- **Core Components**: `MultiPoint`, `IPAProof`, `Committer`, `CRS`
+  - Homomorphic commitments enabling incremental updates
+  - Multi-point polynomial opening proofs
+  - Optimized Lagrange basis operations
+  - Transcript-based Fiat-Shamir transformation
+- **Core Components**:
+  - `MultiPoint`: Multi-point proof generation and verification
+  - `IPAProof`: Inner product argument proofs
+  - `CRS`: Common reference string for trusted setup
+  - `LagrangeBasis`: Efficient polynomial evaluations
 
-### 3. SALT (`salt/`)
-- **Purpose**: Main SALT trie implementation
-- **Architecture**:
-  - **State Module**: Manages storage and access of key-value pairs in buckets
-  - **Trie Module**: Maintains commitments of trie nodes
-  - **Proof Module**: Generates and verifies cryptographic proofs
-- **Core Types**: `MemSalt`, `EphemeralSaltState`, `StateRoot`, `SaltProof`
+#### 3. SALT (`salt/`)
+**Purpose**: The main authenticated key-value store implementation
 
-## Component Interactions
+- **Architecture Layers**:
+  - **Storage Layer** (`state` module):
+    - Manages key-value pairs using SHI hash tables
+    - Implements bucket operations (insert, delete, lookup)
+    - Handles dynamic bucket resizing and metadata
+  - **Authentication Layer** (`trie` module):
+    - Maintains cryptographic commitments for all nodes
+    - Computes state root using incremental updates
+    - Manages bucket subtree expansion/contraction
+  - **Proof Layer** (`proof` module):
+    - Generates inclusion/exclusion proofs
+    - Creates block witnesses for state transitions
+    - Verifies proofs against state root
+
+- **Core Types**:
+  - `EphemeralSaltState`: Non-persistent state view with caching
+  - `StateRoot`: Incremental state root computation
+  - `MemStore`: Thread-safe in-memory storage backend
+  - `SaltKey`/`SaltValue`: Encoded key-value pairs
+  - `PlainKeysProof`: Inclusion/exclusion proofs for plain keys
+
+### Architectural Design
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Banderwagon   │    │  IPA Multipoint  │    │      SALT       │
-│                 │    │                  │    │                 │
-│ • Element       │◄───┤ • Committer      │◄───┤ • StateRoot     │
-│ • Fr            │    │ • MultiPoint     │    │ • SaltProof     │
-│ • MSM           │    │ • IPAProof       │    │ • MemSalt       │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    Application Layer                             │
+│               (Plain key-value operations)                       │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────────────┐
+│                    State Management Layer                        │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │ EphemeralSaltState: SHI hash table operations            │    │
+│  │ • Bucket lookups, insertions, deletions                  │    │
+│  │ • Dynamic resizing and rehashing                         │    │
+│  │ • Change tracking and state updates                      │    │
+│  └──────────────────────┬───────────────────────────────────┘    │
+└─────────────────────────┼────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼────────────────────────────────────────┐
+│                    Authentication Layer                          │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │ StateRoot: Cryptographic commitment management           │    │
+│  │ • Incremental commitment updates using homomorphism      │    │
+│  │ • 4-level main trie + dynamic bucket subtrees            │    │
+│  │ • Batch updates with delta propagation                   │    │
+│  └──────────────────────┬───────────────────────────────────┘    │
+└─────────────────────────┼────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼────────────────────────────────────────┐
+│                    Cryptographic Layer                           │
+│  ┌─────────────────┐        ┌──────────────────┐                 │
+│  │ IPA Multipoint  │◄───────┤   Banderwagon    │                 │
+│  │ • IPAProof      │        │ • Element ops    │                 │
+│  │ • Committer     │        │ • MSM operations │                 │
+│  └─────────────────┘        └──────────────────┘                 │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Flow:
-1. **State Updates**: Key-value pairs are stored in SALT buckets
-2. **Commitment Generation**: Each bucket computes commitments using IPA vector commitments
-3. **Trie Maintenance**: Internal nodes compute commitments of child nodes recursively
-4. **Proof Generation**: Multi-point proofs are generated for state verification
-5. **Cryptographic Operations**: All group operations use optimized Banderwagon curve arithmetic
+### Data Flow
 
-## Key Features
+1. **Write Path**:
+   - Application submits key-value updates
+   - State layer applies SHI hash table operations to buckets
+   - Authentication layer computes commitment deltas
+   - Deltas propagate up the trie to update state root
+   - Storage backend persists state and trie updates
 
-### Memory Efficiency
-- Shallow, wide trie structure minimizes depth
-- In-memory storage eliminates disk I/O for state updates
-- Hugepage support for optimized memory access patterns
+2. **Read Path**:
+   - Application queries by plain key
+   - State layer locates bucket and performs SHI lookup
+   - Returns value if found, None otherwise
 
-### Cryptographic Security
-- Uses Inner Product Arguments (IPA) for vector commitments
-- History-independent hash tables ensure deterministic representation
-- Banderwagon curve provides efficient group operations
+3. **Proof Generation**:
+   - Collect all affected bucket commitments
+   - Build SALT paths from buckets to root
+   - Generate IPA proofs for bucket contents
+   - Package into verifiable witness
 
-### Performance Optimizations
-- Parallel processing for large vector operations
-- Precomputed tables for MSM operations
-- Batch operations for field arithmetic
+### Storage Abstraction
 
-## Usage
+SALT cleanly separates storage from authentication through trait interfaces:
 
-### Basic Operations
+- **`StateReader`**: Read-only access to bucket data
+- **`TrieReader`**: Read-only access to node commitments
+- **`MemStore`**: Reference implementation using `RwLock<HashMap>`
 
-```rust
-use salt::{MemSalt, EphemeralSaltState};
-
-// Create a new SALT instance
-let salt = MemSalt::new();
-
-// Create ephemeral state for tentative updates
-let mut state = EphemeralSaltState::new(&salt);
-
-// Update key-value pairs
-state.set(key, value);
-
-// Compute state root
-let root = state.compute_state_root();
-```
-
-### Proof Generation
-
-```rust
-use salt::proof::create_salt_proof;
-
-// Generate proof for specific keys
-let proof = create_salt_proof(&keys, &state_reader, &trie_reader)?;
-
-// Verify proof
-let is_valid = proof.verify(&state_root, &keys, &values)?;
-```
-
-## Development Setup
-
-### Prerequisites
-- Rust 1.70+ with 2021 edition
-- For optimal performance: Linux with hugepage support
-
-### Building
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd salt
-
-# Build all components
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run benchmarks
-cargo bench
-```
+This allows plugging in different storage backends (RocksDB, PostgreSQL, etc.) without changing the core logic.
 
 ### Hugepage Configuration (Linux)
 
-By default, SALT uses standard memory allocation for compatibility. For optimal performance with large precomputed tables, you can enable hugepages:
+By default, SALT uses standard memory allocation for compatibility. For optimal performance with large precomputation tables, you can enable hugepages:
 
 ```bash
 # Check current hugepage allocation
 grep HugePages /proc/meminfo
 
-# Allocate hugepages (requires ~400MB for precomputed tables)
+# Allocate hugepages (requires ~400MB for precomputation tables)
 sudo sysctl -w vm.nr_hugepages=1024
 ```
 
@@ -225,53 +272,12 @@ To enable hugepages for better performance:
 banderwagon = { path = "banderwagon", features = ["enable-hugepages"] }
 ```
 
-## Performance Characteristics
-
-### Benchmarks (Apple M1 Pro, 16GB RAM)
-- IPA prove (256 elements): ~28.7ms
-- IPA verify (256 elements): ~20.8ms
-- Multipoint verify (256/1000 proofs): ~8.6ms
-- Multipoint verify (256/16000 proofs): ~69.4ms
-
-### Scalability
-- Supports millions of key-value pairs
-- Parallel processing for operations >64 elements
-- Optimized batch operations for field arithmetic
-
-## Security Considerations
-
-⚠️ **Warning**: This implementation is for research and development purposes. The code has not undergone security audits and should not be used in production environments.
-
-### Known Limitations
-- CRS generation is not cryptographically secure (relative DLOG is known)
-- Requires proper hash-to-group implementation for production use
-- Some optimizations (GLV endomorphism, full parallelization) not yet implemented
-
-## Project Status
-
-- **Current State**: Active development, proof-of-concept implementation
-- **Testing**: Comprehensive unit and integration tests
-- **Documentation**: Extensive inline documentation and examples
-- **Benchmarking**: Performance benchmarks included
-
-## Contributing
-
-This project follows standard Rust development practices:
-- Use `cargo fmt` for code formatting
-- Run `cargo clippy` for linting
-- Ensure all tests pass before submitting PRs
-- Follow the existing code style and patterns
-
-## License
-
-Licensed under either of:
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
-
 ## References
 
+### Papers
 - [Bandersnatch Curve Specification](https://eprint.iacr.org/2021/1152.pdf)
 - [Verkle Trees and Vector Commitments](https://hackmd.io/@6iQDuIePQjyYBqDChYw_jg/BJ2-L6Nzc)
 - [Inner Product Arguments (BCMS20)](https://eprint.iacr.org/2019/1177.pdf)
+
+### Presentations & Talks
+- [SALT: Breaking the I/O Bottleneck for Blockchains with a Scalable Authenticated Key-Value Store](https://x.com/yangl1996/status/1957487663818416406) - [Science and Engineering of Consensus 2025](https://tselab.stanford.edu/workshop-sbc25/), August 3rd, 2025
