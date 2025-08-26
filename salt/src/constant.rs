@@ -1,71 +1,165 @@
-//! This module defines constants that determine the shape of the SALT data structure.
-use crate::types::{get_bfs_level, is_subtree_node, CommitmentBytes, NodeId};
-use banderwagon::salt_committer::Committer;
+//! Constants defining the SALT data structure.
+//!
+//! SALT is a cryptographically authenticated key-value store organized as a 256-ary trie.
+//! The structure consists of:
+//! - A 4-level main trie with 256^3 = 16,777,216 leaf nodes (buckets)
+//! - Each bucket can dynamically resize to hold key-value pairs
+//! - The first 65,536 buckets store metadata, the rest store actual data
+//!
+//! ## Trie Structure
+//! ```text
+//!                    Root (Level 0)
+//!                      /    |    \
+//!                   /       |       \  [256 children]
+//!            Level 1    Level 1   ...
+//!               /|\        /|\
+//!              / | \      / | \     [256 children each]
+//!           Level 2    Level 2  ...
+//!             /|\        /|\
+//!            / | \      / | \       [256 children each]
+//!         Buckets    Buckets ...    [16,777,216 total]
+//! ```
+use crate::types::{get_bfs_level, is_subtree_node, leftmost_node, CommitmentBytes, NodeId};
 
-/// Number of bits to represent `MIN_BUCKET_SIZE`.
+// ============================================================================
+// Bucket Size Constants
+// ============================================================================
+
+/// Number of bits to represent the minimum bucket size.
 pub const MIN_BUCKET_SIZE_BITS: usize = 8;
-/// Capacity of a default SALT bucket. Buckets are dynamically resized but their capacities cannot
-/// drop below this value.
+/// Minimum capacity of a SALT bucket (256 slots).
+/// Buckets are dynamically resized but their capacities cannot drop below this value.
+/// This represents the number of key-value pairs a bucket can hold at minimum.
 pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 /// Fixed capacity of metadata buckets.
+/// Set equal to MIN_BUCKET_SIZE since metadata buckets don't need to resize
+/// and maintaining uniform size simplifies the implementation.
 pub const META_BUCKET_SIZE: usize = MIN_BUCKET_SIZE;
 
-/// Number of levels in the SALT trie. Level 0 is the root. Buckets are located at the last level.
+// ============================================================================
+// Trie Structure Constants
+// ============================================================================
+
+/// Number of levels in the SALT main trie.
+/// - Level 0: Root node (1 node)
+/// - Level 1: 256 nodes
+/// - Level 2: 65,536 nodes
+/// - Level 3: 16,777,216 nodes (buckets)
+///
+/// This gives us 256^3 = 16,777,216 total buckets.
 pub const MAIN_TRIE_LEVELS: usize = 4;
-/// Number of levels in the sub-trie of the bucket. The root node is stored in the SALT trie,
-/// while the remaining nodes are stored in the sub-trie. The node numbers of the sub-trie are
-/// generated according to the 40-bit full encoding rule.
-/// For example, if the bucket capacity is `MIN_BUCKET_SIZE`, the number of sub-trie nodes is 0.
-/// If the bucket capacity is 2 * `MIN_BUCKET_SIZE`, the number of sub-trie nodes is 2, as shown in
-/// the below:               |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
-/// trie                  /                         \
-/// |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]| |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
+/// Maximum levels in bucket subtrees.
+///
+/// Bucket subtrees organize data into 256-slot segments. These segments are ALWAYS
+/// leaf nodes at the deepest level (level 4) of the MAXIMAL subtree structure. As
+/// bucket capacity increases, the subtree root moves UP to accommodate more leaves.
+///
+/// Structure evolution by capacity:
+/// - 256 slots (1 segment): Single-node subtree, root at level 4
+/// - 512 slots (2 segments): Root at level 3, 2 leaf nodes at level 4
+/// - 768-65536 slots: Root at level 2, internal nodes at level 3, leaves at level 4
+/// - 65537+ slots: Root at higher levels as needed
+///
+/// Example for 512-slot bucket (2 segments):
+/// ```text
+///        Root (level 3, in subtree)
+///         /                \
+///   Segment_0           Segment_1  (level 4, in subtree)
+///   [slots 0-255]    [slots 256-511]
+///   NodeId: 16843009  NodeId: 16843010
+/// ```
+///
+/// Key invariants:
+/// - Bucket segments are always at level 4 (NodeId starts at 16843009)
+/// - Each segment holds exactly 256 consecutive slots
+/// - The root position depends on capacity (see subtree_root_level function)
 pub const MAX_SUBTREE_LEVELS: usize = 5;
-/// Number of bits to represent `TRIE_WIDTH`.
+/// Number of bits to represent the trie width (branching factor).
 pub const TRIE_WIDTH_BITS: usize = 8;
-/// Branch factor of the SALT trie nodes. Always a power of two.
+
+/// Branch factor of SALT trie nodes (256 children per node).
+/// 256 was chosen because:
+/// - Matches byte boundaries (one byte selects a child)
+/// - Provides good fanout for reducing tree depth
+/// - Aligns with common cryptographic block sizes
 pub const TRIE_WIDTH: usize = 1 << TRIE_WIDTH_BITS;
-/// Number of buckets (i.e., leaf nodes) in the SALT trie.
+/// Total number of buckets (leaf nodes) in the SALT trie.
+/// Calculated as: 256^3 = 16,777,216 buckets
+/// (3 levels of 256-way branching below the root)
 pub const NUM_BUCKETS: usize = 1 << ((MAIN_TRIE_LEVELS - 1) * TRIE_WIDTH_BITS);
-/// Number of meta buckets in the SALT trie. Meta buckets are used to store metadata for each
-/// bucket. The remaining buckets are used to store key-value pairs.
+/// Number of metadata buckets in the SALT trie.
+/// Calculated as: 16,777,216 / 256 = 65,536 buckets
+/// These store bucket metadata (nonce, capacity) for all data buckets.
 pub const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
-/// Number of key-value buckets in the SALT trie.
+/// Number of data buckets for storing actual key-value pairs.
+/// Calculated as: 16,777,216 - 65,536 = 16,711,680 buckets
 pub const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
-/// Index of root commitment in salt buckets.
+
+// ============================================================================
+// Node Addressing Constants
+// ============================================================================
+
+/// Node ID of the root node in the main trie.
 pub const ROOT_NODE_ID: NodeId = 0;
-/// Default hash value of [1u8; 32] when the slot is empty
+
+/// Default hash value for empty slots in buckets.
+/// Set to [1u8; 32] to distinguish from zero-initialized memory.
 pub const EMPTY_SLOT_HASH: [u8; 32] = [1u8; 32];
 
-/// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
-/// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
-/// array) at level i.
+/// Array of starting node IDs for each trie level.
+///
+/// Since the SALT trie is always full, nodes can be flattened to an array.
+/// The ID of the leftmost node at level i is calculated as: sum(256^j) for j in 0..i
+///
+/// - Level 0: 0 (just the root)
+/// - Level 1: 1 (after 1 node at level 0)
+/// - Level 2: 257 (after 1 + 256 nodes)
+/// - Level 3: 65,793 (after 1 + 256 + 65,536 nodes)
+/// - Level 4: 16,843,009 (after 1 + 256 + 65,536 + 16,777,216 nodes)
 pub const STARTING_NODE_ID: [usize; MAX_SUBTREE_LEVELS] = [
-    0,
-    1,
-    TRIE_WIDTH + 1,
-    TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH + 1,
-    TRIE_WIDTH * TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH + 1,
+    leftmost_node(0).unwrap() as usize, // 0
+    leftmost_node(1).unwrap() as usize, // 1
+    leftmost_node(2).unwrap() as usize, // 257
+    leftmost_node(3).unwrap() as usize, // 65793
+    leftmost_node(4).unwrap() as usize, // 16843009
 ];
 
 /// Maximum number of bits to represent a bucket ID.
+/// 24 bits supports up to ~16.7 million buckets, which matches NUM_BUCKETS.
 pub const BUCKET_ID_BITS: usize = 24;
-/// Maximum number of bits to represent a slot index in a bucket. 2^40 slots per bucket should be
-/// more than enough.
+
+/// Maximum number of bits to represent a slot index in a bucket.
+/// 40 bits supports up to ~1 trillion slots per bucket, providing ample room for growth.
 pub const BUCKET_SLOT_BITS: usize = 40;
-/// Mask of the slot ID in a bucket. The slot ID is the lower 40 bits of the `SaltKey`.
+
+/// Mask to extract the slot ID from a NodeId or SaltKey.
+/// The slot ID occupies the lower 40 bits.
+/// Example: node_id & BUCKET_SLOT_ID_MASK extracts the position within a bucket.
 pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
+
+// ============================================================================
+// Resizing Parameters
+// ============================================================================
 
 /// Load factor threshold (as percentage) that triggers bucket resizing.
 /// When a bucket's usage exceeds this percentage of its capacity, it will be resized.
+/// 80% provides a good balance between space efficiency and collision avoidance.
 pub const BUCKET_RESIZE_LOAD_FACTOR_PCT: u64 = 80;
+
 /// Multiplier used when expanding bucket capacity during resize operations.
 /// The new capacity will be the old capacity multiplied by this factor.
 pub const BUCKET_RESIZE_MULTIPLIER: u64 = 2;
 
-/// The degree of the polynomial used in the IPA proof.
+// ============================================================================
+// Cryptographic Constants
+// ============================================================================
+
+/// The degree of the polynomial used in the IPA (Inner Product Argument) proof.
+/// 256 matches our trie branching factor for efficient proof generation.
 pub const POLY_DEGREE: usize = 256;
-/// Macro to convert a 128-character hex string into a [u8; 64] array at compile time
+
+/// Macro to convert a 128-character hex string into a [u8; 64] array at compile time.
+/// Used for embedding precomputed cryptographic commitments.
 macro_rules! b512 {
     ($s:literal) => {{
         const _: () = assert!(
@@ -106,11 +200,22 @@ macro_rules! b512 {
     }};
 }
 
-/// Get the default commitment for the specified node.
+/// Get the default commitment for an empty node at the specified position.
+///
+/// These commitments are precomputed for performance and represent
+/// the cryptographic hash of an empty trie at each level. This allows
+/// efficient validation without recomputing empty subtree hashes.
+///
+/// The commitments differ based on:
+/// - Node level in the trie
+/// - Position relative to metadata/data bucket boundary (at NUM_META_BUCKETS)
+///
+/// For implementation details, see the test case `trie_level_default_commitment`
+/// in ../salt/src/trie/trie.rs.
 pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
-    // Precomputed node commitment at each level of an empty SALT trie.
-    // Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
-    // info.
+    // Precomputed commitments for each level of an empty SALT main trie.
+    // Each entry contains: (boundary_position, left_commitment, right_commitment)
+    // where left is for positions < boundary, right is for positions >= boundary.
     static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); MAIN_TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,
@@ -134,8 +239,9 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
         ),
     ];
 
-    // Precomputed node commitment at each level of an empty SALT SubTrie.
-    static SUBTRIE_DEFAULT_COMMITMENT:[CommitmentBytes; MAX_SUBTREE_LEVELS] = [
+    // Precomputed commitments for each level of an empty SALT bucket subtree.
+    // These are used when a bucket has expanded beyond MIN_BUCKET_SIZE.
+    static SUBTREE_DEFAULT_COMMITMENT:[CommitmentBytes; MAX_SUBTREE_LEVELS] = [
         b512!("5a4458230b52d0445f846b078df60f4aba2130f015eff95bf6530098bdcfbc570331d402f243631ee94f2b59af6c41b9014eb1a767ff4d4e692889ea546a3c01"),
         b512!("26e37bc889bd763289bc5ca3fd88babef8c4477ea0c0d0ec457d165c7a37e1449bf45aaa4d7fdf0c6a43aa579243015ad99e70dfa4fb66137fc6733be79a4803"),
         b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),
@@ -146,15 +252,10 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     let level = get_bfs_level(node_id & BUCKET_SLOT_ID_MASK as NodeId);
 
     if is_subtree_node(node_id) {
-        SUBTRIE_DEFAULT_COMMITMENT[level]
+        SUBTREE_DEFAULT_COMMITMENT[level]
     } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
-}
-
-/// Return the zero commitment.
-pub fn zero_commitment() -> CommitmentBytes {
-    Committer::zero()
 }

@@ -36,21 +36,38 @@ Each bucket contains:
 
 ### Key Components
 
-#### State Management ([`state`])
-FIXME: EphemeralSaltState also implements all the SHI hashtable logic and
-provides an interface for reading EVM account/storage data.
-- [`EphemeralSaltState`]: Non-persistent state snapshot with change tracking
-- [`StateUpdates`]: Incremental state change accumulator
-
-#### Trie Authentication ([`trie`])
-- [`StateRoot`]: Updates cryptographic commitments incrementally
-- [`TrieUpdates`]: Tracks commitment changes across trie levels
-- [`BlockWitness`]: Generates and verifies cryptographic proofs
-
 #### Storage Abstraction ([`traits`])
+Provides pluggable storage backend interfaces:
 - [`StateReader`]: Interface for reading bucket entries
 - [`TrieReader`]: Interface for reading node commitments
-- Enables pluggable storage backends
+- [`MemStore`]: Reference in-memory storage implementation
+
+#### State Management ([`state`])
+Handles the application layer of SALT, managing key-value pairs with SHI hash tables:
+- [`EphemeralSaltState`]: Non-persistent state view with in-memory caching
+  - Implements SHI (Strongly History-Independent) hash table operations
+  - Provides EVM account/storage data interface
+  - Tracks changes and generates state updates
+- [`StateUpdates`]: Accumulates state changes for batch processing
+
+#### Trie Authentication ([`trie`])
+Manages cryptographic commitments using IPA vector commitments:
+- [`StateRoot`]: Computes and maintains the authenticated state root
+  - Supports incremental updates
+  - Optimizes computation by only updating changed paths
+- [`TrieUpdates`]: Tracks commitment changes across all trie levels
+  - Handles both main trie and dynamic bucket subtree updates
+- [`node_utils`]: Utilities for node navigation and subtree management
+  - Manages dynamic bucket expansion/contraction
+  - Provides node ID calculation and tree traversal
+
+#### Proof Generation ([`proof`])
+Creates and verifies cryptographic witnesses:
+- [`BlockWitness`]: Generates witnesses for state transitions
+  - Supports both inclusion and exclusion proofs
+- [`PlainKeysProof`]: Proves existence/non-existence of plain keys
+  - Enables light client verification
+- [`SaltProof`]: Low-level proof structure with IPA commitments
 
 ## Usage
 

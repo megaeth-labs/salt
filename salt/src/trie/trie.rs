@@ -1098,7 +1098,7 @@ mod tests {
     use rand::Rng;
 
     use crate::{
-        constant::{default_commitment, zero_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
+        constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
     use std::collections::HashMap;
@@ -2225,7 +2225,7 @@ mod tests {
     /// Checks if the default commitment is correct
     #[test]
     fn trie_level_default_committment() {
-        let zero = zero_commitment();
+        let zero = Committer::zero();
         let mut default_committment_vec = vec![(zero, zero); MAIN_TRIE_LEVELS];
         let len_vec = [1, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE];
 
