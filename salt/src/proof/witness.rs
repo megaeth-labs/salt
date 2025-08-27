@@ -1,6 +1,6 @@
-//! Block witness implementation for stateless validation.
+//! Salt witness implementation for stateless validation.
 //!
-//! This module provides the `BlockWitness` data structure, which contains a subset
+//! This module provides the `SaltWitness` data structure, which contains a subset
 //! of state data along with cryptographic proofs for stateless validation. The witness
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
@@ -15,9 +15,9 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
-/// Block witness for stateless validation with security guarantees.
+/// Salt witness for stateless validation with security guarantees.
 ///
-/// A `BlockWitness` contains a curated subset of state data along with cryptographic
+/// A `SaltWitness` contains a curated subset of state data along with cryptographic
 /// proofs that allow stateless validators to verify state transitions without having
 /// access to the full state tree.
 ///
@@ -43,7 +43,7 @@ use std::{
 ///   omission attacks where a prover hides some keys while including others in a range.
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockWitness {
+pub struct SaltWitness {
     /// All witnessed data in this proof, including both metadata and regular
     /// key-value pairs.
     /// - `Some(value)`: Key exists with the given value
@@ -59,16 +59,31 @@ pub struct BlockWitness {
     pub proof: SaltProof,
 }
 
-impl BlockWitness {
-    /// Create a block witness from the trie
-    pub fn create<Store>(
-        min_sub_tree: &[SaltKey],
-        store: &Store,
-    ) -> Result<BlockWitness, ProofError>
+impl SaltWitness {
+    /// Creates a salt witness for a given set of keys with their cryptographic proof.
+    ///
+    /// This method constructs a witness that includes the specified keys' data along
+    /// with a cryptographic proof that authenticates the data against the state root.
+    /// Every key is cryptographically proven to either exist (with its value) or not
+    /// exist.
+    ///
+    /// # Arguments
+    /// * `keys` - The set of salt keys to include in the witness
+    /// * `store` - The storage backend providing access to state data
+    ///
+    /// # Returns
+    /// * `Ok(SaltWitness)` - A witness containing the requested keys' data and their proof
+    /// * `Err(ProofError)` - If reading any key fails or proof generation fails
+    ///
+    /// # Notes
+    /// - For metadata keys, retrieves bucket metadata instead of regular values
+    /// - For regular keys, retrieves their values (or None if non-existent)
+    /// - The proof is generated for all requested keys to ensure completeness
+    pub fn create<Store>(keys: &[SaltKey], store: &Store) -> Result<SaltWitness, ProofError>
     where
         Store: StateReader + TrieReader,
     {
-        let kvs = min_sub_tree
+        let kvs = keys
             .par_iter()
             .map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
@@ -79,16 +94,18 @@ impl BlockWitness {
                     // Handle regular data keys
                     store.value(salt_key)
                 })
-                .map_err(|e| ProofError::ProveFailed(format!("Failed to read key: {e:?}")))?;
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read key: {e:?}"),
+                })?;
                 Ok((salt_key, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
         let proof = SaltProof::create(kvs.keys().copied(), store)?;
-        Ok(BlockWitness { kvs, proof })
+        Ok(SaltWitness { kvs, proof })
     }
 
-    /// Verify the block witness against the given state root.
+    /// Verify the salt witness against the given state root.
     ///
     /// This method verifies that the witness correctly represents the state by
     /// checking the cryptographic proof. Importantly, it preserves the distinction
@@ -105,7 +122,7 @@ impl BlockWitness {
     }
 }
 
-impl StateReader for BlockWitness {
+impl StateReader for SaltWitness {
     type Error = &'static str;
 
     /// Retrieves a state value by key from the witness.
@@ -128,7 +145,7 @@ impl StateReader for BlockWitness {
         }
     }
 
-    /// Range queries are not supported for BlockWitness.
+    /// Range queries are not supported for SaltWitness.
     ///
     /// # Security Rationale
     ///
@@ -144,7 +161,7 @@ impl StateReader for BlockWitness {
         &self,
         _range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Err("Range queries not supported for BlockWitness")
+        Err("Range queries not supported for SaltWitness")
     }
 
     /// Retrieves metadata for a specific bucket from the witness.
@@ -219,14 +236,14 @@ impl StateReader for BlockWitness {
     }
 }
 
-impl TrieReader for BlockWitness {
+impl TrieReader for SaltWitness {
     type Error = &'static str;
 
     /// Retrieves the commitment for a specific trie node from the witness.
     ///
     /// # Security Model
     ///
-    /// This method enforces the same security properties as other BlockWitness methods:
+    /// This method enforces the same security properties as other SaltWitness methods:
     /// - Returns the commitment if the node is witnessed in the proof
     /// - Returns an error if the node is not included in the witness
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
@@ -236,7 +253,7 @@ impl TrieReader for BlockWitness {
         }
     }
 
-    /// Range queries are not supported for BlockWitness.
+    /// Range queries are not supported for SaltWitness.
     ///
     /// **For stateless validation**: Use individual `commitment()` calls instead
     /// of range queries. This ensures proper distinction between unknown and
@@ -245,7 +262,7 @@ impl TrieReader for BlockWitness {
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Err("Range queries not supported for BlockWitness")
+        Err("Range queries not supported for SaltWitness")
     }
 }
 
@@ -259,12 +276,12 @@ pub fn create_mock_proof() -> SaltProof {
 }
 
 #[cfg(test)]
-/// Helper function to create a BlockWitness for testing
+/// Helper function to create a SaltWitness for testing
 pub fn create_witness(
     bucket_id: BucketId,
     metadata: Option<BucketMeta>,
     slots: Vec<(u64, Option<SaltValue>)>,
-) -> BlockWitness {
+) -> SaltWitness {
     let mut kvs = BTreeMap::new();
 
     if let Some(meta) = metadata {
@@ -277,7 +294,7 @@ pub fn create_witness(
         kvs.insert(salt_key, val);
     }
 
-    BlockWitness {
+    SaltWitness {
         kvs,
         proof: create_mock_proof(),
     }
@@ -326,22 +343,22 @@ mod tests {
         let (new_trie_root, mut trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
+        let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // 3.options in prover node
-        // 3.1 verify the block witness
-        let res = block_witness.verify_proof(old_trie_root);
+        // 3.1 verify the salt witness
+        let res = salt_witness.verify_proof(old_trie_root);
         assert!(res.is_ok());
 
-        // 3.2 create EphemeralSaltState from block witness
-        let mut prover_state = EphemeralSaltState::new(&block_witness);
+        // 3.2 create EphemeralSaltState from salt witness
+        let mut prover_state = EphemeralSaltState::new(&salt_witness);
 
         // 3.3 prover client execute the same blocks, and get the same new_kvs
         let prover_updates = prover_state.update(&new_kvs).unwrap();
 
         assert_eq!(state_updates, prover_updates);
 
-        let mut prover_trie = StateRoot::new(&block_witness);
+        let mut prover_trie = StateRoot::new(&salt_witness);
         let (prover_trie_root, mut prover_trie_updates) =
             prover_trie.update_fin(prover_updates).unwrap();
 
@@ -379,9 +396,9 @@ mod tests {
         state.update(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let block_witness_res = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
+        let salt_witness_res = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
-        let res = block_witness_res.verify_proof(root);
+        let res = salt_witness_res.verify_proof(root);
         assert!(res.is_ok());
     }
 
@@ -408,11 +425,11 @@ mod tests {
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
-        let block_witness = BlockWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
+        let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
         // use the old state
         for key in min_sub_tree_keys {
-            let witness_value = block_witness.value(key).unwrap();
+            let witness_value = salt_witness.value(key).unwrap();
             let state_value = mem_store.value(key).unwrap();
             assert_eq!(witness_value, state_value);
         }
@@ -445,9 +462,9 @@ mod tests {
         res
     }
 
-    /// Test all three cases of the BlockWitness::metadata() method
+    /// Test all three cases of the SaltWitness::metadata() method
     #[test]
-    fn test_block_witness_metadata_cases() {
+    fn test_salt_witness_metadata_cases() {
         let mock_salt_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
 
         // Use valid data bucket IDs (>= NUM_META_BUCKETS)
@@ -464,7 +481,7 @@ mod tests {
         let metadata_key = bucket_metadata_key(bucket1);
         kvs.insert(metadata_key, Some(explicit_meta.into()));
 
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs,
             proof: create_mock_proof(),
         };
@@ -493,7 +510,7 @@ mod tests {
             Some(mock_salt_value.clone()),
         );
 
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs,
             proof: create_mock_proof(),
         };
@@ -504,7 +521,7 @@ mod tests {
         assert_eq!(result.used, None); // Cannot compute reliably from partial witness
 
         // Test Case 3: Bucket not in proof (None)
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs: BTreeMap::new(), // Empty - bucket not in proof
             proof: create_mock_proof(),
         };
@@ -517,7 +534,7 @@ mod tests {
         );
     }
 
-    /// Test that verifies the security properties of BlockWitness StateReader
+    /// Test that verifies the security properties of SaltWitness StateReader
     /// implementation.
     ///
     /// This test ensures that the witness correctly distinguishes between:
@@ -540,7 +557,7 @@ mod tests {
         kvs.insert(key_nonexistent, None); // Proven non-existent
                                            // key_unknown is intentionally omitted (unknown)
 
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs,
             proof: create_mock_proof(),
         };
@@ -592,7 +609,7 @@ mod tests {
         kvs.insert(meta_key_default, Some(BucketMeta::default().into())); // Default metadata
                                                                           // bucket_unknown intentionally omitted
 
-        let witness_meta = BlockWitness {
+        let witness_meta = SaltWitness {
             kvs,
             proof: create_mock_proof(),
         };
@@ -684,7 +701,7 @@ mod tests {
             };
             kvs.insert(SaltKey::from((bucket_id, slot)), val_opt);
         }
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs,
             proof: create_mock_proof(),
         };
@@ -692,7 +709,7 @@ mod tests {
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
     }
 
-    /// Test that verifies the security properties of BlockWitness TrieReader
+    /// Test that verifies the security properties of SaltWitness TrieReader
     /// implementation.
     ///
     /// This test ensures that the TrieReader correctly distinguishes between:
@@ -711,7 +728,7 @@ mod tests {
         ]
         .into();
 
-        let witness = BlockWitness {
+        let witness = SaltWitness {
             kvs: BTreeMap::new(),
             proof,
         };
@@ -742,7 +759,7 @@ mod tests {
 
         let bucket_id: BucketId = 100000;
         let salt_key = bucket_metadata_key(bucket_id);
-        let witness = BlockWitness::create(&[salt_key], &mem_store).unwrap();
+        let witness = SaltWitness::create(&[salt_key], &mem_store).unwrap();
         let res = witness.verify_proof(root);
         assert!(res.is_ok());
     }

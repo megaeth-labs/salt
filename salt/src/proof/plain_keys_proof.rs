@@ -5,7 +5,7 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
-    proof::witness::BlockWitness,
+    proof::witness::SaltWitness,
     proof::ProofError,
     state::state::EphemeralSaltState,
     traits::{StateReader, TrieReader},
@@ -22,8 +22,8 @@ use std::ops::{Range, RangeInclusive};
 pub struct PlainKeysProof {
     /// The plain keys being proved.
     pub(crate) keys: Vec<Vec<u8>>,
-    /// Block witness containing all state data and cryptographic proof.
-    pub(crate) witness: BlockWitness,
+    /// Salt witness containing all state data and cryptographic proof.
+    pub(crate) witness: SaltWitness,
 }
 
 impl PlainKeysProof {
@@ -65,18 +65,20 @@ impl PlainKeysProof {
 
         // Process each plain key individually to determine its status
         for plain_key in keys {
-            let _ = state.plain_value(plain_key).map_err(|e| {
-                ProofError::ProveFailed(format!("Failed to read plain value: {e:?}"))
-            })?;
+            let _ = state
+                .plain_value(plain_key)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read plain value: {e:?}"),
+                })?;
         }
 
         let witness =
-            BlockWitness::create::<Store>(&state.cache.into_keys().collect::<Vec<_>>(), store)?;
+            SaltWitness::create::<Store>(&state.cache.into_keys().collect::<Vec<_>>(), store)?;
 
         // Construct the final proof structure containing all necessary verification data
         Ok(PlainKeysProof {
             keys: keys.to_vec(), // The original plain keys being proved
-            witness,             // Block witness containing all state data and cryptographic proof
+            witness,             // Salt witness containing all state data and cryptographic proof
         })
     }
 
@@ -101,9 +103,11 @@ impl PlainKeysProof {
 
         // Process each plain key individually to determine its status
         for plain_key in &self.keys {
-            let _ = state.plain_value(plain_key).map_err(|e| {
-                ProofError::VerifyFailed(format!("Failed to read plain value from witness: {e:?}"))
-            })?;
+            let _ = state
+                .plain_value(plain_key)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read plain value from witness: {e:?}"),
+                })?;
         }
 
         Ok(())
@@ -152,7 +156,7 @@ impl StateReader for PlainKeysProof {
     type Error = &'static str;
 
     /// Retrieves a salt value by its salt key from the proof data.
-    /// Delegates to the underlying BlockWitness implementation.
+    /// Delegates to the underlying SaltWitness implementation.
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
         self.witness.value(key)
     }
@@ -165,7 +169,7 @@ impl StateReader for PlainKeysProof {
     }
 
     /// Returns the metadata for a specific bucket.
-    /// Delegates to the BlockWitness implementation which correctly handles all cases.
+    /// Delegates to the SaltWitness implementation which correctly handles all cases.
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         self.witness.metadata(bucket_id)
     }

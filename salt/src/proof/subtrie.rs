@@ -188,7 +188,9 @@ where
             Ok((bucket_id, bucket_trie_top_level as u8))
         })
         .collect::<Result<FxHashMap<_, _>, <Store as StateReader>::Error>>()
-        .map_err(|e| ProofError::ProveFailed(format!("Failed to read state: {e:?}")))?;
+        .map_err(|e| ProofError::StateReadError {
+            reason: format!("Failed to read state: {e:?}"),
+        })?;
 
     let (bucket_trie_nodes, bucket_state_nodes) =
         bucket_trie_parents_and_points(salt_keys, &buckets_top_level);
