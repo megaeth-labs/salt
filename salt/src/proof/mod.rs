@@ -46,7 +46,7 @@ mod tests {
     use banderwagon::{CanonicalSerialize, Element, Fr, PrimeField};
     use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -61,7 +61,7 @@ mod tests {
     fn test_empty_trie_proof() {
         let salt = EmptySalt;
 
-        let salt_keys: Vec<SaltKey> = vec![(0, 0).into()];
+        let salt_key: SaltKey = (0, 0).into();
         let first_data_bucket_id = 131329;
         let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
 
@@ -150,13 +150,13 @@ mod tests {
         let l0_fr = l1_commitment.map_to_scalar_field();
         let empty_root = fr_to_le_bytes(l0_fr);
 
-        let proof = SaltProof::create(&salt_keys, &salt).unwrap();
+        let proof = SaltProof::create([salt_key], &salt).unwrap();
 
         let value = salt
-            .metadata(bucket_id_from_metadata_key(salt_keys[0]))
+            .metadata(bucket_id_from_metadata_key(salt_key))
             .unwrap();
 
-        let res = proof.check(salt_keys, vec![Some(value.into())], empty_root);
+        let res = proof.check(&[(salt_key, Some(value.into()))].into(), empty_root);
 
         assert!(res.is_ok());
     }
@@ -189,9 +189,9 @@ mod tests {
         let salt_key = *updates.data.keys().next().unwrap();
         let value = mem_store.value(salt_key).unwrap();
 
-        let proof = SaltProof::create(&[salt_key], &mem_store).unwrap();
+        let proof = SaltProof::create([salt_key], &mem_store).unwrap();
 
-        let res = proof.check(vec![salt_key], vec![value], trie_root);
+        let res = proof.check(&[(salt_key, value)].into(), trie_root);
         assert!(res.is_ok());
     }
 
@@ -273,9 +273,10 @@ mod tests {
         values.push(None);
         values.push(None);
 
-        let proof = SaltProof::create(&salt_keys, &mem_store).unwrap();
+        let proof = SaltProof::create(salt_keys.iter().copied(), &mem_store).unwrap();
 
-        let res = proof.check(salt_keys, values, trie_root);
+        let data: BTreeMap<_, _> = salt_keys.into_iter().zip(values).collect();
+        let res = proof.check(&data, trie_root);
 
         assert!(res.is_ok());
     }
@@ -382,9 +383,9 @@ mod tests {
         );
 
         // sub trie L2
-        let proof = SaltProof::create(&[SaltKey::from((bid, 2049))], &store).unwrap();
+        let proof = SaltProof::create([SaltKey::from((bid, 2049))], &store).unwrap();
 
-        let res = proof.check(vec![SaltKey::from((bid, 2049))], vec![None], expansion_root);
+        let res = proof.check(&[(SaltKey::from((bid, 2049)), None)].into(), expansion_root);
 
         assert!(res.is_ok());
     }
@@ -459,7 +460,7 @@ mod tests {
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(
-            &[
+            [
                 (bid, 3).into(),
                 (bid, 5).into(),
                 (bid, 2049).into(),
@@ -470,18 +471,13 @@ mod tests {
         .unwrap();
 
         let res = proof.check(
-            vec![
-                (bid, 3).into(),
-                (bid, 5).into(),
-                (bid, 2049).into(),
-                (bid, new_capacity - 1).into(),
-            ],
-            vec![
-                Some(SaltValue::new(&[1; 32], &[1; 32])),
-                Some(SaltValue::new(&[2; 32], &[2; 32])),
-                Some(SaltValue::new(&[3; 32], &[3; 32])),
-                None,
-            ],
+            &[
+                ((bid, 3).into(), Some(SaltValue::new(&[1; 32], &[1; 32]))),
+                ((bid, 5).into(), Some(SaltValue::new(&[2; 32], &[2; 32]))),
+                ((bid, 2049).into(), Some(SaltValue::new(&[3; 32], &[3; 32]))),
+                ((bid, new_capacity - 1).into(), None),
+            ]
+            .into(),
             expansion_root,
         );
 
@@ -514,7 +510,7 @@ mod tests {
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(
-            &[
+            [
                 (bid, 3).into(),
                 (bid, 5).into(),
                 (bid, 2049).into(),
@@ -528,24 +524,19 @@ mod tests {
         .unwrap();
 
         let res = proof.check(
-            vec![
-                (bid, 3).into(),
-                (bid, 5).into(),
-                (bid, 2049).into(),
-                (bid, 256 * 256 * 256).into(),
-                (bid, new_capacity - 1).into(),
-                (bid, new_capacity2 - 255).into(),
-                (bid, new_capacity2 - 1).into(),
-            ],
-            vec![
-                Some(SaltValue::new(&[1; 32], &[1; 32])),
-                Some(SaltValue::new(&[2; 32], &[2; 32])),
-                Some(SaltValue::new(&[3; 32], &[3; 32])),
-                None,
-                None,
-                Some(SaltValue::new(&[255; 32], &[255; 32])),
-                None,
-            ],
+            &[
+                ((bid, 3).into(), Some(SaltValue::new(&[1; 32], &[1; 32]))),
+                ((bid, 5).into(), Some(SaltValue::new(&[2; 32], &[2; 32]))),
+                ((bid, 2049).into(), Some(SaltValue::new(&[3; 32], &[3; 32]))),
+                ((bid, 256 * 256 * 256).into(), None),
+                ((bid, new_capacity - 1).into(), None),
+                (
+                    (bid, new_capacity2 - 255).into(),
+                    Some(SaltValue::new(&[255; 32], &[255; 32])),
+                ),
+                ((bid, new_capacity2 - 1).into(), None),
+            ]
+            .into(),
             expansion_root,
         );
 

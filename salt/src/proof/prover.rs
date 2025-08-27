@@ -4,7 +4,7 @@ use crate::{
     proof::{subtrie::create_sub_trie, verifier, ProofError},
     traits::{StateReader, TrieReader},
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
-    BucketId,
+    BucketId, ScalarBytes,
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::{
@@ -105,15 +105,15 @@ pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
 
 impl SaltProof {
     /// Create a new proof.
-    pub fn create<Store>(keys: &[SaltKey], store: &Store) -> Result<SaltProof, ProofError>
+    pub fn create<Store, I>(keys: I, store: &Store) -> Result<SaltProof, ProofError>
     where
+        I: IntoIterator<Item = SaltKey>,
         Store: StateReader + TrieReader,
     {
+        let mut keys: Vec<_> = keys.into_iter().collect();
         if keys.is_empty() {
             return Err(ProofError::ProveFailed("empty key set".to_string()));
         }
-
-        let mut keys = keys.to_vec();
         // Check if the array is already sorted - returns true if sorted, false otherwise
         // Using any() to find the first out-of-order pair for efficiency
         let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
@@ -142,22 +142,14 @@ impl SaltProof {
     /// Check if the proof is valid.
     pub fn check(
         &self,
-        keys: Vec<SaltKey>,
-        values: Vec<Option<SaltValue>>,
-        state_root: [u8; 32],
+        data: &BTreeMap<SaltKey, Option<SaltValue>>,
+        state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
-        if keys.is_empty() {
+        if data.is_empty() {
             return Err(ProofError::VerifyFailed("empty key set".to_string()));
         }
-        if keys.len() != values.len() {
-            return Err(ProofError::VerifyFailed(
-                "key set and values length not match".to_string(),
-            ));
-        }
 
-        let mut kvs = keys.into_iter().zip(values).collect::<Vec<_>>();
-        kvs.sort_unstable_by_key(|a| a.0);
-        kvs.dedup_by_key(|a| a.0);
+        let kvs: Vec<_> = data.iter().map(|(&k, v)| (k, v.clone())).collect();
 
         let queries = verifier::create_verifier_queries(
             &self.parents_commitments,

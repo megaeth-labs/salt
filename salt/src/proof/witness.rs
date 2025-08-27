@@ -4,7 +4,6 @@
 //! of state data along with cryptographic proofs for stateless validation. The witness
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
-    constant::NUM_META_BUCKETS,
     proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -45,19 +44,15 @@ use std::{
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockWitness {
-    /// Bucket metadata witnessed in this proof.
-    /// - `Some(Some(meta))`: Explicit metadata stored
-    /// - `Some(None)`: Default metadata stored
-    /// - Missing key: Bucket not witnessed (unknown)
+    /// All witnessed data in this proof, including both metadata and regular
+    /// key-value pairs.
+    /// - `Some(value)`: Key exists with the given value
+    /// - `None`: Key does not exist
+    /// - Missing key: Key not witnessed (unknown)
     ///
     /// Unlike regular data buckets, metadata bucket slots can never be empty.
-    /// `Some(None)` is just a storage-level optimization for default metadata.
-    pub metadata: BTreeMap<BucketId, Option<BucketMeta>>,
-
-    /// Key-value pairs witnessed in this proof.
-    /// - `Some(Some(value))`: Key exists with value
-    /// - `Some(None)`: Key proven to not exist
-    /// - Missing key: Key not witnessed (unknown)
+    /// Default metadata is stored explicity as `Some(SaltValue)`, not `None`,
+    /// to simplify the witness code.
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
 
     /// Cryptographic proof authenticating all witnessed data
@@ -73,47 +68,24 @@ impl BlockWitness {
     where
         Store: StateReader + TrieReader,
     {
-        let mut keys = min_sub_tree.to_vec();
-
-        // Sort only if needed
-        if keys.windows(2).any(|w| w[0] > w[1]) {
-            keys.par_sort_unstable();
-        }
-        keys.dedup();
-
-        // Separate meta keys from data keys
-        let threshold = SaltKey::from((NUM_META_BUCKETS as u32, 0));
-        let split_index = keys.partition_point(|&k| k < threshold);
-        let (meta_keys, data_keys) = keys.split_at(split_index);
-
-        let metadata = meta_keys
+        let kvs = min_sub_tree
             .par_iter()
             .map(|&salt_key| {
-                let bucket_id = bucket_id_from_metadata_key(salt_key);
-                store
-                    .metadata(bucket_id)
-                    .map(|meta| (bucket_id, (!meta.is_default()).then_some(meta)))
-                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read metadata: {e:?}")))
+                let value = (if salt_key.is_in_meta_bucket() {
+                    // Handle metadata keys
+                    let bucket_id = bucket_id_from_metadata_key(salt_key);
+                    store.metadata(bucket_id).map(|meta| Some(meta.into()))
+                } else {
+                    // Handle regular data keys
+                    store.value(salt_key)
+                })
+                .map_err(|e| ProofError::ProveFailed(format!("Failed to read key: {e:?}")))?;
+                Ok((salt_key, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-        let kvs = data_keys
-            .par_iter()
-            .map(|&salt_key| {
-                store
-                    .value(salt_key)
-                    .map(|entry| (salt_key, entry))
-                    .map_err(|e| ProofError::ProveFailed(format!("Failed to read value: {e:?}")))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-
-        let proof = SaltProof::create(&keys, store)?;
-
-        Ok(BlockWitness {
-            metadata,
-            kvs,
-            proof,
-        })
+        let proof = SaltProof::create(kvs.keys().copied(), store)?;
+        Ok(BlockWitness { kvs, proof })
     }
 
     /// Verify the block witness against the given state root.
@@ -128,24 +100,8 @@ impl BlockWitness {
     /// - All witnessed keys are correctly proven against the state root
     /// - Non-existent values (None) are properly verified as absent
     /// - The proof cannot be manipulated to hide or fabricate state
-    pub fn verify_proof(&self, root: [u8; 32]) -> Result<(), ProofError> {
-        let mut keys = Vec::new();
-        let mut vals = Vec::new();
-
-        // Handle metadata entries - convert None to default metadata values
-        for (&bucket_id, &meta_opt) in &self.metadata {
-            keys.push(bucket_metadata_key(bucket_id));
-            vals.push(Some(meta_opt.unwrap_or_default().into()));
-        }
-
-        // Handle regular KV entries - preserve None for non-existent values
-        for (&key, value_opt) in &self.kvs {
-            keys.push(key);
-            vals.push(value_opt.clone());
-        }
-
-        self.proof.check(keys, vals, root)?;
-        Ok(())
+    pub fn verify_proof(&self, root: ScalarBytes) -> Result<(), ProofError> {
+        self.proof.check(&self.kvs, root)
     }
 }
 
@@ -158,26 +114,17 @@ impl StateReader for BlockWitness {
     ///
     /// This method enforces a critical distinction for stateless validation:
     /// - `Ok(Some(value))` - Key exists with the given value (witnessed)
-    /// - `Ok(None)` - Key is proven to not exist OR has default metadata (witnessed as absent)
+    /// - `Ok(None)` - Key is proven to not exist (witnessed as absent)
     /// - `Err(_)` - Key was not included in the witness (unknown state)
     ///
     /// **Security Property**: A malicious prover cannot make an unknown key appear
     /// as non-existent by omitting it from the witness. Unknown keys will always
     /// return an error, preventing state manipulation attacks.
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        if key.is_in_meta_bucket() {
-            let bucket_id = bucket_id_from_metadata_key(key);
-            match self.metadata.get(&bucket_id) {
-                Some(Some(meta)) => Ok(Some((*meta).into())), // Explicit metadata stored
-                Some(None) => Ok(None), // Default metadata (appear as None at the storage layer)
-                None => Err("Key not in witness"), // Unknown - not witnessed
-            }
-        } else {
-            match self.kvs.get(&key) {
-                Some(Some(value)) => Ok(Some(value.clone())), // Exists with value
-                Some(None) => Ok(None),                       // Witnessed as non-existent
-                None => Err("Key not in witness"),            // Unknown - not witnessed
-            }
+        match self.kvs.get(&key) {
+            Some(Some(value)) => Ok(Some(value.clone())), // Key exists with value
+            Some(None) => Ok(None),                       // Key witnessed as non-existent
+            None => Err("Key not in witness"),            // Unknown - not witnessed
         }
     }
 
@@ -202,11 +149,10 @@ impl StateReader for BlockWitness {
 
     /// Retrieves metadata for a specific bucket from the witness.
     ///
-    /// This method only provides metadata for buckets that were included in the proof
-    /// during witness generation. The behavior depends on what was stored:
+    /// This method only provides metadata for buckets that were included in the
+    /// proof during witness generation. The behavior depends on what was stored:
     ///
     /// - If explicit metadata was stored: returns that metadata as-is
-    /// - If bucket exists with default metadata: returns default values with computed `used` field
     /// - If bucket was not included in proof: returns an error
     ///
     /// # Arguments
@@ -219,26 +165,12 @@ impl StateReader for BlockWitness {
     /// # Note
     /// This method will never fabricate metadata for unknown buckets, ensuring proof integrity.
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        match self.metadata.get(&bucket_id) {
-            Some(Some(meta)) => {
-                // Case 1: Explicit metadata was stored in the proof
-                // Return as-is since the used field is already properly set
-                Ok(*meta)
-            }
-            Some(None) => {
-                // Case 2: Bucket exists in proof but has default metadata
-                // We cannot reliably compute used count since the witness may not
-                // contain all entries in the bucket
-                let meta = BucketMeta {
-                    used: None, // Unknown - cannot determine from partial witness
-                    ..Default::default()
-                };
-                Ok(meta)
-            }
-            None => {
-                // Case 3: Bucket not included in proof - cannot provide metadata
-                Err("Bucket metadata not available in proof")
-            }
+        let metadata_key = bucket_metadata_key(bucket_id);
+        match self.kvs.get(&metadata_key) {
+            Some(Some(salt_value)) => BucketMeta::try_from(salt_value.clone())
+                .map_err(|_| "Failed to decode metadata from SaltValue"),
+            Some(None) => Err("Metadata stored as None in witness - unexpected state"),
+            None => Err("Bucket metadata not available in witness"),
         }
     }
 
@@ -323,8 +255,7 @@ pub fn create_mock_proof() -> SaltProof {
     use crate::{empty_salt::EmptySalt, proof::SaltProof};
 
     // Create a minimal real proof using EmptySalt
-    let salt_keys = vec![SaltKey(0)];
-    SaltProof::create(&salt_keys, &EmptySalt).unwrap()
+    SaltProof::create([SaltKey(0)], &EmptySalt).unwrap()
 }
 
 #[cfg(test)]
@@ -334,17 +265,19 @@ pub fn create_witness(
     metadata: Option<BucketMeta>,
     slots: Vec<(u64, Option<SaltValue>)>,
 ) -> BlockWitness {
-    let metadata = if let Some(meta) = metadata {
-        [(bucket_id, Some(meta))].into()
-    } else {
-        BTreeMap::new()
-    };
-    let kvs = slots
-        .into_iter()
-        .map(|(slot, val)| (SaltKey::from((bucket_id, slot)), val))
-        .collect();
+    let mut kvs = BTreeMap::new();
+
+    if let Some(meta) = metadata {
+        let metadata_key = bucket_metadata_key(bucket_id);
+        kvs.insert(metadata_key, Some(meta.into()));
+    }
+
+    for (slot, val) in slots {
+        let salt_key = SaltKey::from((bucket_id, slot));
+        kvs.insert(salt_key, val);
+    }
+
     BlockWitness {
-        metadata,
         kvs,
         proof: create_mock_proof(),
     }
@@ -526,28 +459,27 @@ mod tests {
         let mut explicit_meta = BucketMeta::default();
         explicit_meta.nonce = 42;
         explicit_meta.capacity = 512;
-        explicit_meta.used = Some(10); // Pre-set used field should be preserved
 
-        let mut metadata_map = BTreeMap::new();
-        metadata_map.insert(bucket1, Some(explicit_meta));
+        let mut kvs = BTreeMap::new();
+        let metadata_key = bucket_metadata_key(bucket1);
+        kvs.insert(metadata_key, Some(explicit_meta.into()));
 
         let witness = BlockWitness {
-            metadata: metadata_map,
-            kvs: BTreeMap::new(),
+            kvs,
             proof: create_mock_proof(),
         };
 
         let result = witness.metadata(bucket1).unwrap();
         assert_eq!(result.nonce, 42);
         assert_eq!(result.capacity, 512);
-        assert_eq!(result.used, Some(10)); // Should be unchanged from stored value
 
-        // Test Case 2: Default metadata case (Some(None))
-        let mut metadata_map = BTreeMap::new();
-        metadata_map.insert(bucket2, None); // Default metadata case
+        // Test Case 2: Default metadata case
+        let default_meta = BucketMeta::default();
+        let mut kvs = BTreeMap::new();
+        let metadata_key = bucket_metadata_key(bucket2);
+        kvs.insert(metadata_key, Some(default_meta.into()));
 
         // Add some kvs for used count calculation
-        let mut kvs = BTreeMap::new();
         kvs.insert(
             SaltKey::from((bucket2, 0u64)),
             Some(mock_salt_value.clone()),
@@ -562,7 +494,6 @@ mod tests {
         );
 
         let witness = BlockWitness {
-            metadata: metadata_map,
             kvs,
             proof: create_mock_proof(),
         };
@@ -574,8 +505,7 @@ mod tests {
 
         // Test Case 3: Bucket not in proof (None)
         let witness = BlockWitness {
-            metadata: BTreeMap::new(), // Empty - bucket not in proof
-            kvs: BTreeMap::new(),
+            kvs: BTreeMap::new(), // Empty - bucket not in proof
             proof: create_mock_proof(),
         };
 
@@ -583,7 +513,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "Bucket metadata not available in proof"
+            "Bucket metadata not available in witness"
         );
     }
 
@@ -611,7 +541,6 @@ mod tests {
                                            // key_unknown is intentionally omitted (unknown)
 
         let witness = BlockWitness {
-            metadata: BTreeMap::new(),
             kvs,
             proof: create_mock_proof(),
         };
@@ -646,21 +575,25 @@ mod tests {
         let bucket_default = 100001;
         let bucket_unknown = 100002;
 
-        let mut metadata = BTreeMap::new();
-        metadata.insert(
-            bucket_exists,
-            Some(BucketMeta {
-                nonce: 42,
-                capacity: 512,
-                used: Some(10),
-            }),
+        let mut kvs = BTreeMap::new();
+        let meta_key_exists = bucket_metadata_key(bucket_exists);
+        kvs.insert(
+            meta_key_exists,
+            Some(
+                BucketMeta {
+                    nonce: 42,
+                    capacity: 512,
+                    used: Some(10),
+                }
+                .into(),
+            ),
         );
-        metadata.insert(bucket_default, None); // Default metadata
-                                               // bucket_unknown intentionally omitted
+        let meta_key_default = bucket_metadata_key(bucket_default);
+        kvs.insert(meta_key_default, Some(BucketMeta::default().into())); // Default metadata
+                                                                          // bucket_unknown intentionally omitted
 
         let witness_meta = BlockWitness {
-            metadata,
-            kvs: BTreeMap::new(),
+            kvs,
             proof: create_mock_proof(),
         };
 
@@ -694,7 +627,7 @@ mod tests {
         let witness = create_witness(bucket_id, None, vec![]);
         assert_eq!(
             witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Bucket metadata not available in proof"
+            "Bucket metadata not available in witness"
         );
 
         // Test 2: Fully witnessed bucket
@@ -740,18 +673,19 @@ mod tests {
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), 0);
 
         // Test 5: Default metadata bucket
+        let mut kvs = BTreeMap::new();
+        let metadata_key = bucket_metadata_key(bucket_id);
+        kvs.insert(metadata_key, Some(BucketMeta::default().into()));
+        for slot in 0..MIN_BUCKET_SIZE as u64 {
+            let val_opt = if slot % 3 == 0 {
+                Some(val.clone())
+            } else {
+                None
+            };
+            kvs.insert(SaltKey::from((bucket_id, slot)), val_opt);
+        }
         let witness = BlockWitness {
-            metadata: [(bucket_id, None)].into(),
-            kvs: (0..MIN_BUCKET_SIZE as u64)
-                .map(|slot| {
-                    let val_opt = if slot % 3 == 0 {
-                        Some(val.clone())
-                    } else {
-                        None
-                    };
-                    (SaltKey::from((bucket_id, slot)), val_opt)
-                })
-                .collect(),
+            kvs,
             proof: create_mock_proof(),
         };
         let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
@@ -778,7 +712,6 @@ mod tests {
         .into();
 
         let witness = BlockWitness {
-            metadata: BTreeMap::new(),
             kvs: BTreeMap::new(),
             proof,
         };
