@@ -3,7 +3,7 @@
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{BlockWitness, PlainKeysProof, ProofError, SaltProof};
+pub use proof::{PlainKeysProof, ProofError, SaltProof, SaltWitness};
 pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;

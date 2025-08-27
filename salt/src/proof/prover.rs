@@ -111,9 +111,6 @@ impl SaltProof {
         Store: StateReader + TrieReader,
     {
         let mut keys: Vec<_> = keys.into_iter().collect();
-        if keys.is_empty() {
-            return Err(ProofError::ProveFailed("empty key set".to_string()));
-        }
         // Check if the array is already sorted - returns true if sorted, false otherwise
         // Using any() to find the first out-of-order pair for efficiency
         let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
@@ -145,10 +142,6 @@ impl SaltProof {
         data: &BTreeMap<SaltKey, Option<SaltValue>>,
         state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
-        if data.is_empty() {
-            return Err(ProofError::VerifyFailed("empty key set".to_string()));
-        }
-
         let kvs: Vec<_> = data.iter().map(|(&k, v)| (k, v.clone())).collect();
 
         let queries = verifier::create_verifier_queries(
@@ -160,16 +153,15 @@ impl SaltProof {
         let root = self
             .parents_commitments
             .get(&0)
-            .ok_or(ProofError::VerifyFailed(
-                "lack of root commitment".to_string(),
-            ))?;
+            .ok_or(ProofError::MissingRootCommitment)?;
 
         let trie_root = hash_commitment(root.0);
 
         if state_root != trie_root {
-            return Err(ProofError::VerifyFailed(format!(
-                "state root not match, expect: {trie_root:?}, got: {state_root:?}"
-            )));
+            return Err(ProofError::RootMismatch {
+                expected: trie_root,
+                actual: state_root,
+            });
         }
 
         let mut transcript = Transcript::new(b"st");
@@ -183,9 +175,7 @@ impl SaltProof {
         {
             Ok(())
         } else {
-            Err(ProofError::VerifyFailed(
-                "multi pointproof check failed".to_string(),
-            ))
+            Err(ProofError::MultiPointProofFailed)
         }
     }
 }
