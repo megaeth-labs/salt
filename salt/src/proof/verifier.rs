@@ -14,6 +14,7 @@ use crate::{
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::multiproof::VerifierQuery;
+use iter_tools::Itertools;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -136,32 +137,52 @@ pub(crate) fn create_verifier_queries(
     let mut bucket_ids = kvs.iter().map(|(k, _)| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
 
-    let trie_nodes = main_trie_parents_and_points(&bucket_ids);
+    let top_level_bucket_ids: Vec<_> = buckets_top_level
+        .keys()
+        .copied()
+        .sorted_unstable()
+        .collect();
 
-    // trie_nodes for main trie
-    // kvs *1 for bucket state queries and kvs *2 > bucket trie querie' len in most cases
-    let total_len = trie_nodes
+    if top_level_bucket_ids != bucket_ids {
+        return Err(ProofError::StateReadError {
+            reason: "buckets_top_level in proof contains unknown bucket level info".to_string(),
+        });
+    }
+
+    let main_trie_nodes = main_trie_parents_and_points(&bucket_ids);
+
+    let salt_keys = kvs.iter().map(|(k, _)| *k).collect::<Vec<_>>();
+    let (bucket_trie_nodes, bucket_state_nodes) =
+        bucket_trie_parents_and_points(&salt_keys, buckets_top_level);
+
+    let trie_nodes = main_trie_nodes
+        .into_iter()
+        .chain(bucket_trie_nodes)
+        .collect::<Vec<_>>();
+
+    let node_ids = trie_nodes
         .iter()
-        .map(|(_, points)| points.len())
-        .sum::<usize>()
-        + kvs.len() * 3;
+        .chain(bucket_state_nodes.iter())
+        .map(|(node_id, _)| connect_parent_id(*node_id))
+        .sorted_unstable()
+        .collect::<Vec<_>>();
 
-    let mut queries = Vec::with_capacity(total_len);
+    if path_commitments.keys().copied().collect::<Vec<_>>() != node_ids {
+        return Err(ProofError::StateReadError {
+            reason: "path_commitments in proof contains unknown node commitment".to_string(),
+        });
+    }
+
+    let mut queries = Vec::with_capacity(
+        trie_nodes
+            .iter()
+            .map(|(_, points)| points.len())
+            .sum::<usize>()
+            + kvs.len(),
+    );
 
     let num_threads = rayon::current_num_threads();
-
     process_trie_queries(trie_nodes, path_commitments, num_threads, &mut queries);
-
-    // process bucket trie queries
-    let salt_keys = kvs.iter().map(|(k, _)| *k).collect::<Vec<_>>();
-    let (bucket_trie_nodes, _) = bucket_trie_parents_and_points(&salt_keys, buckets_top_level);
-
-    process_trie_queries(
-        bucket_trie_nodes,
-        path_commitments,
-        num_threads,
-        &mut queries,
-    );
 
     // process bucket state queries
     let chunk_size = kvs.len().div_ceil(num_threads);

@@ -158,10 +158,7 @@ pub(crate) fn main_trie_parents_and_points(bucket_ids: &[BucketId]) -> Vec<(Node
 pub(crate) fn bucket_trie_parents_and_points(
     salt_keys: &[SaltKey],
     buckets_top_level: &FxHashMap<BucketId, u8>,
-) -> (
-    Vec<(NodeId, Vec<u8>)>,
-    Vec<(BucketId, Vec<(NodeId, Vec<u8>)>)>,
-) {
+) -> (Vec<(NodeId, Vec<u8>)>, Vec<(NodeId, Vec<u8>)>) {
     if salt_keys.is_empty() {
         return (vec![], vec![]);
     }
@@ -208,10 +205,27 @@ pub(crate) fn bucket_trie_parents_and_points(
     let bucket_state_nodes = salt_keys
         .par_chunk_by(|&x, &y| x.bucket_id() == y.bucket_id())
         .into_par_iter()
-        .map(|keys| {
+        .flat_map(|keys| {
             let bucket_id = keys[0].bucket_id();
             let levels = MAX_SUBTREE_LEVELS as u8 - buckets_top_level[&bucket_id];
-            process_bucket_state_nodes(bucket_id, levels, keys)
+
+            if levels == 1 {
+                vec![(
+                    bucket_id as u64 + STARTING_NODE_ID[3] as u64,
+                    keys.iter().map(|key| key.slot_id() as u8).collect_vec(),
+                )]
+            } else {
+                keys.chunk_by(|&x, &y| x.slot_id() >> 8 == y.slot_id() >> 8)
+                    .map(|chunk| {
+                        let subtrie_node_id = subtree_leaf_for_key(&chunk[0]);
+                        let slot_ids = chunk
+                            .iter()
+                            .map(|key| (key.slot_id() & 0xFF) as u8)
+                            .collect_vec();
+                        (subtrie_node_id, slot_ids)
+                    })
+                    .collect()
+            }
         })
         .collect::<Vec<_>>();
 
@@ -328,37 +342,6 @@ fn process_bucket_trie_nodes(
     }
 
     nodes
-}
-
-/// Process bucket state nodes for a single bucket
-fn process_bucket_state_nodes(
-    bucket_id: BucketId,
-    levels: u8,
-    keys: &[SaltKey],
-) -> (BucketId, Vec<(NodeId, Vec<u8>)>) {
-    if levels == 1 {
-        return (
-            bucket_id,
-            vec![(
-                bucket_id as u64 + STARTING_NODE_ID[3] as u64,
-                keys.iter().map(|key| key.slot_id() as u8).collect_vec(),
-            )],
-        );
-    }
-
-    let state_nodes = keys
-        .chunk_by(|&x, &y| x.slot_id() >> 8 == y.slot_id() >> 8)
-        .map(|chunk| {
-            let subtrie_node_id = subtree_leaf_for_key(&chunk[0]);
-            let slot_ids = chunk
-                .iter()
-                .map(|key| (key.slot_id() & 0xFF) as u8)
-                .collect_vec();
-            (subtrie_node_id, slot_ids)
-        })
-        .collect_vec();
-
-    (bucket_id, state_nodes)
 }
 
 /// Convert a bucket id to a canonical-trie path.
