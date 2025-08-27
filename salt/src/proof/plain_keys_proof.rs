@@ -65,9 +65,11 @@ impl PlainKeysProof {
 
         // Process each plain key individually to determine its status
         for plain_key in keys {
-            let _ = state.plain_value(plain_key).map_err(|e| {
-                ProofError::ProveFailed(format!("Failed to read plain value: {e:?}"))
-            })?;
+            let _ = state
+                .plain_value(plain_key)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read plain value: {e:?}"),
+                })?;
         }
 
         let witness =
@@ -101,9 +103,11 @@ impl PlainKeysProof {
 
         // Process each plain key individually to determine its status
         for plain_key in &self.keys {
-            let _ = state.plain_value(plain_key).map_err(|e| {
-                ProofError::VerifyFailed(format!("Failed to read plain value from witness: {e:?}"))
-            })?;
+            let _ = state
+                .plain_value(plain_key)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read plain value from witness: {e:?}"),
+                })?;
         }
 
         Ok(())

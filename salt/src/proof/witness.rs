@@ -79,7 +79,9 @@ impl BlockWitness {
                     // Handle regular data keys
                     store.value(salt_key)
                 })
-                .map_err(|e| ProofError::ProveFailed(format!("Failed to read key: {e:?}")))?;
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read key: {e:?}"),
+                })?;
                 Ok((salt_key, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;

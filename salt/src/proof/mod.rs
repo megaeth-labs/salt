@@ -12,13 +12,25 @@ pub use plain_keys_proof::PlainKeysProof;
 pub use prover::{CommitmentBytesW, SaltProof};
 pub use witness::BlockWitness;
 
-/// Error type for proof.
+/// Error type for proof operations
 #[derive(Debug, Error)]
 pub enum ProofError {
-    /// Prove error
-    #[error("prove failed: {0}")]
-    ProveFailed(String),
-    /// Verify error
-    #[error("verify failed: {0}")]
-    VerifyFailed(String),
+    /// Failed to read state data during proof operations
+    #[error("failed to read state: {reason}")]
+    StateReadError { reason: String },
+
+    /// Root commitment is missing from proof
+    #[error("missing root commitment in proof")]
+    MissingRootCommitment,
+
+    /// State root mismatch during verification
+    #[error("state root mismatch: expected {expected:?}, got {actual:?}")]
+    RootMismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+
+    /// Multi-point proof verification failed
+    #[error("multi-point proof check failed")]
+    MultiPointProofFailed,
 }
