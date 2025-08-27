@@ -10,7 +10,7 @@ pub mod witness;
 
 pub use plain_keys_proof::PlainKeysProof;
 pub use prover::{CommitmentBytesW, SaltProof};
-pub use witness::BlockWitness;
+pub use witness::SaltWitness;
 
 /// Error type for proof operations
 #[derive(Debug, Error)]

@@ -1629,7 +1629,7 @@ mod tests {
     fn test_shi_upsert_without_usage_count() {
         use crate::proof::witness::create_witness;
 
-        // Create BlockWitness with incomplete metadata (used: None)
+        // Create SaltWitness with incomplete metadata (used: None)
         let key_to_insert = [1u8; 32];
         let hashed = hasher::hash_with_nonce(&key_to_insert, 0);
         let slots = vec![(probe(hashed, 0, 4), None)];
