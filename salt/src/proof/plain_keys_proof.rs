@@ -91,7 +91,7 @@ impl PlainKeysProof {
     /// # Returns
     /// * `Ok(())` if the proof is valid
     /// * `Err(ProofError)` if verification fails
-    pub fn verify(&self, root: [u8; 32]) -> Result<(), ProofError> {
+    pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
         // Verify the underlying cryptographic proof using the witness
         self.witness.verify_proof(root)?;
 
@@ -621,26 +621,12 @@ mod tests {
             PlainKeysProof::create(&kvs.keys().map(|k| k.clone()).collect::<Vec<_>>(), &store)
                 .unwrap();
 
-        let data_keys: Vec<SaltKey> = plain_keys_proof
-            .witness
-            .kvs
-            .keys()
-            .map(|k| *k)
-            .collect::<Vec<_>>();
-
-        let mut meta_keys: Vec<SaltKey> = plain_keys_proof
-            .witness
-            .metadata
-            .keys()
-            .map(|bucket_id| bucket_metadata_key(*bucket_id))
-            .collect();
-
-        meta_keys.extend_from_slice(&data_keys);
-
-        for key in meta_keys {
-            let proof_value = plain_keys_proof.value(key).unwrap();
-            let state_value = state.value(key).unwrap();
-
+        for key in plain_keys_proof.witness.kvs.keys() {
+            let proof_value = plain_keys_proof.value(*key).unwrap();
+            let mut state_value = state.value(*key).unwrap();
+            if state_value.is_none() && key.is_in_meta_bucket() {
+                state_value = Some(BucketMeta::default().into());
+            }
             assert_eq!(proof_value, state_value);
         }
     }
