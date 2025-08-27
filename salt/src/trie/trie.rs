@@ -359,10 +359,11 @@ where
                         }
                         std::cmp::Ordering::Equal => {}
                     }
-                } else if self.store.metadata(bucket_id)?.capacity > MIN_BUCKET_SIZE as u64 {
+                } else if self.store.get_subtree_levels(bucket_id)? > 1 {
                     // KV changes in expanded bucket (capacity unchanged)
                     need_handle_buckets.insert(bucket_id);
-                    let bucket_capacity = self.store.metadata(bucket_id)?.capacity;
+                    let bucket_capacity = (MIN_BUCKET_SIZE as NodeId)
+                        .pow(self.store.get_subtree_levels(bucket_id)? as u32);
                     subtree_change_info.insert(
                         bucket_id,
                         SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
