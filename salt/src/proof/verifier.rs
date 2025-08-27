@@ -144,9 +144,9 @@ pub(crate) fn create_verifier_queries(
         .collect();
 
     if top_level_bucket_ids != bucket_ids {
-        return Err(ProofError::VerifyFailed(
-            "buckets_top_level in proof contains unknown bucket level info".to_string(),
-        ));
+        return Err(ProofError::StateReadError {
+            reason: "buckets_top_level in proof contains unknown bucket level info".to_string(),
+        });
     }
 
     let main_trie_nodes = main_trie_parents_and_points(&bucket_ids);
@@ -168,9 +168,9 @@ pub(crate) fn create_verifier_queries(
         .collect::<Vec<_>>();
 
     if path_commitments.keys().copied().collect::<Vec<_>>() != node_ids {
-        return Err(ProofError::VerifyFailed(
-            "path_commitments in proof contains unknown node commitment".to_string(),
-        ));
+        return Err(ProofError::StateReadError {
+            reason: "path_commitments in proof contains unknown node commitment".to_string(),
+        });
     }
 
     let mut queries = Vec::with_capacity(
