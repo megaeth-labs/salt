@@ -3,7 +3,10 @@ use crate::{
     constant::{EMPTY_SLOT_HASH, MAX_SUBTREE_LEVELS},
     proof::{
         prover::calculate_fr_by_kv,
-        shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
+        shape::{
+            bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
+            main_trie_parents_and_points,
+        },
         CommitmentBytesW, ProofError,
     },
     trie::node_utils::{bucket_root_node_id, get_child_node, subtree_leaf_for_key},
@@ -56,7 +59,7 @@ fn create_verify_queries(
 /// 3. According to children_indices Calculate the points that need to be verified
 /// 4. Create a VerifierQuery object
 fn process_trie_queries(
-    trie_nodes: Vec<(NodeId, NodeId, Vec<u8>)>,
+    trie_nodes: Vec<(NodeId, Vec<u8>)>,
     path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
     num_threads: usize,
     queries: &mut Vec<VerifierQuery>,
@@ -71,12 +74,12 @@ fn process_trie_queries(
             .flat_map(|chunk| {
                 let (multi_children_id, multi_children_commitment) = chunk
                     .iter()
-                    .flat_map(|(_, logic_parent, points)| {
+                    .flat_map(|(parent, points)| {
                         points
                             .iter()
                             .map(|point| {
-                                let child_id = get_child_node(logic_parent, *point as usize);
-
+                                let child_id =
+                                    get_child_node(&logic_parent_id(*parent), *point as usize);
                                 (
                                     child_id,
                                     path_commitments
@@ -104,16 +107,18 @@ fn process_trie_queries(
 
                 chunk
                     .iter()
-                    .flat_map(|(parent, logic_parent, points)| {
+                    .flat_map(|(parent, points)| {
+                        let logic_parent = logic_parent_id(*parent);
+                        let parent = connect_parent_id(*parent);
                         let commitment = Element::from_bytes_unchecked_uncompressed(
                             path_commitments
-                                .get(parent)
+                                .get(&parent)
                                 .cloned()
                                 .unwrap_or_else(|| panic!("path_commitments lack id {parent:?}"))
                                 .0,
                         );
 
-                        create_verify_queries(*logic_parent, points, commitment, &child_map)
+                        create_verify_queries(logic_parent, points, commitment, &child_map)
                     })
                     .collect::<Vec<_>>()
             })
@@ -137,7 +142,7 @@ pub(crate) fn create_verifier_queries(
     // kvs *1 for bucket state queries and kvs *2 > bucket trie querie' len in most cases
     let total_len = trie_nodes
         .iter()
-        .map(|(_, _, points)| points.len())
+        .map(|(_, points)| points.len())
         .sum::<usize>()
         + kvs.len() * 3;
 

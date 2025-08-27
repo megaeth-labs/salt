@@ -1,54 +1,49 @@
-//! Utilities for computing the structural shape of the SALT trie.
+//! Shape computation and path extraction utilities for the SALT trie proof system.
 //!
-//! The canonical trie has 4 levels, each branching factor is 256. All nodes are assigned a
-//! monotonically increasing `node id` starting from the root.
+//! This module provides the core functionality for navigating and computing the structure
+//! of the SALT trie, which is essential for generating and verifying cryptographic proofs.
+//! It handles the hierarchical relationships between the main trie and bucket trees.
 //!
-//! Any node can be addressed by its path (sequence of child indices from the root). For example,
-//! node `590849` is addressed by the path `[8, 3, 0]`.
+//! # Key Concepts
 //!
-//! Only the last level contains leaf nodes. Each leaf node corresponds one-to-one to a bucket.
-//! Buckets store user data, while the leaf node is the commitment constructed from the bucket.
-//! Therefore, a leaf has a corresponding `bucket id`, and the following identity holds:
+//! ## Path Representation
+//! - **Bucket paths**: 3-element arrays `[u8; 3]` representing navigation from root to bucket
+//! - **Slot paths**: 4-element arrays `[u8; 4]` representing navigation within a bucket, from
+//!   bucket tree root to slot.
+//! - **Path extraction**: Bit manipulation to convert IDs to navigable paths
 //!
-//!   node_id = bucket_id + 1 + 256 + 256 * 256
-//
-// ┌───┐
-// │ 0 │: node id
-// └───┘
-//
-//   |
-//   0  : path index
-//   |
-//
-//                                           ┌───┐
-//                                           │ 0 │
-//                                           └─┬─┘
-//      ┌───────────────────┬──────────────────┴──────────────┬───────────────────┐
-//      0                   8                                177                 255
-//      |                   |                                 |                   |
-//    ┌─┴─┐               ┌─┴─┐                            ┌──┴──┐             ┌──┴──┐
-//    │ 1 │               │ 9 │               ...          │ 178 │             │ 256 │
-//    └───┘               └─┬─┘                            └──┬──┘             └─────┘
-//             ┌────────────┼────────────┐          ┌─────────┴───────────┐
-//             0            3           255         0                    255
-//             |            |            |          |                     |
-//          ┌──┴───┐     ┌──┴───┐     ┌──┴───┐  ┌───┴───┐             ┌───┴───┐
-//     ...  │ 2305 │     │ 2308 │     │ 2560 │  │ 45569 │             │ 45824 │   ...
-//          └──────┘     └──┬───┘     └──────┘  └───────┘             └───┬───┘
-//              ┌───────────┼───────────┐                   ┌─────────────┼─────────────┐
-//              0          152         255                  0            173           255
-//              |           |           |                   |             |             |
-//          ┌───┴────┐  ┌───┴────┐  ┌───┴────┐         ┌────┴─────┐  ┌────┴─────┐  ┌────┴─────┐
-//  ...     │ 590849 │  │ 591001 │  │ 591104 │         │ 11730945 │  │ 11731118 │  │ 11731200 │ ...
-//          └────────┘  └────────┘  └────────┘         └──────────┘  └──────────┘  └──────────┘
-// bucket id:
-//  0,1,2,...,525056      525208      525311     ...     11665152      11665325      11665407   ...
-// bucket trie
-// ...
+//! ## Node Addressing
+//! Nodes can be addressed in two ways:
+//! 1. **BFS number**: Absolute position in breadth-first traversal
+//! 2. **Path**: Sequence of child indices from root
+//!
+//! Example: Node 590849 has path [8, 3, 0] and is located at:
+//! - Level 1: Take child 8 (node 9)
+//! - Level 2: Take child 3 (node 2308)
+//! - Level 3: Take child 0 (node 590849)
+//!
+//! ## Bucket Tree Structure (up to 5 levels)
+//! ```text
+//! Each bucket at main trie level 3 can have its own internal tree,
+//! and the main trie level 3 store the bucket tree root.
+//!
+//! Bucket Root(Level 0) ──┬── Level 1 (256 children)
+//!                        ├── Level 2 (256² children)
+//!                        ├── Level 3 (256³ children)
+//!                        ├── Level 4 (256⁴ children)
+//!                        └── 256⁵ slots(Leaf nodes are not included in the number of layers)
+//!
+//! - levels=1: 1-level bucket tree
+//! - levels=2: 2-level bucket tree
+//! - levels=3: 3-level bucket tree
+//! - levels=4: 4-level bucket tree
+//! - levels=5: 5-level bucket tree
+//! ```
 
 use crate::{
     constant::{
-        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID, TRIE_WIDTH_BITS,
+        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS,
+        STARTING_NODE_ID, TRIE_WIDTH_BITS,
     },
     trie::node_utils::subtree_leaf_for_key,
     BucketId, NodeId, SaltKey, SlotId,
@@ -76,9 +71,7 @@ use rustc_hash::FxHashMap;
 /// two parent ids are returned in a mini-tree and they are the same.
 /// see `bucket_trie_parents_and_points` for more details.
 #[allow(clippy::type_complexity)]
-pub(crate) fn main_trie_parents_and_points(
-    bucket_ids: &[BucketId],
-) -> Vec<(NodeId, NodeId, Vec<u8>)> {
+pub(crate) fn main_trie_parents_and_points(bucket_ids: &[BucketId]) -> Vec<(NodeId, Vec<u8>)> {
     if bucket_ids.is_empty() {
         return vec![];
     }
@@ -102,17 +95,13 @@ pub(crate) fn main_trie_parents_and_points(
     let mut res = vec![];
 
     // root
-    res.push((0u64, 0u64, l1_paths));
+    res.push((0u64, l1_paths));
 
     // l1
     res.extend(l2_paths.chunk_by(|&x, &y| x.0 == y.0).map(|paths| {
         let node_id = paths[0].0 as u64 + STARTING_NODE_ID[1] as u64;
 
-        (
-            node_id,
-            node_id,
-            paths.iter().map(|path| path.1).collect_vec(),
-        )
+        (node_id, paths.iter().map(|path| path.1).collect_vec())
     }));
 
     // l2
@@ -122,12 +111,7 @@ pub(crate) fn main_trie_parents_and_points(
             .map(|paths| {
                 let node_id =
                     (((paths[0].0 as u64) << 8) | paths[0].1 as u64) + STARTING_NODE_ID[2] as u64;
-
-                (
-                    node_id,
-                    node_id,
-                    paths.iter().map(|path| path.2).collect_vec(),
-                )
+                (node_id, paths.iter().map(|path| path.2).collect_vec())
             }),
     );
 
@@ -175,7 +159,7 @@ pub(crate) fn bucket_trie_parents_and_points(
     salt_keys: &[SaltKey],
     buckets_top_level: &FxHashMap<BucketId, u8>,
 ) -> (
-    Vec<(NodeId, NodeId, Vec<u8>)>,
+    Vec<(NodeId, Vec<u8>)>,
     Vec<(BucketId, Vec<(NodeId, Vec<u8>)>)>,
 ) {
     if salt_keys.is_empty() {
@@ -187,7 +171,7 @@ pub(crate) fn bucket_trie_parents_and_points(
         .into_par_iter()
         .flat_map(|keys| {
             let bucket_id = keys[0].bucket_id();
-            let top_level = buckets_top_level[&bucket_id];
+            let levels = MAX_SUBTREE_LEVELS as u8 - buckets_top_level[&bucket_id];
 
             let slot_ids = keys.iter().map(|key| key.slot_id()).collect_vec();
 
@@ -216,7 +200,7 @@ pub(crate) fn bucket_trie_parents_and_points(
             l4_paths.dedup();
 
             process_bucket_trie_nodes(
-                bucket_id, top_level, &l1_paths, &l2_paths, &l3_paths, &l4_paths,
+                bucket_id, levels, &l1_paths, &l2_paths, &l3_paths, &l4_paths,
             )
         })
         .collect::<Vec<_>>();
@@ -226,8 +210,8 @@ pub(crate) fn bucket_trie_parents_and_points(
         .into_par_iter()
         .map(|keys| {
             let bucket_id = keys[0].bucket_id();
-            let top_level = buckets_top_level[&bucket_id];
-            process_bucket_state_nodes(bucket_id, top_level, keys)
+            let levels = MAX_SUBTREE_LEVELS as u8 - buckets_top_level[&bucket_id];
+            process_bucket_state_nodes(bucket_id, levels, keys)
         })
         .collect::<Vec<_>>();
 
@@ -237,13 +221,13 @@ pub(crate) fn bucket_trie_parents_and_points(
 /// Process trie nodes for a single bucket
 fn process_bucket_trie_nodes(
     bucket_id: BucketId,
-    top_level: u8,
+    levels: u8,
     l1_paths: &[u8],
     l2_paths: &[(u8, u8)],
     l3_paths: &[(u8, u8, u8)],
     l4_paths: &[(u8, u8, u8, u8)],
-) -> Vec<(NodeId, NodeId, Vec<u8>)> {
-    if top_level == (MAX_SUBTREE_LEVELS - 1) as u8 {
+) -> Vec<(NodeId, Vec<u8>)> {
+    if levels == 1 {
         return vec![];
     }
 
@@ -252,50 +236,42 @@ fn process_bucket_trie_nodes(
     let main_trie_node = bucket_id as u64 + STARTING_NODE_ID[3] as u64;
 
     // Process different levels of nodes
-    match top_level {
-        3 => {
+    match levels {
+        2 => {
             // l3 and its children
             // The capacity of the bucket is guaranteed to be (x.0 == y.0) && (x.1 == y.1) && (x.2 == y.2)
             nodes.push((
-                main_trie_node,
-                bucket_base + STARTING_NODE_ID[3] as u64,
+                // store the levels in node id 32-40 bits
+                // [64..........40..32........0]
+                //    bucket id      node index
+                main_trie_node | ((levels as u64) << 32),
                 l4_paths.iter().map(|path| path.3).collect_vec(),
             ));
         }
-        2 => {
+        3 => {
             // l2 and its children
             nodes.push((
-                main_trie_node,
-                bucket_base + STARTING_NODE_ID[2] as u64,
+                main_trie_node | ((levels as u64) << 32),
                 l3_paths.iter().map(|path| path.2).collect_vec(),
             ));
 
             // l3 and its children
             nodes.extend(l4_paths.chunk_by(|&x, &y| x.2 == y.2).map(|chunk| {
                 let parent_id = bucket_base + (chunk[0].2 as u64) + STARTING_NODE_ID[3] as u64;
-                (
-                    parent_id,
-                    parent_id,
-                    chunk.iter().map(|path| path.3).collect_vec(),
-                )
+                (parent_id, chunk.iter().map(|path| path.3).collect_vec())
             }));
         }
-        1 => {
+        4 => {
             // l1 and its children
             nodes.push((
-                main_trie_node,
-                bucket_base + STARTING_NODE_ID[1] as u64,
+                main_trie_node | ((levels as u64) << 32),
                 l2_paths.iter().map(|path| path.1).collect_vec(),
             ));
 
             // l2 and its children
             nodes.extend(l3_paths.chunk_by(|&x, &y| x.1 == y.1).map(|chunk| {
                 let parent_id = bucket_base + (chunk[0].1 as u64) + STARTING_NODE_ID[2] as u64;
-                (
-                    parent_id,
-                    parent_id,
-                    chunk.iter().map(|path| path.2).collect_vec(),
-                )
+                (parent_id, chunk.iter().map(|path| path.2).collect_vec())
             }));
 
             // l3 and its children
@@ -307,30 +283,18 @@ fn process_bucket_trie_nodes(
                             + (chunk[0].2 as u64)
                             + ((chunk[0].1 as u64) << TRIE_WIDTH_BITS)
                             + STARTING_NODE_ID[3] as u64;
-                        (
-                            parent_id,
-                            parent_id,
-                            chunk.iter().map(|path| path.3).collect_vec(),
-                        )
+                        (parent_id, chunk.iter().map(|path| path.3).collect_vec())
                     }),
             );
         }
-        0 => {
+        5 => {
             // l0 and its children
-            nodes.push((
-                main_trie_node,
-                bucket_base + STARTING_NODE_ID[0] as u64,
-                l1_paths.to_vec(),
-            ));
+            nodes.push((main_trie_node | ((levels as u64) << 32), l1_paths.to_vec()));
 
             // l1 and its children
             nodes.extend(l2_paths.chunk_by(|&x, &y| x.0 == y.0).map(|chunk| {
                 let parent_id = bucket_base + (chunk[0].0 as u64) + STARTING_NODE_ID[1] as u64;
-                (
-                    parent_id,
-                    parent_id,
-                    chunk.iter().map(|path| path.1).collect_vec(),
-                )
+                (parent_id, chunk.iter().map(|path| path.1).collect_vec())
             }));
 
             // l2 and its children
@@ -342,11 +306,7 @@ fn process_bucket_trie_nodes(
                             + (chunk[0].1 as u64)
                             + ((chunk[0].0 as u64) << TRIE_WIDTH_BITS)
                             + STARTING_NODE_ID[2] as u64;
-                        (
-                            parent_id,
-                            parent_id,
-                            chunk.iter().map(|path| path.2).collect_vec(),
-                        )
+                        (parent_id, chunk.iter().map(|path| path.2).collect_vec())
                     }),
             );
 
@@ -360,11 +320,7 @@ fn process_bucket_trie_nodes(
                             + ((chunk[0].1 as u64) << TRIE_WIDTH_BITS)
                             + ((chunk[0].0 as u64) << (TRIE_WIDTH_BITS * 2))
                             + STARTING_NODE_ID[3] as u64;
-                        (
-                            parent_id,
-                            parent_id,
-                            chunk.iter().map(|path| path.3).collect_vec(),
-                        )
+                        (parent_id, chunk.iter().map(|path| path.3).collect_vec())
                     }),
             );
         }
@@ -377,10 +333,10 @@ fn process_bucket_trie_nodes(
 /// Process bucket state nodes for a single bucket
 fn process_bucket_state_nodes(
     bucket_id: BucketId,
-    top_level: u8,
+    levels: u8,
     keys: &[SaltKey],
 ) -> (BucketId, Vec<(NodeId, Vec<u8>)>) {
-    if top_level == (MAX_SUBTREE_LEVELS - 1) as u8 {
+    if levels == 1 {
         return (
             bucket_id,
             vec![(
@@ -440,6 +396,56 @@ pub const fn slot_id_to_node_path(slot: SlotId) -> [u8; MAX_SUBTREE_LEVELS - 1] 
         ((slot >> (TRIE_WIDTH_BITS * 2)) & 0xFF) as u8,
         ((slot >> TRIE_WIDTH_BITS) & 0xFF) as u8,
     ]
+}
+
+/// Extracts the connection parent ID from an encoded node ID.
+///
+/// Main trie L3 nodes with at least 2 levels bucket tree, will contain encoded level
+/// information in their higher bits:
+///
+/// store the levels in node id 32-40 bits
+///
+/// [64..........40..32........0]
+///
+///    bucket id      node index
+///
+/// This function strips that information to retrieve the actual parent ID(Main trie L3 nodes)
+/// used for establishing connections in the trie structure. If the node ID is not encoded, it
+/// is returned as is.
+pub const fn connect_parent_id(parent: NodeId) -> NodeId {
+    if parent < BUCKET_SLOT_ID_MASK && parent >= (1 << 32) {
+        parent & ((1 << 32) - 1)
+    } else {
+        parent
+    }
+}
+
+/// Calculates the logical parent ID from an encoded node ID.
+///
+/// Main trie L3 nodes with at least 2 levels bucket tree, will contain encoded level information in their higher
+/// bits:
+///
+/// store the levels in node id 32-40 bits
+///
+/// [64..........40..32........0]
+///
+///    bucket id      node index
+///
+/// In the bucket tree, the root node are physically connected to the main trie, but
+/// the bucket tree root node has a node id within the bucket's own tree structure. This function
+/// computes this logical parent ID, which is necessary for operations like traversing
+/// children within the bucket's conceptual hierarchy. If the node ID is not encoded,
+/// it is returned as is.
+pub const fn logic_parent_id(parent: NodeId) -> NodeId {
+    if parent < BUCKET_SLOT_ID_MASK && parent >= (1 << 32) {
+        let connect_parent = parent & ((1 << 32) - 1);
+        let levels = (parent >> 32) as u8;
+        let bucket_id = connect_parent - STARTING_NODE_ID[3] as u64;
+        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - levels as usize] as u64
+            + (bucket_id << BUCKET_SLOT_BITS)
+    } else {
+        parent
+    }
 }
 
 #[cfg(test)]
@@ -604,15 +610,15 @@ mod tests {
         // 45824 (2nd level for [177,255,x])
         // 65544 (2nd level for [255,7,7])
         let expected_parent_nodes = vec![
-            (0, 0, vec![8, 177, 255]),
-            (9, 9, vec![3, 255]),
-            (178, 178, vec![0, 255]),
-            (256, 256, vec![7]),
-            (2308, 2308, vec![0, 152, 255]),
-            (2560, 2560, vec![152, 170]),
-            (45569, 45569, vec![0, 255]),
-            (45824, 45824, vec![0, 173, 255]),
-            (65544, 65544, vec![7]),
+            (0, vec![8, 177, 255]),
+            (9, vec![3, 255]),
+            (178, vec![0, 255]),
+            (256, vec![7]),
+            (2308, vec![0, 152, 255]),
+            (2560, vec![152, 170]),
+            (45569, vec![0, 255]),
+            (45824, vec![0, 173, 255]),
+            (65544, vec![7]),
         ];
 
         assert_eq!(
@@ -623,8 +629,7 @@ mod tests {
         // Test with a single bucket ID
         let single_bucket_id = vec![525056];
         let single_parent_nodes = main_trie_parents_and_points(&single_bucket_id);
-        let expected_single_parent_nodes =
-            vec![(0, 0, vec![8]), (9, 9, vec![3]), (2308, 2308, vec![0])];
+        let expected_single_parent_nodes = vec![(0, vec![8]), (9, vec![3]), (2308, vec![0])];
 
         assert_eq!(
             single_parent_nodes, expected_single_parent_nodes,
