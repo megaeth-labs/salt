@@ -1,8 +1,9 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::TRIE_WIDTH,
+    constant::POLY_DEGREE,
     proof::{subtrie::create_sub_trie, verifier, ProofError},
     traits::{StateReader, TrieReader},
+    trie::trie::kv_hash,
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
@@ -21,7 +22,7 @@ use std::collections::BTreeMap;
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
-    Lazy::new(|| PrecomputedWeights::new(TRIE_WIDTH));
+    Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
 
 /// Wrapper of `CommitmentBytes` for serialization.
 #[derive(Clone, Debug, Eq, Serialize, Deserialize)]
@@ -94,13 +95,20 @@ where
     Ok(element.to_bytes_uncompressed())
 }
 
-/// Calculate the hash value of the key-value pair.
+/// Converts a bucket slot entry into a field element for IPA polynomial commitments.
+///
+/// This function maps key-value pairs (or empty slots) to field elements that serve
+/// as polynomial evaluations in SALT's proof system.
+///
+/// # Arguments
+/// * `entry` - Optional key-value pair from a bucket slot
+///
+/// # Returns
+/// A field element (`Fr`) in the Banderwagon scalar field suitable for IPA polynomial
+/// commitment schemes.
 #[inline(always)]
-pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
-    let mut data = blake3::Hasher::new();
-    data.update(entry.key());
-    data.update(entry.value());
-    Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
+pub(crate) fn slot_to_field(entry: &Option<SaltValue>) -> Fr {
+    Fr::from_le_bytes_mod_order(&kv_hash(entry))
 }
 
 impl SaltProof {
@@ -192,7 +200,7 @@ mod tests {
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
-        proof::prover::calculate_fr_by_kv,
+        proof::prover::slot_to_field,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         traits::{StateReader, TrieReader},
         trie::trie::StateRoot,
@@ -228,7 +236,7 @@ mod tests {
 
         let crs = CRS::default();
 
-        let meta_bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
+        let meta_bucket_fr = slot_to_field(&Some(BucketMeta::default().into()));
         let meta_bucket_frs = vec![meta_bucket_fr; 256];
         let meta_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(meta_bucket_frs));
 
@@ -516,7 +524,7 @@ mod tests {
         let crs = CRS::default();
         let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
         let mut sub_bucket_frs = vec![default_fr; 256];
-        sub_bucket_frs[3] = calculate_fr_by_kv(&salt_value);
+        sub_bucket_frs[3] = slot_to_field(&Some(salt_value));
         let sub_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_bucket_frs));
 
         // sub trie L4

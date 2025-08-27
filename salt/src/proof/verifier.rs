@@ -1,8 +1,8 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{EMPTY_SLOT_HASH, MAX_SUBTREE_LEVELS},
+    constant::MAX_SUBTREE_LEVELS,
     proof::{
-        prover::calculate_fr_by_kv,
+        prover::slot_to_field,
         shape::{
             bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
             main_trie_parents_and_points,
@@ -12,7 +12,7 @@ use crate::{
     trie::node_utils::{bucket_root_node_id, get_child_node, subtree_leaf_for_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
 };
-use banderwagon::{Element, Fr, PrimeField};
+use banderwagon::{Element, Fr};
 use ipa_multipoint::multiproof::VerifierQuery;
 use iter_tools::Itertools;
 use rayon::prelude::*;
@@ -196,10 +196,7 @@ pub(crate) fn create_verifier_queries(
 
                     let slot_id = key.slot_id() & 0xff;
 
-                    let result = val.as_ref().map_or(
-                        Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
-                        calculate_fr_by_kv,
-                    );
+                    let result = slot_to_field(val);
 
                     let bucket_trie_top_level = buckets_top_level[&bucket_id];
 
