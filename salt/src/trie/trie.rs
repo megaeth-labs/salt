@@ -665,55 +665,69 @@ where
 pub fn compute_from_scratch<S: StateReader>(
     reader: &S,
 ) -> Result<([u8; 32], TrieUpdates), S::Error> {
-    let trie_reader = &EmptySalt;
-    let trie = StateRoot::new(trie_reader, trie_reader);
-    let mut trie_updates = TrieUpdates::default();
-
-    // Compute bucket commitments.
     const STEP_SIZE: usize = 256;
-    (NUM_META_BUCKETS..NUM_BUCKETS)
-        .step_by(STEP_SIZE)
-        .try_for_each(|start| {
-            let end = std::cmp::min(start + STEP_SIZE, NUM_BUCKETS) - 1;
-            // Read Bucket Metadata from store
-            let meta_start = if start == NUM_META_BUCKETS {
-                0
-            } else {
-                (start >> MIN_BUCKET_SIZE_BITS) as BucketId
-            };
-            let mut state_updates = reader
-                .entries(
-                    SaltKey::from((meta_start, 0))
-                        ..=SaltKey::from((
-                            (end >> MIN_BUCKET_SIZE_BITS) as BucketId,
-                            BUCKET_SLOT_ID_MASK,
-                        )),
-                )?
+    const META_STEP_SIZE: usize = 2048;
+    //get bucket meta updates from `reader`
+    let meta_updates: BTreeMap<_, _> = (0..NUM_META_BUCKETS)
+        .into_par_iter()
+        .step_by(META_STEP_SIZE)
+        .map(|start| {
+            let end = (start + META_STEP_SIZE)
+                .saturating_sub(1)
+                .min(NUM_META_BUCKETS);
+            let range =
+                (start as BucketId, 0).into()..=(end as BucketId, MIN_BUCKET_SIZE as SlotId).into();
+            reader
+                .entries(range)
+                .expect("compute_from_scratch fail to load range")
                 .into_iter()
                 .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
-                .collect::<BTreeMap<_, _>>();
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect();
 
-            // Read buckets key-value pairs from store
-            state_updates.extend(
-                reader
-                    .entries(
-                        SaltKey::from((start as BucketId, 0))
-                            ..=SaltKey::from((end as BucketId, BUCKET_SLOT_ID_MASK)),
-                    )?
-                    .into_iter()
-                    .map(|(k, v)| (k, (None, Some(v)))),
-            );
+    // compute bucket commitments
+    let trie_updates = TrieUpdates {
+        data: (NUM_META_BUCKETS..NUM_BUCKETS)
+            .into_par_iter()
+            .step_by(STEP_SIZE)
+            .map(|bucket_start| {
+                let bucket_end =
+                    std::cmp::min(bucket_start + STEP_SIZE, NUM_BUCKETS) as BucketId - 1;
+                let meta_start = bucket_start as BucketId;
+                let range = bucket_metadata_key(meta_start)..=bucket_metadata_key(bucket_end);
+                let mut state_updates = StateUpdates {
+                    data: meta_updates
+                        .range(range)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                };
 
-            let updates = trie
-                .update_leaf_nodes(&StateUpdates {
-                    data: state_updates,
-                })
-                .expect("no error in EmptySalt when update_leaf_nodes");
-            trie_updates.data.extend(updates);
-            Ok(())
-        })?;
+                // Read buckets key-value pairs from store
+                let range =
+                    (bucket_start as BucketId, 0).into()..=(bucket_end, BUCKET_SLOT_ID_MASK).into();
+                state_updates.data.extend(
+                    reader
+                        .entries(range)
+                        .expect("compute_from_scratch fail to load range")
+                        .into_iter()
+                        .map(|(k, v)| (k, (None, Some(v)))),
+                );
 
-    Ok(trie
+                StateRoot::new(&EmptySalt, &EmptySalt)
+                    .update_leaf_nodes(&state_updates)
+                    .expect("no error in EmptySalt when update_leaf_nodes")
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+    };
+
+    Ok(StateRoot::new(&EmptySalt, &EmptySalt)
         .update_internal_nodes(trie_updates)
         .expect("no error in EmptySalt when update_internal_nodes"))
 }
@@ -1575,7 +1589,7 @@ mod tests {
 
         // bucket nonce changes
         state_updates.data.insert(
-            (0, 0).into(),
+            (256, 0).into(),
             (
                 Some(SaltValue::from(BucketMeta::default())),
                 Some(SaltValue::from(bucket_meta(10, MIN_BUCKET_SIZE as SlotId))),
