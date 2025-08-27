@@ -60,12 +60,30 @@ pub struct SaltWitness {
 }
 
 impl SaltWitness {
-    /// Create a salt witness from the trie
-    pub fn create<Store>(min_sub_tree: &[SaltKey], store: &Store) -> Result<SaltWitness, ProofError>
+    /// Creates a salt witness for a given set of keys with their cryptographic proof.
+    ///
+    /// This method constructs a witness that includes the specified keys' data along
+    /// with a cryptographic proof that authenticates the data against the state root.
+    /// Every key is cryptographically proven to either exist (with its value) or not
+    /// exist.
+    ///
+    /// # Arguments
+    /// * `keys` - The set of salt keys to include in the witness
+    /// * `store` - The storage backend providing access to state data
+    ///
+    /// # Returns
+    /// * `Ok(SaltWitness)` - A witness containing the requested keys' data and their proof
+    /// * `Err(ProofError)` - If reading any key fails or proof generation fails
+    ///
+    /// # Notes
+    /// - For metadata keys, retrieves bucket metadata instead of regular values
+    /// - For regular keys, retrieves their values (or None if non-existent)
+    /// - The proof is generated for all requested keys to ensure completeness
+    pub fn create<Store>(keys: &[SaltKey], store: &Store) -> Result<SaltWitness, ProofError>
     where
         Store: StateReader + TrieReader,
     {
-        let kvs = min_sub_tree
+        let kvs = keys
             .par_iter()
             .map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
