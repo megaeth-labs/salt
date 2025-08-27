@@ -29,26 +29,38 @@ type SaltUpdates<'a> = Vec<(&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValu
 
 /// Used to compute or update the root node of a SALT trie.
 #[derive(Debug)]
-pub struct StateRoot<'a, Store> {
-    /// Storage backend providing both trie and state access.
-    store: &'a Store,
+pub struct StateRoot<'a, T, S> {
+    /// Storage backend providing state access.
+    state_store: &'a S,
+    /// Storage backend providing trie access.
+    trie_store: &'a T,
     /// Cache the incremental updates of the trie nodes.
     pub increase_updates: HashMap<NodeId, (CommitmentBytes, CommitmentBytes)>,
     /// Cache the latest commitments of each updated trie node.
     pub cache: HashMap<NodeId, CommitmentBytes>,
 }
 
-impl<'a, Store> StateRoot<'a, Store>
+impl<'a, T, S> StateRoot<'a, T, S>
 where
-    Store: TrieReader + StateReader<Error = <Store as TrieReader>::Error>,
+    S: StateReader,
+    T: TrieReader<Error = <S as StateReader>::Error>,
 {
-    /// Create a [`StateRoot`] object with the given storage backend.
-    pub fn new(store: &'a Store) -> Self {
+    /// Create a [`StateRoot`] object with the given state and trie storage backend.
+    pub fn new(state_store: &'a S, trie_store: &'a T) -> Self {
         Self {
-            store,
+            state_store,
+            trie_store,
             increase_updates: HashMap::new(),
             cache: HashMap::new(),
         }
+    }
+
+    /// Create with the same store for both (requires Store to implement both traits)
+    pub fn new_one<A>(store: &'a A) -> StateRoot<'a, A, A>
+    where
+        A: StateReader + TrieReader<Error = <A as StateReader>::Error>,
+    {
+        StateRoot::new(store, store)
     }
 
     /// Merge the trie updates into the existing trie.
@@ -67,7 +79,7 @@ where
     pub fn incremental_update(
         &mut self,
         state_updates: &StateUpdates,
-    ) -> Result<(), <Store as TrieReader>::Error> {
+    ) -> Result<(), <T as TrieReader>::Error> {
         let updates = self.update_leaf_nodes(state_updates)?;
         // Cache the results of incremental calculations.
         for (k, v) in updates {
@@ -84,7 +96,7 @@ where
     }
 
     /// Finalizes and returns the state root after a series of calls to `incremental_update`.
-    pub fn finalize(&mut self) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    pub fn finalize(&mut self) -> Result<([u8; 32], TrieUpdates), <T as TrieReader>::Error> {
         // Retrieve trie_updates from the cache
         let trie_updates = TrieUpdates {
             data: std::mem::take(&mut self.increase_updates)
@@ -100,7 +112,7 @@ where
     pub fn update(
         &mut self,
         state_updates: &StateUpdates,
-    ) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    ) -> Result<([u8; 32], TrieUpdates), <T as TrieReader>::Error> {
         self.incremental_update(state_updates)?;
         self.finalize()
     }
@@ -108,7 +120,7 @@ where
     fn update_internal_nodes(
         &self,
         mut trie_updates: TrieUpdates,
-    ) -> Result<([u8; 32], TrieUpdates), <Store as TrieReader>::Error> {
+    ) -> Result<([u8; 32], TrieUpdates), <T as TrieReader>::Error> {
         let mut updates = trie_updates
             .data
             .iter()
@@ -132,7 +144,7 @@ where
         let root_commitment = if let Some(c) = trie_updates.data.last() {
             c.1 .1
         } else {
-            self.store.commitment(0)?
+            self.trie_store.commitment(0)?
         };
 
         Ok((hash_commitment(root_commitment), trie_updates))
@@ -145,7 +157,7 @@ where
         child_updates: &mut [(NodeId, (CommitmentBytes, CommitmentBytes))],
         level: usize,
         get_parent_id: P,
-    ) -> Result<NodeUpdates, <Store as TrieReader>::Error>
+    ) -> Result<NodeUpdates, <T as TrieReader>::Error>
     where
         P: Fn(&NodeId, usize) -> NodeId + Sync + Send,
     {
@@ -200,7 +212,7 @@ where
     fn update_leaf_nodes(
         &self,
         state_updates: &StateUpdates,
-    ) -> Result<NodeUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<NodeUpdates, <T as TrieReader>::Error> {
         // expansion kvs and non-expansion kvs are sorted separately
         let mut expansion_updates: SaltUpdates<'_> = vec![];
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
@@ -271,7 +283,7 @@ where
                     (old_capacity, new_capacity) =
                         capacity_changes.remove(&bid).unwrap_or_else(|| {
                             let bucket_capacity = self
-                                .store
+                                .state_store
                                 .metadata(bid)
                                 .expect("bucket capacity should exist")
                                 .capacity;
@@ -542,7 +554,7 @@ where
         &self,
         state_updates: &mut SaltUpdates<'_>,
         get_node_id: N,
-    ) -> Result<NodeUpdates, <Store as TrieReader>::Error>
+    ) -> Result<NodeUpdates, <T as TrieReader>::Error>
     where
         N: Fn(&SaltKey) -> NodeId + Sync + Send,
     {
@@ -580,7 +592,7 @@ where
         &self,
         mut c_deltas: Vec<(NodeId, Element)>,
         task_size: usize,
-    ) -> Result<NodeUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<NodeUpdates, <T as TrieReader>::Error> {
         // Sort the updated elements by their parent node IDs.
         c_deltas.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
@@ -640,11 +652,11 @@ where
 
     /// Retrieves the commitment of a node from the trie or the cache.
     #[inline(always)]
-    fn get_node(&self, node_id: NodeId) -> Result<CommitmentBytes, <Store as TrieReader>::Error> {
+    fn get_node(&self, node_id: NodeId) -> Result<CommitmentBytes, <T as TrieReader>::Error> {
         if let Some(c) = self.cache.get(&node_id) {
             Ok(*c)
         } else {
-            self.store.commitment(node_id)
+            self.trie_store.commitment(node_id)
         }
     }
 }
@@ -654,7 +666,7 @@ pub fn compute_from_scratch<S: StateReader>(
     reader: &S,
 ) -> Result<([u8; 32], TrieUpdates), S::Error> {
     let trie_reader = &EmptySalt;
-    let trie = StateRoot::new(trie_reader);
+    let trie = StateRoot::new(trie_reader, trie_reader);
     let mut trie_updates = TrieUpdates::default();
 
     // Compute bucket commitments.
@@ -961,7 +973,7 @@ mod tests {
     #[test]
     fn trie_add_deltas() {
         let trie_reader = &EmptySalt;
-        let mut trie = StateRoot::new(trie_reader);
+        let mut trie = StateRoot::new(trie_reader, trie_reader);
         let empty_reader = &EmptySalt;
         // Total updates of the state
         let mut state_updates = StateUpdates::default();
@@ -988,7 +1000,9 @@ mod tests {
         trie.add_deltas(&trie_updates1);
         let (root2, trie_updates2) = trie.update(&state_updates2).unwrap();
 
-        let (new_root2, _) = StateRoot::new(empty_reader).update(&state_updates).unwrap();
+        let (new_root2, _) = StateRoot::new(empty_reader, empty_reader)
+            .update(&state_updates)
+            .unwrap();
         assert_eq!(root2, new_root2);
 
         let mut state_updates3 = StateUpdates::default();
@@ -996,14 +1010,16 @@ mod tests {
         state_updates.merge(state_updates3.clone());
         trie.add_deltas(&trie_updates2);
         let (root3, _) = trie.update(&state_updates3).unwrap();
-        let (new_root3, _) = StateRoot::new(empty_reader).update(&state_updates).unwrap();
+        let (new_root3, _) = StateRoot::new(empty_reader, empty_reader)
+            .update(&state_updates)
+            .unwrap();
         assert_eq!(root3, new_root3);
     }
 
     #[test]
     fn expansion_and_contraction_no_kvchanges() {
         let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
+        let mut trie = StateRoot::new(&store, &store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key = bucket_metadata_key(bid);
         // initialize the trie
@@ -1056,7 +1072,7 @@ mod tests {
     #[test]
     fn expansion_and_contraction_small() {
         let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
+        let mut trie = StateRoot::new(&store, &store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
         let salt_key = bucket_metadata_key(bid);
         // initialize the trie
@@ -1194,7 +1210,7 @@ mod tests {
     #[test]
     fn expansion_and_contraction_large() {
         let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
+        let mut trie = StateRoot::new(&store, &store);
         let mut state_updates = StateUpdates::default();
 
         for bid in KV_BUCKET_OFFSET..KV_BUCKET_OFFSET + 10000 {
@@ -1385,7 +1401,7 @@ mod tests {
         };
 
         let trie_reader = &EmptySalt;
-        let mut trie = StateRoot::new(trie_reader);
+        let mut trie = StateRoot::new(trie_reader, trie_reader);
         trie.incremental_update(&state_updates1).unwrap();
         state_updates.merge(state_updates1);
         trie.incremental_update(&state_updates2).unwrap();
@@ -1437,7 +1453,7 @@ mod tests {
         };
         assert_eq!(cmp_state_updates, state_updates);
 
-        let mut trie = StateRoot::new(trie_reader);
+        let mut trie = StateRoot::new(trie_reader, trie_reader);
         let (cmp_root, mut cmp_trie_updates) = trie.update(&cmp_state_updates).unwrap();
         assert_eq!(root, cmp_root);
         trie_updates
@@ -1462,7 +1478,7 @@ mod tests {
         let kvs = create_random_account(10000);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
-        let mut trie = StateRoot::new(&mock_db);
+        let mut trie = StateRoot::new(&mock_db, &mock_db);
         let total_state_updates = state.update(&kvs).unwrap();
         let (root, mut total_trie_updates) = trie.update(&total_state_updates).unwrap();
 
@@ -1474,7 +1490,7 @@ mod tests {
             .collect();
 
         let mut state = EphemeralSaltState::new(&mock_db);
-        let mut trie = StateRoot::new(&mock_db);
+        let mut trie = StateRoot::new(&mock_db, &mock_db);
         let mut final_state_updates = StateUpdates::default();
         for kvs in &sub_kvs {
             let state_updates = state.update(kvs).unwrap();
@@ -1505,7 +1521,7 @@ mod tests {
     #[test]
     fn compute_from_scratch_small() {
         let mock_db = MemStore::new();
-        let mut trie = StateRoot::new(&mock_db);
+        let mut trie = StateRoot::new(&mock_db, &mock_db);
         let mut state_updates = StateUpdates::default();
 
         let bid = KV_BUCKET_OFFSET as BucketId;
@@ -1554,7 +1570,7 @@ mod tests {
     #[test]
     fn compute_from_scratch_large() {
         let mock_db = MemStore::new();
-        let mut trie = StateRoot::new(&mock_db);
+        let mut trie = StateRoot::new(&mock_db, &mock_db);
         let mut state_updates = StateUpdates::default();
 
         // bucket nonce changes
@@ -1599,7 +1615,7 @@ mod tests {
             .map(|c| Element::from_bytes_unchecked_uncompressed(*c))
             .collect();
         let binding = EmptySalt;
-        let trie = StateRoot::new(&binding);
+        let trie = StateRoot::new(&binding, &binding);
         let task_size = 3;
         let c_deltas = vec![
             (0, elements[0]),
@@ -1647,7 +1663,7 @@ mod tests {
     fn trie_update_leaf_nodes() {
         let committer = get_global_committer();
         let store = MemStore::new();
-        let trie = StateRoot::new(&store);
+        let trie = StateRoot::new(&store, &store);
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
@@ -1717,7 +1733,7 @@ mod tests {
     fn trie_update_internal_nodes() {
         let committer = get_global_committer();
         let bottom_level = TRIE_LEVELS - 1;
-        let trie = StateRoot::new(&EmptySalt);
+        let trie = StateRoot::new(&EmptySalt, &EmptySalt);
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
@@ -1807,7 +1823,7 @@ mod tests {
 
     #[test]
     fn trie_calculate_inner() {
-        let mut trie = StateRoot::new(&EmptySalt);
+        let mut trie = StateRoot::new(&EmptySalt, &EmptySalt);
         let committer = get_global_committer();
 
         let mut state_updates = StateUpdates::default();

@@ -66,7 +66,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box(
-                    StateRoot::new(&EmptySalt)
+                    StateRoot::new(&EmptySalt, &EmptySalt)
                         .update(&state_updates_vec[0])
                         .unwrap(),
                 )
@@ -80,7 +80,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 1_000, &mut rng),
             |state_updates_vec| {
                 black_box(
-                    StateRoot::new(&EmptySalt)
+                    StateRoot::new(&EmptySalt, &EmptySalt)
                         .update(&state_updates_vec[0])
                         .unwrap(),
                 )
@@ -94,7 +94,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    let mut trie = StateRoot::new(&EmptySalt);
+                    let mut trie = StateRoot::new(&EmptySalt, &EmptySalt);
                     for state_updates in state_updates_vec.iter() {
                         trie.incremental_update(state_updates).unwrap();
                     }
@@ -111,7 +111,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |state_updates_vec| {
                 {
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new(&EmptySalt).update(state_updates).unwrap();
+                        StateRoot::new(&EmptySalt, &EmptySalt)
+                            .update(state_updates)
+                            .unwrap();
                     }
                 }
                 black_box(())
@@ -125,7 +127,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    StateRoot::new(&ExpansionSalt((65536 * 16, 512)))
+                    let reader = &ExpansionSalt((65536 * 16, 512));
+                    StateRoot::new(reader, reader)
                         .update(&state_updates_vec[0])
                         .unwrap()
                 })
