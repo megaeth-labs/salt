@@ -24,18 +24,57 @@ use std::collections::BTreeMap;
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
 
-/// Wrapper of `CommitmentBytes` for serialization.
-#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
-pub struct CommitmentBytesW(
-    #[serde(serialize_with = "serialize_commitment")]
-    #[serde(deserialize_with = "deserialize_commitment")]
-    pub CommitmentBytes,
-);
+/// Serde wrapper for `CommitmentBytes`.
+#[derive(Clone, Debug, Eq)]
+pub struct SerdeCommitment(pub CommitmentBytes);
 
-impl PartialEq for CommitmentBytesW {
+impl PartialEq for SerdeCommitment {
     fn eq(&self, other: &Self) -> bool {
         Element::from_bytes_unchecked_uncompressed(self.0)
             == Element::from_bytes_unchecked_uncompressed(other.0)
+    }
+}
+
+impl Serialize for SerdeCommitment {
+    /// Serializes the commitment from uncompressed (64-byte) to compressed (32-byte) format.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Element::from_bytes_unchecked_uncompressed(self.0)
+            .to_bytes()
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SerdeCommitment {
+    /// Deserializes from compressed (32-byte) format back to uncompressed (64-byte) storage.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        Element::from_bytes(&bytes)
+            .map(|e| Self(e.to_bytes_uncompressed()))
+            .ok_or_else(|| serde::de::Error::custom("invalid element bytes"))
+    }
+}
+
+/// Serde wrapper for `MultiPointProof`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerdeMultiPointProof(pub MultiPointProof);
+
+impl Serialize for SerdeMultiPointProof {
+    /// Serializes the MultiPointProof to its byte representation.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0
+            .to_bytes()
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SerdeMultiPointProof {
+    /// Deserializes from bytes back to MultiPointProof with the configured polynomial degree.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        MultiPointProof::from_bytes(&bytes, POLY_DEGREE)
+            .map(SerdeMultiPointProof)
+            .map_err(|e| serde::de::Error::custom(e.to_string()))
     }
 }
 
@@ -43,56 +82,14 @@ impl PartialEq for CommitmentBytesW {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltProof {
     /// the node id of nodes in the path => node commitment
-    pub parents_commitments: BTreeMap<NodeId, CommitmentBytesW>,
+    pub parents_commitments: BTreeMap<NodeId, SerdeCommitment>,
 
     /// the IPA proof
-    #[serde(serialize_with = "serialize_multipoint_proof")]
-    #[serde(deserialize_with = "deserialize_multipoint_proof")]
-    pub proof: MultiPointProof,
+    pub proof: SerdeMultiPointProof,
 
     /// the top level of the buckets trie
     /// used to let verifier determine the bucket trie level
     pub buckets_top_level: FxHashMap<BucketId, u8>,
-}
-
-fn serialize_multipoint_proof<S>(proof: &MultiPointProof, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let bytes = proof
-        .to_bytes()
-        .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-    bytes.serialize(serializer)
-}
-
-fn deserialize_multipoint_proof<'de, D>(deserializer: D) -> Result<MultiPointProof, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes = Vec::<u8>::deserialize(deserializer)?;
-    MultiPointProof::from_bytes(&bytes, crate::constant::POLY_DEGREE)
-        .map_err(|e| serde::de::Error::custom(e.to_string()))
-}
-
-fn serialize_commitment<S>(commitment: &CommitmentBytes, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let element = Element::from_bytes_unchecked_uncompressed(*commitment);
-    let bytes = element.to_bytes();
-
-    bytes.serialize(serializer)
-}
-
-fn deserialize_commitment<'de, D>(deserializer: D) -> Result<CommitmentBytes, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes: [u8; 32] = <[u8; 32]>::deserialize(deserializer)?;
-    let element = Element::from_bytes(&bytes)
-        .ok_or_else(|| serde::de::Error::custom("from_bytes to an element is none"))?;
-
-    Ok(element.to_bytes_uncompressed())
 }
 
 /// Converts a bucket slot entry into a field element for IPA polynomial commitments.
@@ -139,7 +136,7 @@ impl SaltProof {
 
         Ok(SaltProof {
             parents_commitments,
-            proof,
+            proof: SerdeMultiPointProof(proof),
             buckets_top_level,
         })
     }
@@ -179,6 +176,7 @@ impl SaltProof {
         // call MultiPointProof::check to verify the proof
         if self
             .proof
+            .0
             .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
         {
             Ok(())

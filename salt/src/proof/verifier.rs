@@ -7,7 +7,7 @@ use crate::{
             bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
             main_trie_parents_and_points,
         },
-        CommitmentBytesW, ProofError,
+        ProofError, SerdeCommitment,
     },
     trie::node_utils::{bucket_root_node_id, get_child_node, subtree_leaf_for_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
@@ -61,7 +61,7 @@ fn create_verify_queries(
 /// 4. Create a VerifierQuery object
 fn process_trie_queries(
     trie_nodes: Vec<(NodeId, Vec<u8>)>,
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
+    path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     num_threads: usize,
     queries: &mut Vec<VerifierQuery>,
 ) {
@@ -130,7 +130,7 @@ fn process_trie_queries(
 /// Create verifier queries.
 /// kvs have already been sorted and deduped.
 pub(crate) fn create_verifier_queries(
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
+    path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     kvs: Vec<(SaltKey, Option<SaltValue>)>,
     buckets_top_level: &FxHashMap<BucketId, u8>,
 ) -> Result<Vec<VerifierQuery>, ProofError> {

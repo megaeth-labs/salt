@@ -10,7 +10,7 @@ use crate::{
             bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
             main_trie_parents_and_points,
         },
-        CommitmentBytesW, ProofError,
+        ProofError, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 type SubTrieInfo = (
     Vec<ProverQuery>,
-    BTreeMap<NodeId, CommitmentBytesW>,
+    BTreeMap<NodeId, SerdeCommitment>,
     FxHashMap<BucketId, u8>,
 );
 
@@ -224,7 +224,7 @@ where
             let parent = connect_parent_id(parent);
             (
                 parent,
-                CommitmentBytesW(store.commitment(parent).expect("Failed to get trie node")),
+                SerdeCommitment(store.commitment(parent).expect("Failed to get trie node")),
             )
         })
         .collect::<BTreeMap<_, _>>();
