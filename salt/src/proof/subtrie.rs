@@ -3,12 +3,14 @@ use crate::{
     constant::{default_commitment, EMPTY_SLOT_HASH, NUM_META_BUCKETS, TRIE_WIDTH},
     proof::{
         prover::calculate_fr_by_kv,
-        shape::{bucket_trie_parents_and_points, main_trie_parents_and_points},
+        shape::{
+            bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
+            main_trie_parents_and_points,
+        },
         CommitmentBytesW, ProofError,
     },
     traits::{StateReader, TrieReader},
-    trie::node_utils::get_child_node,
-    trie::node_utils::{subtree_leaf_start_key, subtree_root_level},
+    trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
@@ -43,7 +45,7 @@ fn create_prover_queries(
 }
 
 fn process_trie_queries<Store: TrieReader>(
-    trie_nodes: Vec<(NodeId, NodeId, Vec<u8>)>,
+    trie_nodes: Vec<(NodeId, Vec<u8>)>,
     store: &Store,
     num_threads: usize,
     queries: &mut Vec<ProverQuery>,
@@ -58,8 +60,8 @@ fn process_trie_queries<Store: TrieReader>(
             .flat_map(|chunk| {
                 let multi_children = chunk
                     .iter()
-                    .flat_map(|(_, logic_parent, _)| {
-                        let child_idx = get_child_node(logic_parent, 0);
+                    .flat_map(|(parent, _)| {
+                        let child_idx = get_child_node(&logic_parent_id(*parent), 0);
                         let children = store
                             .node_entries(child_idx..child_idx + TRIE_WIDTH as NodeId)
                             .expect("Failed to get trie children");
@@ -81,9 +83,11 @@ fn process_trie_queries<Store: TrieReader>(
                 chunk
                     .iter()
                     .zip(multi_children_frs.chunks(256))
-                    .flat_map(|((parent, _, children), frs)| {
+                    .flat_map(|((parent, children), frs)| {
                         let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                            store.commitment(*parent).expect("Failed to get trie node"),
+                            store
+                                .commitment(connect_parent_id(*parent))
+                                .expect("Failed to get trie node"),
                         );
 
                         create_prover_queries(
@@ -199,7 +203,7 @@ where
     let mut queries = Vec::with_capacity(
         trie_nodes
             .iter()
-            .map(|(_, _, points)| points.len())
+            .map(|(_, points)| points.len())
             .sum::<usize>()
             + salt_keys.len(),
     );
@@ -215,7 +219,8 @@ where
     // Process trie nodes commitments
     let mut parents_commitments = trie_nodes
         .into_iter()
-        .map(|(parent, _, _)| {
+        .map(|(parent, _)| {
+            let parent = connect_parent_id(parent);
             (
                 parent,
                 CommitmentBytesW(store.commitment(parent).expect("Failed to get trie node")),
