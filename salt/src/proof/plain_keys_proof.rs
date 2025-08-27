@@ -7,12 +7,19 @@
 use crate::{
     proof::witness::SaltWitness,
     proof::ProofError,
-    state::state::EphemeralSaltState,
+    state::{
+        hasher,
+        state::{probe, EphemeralSaltState},
+    },
     traits::{StateReader, TrieReader},
     types::*,
 };
 use serde::{Deserialize, Serialize};
-use std::ops::{Range, RangeInclusive};
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    ops::{Range, RangeInclusive},
+};
 
 /// Cryptographic proof for a set of plain keys.
 ///
@@ -21,7 +28,7 @@ use std::ops::{Range, RangeInclusive};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainKeysProof {
     /// The plain keys being proved.
-    pub(crate) keys: Vec<Vec<u8>>,
+    pub(crate) keys: BTreeMap<Vec<u8>, Option<SaltKey>>,
     /// Salt witness containing all state data and cryptographic proof.
     pub(crate) witness: SaltWitness,
 }
@@ -59,17 +66,33 @@ impl PlainKeysProof {
     where
         Store: StateReader + TrieReader,
     {
+        let keys: BTreeMap<Vec<u8>, Option<SaltKey>> = keys
+            .iter()
+            .map(|k| plain_key_to_salt_key(k, store).map(|v| (k.clone(), v)))
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|e| ProofError::StateReadError {
+                reason: format!("Failed to get salt key: {e:?}"),
+            })?;
+
         // Create a fresh ephemeral state for each key to prevent cache interference
         // This ensures that the search process for one key doesn't affect another
         let mut state = EphemeralSaltState::new(store).cache_read();
 
         // Process each plain key individually to determine its status
-        for plain_key in keys {
-            let _ = state
-                .plain_value(plain_key)
-                .map_err(|e| ProofError::StateReadError {
-                    reason: format!("Failed to read plain value: {e:?}"),
-                })?;
+        for (plain_key, maybe_salt_key) in keys.iter() {
+            if let Some(salt_key) = maybe_salt_key {
+                state
+                    .value(*salt_key)
+                    .map_err(|e| ProofError::StateReadError {
+                        reason: format!("Failed to read salt value: {e:?}"),
+                    })?;
+            } else {
+                let _ = state
+                    .plain_value(plain_key)
+                    .map_err(|e| ProofError::StateReadError {
+                        reason: format!("Failed to read plain value: {e:?}"),
+                    })?;
+            }
         }
 
         let witness =
@@ -77,8 +100,8 @@ impl PlainKeysProof {
 
         // Construct the final proof structure containing all necessary verification data
         Ok(PlainKeysProof {
-            keys: keys.to_vec(), // The original plain keys being proved
-            witness,             // Salt witness containing all state data and cryptographic proof
+            keys,    // The original plain keys being proved
+            witness, // Salt witness containing all state data and cryptographic proof
         })
     }
 
@@ -102,12 +125,43 @@ impl PlainKeysProof {
         let mut state = EphemeralSaltState::new(&self.witness);
 
         // Process each plain key individually to determine its status
-        for plain_key in &self.keys {
-            let _ = state
-                .plain_value(plain_key)
-                .map_err(|e| ProofError::StateReadError {
-                    reason: format!("Failed to read plain value from witness: {e:?}"),
-                })?;
+        for (plain_key, maybe_salt_key) in &self.keys {
+            if let Some(salt_key) = maybe_salt_key {
+                let maybe_salt_value =
+                    self.witness
+                        .value(*salt_key)
+                        .map_err(|e| ProofError::StateReadError {
+                            reason: format!("Witness Failed to read salt value: {e:?}"),
+                        })?;
+                if let Some(salt_value) = maybe_salt_value {
+                    if salt_value.key() != plain_key {
+                        return Err(ProofError::StateReadError {
+                            reason: format!(
+                                "Witness plain key doesn't match, expected: {plain_key:?}, got: {:?}",
+                                salt_value.key()
+                            ),
+                        });
+                    }
+                } else {
+                    return Err(ProofError::StateReadError {
+                        reason: format!("Witness salt value shouldn't be None, plain key: {plain_key:?}, salt key {salt_key:?}"),
+                    });
+                }
+            } else {
+                let maybe_plain_value =
+                    state
+                        .plain_value(plain_key)
+                        .map_err(|e| ProofError::StateReadError {
+                            reason: format!("Failed to read plain value from witness: {e:?}"),
+                        })?;
+                if maybe_plain_value.is_some() {
+                    return Err(ProofError::StateReadError {
+                        reason: format!(
+                            "Witness plain value should be None, got: {maybe_plain_value:?}, plain key: {plain_key:?}"
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -122,14 +176,22 @@ impl PlainKeysProof {
     /// * `Ok(Some(value))` if the key exists and has a value
     /// * `Ok(None)` if the key does not exist
     /// * `Err(String)` if the key was not included in this proof
-    pub fn get_plain_value(&self, plain_key: &Vec<u8>) -> Result<Option<Vec<u8>>, String> {
-        if !self.keys.iter().any(|v| v == plain_key) {
-            return Err("plain_key is not proved".to_string());
+    ///
+    /// Note: this method doesn't verify the proof, so it's not safe to use directly.
+    /// You need to call `verify()` first.
+    pub fn get_plain_value(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        match self.keys.get(plain_key) {
+            Some(Some(salt_key)) => {
+                let salt_value = self.witness.value(*salt_key).map_err(|e| e.to_string())?;
+                if let Some(salt_value) = salt_value {
+                    Ok(Some(salt_value.value().to_vec()))
+                } else {
+                    Err("salt key exists, plain key should exist".to_string())
+                }
+            }
+            Some(None) => Ok(None),
+            None => Err("plain_key is not proved".to_string()),
         }
-
-        let mut state = EphemeralSaltState::new(&self.witness);
-
-        state.plain_value(plain_key).map_err(|e| e.to_string())
     }
 
     /// Retrieves all plain values for the keys in this proof.
@@ -139,12 +201,20 @@ impl PlainKeysProof {
     ///
     /// # Returns
     /// A vector of optional values, one for each key in the proof
+    ///
+    /// Note: this method doesn't verify the proof, so it's not safe to use directly.
+    /// You need to call `verify()` first.
     pub fn get_values(&self) -> Result<Vec<Option<Vec<u8>>>, String> {
-        let mut state = EphemeralSaltState::new(&self.witness);
-
         self.keys
-            .iter()
-            .map(|plain_key| state.plain_value(plain_key).map_err(|e| e.to_string()))
+            .values()
+            .map(|maybe_salt_key| {
+                if let Some(salt_key) = maybe_salt_key {
+                    let salt_value = self.witness.value(*salt_key).map_err(|e| e.to_string())?;
+                    Ok(salt_value.map(|v| v.value().to_vec()))
+                } else {
+                    Ok(None)
+                }
+            })
             .collect()
     }
 }
@@ -190,6 +260,38 @@ impl TrieReader for PlainKeysProof {
     }
 }
 
+pub fn plain_key_to_salt_key<Store>(
+    plain_key: &[u8],
+    store: &Store,
+) -> Result<Option<SaltKey>, Store::Error>
+where
+    Store: StateReader,
+{
+    let bucket_id = hasher::bucket_id(plain_key);
+    let metadata = store.metadata(bucket_id)?;
+    let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
+
+    for step in 0..metadata.capacity {
+        let slot = probe(hashed_key, step, metadata.capacity);
+        // FIXME: too many memory copies on the read path currently
+        // 1. self.value() has two internal paths:
+        //    - Cache hit: 1 copy from cache
+        //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
+        // 2. salt_val.value().to_vec() copies the plain value bytes upon return
+        let salt_key = (bucket_id, slot).into();
+        if let Some(salt_val) = store.value(salt_key)? {
+            match salt_val.key().cmp(plain_key) {
+                Ordering::Less => return Ok(None),
+                Ordering::Equal => return Ok(Some(salt_key)),
+                Ordering::Greater => (),
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +303,7 @@ mod tests {
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
+    use iter_tools::Itertools;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
@@ -572,7 +675,7 @@ mod tests {
 
         assert!(proof.verify(root).is_ok());
 
-        assert_eq!(proof.keys.first().unwrap(), &key);
+        assert_eq!(proof.keys.keys().next().unwrap(), &key);
 
         let salt_key = SaltKey::from((bucket_id, 1));
         let salt_value = proof.value(salt_key).unwrap().unwrap();
@@ -633,6 +736,30 @@ mod tests {
             }
             assert_eq!(proof_value, state_value);
         }
+    }
+
+    #[test]
+    fn test_plain_key_exist_proof_should_without_bucket_meta() {
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &store);
+
+        let keys = get_plain_keys(vec![7, 8, 9]);
+        let proof = PlainKeysProof::create(&keys, &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        assert_eq!(proof.keys.len(), 3);
+        assert_eq!(proof.witness.kvs.len(), 3);
+
+        let salt_keys = proof.witness.kvs.keys().copied().collect::<Vec<_>>();
+        let salt_keys2 = proof
+            .keys
+            .values()
+            .map(|v| v.unwrap())
+            .sorted_unstable()
+            .collect::<Vec<_>>();
+
+        assert_eq!(salt_keys, salt_keys2);
     }
 
     /// Helper function to get a subset of test keys by their indices.
