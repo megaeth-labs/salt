@@ -1,23 +1,23 @@
 //! This module return all-needed queries for a given kv list by create_sub_trie()
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
-        NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
+        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, NUM_META_BUCKETS,
+        STARTING_NODE_ID, TRIE_WIDTH,
     },
     proof::{
-        prover::calculate_fr_by_kv,
+        prover::slot_to_field,
         shape::{
             bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
             main_trie_parents_and_points,
         },
-        CommitmentBytesW, ProofError,
+        ProofError, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr, PrimeField};
+use banderwagon::Element;
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 type SubTrieInfo = (
     Vec<ProverQuery>,
-    BTreeMap<NodeId, CommitmentBytesW>,
+    BTreeMap<NodeId, SerdeCommitment>,
     FxHashMap<BucketId, u8>,
 );
 
@@ -132,9 +132,9 @@ fn process_bucket_state_queries<Store: StateReader + TrieReader>(
                         };
 
                         let mut default_frs = if bucket_id < 65536 {
-                            vec![calculate_fr_by_kv(&BucketMeta::default().into()); 256]
+                            vec![slot_to_field(&Some(BucketMeta::default().into())); 256]
                         } else {
-                            vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); 256]
+                            vec![slot_to_field(&None); 256]
                         };
                         let slot_start = salt_key_start.slot_id();
                         let children_kvs = store
@@ -147,7 +147,7 @@ fn process_bucket_state_queries<Store: StateReader + TrieReader>(
                             });
                         for (k, v) in children_kvs {
                             default_frs[(k.slot_id() & 0xff) as usize] =
-                                calculate_fr_by_kv(&v);
+                                slot_to_field(&Some(v));
                         }
 
                         create_prover_queries(
@@ -224,7 +224,7 @@ where
             let parent = connect_parent_id(parent);
             (
                 parent,
-                CommitmentBytesW(store.commitment(parent).expect("Failed to get trie node")),
+                SerdeCommitment(store.commitment(parent).expect("Failed to get trie node")),
             )
         })
         .collect::<BTreeMap<_, _>>();
