@@ -149,7 +149,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     }
 
     /// Accessing `keys` through `EphemeralSaltState`
-    pub fn travel_keys(&mut self, keys: Vec<Vec<u8>>) -> Result<(), Store::Error> {
+    pub fn touch_keys(&mut self, keys: Vec<&[u8]>) -> Result<(), Store::Error> {
         for k in keys {
             let bucket_id = hasher::bucket_id(&k);
             // get and record bucket meta
