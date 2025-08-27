@@ -1,5 +1,5 @@
 //! This module defines constants that determine the shape of the SALT data structure.
-use crate::types::{CommitmentBytes, NodeId};
+use crate::types::{get_bfs_level, is_subtree_node, CommitmentBytes, NodeId};
 use banderwagon::salt_committer::Committer;
 
 /// Number of bits to represent `MIN_BUCKET_SIZE`.
@@ -17,7 +17,7 @@ pub const TRIE_LEVELS: usize = 4;
 /// the below:               |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-2]| - root node stored in the SALT
 /// trie                  /                         \
 /// |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]| |`STARTING_NODE_ID`[SUB_TRIE_LEVELS-1]+1|  - internal node stored in the sub trie
-pub const SUB_TRIE_LEVELS: usize = TRIE_LEVELS + 1;
+pub const SUB_TRIE_LEVELS: usize = 5;
 /// Number of bits to represent `TRIE_WIDTH`.
 pub const TRIE_WIDTH_BITS: usize = 8;
 /// Branch factor of the SALT trie nodes. Always a power of two.
@@ -31,6 +31,8 @@ pub const NUM_META_BUCKETS: usize = NUM_BUCKETS / MIN_BUCKET_SIZE;
 pub const NUM_KV_BUCKETS: usize = NUM_BUCKETS - NUM_META_BUCKETS;
 /// Index of root commitment in salt buckets.
 pub const ROOT_NODE_ID: NodeId = 0;
+/// Default hash value of [1u8; 32] when the slot is empty
+pub const EMPTY_SLOT_HASH: [u8; 32] = [1u8; 32];
 
 /// The SALT trie is always full, so its nodes can be flattened to an array for efficient storage
 /// and access. `STARTING_NODE_ID`[i] indicates the ID of the leftmost node (i.e., its index in the
@@ -43,14 +45,20 @@ pub const STARTING_NODE_ID: [usize; SUB_TRIE_LEVELS] = [
     TRIE_WIDTH * TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH * TRIE_WIDTH + TRIE_WIDTH + 1,
 ];
 
-/// Maximum number of bits to represent a bucket ID. Although the ID consists of only 24 bits, it
-/// will occupy the upper 32 bits of the `SaltKey`.
+/// Maximum number of bits to represent a bucket ID.
 pub const BUCKET_ID_BITS: usize = 24;
 /// Maximum number of bits to represent a slot index in a bucket. 2^40 slots per bucket should be
 /// more than enough.
 pub const BUCKET_SLOT_BITS: usize = 40;
 /// Mask of the slot ID in a bucket. The slot ID is the lower 40 bits of the `SaltKey`.
 pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
+
+/// Load factor threshold (as percentage) that triggers bucket resizing.
+/// When a bucket's usage exceeds this percentage of its capacity, it will be resized.
+pub const BUCKET_RESIZE_LOAD_FACTOR_PCT: u64 = 80;
+/// Multiplier used when expanding bucket capacity during resize operations.
+/// The new capacity will be the old capacity multiplied by this factor.
+pub const BUCKET_RESIZE_MULTIPLIER: u64 = 2;
 
 /// The degree of the polynomial used in the IPA proof.
 pub const POLY_DEGREE: usize = 256;
@@ -95,40 +103,52 @@ macro_rules! b512 {
     }};
 }
 
-/// Precomputed node commitment at each level of an empty SALT trie.
-/// Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
-/// info.
-pub static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes); TRIE_LEVELS] = [
-    (STARTING_NODE_ID[0] + 1,b512!("9bb8e18954f7cb728885f1f6a77f3448de15b3e3512b1d51256ca30af6b90c66568f74ac59eb651d19c35eb8b64ada821e789c9f1adcd173c03afc4f64140b52")),
-    (STARTING_NODE_ID[1] + 1,b512!("1ef0f9c10d2b7bfbec60787dfa59d9e19632a213d2b7e89f0328f82b24bbb71616f28a6c6ba911d5885501210288d011d45f2ec6f24461c213fdc645c1f3201b")),
-    (STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,b512!("e42d4b783f0296980d46e906266a6295d77a6a001d0c01644a5e8b570ab2c01f877a60937a24e203bdcba34041a899ad74f5d61b69e0bb98ca4c324823ae5937")),
-    (STARTING_NODE_ID[3] + NUM_META_BUCKETS,b512!("045ea6b6382f95905296a34b1eb8904902f428fff6e6240c5e038b12c1229755905728c1b60a267b159756e7bf703f54ac13983112ed28c174fb790b78e15b5f")),
-];
-
-/// Calculate the level where the specified node is located.
-pub fn get_node_level(node_id: NodeId) -> usize {
-    STARTING_NODE_ID
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|&(_, &threshold)| node_id >= threshold as NodeId)
-        .unwrap()
-        .0
-}
-
 /// Get the default commitment for the specified node.
-pub fn default_commitment(level: usize, id: NodeId) -> CommitmentBytes {
-    if id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
+pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
+    // Precomputed node commitment at each level of an empty SALT trie.
+    // Refer to the test case '`trie_level_default_committment`' in ../salt/src/trie/trie.rs for more
+    // info.
+    static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); TRIE_LEVELS] = [
+        (
+            STARTING_NODE_ID[0] + 1,
+            b512!("5f0ee344a7c4c41456f239be83cda66eb4e1311b64ea69c7be03df42e5d5650c2abbf663ac56db88332dfea35f3d65c1365f413d5890cf90232b15f26d33cb03"),
+            b512!("5f0ee344a7c4c41456f239be83cda66eb4e1311b64ea69c7be03df42e5d5650c2abbf663ac56db88332dfea35f3d65c1365f413d5890cf90232b15f26d33cb03"),
+        ),
+        (
+            STARTING_NODE_ID[1] + 1,
+            b512!("4abb404b7e0555512fa6c91ef6c2ab0b694ed5c55c4796b2581eed30ec1b7a63b83260bddc4f935c1a3e9cb4ab683a6d8a387cef20e356c673e69fe84dab6001"),
+            b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),
+        ),
+        (
+            STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,
+            b512!("632ad81f19f816c3f986568e7e829fe8456989e90a106cfc0f0150d75aedbb5bd2b8131e1349252f63d067f9d7de9838f1999e16996e3a7a0c6fa54fb3256601"),
+            b512!("1d8d81bcb60ff180ff99c497a8298af38d71d2fbf3c0ffda09b659839e3732612771a485191ab8fe740dc20d1a33c53f8cfbb1c07676d74050de914c0efc7f54"),
+        ),
+        (
+            STARTING_NODE_ID[3] + NUM_META_BUCKETS,
+            b512!("21824da3ca11d224dbc2d2191ae01357f89c65e618daf8a97c5678058542865945c25871df9856d9234a045eca471580aae9270439e6131e12b641b65c981c08"),
+            b512!("da260863cc36b265d34f9912c3b98ae7e046ced37bf5eebe1be164695093714efc9e5b23b9ab87c9f7b51e4fec4ea377e4fe44672d70752f7c3522e0f0269555"),
+        ),
+    ];
+
+    // Precomputed node commitment at each level of an empty SALT SubTrie.
+    static SUBTRIE_DEFAULT_COMMITMENT:[CommitmentBytes; SUB_TRIE_LEVELS] = [
+        b512!("5a4458230b52d0445f846b078df60f4aba2130f015eff95bf6530098bdcfbc570331d402f243631ee94f2b59af6c41b9014eb1a767ff4d4e692889ea546a3c01"),
+        b512!("26e37bc889bd763289bc5ca3fd88babef8c4477ea0c0d0ec457d165c7a37e1449bf45aaa4d7fdf0c6a43aa579243015ad99e70dfa4fb66137fc6733be79a4803"),
+        b512!("7b94f02eb51571dcc132a10087120eb93f891f26ff9da29441eeb333aa3275410c612ac201e16c64229c5fe4461c482776ef4d8da1a8e6b4889e7aad6b22971a"),
+        b512!("1d8d81bcb60ff180ff99c497a8298af38d71d2fbf3c0ffda09b659839e3732612771a485191ab8fe740dc20d1a33c53f8cfbb1c07676d74050de914c0efc7f54"),
+        b512!("da260863cc36b265d34f9912c3b98ae7e046ced37bf5eebe1be164695093714efc9e5b23b9ab87c9f7b51e4fec4ea377e4fe44672d70752f7c3522e0f0269555"),
+    ];
+
+    let level = get_bfs_level(node_id & BUCKET_SLOT_ID_MASK as NodeId);
+
+    if is_subtree_node(node_id) {
+        SUBTRIE_DEFAULT_COMMITMENT[level]
+    } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
-        zero_commitment()
+        DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
-}
-
-/// Determine whether to expand the node
-#[inline]
-pub fn is_extension_node(node_id: NodeId) -> bool {
-    node_id >= STARTING_NODE_ID[SUB_TRIE_LEVELS - 1] as NodeId
 }
 
 /// Return the zero commitment.

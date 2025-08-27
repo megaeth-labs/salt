@@ -10,7 +10,7 @@ use salt::{
     trie::trie::{get_global_committer, StateRoot},
     types::*,
 };
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 /// Generates a series of fixed-size state updates.
 ///
@@ -25,30 +25,23 @@ use std::ops::Range;
 /// A vector of `StateUpdates` containing the generated state updates.
 fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates> {
     (0..num)
-        .into_iter()
         .map(|_| {
             let mut bids: Vec<_> = (0..l)
-                .into_iter()
                 .map(|_| rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId))
                 .collect();
             bids.sort();
-            StateUpdates {
-                data: bids
-                    .into_iter()
-                    .map(|bid| {
-                        (
-                            SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
-                            (
-                                None,
-                                Some(SaltValue::new(
-                                    &rng.gen::<[u8; 20]>(),
-                                    &rng.gen::<[u8; 32]>(),
-                                )),
-                            ),
-                        )
-                    })
-                    .collect(),
+            let mut state_updates = StateUpdates::default();
+            for bid in bids {
+                state_updates.add(
+                    SaltKey::from((bid, rng.gen_range(0..MIN_BUCKET_SIZE as SlotId))),
+                    None,
+                    Some(SaltValue::new(
+                        &rng.gen::<[u8; 20]>(),
+                        &rng.gen::<[u8; 32]>(),
+                    )),
+                );
             }
+            state_updates
         })
         .collect()
 }
@@ -72,11 +65,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
-                black_box({
-                    StateRoot::new()
-                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
-                        .unwrap();
-                })
+                black_box(
+                    StateRoot::new(&EmptySalt, &EmptySalt)
+                        .update(&state_updates_vec[0])
+                        .unwrap(),
+                )
             },
             criterion::BatchSize::SmallInput,
         );
@@ -86,11 +79,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(1, 1_000, &mut rng),
             |state_updates_vec| {
-                black_box({
-                    StateRoot::new()
-                        .update(&EmptySalt, &EmptySalt, &state_updates_vec[0])
-                        .unwrap();
-                })
+                black_box(
+                    StateRoot::new(&EmptySalt, &EmptySalt)
+                        .update(&state_updates_vec[0])
+                        .unwrap(),
+                )
             },
             criterion::BatchSize::SmallInput,
         );
@@ -101,12 +94,11 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    let mut trie = StateRoot::new();
+                    let mut trie = StateRoot::new(&EmptySalt, &EmptySalt);
                     for state_updates in state_updates_vec.iter() {
-                        trie.incremental_update(&EmptySalt, &EmptySalt, state_updates)
-                            .unwrap();
+                        trie.incremental_update(state_updates).unwrap();
                     }
-                    trie.finalize(&EmptySalt).unwrap();
+                    trie.finalize().unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -117,13 +109,14 @@ fn salt_trie_bench(_c: &mut Criterion) {
         b.iter_batched(
             || gen_state_updates(10, 100, &mut rng),
             |state_updates_vec| {
-                black_box({
+                {
                     for state_updates in state_updates_vec.iter() {
-                        StateRoot::new()
-                            .update(&EmptySalt, &EmptySalt, state_updates)
+                        StateRoot::new(&EmptySalt, &EmptySalt)
+                            .update(state_updates)
                             .unwrap();
                     }
-                })
+                }
+                black_box(())
             },
             criterion::BatchSize::SmallInput,
         );
@@ -134,13 +127,10 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |state_updates_vec| {
                 black_box({
-                    StateRoot::new()
-                        .update(
-                            &ExpansionSalt((65536 * 16, 512)),
-                            &ExpansionSalt((65536 * 16, 512)),
-                            &state_updates_vec[0],
-                        )
-                        .unwrap();
+                    let reader = &ExpansionSalt((65536 * 16, 512));
+                    StateRoot::new(reader, reader)
+                        .update(&state_updates_vec[0])
+                        .unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -157,11 +147,11 @@ pub struct ExpansionSalt((u64, u64));
 impl TrieReader for ExpansionSalt {
     type Error = SaltError;
 
-    fn get_commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+    fn commitment(&self, _node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(zero_commitment())
     }
 
-    fn get_range(
+    fn node_entries(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
@@ -172,17 +162,25 @@ impl TrieReader for ExpansionSalt {
 impl StateReader for ExpansionSalt {
     type Error = SaltError;
 
-    fn entry(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+    fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
     }
 
-    fn get_meta(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+    fn entries(
+        &self,
+        _range: RangeInclusive<SaltKey>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        Ok(vec![])
+    }
+
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let meta = BucketMeta {
             capacity: if bucket_id < self.0 .0 as BucketId {
                 self.0 .1
             } else {
                 MIN_BUCKET_SIZE as u64
             },
+            used: Some(self.bucket_used_slots(bucket_id)?),
             ..Default::default()
         };
         Ok(meta)

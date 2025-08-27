@@ -72,9 +72,11 @@ impl TranscriptProtocol for Transcript {
         self.state.extend(label)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn test_vector_0() {
         let mut tr = Transcript::new(b"simple_protocol");
@@ -83,6 +85,7 @@ mod tests {
         // We can never even accidentally, generate the same challenge
         assert_ne!(first_challenge, second_challenge)
     }
+
     #[test]
     fn test_vector_1() {
         let mut tr = Transcript::new(b"simple_protocol");
@@ -93,6 +96,7 @@ mod tests {
         let got = scalar_to_hex(&first_challenge);
         assert_eq!(got, expected)
     }
+
     #[test]
     fn test_vector_2() {
         let mut tr = Transcript::new(b"simple_protocol");
@@ -108,6 +112,7 @@ mod tests {
         let got = scalar_to_hex(&challenge);
         assert_eq!(got, expected)
     }
+
     #[test]
     fn test_vector_3() {
         let mut tr = Transcript::new(b"simple_protocol");
@@ -127,6 +132,7 @@ mod tests {
         let got = scalar_to_hex(&challenge);
         assert_eq!(got, expected)
     }
+
     #[test]
     fn test_vector_4() {
         let mut tr = Transcript::new(b"simple_protocol");

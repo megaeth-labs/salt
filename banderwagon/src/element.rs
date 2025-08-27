@@ -234,8 +234,8 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use ark_serialize::CanonicalSerialize;
+
     #[test]
     fn consistent_group_to_field() {
         // In python this is called commitment_to_field
@@ -325,7 +325,7 @@ mod test {
         let mut point = Element::prime_subgroup_generator();
         for (i, _) in expected_bit_string.into_iter().enumerate() {
             let byts = hex::encode(point.to_bytes());
-            assert_eq!(byts, expected_bit_string[i], "index {} does not match", i);
+            assert_eq!(byts, expected_bit_string[i], "index {i} does not match");
 
             points.push(point);
             point = Element(point.0.double())

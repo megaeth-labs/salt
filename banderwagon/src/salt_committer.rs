@@ -1,5 +1,29 @@
-//! Provides MSM calculation module
+//! Efficient Multi-Scalar Multiplication (MSM) for the SALT commitment scheme.
 //!
+//! This module implements optimized MSM calculations over the Bandersnatch curve,
+//! specifically tailored for SALT's vector commitment operations. The implementation
+//! uses windowed Non-Adjacent Form (wNAF) with precomputed tables to accelerate
+//! scalar multiplications.
+//!
+//! # Key Features
+//!
+//! - **Precomputed Tables**: Stores multiples of base points for fast scalar multiplication
+//! - **Memory Optimization**: Optional hugepage support for better cache performance
+//! - **Batch Operations**: Efficient batch conversion between projective and affine coordinates
+//! - **Platform Optimization**: x86_64 specific optimizations with prefetching and assembly
+//!
+//! # Architecture
+//!
+//! The module provides two main components:
+//!
+//! 1. **`Committer`**: A precomputed MSM engine that stores windowed multiples of base points
+//! 2. **Batch conversion utilities**: For efficient coordinate system conversions
+//!
+//! # Performance Characteristics
+//!
+//! - Window size affects the trade-off between memory usage and computation speed
+//! - Typical window size of 11 provides good balance for 256 base points
+//! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
 use ark_ec::AdditiveGroup;
@@ -8,18 +32,38 @@ use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
-
-///MSM calculation for a fixed G points
+/// Precomputed Multi-Scalar Multiplication engine for fixed base points.
+///
+/// The `Committer` precomputes and stores windowed multiples of a set of base points
+/// to accelerate scalar multiplication operations. This is particularly useful for
+/// SALT's vector commitment scheme where the same base points are used repeatedly.
+///
+/// # Memory Layout
+///
+/// For each base point G[i] and window size w, the table stores:
+/// - Window 0: [0, G[i], 2*G[i], ..., (2^(w-1)-1)*G[i]]
+/// - Window 1: [0, 2^w*G[i], 2*2^w*G[i], ..., (2^(w-1)-1)*2^w*G[i]]
+/// - And so on...
+///
+/// # Example
+///
+/// ```ignore
+/// let bases = vec![Element::generator(); 256];
+/// let committer = Committer::new(&bases, 11);
+/// let scalar = Fr::from(12345u64);
+/// let result = committer.mul_index(&scalar, 0); // Compute scalar * bases[0]
+/// ```
 #[derive(Clone, Debug)]
 pub struct Committer {
-    ///Window size for WNAF
+    /// Window size for windowed NAF representation (typically 11 for 256 bases)
     window_size: usize,
-    ///Accelerate MSM by precomputing the table
+    /// Precomputed tables of multiples for each base point.
+    /// Structure: tables[base_index][window_index * half_window_size + multiple]
     tables: Vec<Vec<EdwardsAffine>>,
 }
 
 impl Drop for Committer {
-    #[cfg(all(not(target_os = "macos"), not(feature = "disable-hugepages")))]
+    #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
     fn drop(&mut self) {
         use hugepage_rs;
         use std::alloc::Layout;
@@ -40,14 +84,14 @@ impl Drop for Committer {
         hugepage_rs::dealloc(ptr, layout);
     }
 
-    #[cfg(any(target_os = "macos", feature = "disable-hugepages"))]
+    #[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
     fn drop(&mut self) {
         // Standard drop implementation, no need for explicit deallocation
     }
 }
 
 impl Committer {
-    #[cfg(all(not(target_os = "macos"), not(feature = "disable-hugepages")))]
+    #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         use hugepage_rs;
         use std::alloc::Layout;
@@ -110,7 +154,7 @@ impl Committer {
         }
     }
 
-    #[cfg(any(target_os = "macos", feature = "disable-hugepages"))]
+    #[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
@@ -141,8 +185,11 @@ impl Committer {
         }
     }
 
-    /// This is the identity element of the group
-    pub fn zero() -> [u8; 64] {
+    /// Returns the 64-byte representation of the identity element (point at infinity).
+    ///
+    /// The identity element is encoded as (0, 1) in affine coordinates,
+    /// which serializes to 32 zero bytes followed by 32 bytes representing 1.
+    pub const fn zero() -> [u8; 64] {
         [
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -150,8 +197,29 @@ impl Committer {
         ]
     }
 
-    /// Calculate the new commitment after applying the deltas
-    /// return old_c + (new_bytes[0] - old_bytes[0]) * G[tbi[0]] + ... + (new_bytes[n] - old_bytes[n]) * G[tbi[n]]
+    /// Efficiently updates a commitment by applying a series of delta changes.
+    ///
+    /// This method is crucial for SALT's incremental update mechanism. Instead of
+    /// recomputing the entire commitment from scratch, it only computes the changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_commitment` - The current commitment value (64 bytes)
+    /// * `delta_indices` - Vector of (index, old_value, new_value) tuples where:
+    ///   - `index`: Position in the commitment vector
+    ///   - `old_value`: Previous 32-byte value at this position
+    ///   - `new_value`: New 32-byte value at this position
+    ///
+    /// # Returns
+    ///
+    /// The updated commitment as an `Element`.
+    ///
+    /// # Algorithm
+    ///
+    /// For each delta (i, old, new), computes:
+    /// ```text
+    /// result = old_commitment + Σ (new[i] - old[i]) * G[i]
+    /// ```
     pub fn add_deltas(
         &self,
         old_commitment: [u8; 64],
@@ -168,7 +236,19 @@ impl Committer {
         old
     }
 
-    /// scalar a fixed G[i] point
+    /// Multiplies a precomputed base point by a scalar using windowed NAF.
+    ///
+    /// This x86_64-optimized version uses CPU prefetching instructions to
+    /// improve cache performance during table lookups.
+    ///
+    /// # Arguments
+    ///
+    /// * `scalar` - The scalar multiplier (field element)
+    /// * `g_i` - Index of the base point to multiply
+    ///
+    /// # Returns
+    ///
+    /// The result of `scalar * G[g_i]` as an `Element`.
     #[cfg(target_arch = "x86_64")]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
@@ -253,7 +333,18 @@ impl Committer {
         Element(result)
     }
 
-    /// scalar a fixed G[i] point
+    /// Multiplies a precomputed base point by a scalar using windowed NAF.
+    ///
+    /// This is the generic implementation for non-x86_64 architectures.
+    ///
+    /// # Arguments
+    ///
+    /// * `scalar` - The scalar multiplier (field element)
+    /// * `g_i` - Index of the base point to multiply
+    ///
+    /// # Returns
+    ///
+    /// The result of `scalar * G[g_i]` as an `Element`.
     #[cfg(not(target_arch = "x86_64"))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
@@ -292,7 +383,20 @@ impl Committer {
         Element(result)
     }
 
-    /// returns G[i] * (new_bytes - old_bytes)
+    /// Computes the contribution of a single delta to a commitment update.
+    ///
+    /// This is a convenience method that computes `G[i] * (new - old)`,
+    /// which represents the change in commitment for position i.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_bytes` - Previous 32-byte value at position i
+    /// * `new_bytes` - New 32-byte value at position i
+    /// * `g_i` - Index of the base point
+    ///
+    /// # Returns
+    ///
+    /// The delta contribution as an `Element`.
     pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
         let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
         let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
@@ -300,6 +404,16 @@ impl Committer {
     }
 }
 
+/// Adds an affine point to a projective point using extended Edwards coordinates.
+///
+/// This is the generic implementation using the extended twisted Edwards addition formula.
+/// The formula is optimized for adding an affine point (Z=1) to a projective point.
+///
+/// # Arguments
+///
+/// * `result` - The projective point to update (in-place)
+/// * `p2_x` - X-coordinate of the affine point to add
+/// * `p2_y` - Y-coordinate of the affine point to add
 #[cfg(not(target_arch = "x86_64"))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
@@ -309,6 +423,8 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     let mut c = p2_x * p2_y;
     let mut d = result.t * c;
 
+    // Multiply by the Edwards curve parameter d = -5
+    // The constant below is -5 in Montgomery form for the Bandersnatch field
     c = d * Fq::new_unchecked(BigInt::new([
         12167860994669987632u64,
         4043113551995129031u64,
@@ -329,7 +445,20 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     result.z = f * g;
 }
 
-/// Optimized affine point addition for x86_64
+/// Adds an affine point to a projective point using extended Edwards coordinates.
+///
+/// This x86_64-optimized version uses hand-written assembly for Montgomery multiplication
+/// to achieve better performance than the generic implementation.
+///
+/// # Arguments
+///
+/// * `result` - The projective point to update (in-place)
+/// * `p2_x` - X-coordinate of the affine point to add
+/// * `p2_y` - Y-coordinate of the affine point to add
+///
+/// # Safety
+///
+/// Uses unsafe assembly operations that are guaranteed correct for the Bandersnatch field.
 #[cfg(target_arch = "x86_64")]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use crate::scalar_multi_asm::*;
@@ -344,6 +473,8 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     mont_mul_asm(&mut c.0 .0, &p2_x.0 .0, &p2_y.0 .0);
     mont_mul_asm(&mut d.0 .0, &result.t.0 .0, &c.0 .0);
 
+    // Multiply by the Edwards curve parameter d = -5
+    // The constant is -5 in Montgomery form for the Bandersnatch field
     mont_mul_asm(
         &mut c.0 .0,
         &d.0 .0,
@@ -370,8 +501,20 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     mont_mul_asm(&mut result.z.0 .0, &f.0 .0, &g.0 .0);
 }
 
-/// Calculate the corresponding data index in the
-/// precomputed table through the scalar
+/// Decomposes a scalar into windows for efficient table lookups.
+///
+/// This function splits a scalar into w-bit windows for use with the
+/// precomputed multiplication tables. Each window represents a digit
+/// in the windowed representation of the scalar.
+///
+/// # Arguments
+///
+/// * `scalar` - The scalar to decompose
+/// * `w` - Window size in bits
+///
+/// # Returns
+///
+/// A vector of w-bit values representing the windowed decomposition.
 #[inline]
 fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     // Convert scalar from Montgomery form to big integer
@@ -398,7 +541,15 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
 }
 
 impl Element {
-    /// Batch conversion from EdwardsProjective to EdwardsAffine
+    /// Efficiently converts a batch of projective points to affine coordinates.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of points in projective coordinates
+    ///
+    /// # Returns
+    ///
+    /// Vector of the same points in affine coordinates.
     #[inline]
     pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
         let commitments = Element::batch_to_commitments(
@@ -417,17 +568,35 @@ impl Element {
             .collect()
     }
 
-    /// Batch conversion from Element to CommitmentBytes
+    /// Converts multiple elliptic curve points to their 64-byte commitment representations.
+    ///
+    /// This function efficiently serializes a batch of `Element` points into their
+    /// uncompressed byte representations. It uses Montgomery's batch inversion trick
+    /// to normalize all Z-coordinates with a single field inversion.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of elliptic curve points to convert
+    ///
+    /// # Returns
+    ///
+    /// Vector of 64-byte arrays, each containing:
+    /// - Bytes 0-31: X-coordinate (little-endian)
+    /// - Bytes 32-63: Y-coordinate (little-endian)
+    ///
+    /// # Special Cases
+    ///
+    /// - Identity elements (Z=0) are encoded as (0, 1)
     #[inline]
-    #[allow(clippy::op_ref)]
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
         let mut commitments = vec![[0u8; 64]; elements.len()];
         let mut zi_mul = vec![Fq::ZERO; elements.len()];
         let mut zeroes = vec![false; elements.len()];
         let mut zs_mul = Fq::ONE;
 
-        //zs_mul = 1*z1*z2*z3....zn
-        //zi_mul[i] = 1*z1...zi-1
+        // Montgomery batch inversion algorithm:
+        // Phase 1: Forward pass - compute accumulative products
+        //   zi_mul[i] = z1 * z2 * ... * z_{i-1}
         elements.iter().enumerate().for_each(|(i, element)| {
             if element.0.z.is_zero() {
                 zeroes[i] = true;
@@ -437,27 +606,48 @@ impl Element {
             zs_mul *= &element.0.z;
         });
 
-        // zs_inv = 1/zs_mul
+        // Phase 2: Single inversion - compute 1/(z1 * z2 * ... * zn)
         let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
 
+        // Phase 3: Backward pass - extract individual inverses
+        // We use the formula: 1/zi = zs_mul[i] * 1/(z1 * z2 * ... * zn) * (z_{i+1} * ... * zn)
         for i in (0..elements.len()).rev().step_by(1) {
             if zeroes[i] {
                 let _ = Fq::ONE.serialize_uncompressed(&mut commitments[i][32..64]);
                 continue;
             }
-            // z_inv = 1/zi
-            let z_inv = zi_mul[i] * &zs_inv;
+            let z_inv = zi_mul[i] * zs_inv;
             zs_inv *= &elements[i].0.z;
 
-            let _ = (elements[i].0.x * &z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
-            let _ = (elements[i].0.y * &z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
+            let _ = (elements[i].0.x * z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
+            let _ = (elements[i].0.y * z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
         }
         commitments
     }
 
-    /// Batch conversion from commitments to hash bytes
+    /// Compresses commitment points into 32-byte hashes for storage efficiency.
+    ///
+    /// This function converts 64-byte commitment representations (x, y) into
+    /// 32-byte hashes by computing x/y for each point. This compression is
+    /// useful for storage in SALT's trie nodes where full coordinates aren't needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `commitments` - Slice of 64-byte commitment representations
+    ///
+    /// # Returns
+    ///
+    /// Vector of 32-byte arrays containing x/y for each commitment.
+    ///
+    /// # Algorithm
+    ///
+    /// Uses Montgomery's batch inversion trick to compute all y-inverses
+    /// with a single field inversion, then multiplies each x by 1/y.
+    ///
+    /// # Special Cases
+    ///
+    /// - Points with y=0 result in empty (zero) hash bytes
     #[inline]
-    #[allow(clippy::op_ref)]
     pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
         let elements = commitments
             .iter()
@@ -468,8 +658,9 @@ impl Element {
         let mut zeroes = vec![false; elements.len()];
         let mut ys_mul = Fq::ONE;
 
-        //ys_mul = y1*y2*y3.....yn
-        //yi_mul[i] = 1*y1...yi-1
+        // Montgomery batch inversion algorithm for y-coordinates:
+        // Phase 1: Forward pass - compute comulative products
+        //   yi_mul[i] = y1 * y2 * ... * y_{i-1}
         elements.iter().enumerate().for_each(|(i, element)| {
             if element.0.y.is_zero() {
                 zeroes[i] = true;
@@ -479,17 +670,18 @@ impl Element {
             ys_mul *= &elements[i].0.y;
         });
 
-        // ys_inv = 1/ys_mul
+        // Phase 2: Single inversion - compute 1/(y1 * y2 * ... * yn)
         let mut ys_inv = ys_mul.inverse().expect("ys_mul is not zero");
 
+        // Phase 3: Backward pass - extract individual inverses
+        // We use the formula: 1/yi = yi_mul[i]* 1/(y1 * ... * yn) * (y_{i+1} * ... * yn)
         for i in (0..elements.len()).rev().step_by(1) {
             if zeroes[i] {
                 continue;
             }
-            // y_inv = 1/yi
-            let y_inv = yi_mul[i] * &ys_inv;
+            let y_inv = yi_mul[i] * ys_inv;
             ys_inv *= &elements[i].0.y;
-            let _ = (elements[i].0.x * &y_inv).serialize_uncompressed(&mut hashs[i][..]);
+            let _ = (elements[i].0.x * y_inv).serialize_uncompressed(&mut hashs[i][..]);
         }
         hashs
     }
@@ -506,6 +698,17 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
 
+    /// Tests the batch conversion from 64-byte commitments to 32-byte hash representations.
+    ///
+    /// This test verifies that `hash_commitments` correctly computes x/y for each point,
+    /// which is used to compress elliptic curve points for storage in SALT trie nodes.
+    ///
+    /// # Test Process
+    /// 1. Creates test points as multiples of the generator
+    /// 2. Converts them to 64-byte uncompressed format
+    /// 3. Calls `hash_commitments` to compress to 32 bytes
+    /// 4. Manually computes x/y for verification
+    /// 5. Ensures the batch operation matches individual computations
     #[test]
     fn batch_elements_to_hash_bytes() {
         let a_vec = vec![
@@ -521,13 +724,27 @@ mod tests {
         let hash_bytes = Element::hash_commitments(&c_vec);
 
         for i in 0..a_vec.len() {
-            let mut bytes = [0u8; 32];
+            let mut bytes = [0_u8; 32];
             let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[..]);
             assert_eq!(bytes, hash_bytes[i]);
         }
     }
 
+    /// Tests the batch conversion from projective Elements to 64-byte commitment format.
+    ///
+    /// This test validates that `batch_to_commitments` correctly normalizes projective
+    /// points (X:Y:Z) to affine coordinates (X/Z, Y/Z) and serializes them as 64-byte arrays.
+    ///
+    /// # Test Process
+    /// 1. Creates test points in projective coordinates
+    /// 2. Calls `batch_to_commitments` for batch conversion
+    /// 3. Manually computes affine coordinates (x/z, y/z) for each point
+    /// 4. Serializes manually computed values
+    /// 5. Verifies batch results match individual computations
+    ///
+    /// # Importance
+    /// This ensures the Montgomery batch inversion optimization produces correct results.
     #[test]
     fn batch_elements_to_commitments() {
         let a_vec = vec![
@@ -538,7 +755,7 @@ mod tests {
         let hash_bytes = Element::batch_to_commitments(&a_vec);
 
         for i in 0..a_vec.len() {
-            let mut bytes = [0u8; 64];
+            let mut bytes = [0_u8; 64];
             let x = a_vec[i].0.x * a_vec[i].0.z.inverse().unwrap();
             let y = a_vec[i].0.y * a_vec[i].0.z.inverse().unwrap();
             let _ = x.serialize_uncompressed(&mut bytes[0..32]);
@@ -547,6 +764,19 @@ mod tests {
         }
     }
 
+    /// Tests the batch conversion from projective to affine coordinates.
+    ///
+    /// This test verifies that `batch_proj_to_affine` correctly converts multiple
+    /// points from projective representation (X:Y:Z) to affine representation (x, y).
+    ///
+    /// # Test Process
+    /// 1. Creates projective points directly (accessing internal .0 field)
+    /// 2. Calls `batch_proj_to_affine` for batch conversion
+    /// 3. Verifies each result by checking x = X/Z and y = Y/Z
+    ///
+    /// # Implementation Detail
+    /// The function internally uses `batch_to_commitments` and deserializes the results,
+    /// leveraging the same Montgomery batch inversion optimization.
     #[test]
     fn batch_proj_to_affine() {
         let a_vec = vec![
@@ -562,6 +792,25 @@ mod tests {
         }
     }
 
+    /// Tests the correctness of precomputed MSM against the reference implementation.
+    ///
+    /// This comprehensive test verifies that the `Committer`'s optimized scalar multiplication
+    /// produces identical results to the standard multi-scalar multiplication algorithm.
+    ///
+    /// # Test Setup
+    /// - Creates 256 base points: G, 2G, 3G, ..., 256G
+    /// - Uses negative scalars: -1, -2, -3, ..., -256
+    /// - Window size 11 (typical for 256 base points)
+    ///
+    /// # Test Process
+    /// 1. Computes reference result using `multi_scalar_mul`
+    /// 2. Creates a `Committer` with precomputed tables
+    /// 3. Accumulates results using `mul_index` for each scalar
+    /// 4. Verifies the optimized result matches the reference
+    ///
+    /// # Coverage
+    /// This tests both positive and negative scalars, exercising the
+    /// full windowed NAF algorithm including carry propagation.
     #[test]
     fn mul_index() {
         let mut crs = Vec::with_capacity(256);
@@ -584,16 +833,35 @@ mod tests {
 
         assert_eq!(got_result, result);
     }
-    #[test]
-    fn correctness_for_debug() {
-        // Create a vector of 256 elements, each being a multiple of the prime subgroup generator
 
+    /// Tests a specific edge case with known output for debugging and validation.
+    ///
+    /// This test uses a carefully chosen scalar (q-1, where q is the subgroup order)
+    /// to verify correct handling of large scalars near the field modulus.
+    ///
+    /// # Test Details
+    /// - Uses scalar = q-1 = 13108968793781547619861935127046491459309155893440570251786403306729687672800
+    /// - This represents -1 in the field, so (q-1)G = -G
+    /// - Expected output coordinates are hardcoded for validation
+    ///
+    /// # Purpose
+    /// 1. Validates correct modular reduction of large scalars
+    /// 2. Tests edge case near field boundary
+    /// 3. Provides performance metrics (memory usage and timing)
+    /// 4. Serves as a regression test with known correct output
+    ///
+    /// # Debug Output
+    /// - Prints precomputed table memory size
+    /// - Measures and prints multiplication time
+    /// - Shows resulting affine coordinates
+    #[test]
+    fn neg_one_scalar_mult() {
         let basis_num = 1;
         let mut basic_crs = Vec::with_capacity(basis_num);
         for i in 0..basis_num {
             basic_crs.push(Element::prime_subgroup_generator() * Fr::from((i + 1) as u64));
         }
-        //q-1
+        // q-1 where q is the subgroup order (represents -1 in the field)
         let scalar = Fr::from_str(
             "13108968793781547619861935127046491459309155893440570251786403306729687672800",
         )
@@ -601,7 +869,7 @@ mod tests {
 
         let precompute = Committer::new(&basic_crs, 11);
         let mem_byte_size = precompute.tables.len() * precompute.tables[0].len() * 2 * 32;
-        println!("precompute_size: {:?}", mem_byte_size);
+        println!("precompute_size: {mem_byte_size:?}");
         use std::time::Instant;
         let start = Instant::now();
         let got_result = precompute.mul_index(&scalar, 0);
@@ -618,12 +886,34 @@ mod tests {
         let y = affine_result.y.to_string();
         assert_eq!(string_x, x);
         assert_eq!(string_y, y);
-        println!("got_result: {:?}", affine_result);
+        println!("got_result: {affine_result:?}");
     }
-    #[test]
-    fn correctness_benchmark_manual() {
-        // Create a vector of 256 elements, each being a multiple of the prime subgroup generator
 
+    /// Comprehensive correctness test across multiple window sizes with random scalars.
+    ///
+    /// This test validates the `Committer` implementation by testing various window sizes
+    /// with random scalar inputs, ensuring correctness across different optimization levels.
+    ///
+    /// # Test Parameters
+    /// - Window sizes: 4 through 16 (testing different memory/speed trade-offs)
+    /// - 100 random scalars per window size
+    /// - Uses deterministic RNG (seed [2u8; 32]) for reproducibility
+    ///
+    /// # Test Process
+    /// For each window size:
+    /// 1. Creates a new `Committer` with that window size
+    /// 2. Generates random scalars
+    /// 3. Computes result using optimized `mul_index`
+    /// 4. Computes reference result using `multi_scalar_mul`
+    /// 5. Verifies results match exactly
+    ///
+    /// # Coverage
+    /// - Tests small to large window sizes (4-16)
+    /// - Uses random scalars to test various bit patterns
+    /// - Validates the windowing algorithm works correctly for all window sizes
+    /// - Ensures precomputed tables are correct regardless of window choice
+    #[test]
+    fn test_window_size_variations_with_random_scalars() {
         let basis_num = 1;
         let mut basic_crs = Vec::with_capacity(basis_num);
         for i in 0..basis_num {

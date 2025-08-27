@@ -1,12 +1,8 @@
 [workspace]
 
 members = [
-    "verkle-db",
-    "verkle-trie",
-    "verkle-spec",
     "ipa-multipoint",
     "banderwagon",
-    "ffi_interface",
     "salt",
 ]
 resolver = "2"

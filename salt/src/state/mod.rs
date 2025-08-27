@@ -1,9 +1,17 @@
-//! This module implements the "state" component of the SALT
-//! data structure that holds the key-value pairs of the
-//! blockchain state to be authenticated.
+//! State management for SALT with plain key abstraction.
+//!
+//! This module provides the core state management functionality for SALT,
+//! translating between plain keys and SALT's internal bucket-slot addressing.
+//! It supports an ephemeral state layer for batched updates and implements
+//! strongly history-independent (SHI) hash tables for organizing data within
+//! buckets.
 
+/// Hashing utilities for deterministic bucket and slot assignment.
+pub mod hasher;
+
+/// Core state management with SHI hash table implementation and ephemeral state layer.
 #[allow(clippy::module_inception)]
 pub mod state;
-pub mod updates;
 
-pub use state::pk_hasher;
+/// State change tracking and merging for atomic batch operations.
+pub mod updates;

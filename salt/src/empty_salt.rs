@@ -1,87 +1,98 @@
-//! This module provides a standalone method for computing the
-//! SALT state root for the genesis block with minimal dependency.
+//! Empty storage backend for SALT.
+//!
+//! This module provides [`EmptySalt`], a minimal and immutable storage backend
+//! that returns default values for all queries. Useful for computing the initial
+//! state root of an empty SALT trie and testing scenarios.
 
 use crate::{
     constant::*,
-    traits::{StateLoader, StateReader, TrieReader},
+    traits::{StateReader, TrieReader},
     types::*,
 };
 use std::ops::{Range, RangeInclusive};
 
-/// An empty SALT structure that contains no account or storage.
+/// Represents an empty SALT structure that contains no account or storage.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct EmptySalt;
 
 impl StateReader for EmptySalt {
     type Error = SaltError;
 
-    fn get_meta(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        Ok(BucketMeta::default())
+    fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+        Ok(None)
     }
 
-    fn entry(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        let value = key
-            .is_bucket_meta_slot()
-            .then(|| BucketMeta::default().into());
-        Ok(value)
-    }
-
-    fn range_slot(
+    fn entries(
         &self,
-        bucket_id: BucketId,
-        range: RangeInclusive<u64>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(
-            if bucket_id < NUM_META_BUCKETS as BucketId && *range.start() < MIN_BUCKET_SIZE as u64 {
-                let range = *range.start()..std::cmp::min(MIN_BUCKET_SIZE as u64, *range.end());
-                range
-                    .into_iter()
-                    .map(|slot_id| {
-                        // Return a default value for the bucket meta
-                        (
-                            SaltKey::from((bucket_id, slot_id)),
-                            BucketMeta::default().into(),
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
-        )
-    }
-}
-
-impl StateLoader for EmptySalt {
-    type Error = SaltError;
-
-    fn load_range(
-        &self,
-        _range: RangeInclusive<BucketId>,
+        _range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         Ok(Vec::new())
+    }
+
+    fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        Ok(BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        })
     }
 }
 
 impl TrieReader for EmptySalt {
     type Error = SaltError;
 
-    fn get_commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        let level = get_node_level(node_id);
-        Ok(
-            if is_extension_node(node_id)
-                || node_id >= DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId
-            {
-                zero_commitment()
-            } else {
-                DEFAULT_COMMITMENT_AT_LEVEL[level].1
-            },
-        )
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        Ok(default_commitment(node_id))
     }
 
-    fn get_range(
+    fn node_entries(
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constant::NUM_META_BUCKETS;
+
+    #[test]
+    fn test_state_reader() {
+        let empty_salt = EmptySalt;
+
+        // Test value() returns None
+        assert_eq!(empty_salt.value(SaltKey::from((1000, 0))).unwrap(), None);
+
+        // Test entries() returns empty Vec
+        assert!(empty_salt
+            .entries(SaltKey(0)..=SaltKey(u64::MAX))
+            .unwrap()
+            .is_empty());
+
+        // Test bucket_used_slots() returns 0
+        let bucket_id = NUM_META_BUCKETS as u32;
+        assert_eq!(empty_salt.bucket_used_slots(bucket_id).unwrap(), 0);
+
+        // Test metadata() returns default with used: Some(0)
+        let meta = empty_salt.metadata(bucket_id).unwrap();
+        let expected_meta = BucketMeta {
+            used: Some(0),
+            ..BucketMeta::default()
+        };
+        assert_eq!(meta, expected_meta);
+    }
+
+    #[test]
+    fn test_trie_reader() {
+        let empty_salt = EmptySalt;
+
+        // Test commitment() returns default commitment
+        let node_id = 0;
+        let result = empty_salt.commitment(node_id).unwrap();
+        assert_eq!(result, default_commitment(node_id));
+
+        // Test node_entries() returns empty Vec
+        assert!(empty_salt.node_entries(0..10).unwrap().is_empty());
     }
 }

@@ -1,9 +1,60 @@
-//! This module contains the implementation of scalar multiplication using assembly language.
+//! Optimized Montgomery modular multiplication implementation using x86_64 assembly.
+//!
+//! This module provides low-level, hand-optimized assembly implementations of Montgomery
+//! modular multiplication operations specifically for the Bandersnatch curve's base field.
+//! Montgomery multiplication is essential for efficient elliptic curve operations.
+//!
+//! # Montgomery Multiplication
+//!
+//! Montgomery multiplication computes `(a * b * R^-1) mod p` where `R = 2^256` is the
+//! Montgomery radix. This representation allows for efficient modular arithmetic without
+//! expensive division operations.
+//!
+//! # Field Parameters
+//!
+//! The assembly code uses hardcoded constants for the Bandersnatch curve's base field:
+//! - Field prime: `p = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`
+//! - Montgomery parameter: `q' = 0xfffffffeffffffff` (negative inverse of p mod 2^64)
+//!
+//! # Performance Characteristics
+//!
+//! - Uses x86_64 specific instructions (MULX, ADCX, ADOX) for maximum throughput
+//! - Interleaved multiply-accumulate operations to minimize latency
+//! - Conditional move (CMOV) for constant-time modular reduction
+//! - Register allocation optimized for the specific field size (4 × 64-bit limbs)
+//!
+//! # Safety
+//!
+//! All functions use `unsafe` blocks as they contain inline assembly. The assembly
+//! code assumes x86_64 architecture and may not work on other platforms.
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::asm;
 
-///Implement Montgomery modular multiplication, result = result * 5
+/// Multiplies a field element by 5 in Montgomery form using optimized assembly.
+///
+/// This function computes `result = (result * 5) mod p` where `p` is the Bandersnatch
+/// base field prime. The multiplication by 5 is performed by doubling twice and adding
+/// the original value: `5x = 4x + x = 2(2x) + x`.
+///
+/// # Algorithm
+///
+/// 1. **First doubling**: `2x` with carry propagation
+/// 2. **Modular reduction**: Reduce `2x` if it exceeds the field prime
+/// 3. **Second doubling**: `4x = 2(2x)` with carry propagation
+/// 4. **Modular reduction**: Reduce `4x` if it exceeds the field prime
+/// 5. **Addition**: `5x = 4x + x` with carry propagation
+/// 6. **Final reduction**: Reduce `5x` if it exceeds the field prime
+///
+/// # Parameters
+///
+/// * `result` - Mutable reference to a 4-limb array representing the field element
+///   in Montgomery form. Both input and output.
+///
+/// # Safety
+///
+/// This function is only available on x86_64 targets and uses inline assembly.
+/// The caller must ensure the input is a valid Montgomery form field element.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
@@ -113,7 +164,68 @@ pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
     }
 }
 
-///Implement Montgomery modular multiplication, result = x * y
+/// Computes Montgomery modular multiplication of two field elements.
+///
+/// This function implements the Montgomery multiplication algorithm to compute
+/// `result = (x * y * R^-1) mod p` where `R = 2^256` and `p` is the Bandersnatch
+/// base field prime. This is the core operation for all field arithmetic.
+///
+/// # Montgomery CIOS Algorithm
+///
+/// The implementation uses the Coarsely Integrated Operand Scanning (CIOS) method:
+///
+/// ```text
+/// for i in 0..4:
+///     // Multiply-accumulate phase
+///     (C, t) := t + x * y[i]
+///
+///     // Montgomery reduction phase
+///     m := t[0] * q' mod 2^64
+///     (C, t) := (t + m * p) / 2^64
+///
+/// // Final conditional subtraction
+/// if t >= p then t := t - p
+/// ```
+///
+/// # Parameters
+///
+/// * `result` - Mutable reference to store the multiplication result (4 × 64-bit limbs)
+/// * `x` - First operand in Montgomery form (4 × 64-bit limbs)
+/// * `y` - Second operand in Montgomery form (4 × 64-bit limbs)
+///
+/// # Algorithm Details
+///
+/// The function processes each limb of `y` in sequence:
+/// 1. **Outer loop** (4 iterations): For each `y[i]`
+///    - Multiply `x` by `y[i]` and add to accumulated result
+///    - Compute Montgomery parameter `m = t[0] * q' mod 2^64`
+///    - Multiply `m` by field prime `p` and subtract from result
+///    - Right-shift result by 64 bits
+/// 2. **Final reduction**: Conditionally subtract `p` if result ≥ `p`
+///
+/// # Field Constants
+///
+/// The assembly uses these hardcoded Bandersnatch field parameters:
+/// - `q' = 0xfffffffeffffffff` (Montgomery parameter)
+/// - `p[0] = 0xffffffff00000001` (field prime limb 0)
+/// - `p[1] = 0x53bda402fffe5bfe` (field prime limb 1)
+/// - `p[2] = 0x3339d80809a1d805` (field prime limb 2)
+/// - `p[3] = 0x73eda753299d7d48` (field prime limb 3)
+///
+/// # Safety
+///
+/// This function is only available on x86_64 targets and uses inline assembly.
+/// Both operands must be valid Montgomery form field elements (< 2^256).
+///
+/// # Example Usage
+///
+/// ```ignore
+/// let mut result = [0u64; 4];
+/// let x = [1, 0, 0, 0];  // Montgomery form of 1
+/// let y = [2, 0, 0, 0];  // Montgomery form of 2
+/// mont_mul_asm(&mut result, &x, &y);
+/// // result now contains Montgomery form of (1 * 2 * R^-1) mod p
+/// ```
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn mont_mul_asm(result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]) {
