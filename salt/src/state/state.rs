@@ -277,11 +277,23 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         plain_val: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        let metadata = self.metadata(bucket_id, true)?;
-        let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
-
         // Start with the new key-value pair we want to insert
         let mut new_salt_val = SaltValue::new(plain_key, plain_val);
+
+        // Step 1: Try direct lookup first
+        if let Ok(Some((salt_key, old_salt_val))) = self.direct_find(plain_key) {
+            self.update_value(
+                out_updates,
+                salt_key,
+                Some(old_salt_val),
+                Some(new_salt_val),
+            );
+            return Ok(());
+        }
+
+        // Step 2: Fall through to standard SHI upsert algorithm
+        let metadata = self.metadata(bucket_id, true)?;
+        let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
         // Linear probe through the bucket, creating a displacement chain
         for step in 0..metadata.capacity {
@@ -536,6 +548,38 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(None)
     }
 
+    /// Attempts to find a plain key via direct lookup.
+    ///
+    /// This method serves two purposes:
+    /// 1. **Essential for partial state storage**: Backends like block witnesses
+    ///    or proofs don't have complete slot data needed for SHI linear probing.
+    ///    They maintain direct mappings to provide access to known keys.
+    /// 2. **Optimization for full state storage**: Can bypass the SHI search
+    ///    algorithm when the exact location is already known.
+    ///
+    /// # Returns
+    /// - `Ok(Some((salt_key, salt_val)))` - Successfully found the key with matching plain key
+    /// - `Ok(None)` - Direct lookup failed (not found, key mismatch, or empty slot)
+    /// - `Err(_)` - Storage error or method not supported
+    ///
+    /// # Note
+    /// Callers should always fall back to standard search algorithm when this
+    /// method returns anything other than `Ok(Some(_))`.
+    fn direct_find(
+        &mut self,
+        plain_key: &[u8],
+    ) -> Result<Option<(SaltKey, SaltValue)>, Store::Error> {
+        match self.store.plain_value_fast_path(plain_key)? {
+            Some(salt_key) => {
+                match self.value(salt_key)? {
+                    Some(salt_val) if salt_val.key() == plain_key => Ok(Some((salt_key, salt_val))),
+                    _ => Ok(None), // Key mismatch or empty slot - treated as not found
+                }
+            }
+            None => Ok(None), // Key not found in direct lookup table
+        }
+    }
+
     /// Finds the next entry suitable for moving into the given slot during deletion.
     ///
     /// This method implements the slot compaction algorithm used during SHI deletion.
@@ -591,14 +635,21 @@ where
     type Error = Store::Error;
 
     fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
-        let bucket_id = hasher::bucket_id(plain_key);
-        let metadata = self.metadata(bucket_id, false)?;
+        // Step 1: Try direct lookup first (happy path for partial state storage
+        // or optimization)
+        if let Ok(Some((_, salt_val))) = self.direct_find(plain_key) {
+            return Ok(Some(salt_val.value().to_vec()));
+        }
 
         // FIXME: too many memory copies on the read path currently
         // 1. shi_find() has two internal paths:
         //    - Cache hit: 1 copy from cache
         //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
         // 2. salt_val.value().to_vec() copies the plain value bytes upon return
+
+        // Step 2: Fall through to standard SHI find algorithm
+        let bucket_id = hasher::bucket_id(plain_key);
+        let metadata = self.metadata(bucket_id, false)?;
         match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
             Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
             None => Ok(None),
