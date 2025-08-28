@@ -149,7 +149,7 @@ impl PlainKeysProof {
 // This allows the proof to be used as a state reader during verification,
 // providing only the data that was included in the proof
 impl StateReader for PlainKeysProof {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves a salt value by its salt key from the proof data.
     /// Delegates to the underlying BlockWitness implementation.
@@ -172,7 +172,7 @@ impl StateReader for PlainKeysProof {
 }
 
 impl TrieReader for PlainKeysProof {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         self.witness.commitment(node_id)
@@ -223,7 +223,7 @@ mod tests {
         let state_updates = state.update(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new(&store);
+        let mut trie = StateRoot::new(&store, &store);
         let (root, trie_updates) = trie.update(&state_updates).unwrap();
         store.update_trie(trie_updates);
 
@@ -613,7 +613,7 @@ mod tests {
         let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new(&store).update(&updates).unwrap();
+        let (_, trie_updates) = StateRoot::new(&store, &store).update(&updates).unwrap();
 
         store.update_trie(trie_updates);
 
@@ -664,7 +664,7 @@ mod tests {
 
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new(store);
+        let mut trie = StateRoot::new(store, store);
         let (root, trie_updates) = trie.update(&state_updates).unwrap();
 
         store.update_trie(trie_updates);

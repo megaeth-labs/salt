@@ -5,11 +5,15 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
+pub use state::{
+    hasher,
+    state::{EphemeralSaltState, EphemeralSaltStateCache, PlainStateProvider},
+    updates::StateUpdates,
+};
 pub mod trie;
 pub use trie::{
     proof::PlainKeysProof,
-    trie::{get_child_node, StateRoot},
+    trie::{compute_from_scratch, get_child_node, StateRoot},
     updates::TrieUpdates,
     witness::BlockWitness,
 };
@@ -52,7 +56,7 @@ mod tests {
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes
-        let mut state_root = StateRoot::new(&store);
+        let mut state_root = StateRoot::new(&store, &store);
         let (root_hash, trie_updates) = state_root.update(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state

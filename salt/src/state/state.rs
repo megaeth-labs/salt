@@ -49,6 +49,21 @@ use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
+use tracing::info;
+
+/// EphemeralSaltStateCache is used to cache temporary SALT state.
+/// It contains two hash maps:
+/// - The first HashMap<SaltKey, Option<SaltValue>> caches the value for each
+///   SALT key (Option, None means deleted or missed)
+/// - The second HashMap<BucketId, BucketMeta> caches metadata for each bucket
+///   (such as capacity, usage, etc.)
+#[derive(Debug, Default, Clone)]
+pub struct EphemeralSaltStateCache(
+    // cache for kv
+    pub HashMap<SaltKey, Option<SaltValue>>,
+    // cache fo meta use
+    pub HashMap<BucketId, u64>,
+);
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -110,12 +125,38 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
+    /// Create a [`EphemeralSaltState`] object with the given `state_cache`.
+    pub fn with_cache(self, state_cache: EphemeralSaltStateCache) -> Self {
+        Self {
+            cache: state_cache.0,
+            bucket_used_cache: state_cache.1,
+            ..self
+        }
+    }
+
     /// Enables caching of read values from the store.
     pub fn cache_read(self) -> Self {
         Self {
             cache_read: true,
             ..self
         }
+    }
+
+    /// Consumes the state and returns the underlying cache containing all changes made to the base
+    /// state.
+    pub fn consume_cache(self) -> EphemeralSaltStateCache {
+        EphemeralSaltStateCache(self.cache, self.bucket_used_cache)
+    }
+
+    /// Accessing `keys` through `EphemeralSaltState`
+    pub fn touch_keys(&mut self, keys: Vec<&[u8]>) -> Result<(), Store::Error> {
+        for k in keys {
+            let bucket_id = hasher::bucket_id(k);
+            // get and record bucket meta
+            let meta = self.metadata(bucket_id, false)?;
+            self.shi_find(bucket_id, meta.nonce, meta.capacity, k)?;
+        }
+        Ok(())
     }
 
     /// Retrieves the plain value associated with the given plain key.
@@ -339,6 +380,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 
                 // Resize the bucket if load factor threshold exceeded
                 if used >= metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
+                    info!(
+                        "bucket_id {} capacity extend from {} to {}",
+                        bucket_id,
+                        metadata.capacity,
+                        metadata.capacity * BUCKET_RESIZE_MULTIPLIER
+                    );
                     self.shi_rehash(
                         bucket_id,
                         metadata.nonce,
@@ -565,6 +612,54 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
+    }
+}
+
+/// This structure enables reading EVM account & storage data from a SALT state.
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The SALT state to read data from.
+    pub salt_state: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Create a [`SaltStateProvider`] object.
+    pub const fn new(salt_state: &'a S) -> Self {
+        Self { salt_state }
+    }
+
+    /// Return the SALT value associated with the given plain key.
+    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = hasher::bucket_id(plain_key);
+        self.get_raw_with_bucket(bucket_id, plain_key)
+    }
+
+    /// Returns the SALT value associated with the given plain key using a precomputed Salt key.
+    pub fn get_raw_with_bucket(
+        &self,
+        bucket_id: BucketId,
+        plain_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        let meta = self.salt_state.metadata(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = hasher::hash_with_nonce(plain_key, meta.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..meta.capacity {
+            let slot_id = probe(hashed_id, step, meta.capacity);
+            if let Some(slot_val) = self.salt_state.value((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 

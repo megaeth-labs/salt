@@ -1846,6 +1846,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "ark-ff 0.5.0",
+ "auto_impl",
  "banderwagon",
  "bincode 2.0.1",
  "blake3",
