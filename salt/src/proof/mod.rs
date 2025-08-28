@@ -33,4 +33,8 @@ pub enum ProofError {
     /// Multi-point proof verification failed
     #[error("multi-point proof check failed")]
     MultiPointProofFailed,
+
+    /// Key mapping verification failed during proof validation
+    #[error("invalid key mapping: {reason}")]
+    InvalidKeyMapping { reason: String },
 }

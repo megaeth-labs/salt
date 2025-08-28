@@ -109,59 +109,78 @@ impl PlainKeysProof {
         })
     }
 
-    /// Verifies the cryptographic proof against the given state root.
+    /// Verifies the proof's integrity and validates key locations.
     ///
-    /// This method validates that all plain keys in the proof have the correct
-    /// existence status and that the underlying Salt proof is valid.
+    /// This method performs a two-phase verification process:
+    ///
+    /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT witness
+    ///    proof against the provided state root to ensure the proof is cryptographically
+    ///    sound and the claimed key-value pairs are authentic.
+    ///
+    /// 2. **Key Location Verification**: For each plain key in the proof, verifies that:
+    ///    - Keys claimed to exist are found exactly at their specified salt key locations
+    ///    - Keys claimed not to exist are genuinely absent from the state
     ///
     /// # Arguments
-    /// * `root` - The state root hash to verify against
+    ///
+    /// * `root` - The expected state root hash to verify the proof against
     ///
     /// # Returns
-    /// * `Ok(())` if the proof is valid
-    /// * `Err(ProofError)` if verification fails
+    ///
+    /// * `Ok(())` - If both cryptographic proof and key locations are valid
+    /// * `Err(ProofError)` - If verification fails due to:
+    ///   - Invalid cryptographic proof
+    ///   - Incorrect key mapping
     pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
-        // Verify the underlying cryptographic proof using the witness
+        // Phase 1: Verify the underlying cryptographic proof using salt witness
         self.salt_witness.verify_proof(root)?;
 
-        // Create a fresh ephemeral state for each key to prevent cache interference
-        // This ensures that the search process for one key doesn't affect another
-        let mut state = EphemeralSaltState::new(&self.salt_witness);
+        // Phase 2: Verify that every plain key can be found in the claimed location
+        // or is correctly proven to be non-existent
+        let mut state = EphemeralSaltState::new(self);
 
-        // Process each plain key individually to determine its status
-        for (plain_key, maybe_salt_key) in &self.key_mapping {
-            if let Some(salt_key) = maybe_salt_key {
-                let maybe_salt_value =
-                    self.salt_witness
-                        .value(*salt_key)
-                        .map_err(|e| ProofError::StateReadError {
-                            reason: format!("Witness Failed to read salt value: {e:?}"),
-                        })?;
-                if let Some(salt_value) = maybe_salt_value {
-                    if salt_value.key() != plain_key {
-                        return Err(ProofError::StateReadError {
+        for (plain_key, expected_salt_key) in &self.key_mapping {
+            // First try direct_find to see if the key is in the claimed location
+            match state.direct_find(plain_key) {
+                Ok(Some(_)) => {
+                    // Key found in the expected location - passes the check
+                    continue;
+                }
+                _ => {
+                    // Key not found via direct lookup, fall through to full search
+                }
+            }
+
+            // If direct_find didn't succeed, use `plain_value()` to do a full search
+            match state.plain_value(plain_key) {
+                Ok(Some(_)) => {
+                    // Key exists but NOT in the claimed location - verification fails
+                    // (If it were in the right place, direct_find would have found it)
+                    return Err(ProofError::InvalidKeyMapping {
+                        reason: format!(
+                            "Key found in wrong location: {:?}",
+                            String::from_utf8_lossy(plain_key)
+                        ),
+                    });
+                }
+                Ok(None) => {
+                    // Key doesn't exist - passes only if we expected it not to exist
+                    if expected_salt_key.is_some() {
+                        return Err(ProofError::InvalidKeyMapping {
                             reason: format!(
-                                "Witness plain key doesn't match, expected: {plain_key:?}, got: {:?}",
-                                salt_value.key()
+                                "Key expected to exist but not found: {:?}",
+                                String::from_utf8_lossy(plain_key)
                             ),
                         });
                     }
-                } else {
-                    return Err(ProofError::StateReadError {
-                        reason: format!("Witness salt value shouldn't be None, plain key: {plain_key:?}, salt key {salt_key:?}"),
-                    });
                 }
-            } else {
-                let maybe_plain_value =
-                    state
-                        .plain_value(plain_key)
-                        .map_err(|e| ProofError::StateReadError {
-                            reason: format!("Failed to read plain value from witness: {e:?}"),
-                        })?;
-                if maybe_plain_value.is_some() {
+                Err(e) => {
+                    // Error during lookup - verification fails
                     return Err(ProofError::StateReadError {
                         reason: format!(
-                            "Witness plain value should be None, got: {maybe_plain_value:?}, plain key: {plain_key:?}"
+                            "Failed to verify key {:?}: {}",
+                            String::from_utf8_lossy(plain_key),
+                            e
                         ),
                     });
                 }

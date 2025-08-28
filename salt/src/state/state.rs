@@ -565,7 +565,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// # Note
     /// Callers should always fall back to standard search algorithm when this
     /// method returns anything other than `Ok(Some(_))`.
-    fn direct_find(
+    pub(crate) fn direct_find(
         &mut self,
         plain_key: &[u8],
     ) -> Result<Option<(SaltKey, SaltValue)>, Store::Error> {
