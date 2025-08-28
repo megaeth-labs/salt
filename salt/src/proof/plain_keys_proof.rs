@@ -22,8 +22,12 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainKeysProof {
+    // TODO: the builtin serialization mechanism has too much redundant data.
+    // e.g., every plain key is stored twice: one in `key_mapping` and one in
+    // `salt_witness`.
     /// Mapping from plain keys to their corresponding salt keys (if they exist).
     pub(crate) key_mapping: BTreeMap<Vec<u8>, Option<SaltKey>>,
+
     /// Low-level SALT witness containing all bucket slots needed for proving the
     /// existence or non-existence of the plain keys and their cryptographic proof.
     pub(crate) salt_witness: SaltWitness,
@@ -166,33 +170,6 @@ impl PlainKeysProof {
 
         Ok(())
     }
-
-    /// Retrieves all plain values for the keys in this proof.
-    ///
-    /// Returns a vector where each element corresponds to the plain key at the same index.
-    /// Elements are `Some(value)` for existing keys and `None` for non-existing keys.
-    ///
-    /// # Returns
-    /// A vector of optional values, one for each key in the proof
-    ///
-    /// Note: this method doesn't verify the proof, so it's not safe to use directly.
-    /// You need to call `verify()` first.
-    pub fn get_values(&self) -> Result<Vec<Option<Vec<u8>>>, String> {
-        self.key_mapping
-            .values()
-            .map(|maybe_salt_key| {
-                if let Some(salt_key) = maybe_salt_key {
-                    let salt_value = self
-                        .salt_witness
-                        .value(*salt_key)
-                        .map_err(|e| e.to_string())?;
-                    Ok(salt_value.map(|v| v.value().to_vec()))
-                } else {
-                    Ok(None)
-                }
-            })
-            .collect()
-    }
 }
 
 // Implementation of StateReader trait for PlainKeysProof
@@ -269,6 +246,15 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
+    /// Test helper that extracts all proven values from a PlainKeysProof.
+    /// Returns values in the same order as keys appear in the proof's key_mapping.
+    pub fn get_proven_values(proof: &mut PlainKeysProof) -> Vec<Option<Vec<u8>>> {
+        let keys: Vec<_> = proof.key_mapping.keys().cloned().collect();
+        keys.iter()
+            .map(|plain_key| proof.plain_value(plain_key).unwrap())
+            .collect()
+    }
+
     /// Test serialization and deserialization of PlainKeysProof.
     /// Ensures that proofs can be transmitted and stored reliably.
     #[test]
@@ -337,7 +323,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_some());
 
@@ -358,7 +344,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_none());
 
@@ -403,7 +389,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_none());
 
@@ -452,7 +438,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_none());
 
@@ -497,7 +483,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_none());
 
@@ -535,7 +521,7 @@ mod tests {
         assert!(proof.verify(root).is_ok());
 
         let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = proof.get_values().unwrap();
+        let proof_values = get_proven_values(&mut proof);
 
         assert!(proof_value.is_none());
 
