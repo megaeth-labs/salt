@@ -13,7 +13,6 @@ use crate::{
 };
 use core::error::Error;
 use std::{
-    fmt::Debug,
     ops::{Range, RangeInclusive},
 };
 
@@ -147,7 +146,7 @@ pub trait StateReader: Send + Sync {
 #[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Error + Send + Sync + 'static;
 
     /// Retrieves the commitment for a specific trie node.
     ///

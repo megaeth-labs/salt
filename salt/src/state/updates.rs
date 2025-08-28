@@ -15,7 +15,7 @@ use std::{
 pub struct StateUpdates {
     /// Maps keys to (old_value, new_value) pairs. None indicates absence/deletion.
     #[deref]
-    pub(crate) data: BTreeMap<SaltKey, (Option<SaltValue>, Option<SaltValue>)>,
+    pub data: BTreeMap<SaltKey, (Option<SaltValue>, Option<SaltValue>)>,
 }
 
 impl StateUpdates {

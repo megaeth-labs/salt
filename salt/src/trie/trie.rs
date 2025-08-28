@@ -43,7 +43,7 @@ pub struct StateRoot<'a, T, S> {
 impl<'a, T, S> StateRoot<'a, T, S>
 where
     S: StateReader,
-    T: TrieReader<Error = <S as StateReader>::Error>,
+    T: TrieReader,
 {
     /// Create a [`StateRoot`] object with the given state and trie storage backend.
     pub fn new(state_store: &'a S, trie_store: &'a T) -> Self {
@@ -55,13 +55,6 @@ where
         }
     }
 
-    /// Create with the same store for both (requires Store to implement both traits)
-    pub fn new_one<A>(store: &'a A) -> StateRoot<'a, A, A>
-    where
-        A: StateReader + TrieReader<Error = <A as StateReader>::Error>,
-    {
-        StateRoot::new(store, store)
-    }
 
     /// Merge the trie updates into the existing trie.
     pub fn add_deltas(&mut self, trie_updates: &TrieUpdates) {

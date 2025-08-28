@@ -89,14 +89,14 @@ struct StateStore {
 #[derive(Debug, Default)]
 pub struct MemStore {
     /// Blockchain state storage.
-    state: RwLock<StateStore>,
+    pub state: RwLock<StateStore>,
 
     /// Trie node commitment storage.
     ///
     /// Maps [`NodeId`] to [`CommitmentBytes`] representing cryptographic commitments
     /// for nodes in the SALT trie. These commitments are used for state proofs
     /// and verification.
-    trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
+    pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
 }
 
 impl Clone for MemStore {

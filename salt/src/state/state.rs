@@ -89,7 +89,7 @@ pub struct EphemeralSaltStateCache(
 #[derive(Debug, Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
-    store: &'a Store,
+    pub store: &'a Store,
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
@@ -601,7 +601,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This method handles both the in-memory cache update and the delta tracking
     /// needed for generating [`StateUpdates`]. Changes are only recorded when the
     /// old and new values differ to avoid empty deltas.
-    fn update_value(
+    pub fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,
