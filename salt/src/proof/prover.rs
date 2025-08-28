@@ -142,11 +142,9 @@ impl SaltProof {
         data: &BTreeMap<SaltKey, Option<SaltValue>>,
         state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
-        let kvs: Vec<_> = data.iter().map(|(&k, v)| (k, v.clone())).collect();
-
         let queries = verifier::create_verifier_queries(
             &self.parents_commitments,
-            kvs,
+            data,
             &self.buckets_top_level,
         )?;
 

@@ -1,147 +1,32 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{EMPTY_SLOT_HASH, MAX_SUBTREE_LEVELS},
+    constant::{BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH, STARTING_NODE_ID},
     proof::{
         prover::calculate_fr_by_kv,
-        shape::{
-            bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
-            main_trie_parents_and_points,
-        },
+        shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
         CommitmentBytesW, ProofError,
     },
-    trie::node_utils::{bucket_root_node_id, get_child_node, subtree_leaf_for_key},
+    trie::node_utils::{get_child_node, subtree_leaf_start_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::multiproof::VerifierQuery;
 use iter_tools::Itertools;
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
-
-/// Helper function to create verify queries for a given commitment and points
-fn create_verify_queries(
-    logic_parent_id: NodeId,
-    points: &[u8],
-    commitment: Element,
-    child_fr: &FxHashMap<NodeId, Fr>,
-) -> Vec<VerifierQuery> {
-    points
-        .iter()
-        .map(|point| {
-            let child_id = get_child_node(&logic_parent_id, *point as usize);
-
-            VerifierQuery {
-                commitment,
-                point: Fr::from(*point as u64),
-                result: child_fr[&child_id],
-            }
-        })
-        .collect()
-}
-
-/// Process trie query, convert main trie node to VerifierQuery
-///
-/// # Parameters
-///
-/// * `trie_nodes` - trie node list, each element is a triple `(parent_id, logic_id,
-///   children_indices)`
-/// * `path_commitments` - path commitment map, key is node ID, value is corresponding commitment
-/// * `num_threads` - number of threads used for parallel processing
-/// * `queries` - list of VerifierQuery to be verified, used to save processing results and reduce
-///   clone
-///
-/// # Description
-///
-/// - Function uses parallel processing to improve performance
-/// - For each trie node:
-/// 1. Get its parent node ID and logical node ID
-/// 2. Get the corresponding commitment from path_commitments
-/// 3. According to children_indices Calculate the points that need to be verified
-/// 4. Create a VerifierQuery object
-fn process_trie_queries(
-    trie_nodes: Vec<(NodeId, Vec<u8>)>,
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
-    num_threads: usize,
-    queries: &mut Vec<VerifierQuery>,
-) {
-    if trie_nodes.is_empty() {
-        return;
-    }
-
-    queries.extend(
-        trie_nodes
-            .par_chunks(trie_nodes.len().div_ceil(num_threads))
-            .flat_map(|chunk| {
-                let (multi_children_id, multi_children_commitment) = chunk
-                    .iter()
-                    .flat_map(|(parent, points)| {
-                        points
-                            .iter()
-                            .map(|point| {
-                                let child_id =
-                                    get_child_node(&logic_parent_id(*parent), *point as usize);
-                                (
-                                    child_id,
-                                    path_commitments
-                                        .get(&child_id)
-                                        .cloned()
-                                        .unwrap_or_else(|| {
-                                            panic!("path_commitments lack id {child_id:?}")
-                                        })
-                                        .0,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unzip::<_, _, Vec<_>, Vec<_>>();
-
-                // Convert children commitments to frs at the same time for faster processing
-                let multi_children_frs =
-                    Element::serial_batch_map_to_scalar_field(multi_children_commitment);
-
-                let child_map: FxHashMap<NodeId, Fr> = multi_children_id
-                    .iter()
-                    .zip(multi_children_frs)
-                    .map(|(id, fr)| (*id, fr))
-                    .collect();
-
-                chunk
-                    .iter()
-                    .flat_map(|(parent, points)| {
-                        let logic_parent = logic_parent_id(*parent);
-                        let parent = connect_parent_id(*parent);
-                        let commitment = Element::from_bytes_unchecked_uncompressed(
-                            path_commitments
-                                .get(&parent)
-                                .cloned()
-                                .unwrap_or_else(|| panic!("path_commitments lack id {parent:?}"))
-                                .0,
-                        );
-
-                        create_verify_queries(logic_parent, points, commitment, &child_map)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
-    );
-}
 
 /// Create verifier queries.
 /// kvs have already been sorted and deduped.
 pub(crate) fn create_verifier_queries(
     path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
-    kvs: Vec<(SaltKey, Option<SaltValue>)>,
-    buckets_top_level: &FxHashMap<BucketId, u8>,
+    kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
+    buckets_level: &FxHashMap<BucketId, u8>,
 ) -> Result<Vec<VerifierQuery>, ProofError> {
-    let mut bucket_ids = kvs.iter().map(|(k, _)| k.bucket_id()).collect::<Vec<_>>();
+    println!("kvs: {:?}", kvs);
+    let mut bucket_ids = kvs.keys().map(|k| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
 
-    let top_level_bucket_ids: Vec<_> = buckets_top_level
-        .keys()
-        .copied()
-        .sorted_unstable()
-        .collect();
+    let top_level_bucket_ids: Vec<_> = buckets_level.keys().copied().sorted_unstable().collect();
 
     if top_level_bucket_ids != bucket_ids {
         return Err(ProofError::StateReadError {
@@ -149,21 +34,12 @@ pub(crate) fn create_verifier_queries(
         });
     }
 
-    let main_trie_nodes = main_trie_parents_and_points(&bucket_ids);
+    let salt_keys = kvs.keys().copied().collect::<Vec<_>>();
+    let node = parents_and_points(&salt_keys, buckets_level);
 
-    let salt_keys = kvs.iter().map(|(k, _)| *k).collect::<Vec<_>>();
-    let (bucket_trie_nodes, bucket_state_nodes) =
-        bucket_trie_parents_and_points(&salt_keys, buckets_top_level);
-
-    let trie_nodes = main_trie_nodes
-        .into_iter()
-        .chain(bucket_trie_nodes)
-        .collect::<Vec<_>>();
-
-    let node_ids = trie_nodes
-        .iter()
-        .chain(bucket_state_nodes.iter())
-        .map(|(node_id, _)| connect_parent_id(*node_id))
+    let node_ids = node
+        .keys()
+        .map(|node_id| connect_parent_id(*node_id))
         .sorted_unstable()
         .collect::<Vec<_>>();
 
@@ -173,59 +49,66 @@ pub(crate) fn create_verifier_queries(
         });
     }
 
-    let mut queries = Vec::with_capacity(
-        trie_nodes
-            .iter()
-            .map(|(_, points)| points.len())
-            .sum::<usize>()
-            + kvs.len(),
-    );
+    let queries = node
+        .into_iter()
+        .flat_map(|(parent, points)| {
+            let commitment = Element::from_bytes_unchecked_uncompressed(
+                path_commitments
+                    .get(&connect_parent_id(parent))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("path_commitments lack id {parent:?}"))
+                    .0,
+            );
 
-    let num_threads = rayon::current_num_threads();
-    process_trie_queries(trie_nodes, path_commitments, num_threads, &mut queries);
+            if is_leaf_node(parent) {
+                let salt_key_start = if parent < BUCKET_SLOT_ID_MASK as NodeId {
+                    let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                    SaltKey::from((bucket_id, 0))
+                } else {
+                    subtree_leaf_start_key(&parent)
+                };
 
-    // process bucket state queries
-    let chunk_size = kvs.len().div_ceil(num_threads);
-    let bucket_state_queries = kvs
-        .par_chunks(chunk_size)
-        .flat_map(|chunk| {
-            chunk
-                .iter()
-                .map(|(key, val)| {
-                    let bucket_id = key.bucket_id();
+                points
+                    .iter()
+                    .map(|&point| {
+                        let salt_key = SaltKey(salt_key_start.0 + point as u64);
 
-                    let slot_id = key.slot_id() & 0xff;
+                        let salt_val = kvs.get(&salt_key).expect("salt_key must can found, as parent and points is calculated by salt_keys");
+                        let result = salt_val.as_ref().map_or(
+                            Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
+                            calculate_fr_by_kv,
+                        );
 
-                    let result = val.as_ref().map_or(
-                        Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
-                        calculate_fr_by_kv,
-                    );
+                        VerifierQuery {
+                            commitment,
+                            point: Fr::from(point as u64),
+                            result,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let logic_parent = logic_parent_id(parent);
 
-                    let bucket_trie_top_level = buckets_top_level[&bucket_id];
-
-                    let parent_id = if bucket_trie_top_level == MAX_SUBTREE_LEVELS as u8 - 1 {
-                        bucket_root_node_id(bucket_id)
-                    } else {
-                        subtree_leaf_for_key(key)
-                    };
-
-                    let l3_commitment = path_commitments
-                        .get(&parent_id)
-                        .cloned()
-                        .unwrap_or_else(|| panic!("path_commitments lack id {parent_id:?}"))
-                        .0;
-
-                    VerifierQuery {
-                        commitment: Element::from_bytes_unchecked_uncompressed(l3_commitment),
-                        point: Fr::from(slot_id),
-                        result,
-                    }
-                })
-                .collect::<Vec<_>>()
+                points
+                    .iter()
+                    .map(|&point| {
+                        let child_id = get_child_node(&logic_parent, point);
+                        let child_commitment = path_commitments
+                            .get(&child_id)
+                            .cloned()
+                            .unwrap_or_else(|| panic!("path_commitments lack id {child_id:?}"))
+                            .0;
+                        VerifierQuery {
+                            commitment,
+                            point: Fr::from(point as u64),
+                            result: Element::from_bytes_unchecked_uncompressed(child_commitment)
+                                .map_to_scalar_field(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }
         })
         .collect::<Vec<_>>();
-
-    queries.extend(bucket_state_queries);
 
     Ok(queries)
 }

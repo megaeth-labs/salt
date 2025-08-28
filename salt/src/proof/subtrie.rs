@@ -2,14 +2,11 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
-        NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
+        MAX_SUBTREE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
     },
     proof::{
         prover::calculate_fr_by_kv,
-        shape::{
-            bucket_trie_parents_and_points, connect_parent_id, logic_parent_id,
-            main_trie_parents_and_points,
-        },
+        shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
         CommitmentBytesW, ProofError,
     },
     traits::{StateReader, TrieReader},
@@ -19,9 +16,8 @@ use crate::{
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type SubTrieInfo = (
     Vec<ProverQuery>,
@@ -33,133 +29,17 @@ type SubTrieInfo = (
 fn create_prover_queries(
     commitment: Element,
     poly: LagrangeBasis,
-    points: &[u8],
+    points: BTreeSet<usize>,
 ) -> Vec<ProverQuery> {
     points
         .iter()
         .map(|&i| ProverQuery {
             commitment,
             poly: poly.clone(),
-            point: i as usize,
-            result: poly.evaluate_in_domain(i as usize),
+            point: i,
+            result: poly.evaluate_in_domain(i),
         })
         .collect()
-}
-
-fn process_trie_queries<Store: TrieReader>(
-    trie_nodes: Vec<(NodeId, Vec<u8>)>,
-    store: &Store,
-    num_threads: usize,
-    queries: &mut Vec<ProverQuery>,
-) {
-    if trie_nodes.is_empty() {
-        return;
-    }
-
-    queries.extend(
-        trie_nodes
-            .par_chunks(trie_nodes.len().div_ceil(num_threads))
-            .flat_map(|chunk| {
-                let multi_children = chunk
-                    .iter()
-                    .flat_map(|(parent, _)| {
-                        let child_idx = get_child_node(&logic_parent_id(*parent), 0);
-                        let children = store
-                            .node_entries(child_idx..child_idx + TRIE_WIDTH as NodeId)
-                            .expect("Failed to get trie children");
-                        let mut default_commitment = if child_idx == 1 {
-                            let mut v = vec![default_commitment(child_idx + 1); TRIE_WIDTH];
-                            v[0] = default_commitment(child_idx);
-                            v
-                        } else {
-                            vec![default_commitment(child_idx); TRIE_WIDTH]
-                        };
-                        for (k, v) in children {
-                            default_commitment[k as usize - child_idx as usize] = v;
-                        }
-                        default_commitment
-                    })
-                    .collect::<Vec<_>>();
-                let multi_children_frs = Element::serial_batch_map_to_scalar_field(multi_children);
-
-                chunk
-                    .iter()
-                    .zip(multi_children_frs.chunks(256))
-                    .flat_map(|((parent, children), frs)| {
-                        let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                            store
-                                .commitment(connect_parent_id(*parent))
-                                .expect("Failed to get trie node"),
-                        );
-
-                        create_prover_queries(
-                            parent_commitment,
-                            LagrangeBasis::new(frs.to_vec()),
-                            children,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
-    );
-}
-
-/// Process bucket state queries
-fn process_bucket_state_queries<Store: StateReader + TrieReader>(
-    bucket_state_nodes: Vec<(NodeId, Vec<u8>)>,
-    store: &Store,
-    num_threads: usize,
-    queries: &mut Vec<ProverQuery>,
-) {
-    queries.extend(
-        bucket_state_nodes
-            .par_chunks(bucket_state_nodes.len().div_ceil(num_threads))
-            .flat_map(|chunk| {
-                chunk
-                    .iter()
-                    .flat_map(|(node_id, slot_ids)| {
-                        let parent_commitment = Element::from_bytes_unchecked_uncompressed(
-                            store
-                                .commitment(*node_id)
-                                .expect("Failed to get trie node"),
-                        );
-
-                        let (salt_key_start, bucket_id) = if *node_id < BUCKET_SLOT_ID_MASK as NodeId {
-                            let bucket_id = (node_id - STARTING_NODE_ID[3] as NodeId) as BucketId;
-                            (SaltKey::from((bucket_id, 0)), bucket_id)
-                        } else {
-                            (subtree_leaf_start_key(node_id), (node_id >> BUCKET_SLOT_BITS) as BucketId)
-                        };
-
-                        let mut default_frs = if bucket_id < 65536 {
-                            vec![calculate_fr_by_kv(&BucketMeta::default().into()); 256]
-                        } else {
-                            vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); 256]
-                        };
-                        let slot_start = salt_key_start.slot_id();
-                        let children_kvs = store
-                            .entries(SaltKey::from((bucket_id, slot_start))..=SaltKey::from((bucket_id, slot_start + TRIE_WIDTH as SlotId -1)))
-                            .unwrap_or_else(|_| {
-                                panic!(
-                                    "Failed to get bucket state by range_slot: bucket_id: {:?}, slot_start: {:?}, slot_end: {:?}",
-                                    bucket_id, slot_start, slot_start + TRIE_WIDTH as SlotId -1
-                                )
-                            });
-                        for (k, v) in children_kvs {
-                            default_frs[(k.slot_id() & 0xff) as usize] =
-                                calculate_fr_by_kv(&v);
-                        }
-
-                        create_prover_queries(
-                            parent_commitment,
-                            LagrangeBasis::new(default_frs),
-                            slot_ids.as_slice(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
-    );
 }
 
 /// Create a new sub trie.
@@ -174,53 +54,28 @@ where
     let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
 
-    let main_trie_nodes = main_trie_parents_and_points(&bucket_ids);
-
-    let buckets_top_level = bucket_ids
+    let buckets_level = bucket_ids
         .into_iter()
         .map(|bucket_id| {
             if bucket_id < NUM_META_BUCKETS as BucketId {
-                return Ok((bucket_id, 4u8));
+                Ok((bucket_id, 1))
+            } else {
+                let meta = store.metadata(bucket_id)?;
+                let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
+                Ok((bucket_id, level as u8))
             }
-
-            let meta = store.metadata(bucket_id)?;
-            let bucket_trie_top_level = subtree_root_level(meta.capacity);
-            Ok((bucket_id, bucket_trie_top_level as u8))
         })
         .collect::<Result<FxHashMap<_, _>, <Store as StateReader>::Error>>()
         .map_err(|e| ProofError::StateReadError {
             reason: format!("Failed to read state: {e:?}"),
         })?;
 
-    let (bucket_trie_nodes, bucket_state_nodes) =
-        bucket_trie_parents_and_points(salt_keys, &buckets_top_level);
-
-    let trie_nodes = main_trie_nodes
-        .into_iter()
-        .chain(bucket_trie_nodes)
-        .collect::<Vec<_>>();
-
-    let mut queries = Vec::with_capacity(
-        trie_nodes
-            .iter()
-            .map(|(_, points)| points.len())
-            .sum::<usize>()
-            + salt_keys.len(),
-    );
-
-    let num_threads = rayon::current_num_threads();
-
-    // Process trie queries
-    process_trie_queries(trie_nodes.clone(), store, num_threads, &mut queries);
-
-    // Process state queries
-    process_bucket_state_queries(bucket_state_nodes.clone(), store, num_threads, &mut queries);
+    let nodes = parents_and_points(salt_keys, &buckets_level);
 
     // Process trie nodes commitments
-    let parents_commitments = trie_nodes
-        .into_iter()
-        .chain(bucket_state_nodes)
-        .map(|(parent, _)| {
+    let parents_commitments = nodes
+        .iter()
+        .map(|(&parent, _)| {
             let parent = connect_parent_id(parent);
             (
                 parent,
@@ -229,7 +84,73 @@ where
         })
         .collect::<BTreeMap<_, _>>();
 
-    Ok((queries, parents_commitments, buckets_top_level))
+    let queries = nodes
+        .into_iter()
+        .flat_map(|(parent, points)| {
+            let parent_commitment = Element::from_bytes_unchecked_uncompressed(
+                store
+                    .commitment(connect_parent_id(parent))
+                    .expect("Failed to get trie node"),
+            );
+
+            if is_leaf_node(parent) {
+                let (slot_start, bucket_id) = if parent < BUCKET_SLOT_ID_MASK as NodeId {
+                    let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                    (0, bucket_id)
+                } else {
+                    (subtree_leaf_start_key(&parent).slot_id(), (parent >> BUCKET_SLOT_BITS) as BucketId)
+                };
+
+                let mut default_frs = if bucket_id < 65536 {
+                    vec![calculate_fr_by_kv(&BucketMeta::default().into()); 256]
+                } else {
+                    vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); 256]
+                };
+
+                let children_kvs = store
+                .entries(SaltKey::from((bucket_id, slot_start))..=SaltKey::from((bucket_id, slot_start + TRIE_WIDTH as SlotId -1)))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "Failed to get bucket state by range_slot: bucket_id: {:?}, slot_start: {:?}, slot_end: {:?}",
+                        bucket_id, slot_start, slot_start + TRIE_WIDTH as SlotId -1
+                    )
+                });
+
+                for (k, v) in children_kvs {
+                    default_frs[(k.slot_id() & 0xff) as usize] =
+                        calculate_fr_by_kv(&v);
+                }
+
+                create_prover_queries(
+                    parent_commitment,
+                    LagrangeBasis::new(default_frs),
+                    points
+                )
+            } else {
+                let child_idx = get_child_node(&logic_parent_id(parent), 0);
+                let children = store
+                    .node_entries(child_idx..child_idx + TRIE_WIDTH as NodeId)
+                    .expect("Failed to get trie children");
+                let mut default_commitment = if child_idx == 1 {
+                    let mut v = vec![default_commitment(child_idx + 1); TRIE_WIDTH];
+                    v[0] = default_commitment(child_idx);
+                    v
+                } else {
+                    vec![default_commitment(child_idx); TRIE_WIDTH]
+                };
+                for (k, v) in children {
+                    default_commitment[k as usize - child_idx as usize] = v;
+                }
+                let children_frs = Element::serial_batch_map_to_scalar_field(default_commitment);
+                create_prover_queries(
+                    parent_commitment,
+                    LagrangeBasis::new(children_frs),
+                    points,
+                )
+                }
+            }).collect::<Vec<_>>();
+
+    Ok((queries, parents_commitments, buckets_level))
 }
 
 #[cfg(test)]
