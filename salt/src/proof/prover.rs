@@ -49,9 +49,9 @@ pub struct SaltProof {
     #[serde(deserialize_with = "deserialize_multipoint_proof")]
     pub proof: MultiPointProof,
 
-    /// the top level of the buckets trie
+    /// the  level of the buckets trie
     /// used to let verifier determine the bucket trie level
-    pub buckets_top_level: FxHashMap<BucketId, u8>,
+    pub levels: FxHashMap<BucketId, u8>,
 }
 
 fn serialize_multipoint_proof<S>(proof: &MultiPointProof, serializer: S) -> Result<S::Ok, S::Error>
@@ -120,8 +120,7 @@ impl SaltProof {
         }
         keys.dedup();
 
-        let (prover_queries, parents_commitments, buckets_top_level) =
-            create_sub_trie(store, &keys)?;
+        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys)?;
 
         let crs = CRS::default();
 
@@ -132,7 +131,7 @@ impl SaltProof {
         Ok(SaltProof {
             parents_commitments,
             proof,
-            buckets_top_level,
+            levels,
         })
     }
 
@@ -142,11 +141,8 @@ impl SaltProof {
         data: &BTreeMap<SaltKey, Option<SaltValue>>,
         state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
-        let queries = verifier::create_verifier_queries(
-            &self.parents_commitments,
-            data,
-            &self.buckets_top_level,
-        )?;
+        let queries =
+            verifier::create_verifier_queries(&self.parents_commitments, data, &self.levels)?;
 
         let root = self
             .parents_commitments
