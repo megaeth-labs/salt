@@ -130,26 +130,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
         let bucket_id = hasher::bucket_id(plain_key);
         let metadata = self.metadata(bucket_id, false)?;
-        let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
-        for step in 0..metadata.capacity {
-            let slot = probe(hashed_key, step, metadata.capacity);
-            // FIXME: too many memory copies on the read path currently
-            // 1. self.value() has two internal paths:
-            //    - Cache hit: 1 copy from cache
-            //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
-            // 2. salt_val.value().to_vec() copies the plain value bytes upon return
-            if let Some(salt_val) = self.value((bucket_id, slot).into())? {
-                match salt_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    Ordering::Equal => return Ok(Some(salt_val.value().to_vec())),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
-            }
+        // FIXME: too many memory copies on the read path currently
+        // 1. shi_find() has two internal paths:
+        //    - Cache hit: 1 copy from cache
+        //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
+        // 2. salt_val.value().to_vec() copies the plain value bytes upon return
+        match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
+            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
+            None => Ok(None),
         }
-        Ok(None)
     }
 
     /// Reads the state value for the given SALT key.

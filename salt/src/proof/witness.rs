@@ -234,6 +234,10 @@ impl StateReader for SaltWitness {
 
         Ok(used_count)
     }
+
+    fn plain_value_fast_path(&self, _plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error> {
+        Err("plain_value_fast_path not supported for SaltWitness")
+    }
 }
 
 impl TrieReader for SaltWitness {

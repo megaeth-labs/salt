@@ -120,6 +120,28 @@ pub trait StateReader: Debug + Send + Sync {
         let entries = self.entries(start_key..=end_key)?;
         Ok(entries.len() as u64)
     }
+
+    /// Provides a fast path lookup from plain keys to salt keys.
+    ///
+    /// This method is essential for enabling [`EphemeralSaltState`] to work with
+    /// storage backends that only have partial state information, such as block
+    /// witnesses or proofs. While these backends may not have access to the complete
+    /// state, they can maintain explicit mappings between plain keys and their
+    /// corresponding salt keys to facilitate the SHI hash table lookup algorithm.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    ///
+    /// # Returns
+    /// - `Ok(Some(salt_key))` if the plain key exists and maps to the given salt key
+    /// - `Ok(None)` if the plain key is known to not exist
+    /// - `Err(_)` if the operation is not supported or fails
+    ///
+    /// # Implementation Notes
+    /// - Partial state backends MUST implement this to provide known mappings.
+    /// - Full state backends MAY return an error, or optionally implement this
+    ///   as a performance optimization.
+    fn plain_value_fast_path(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error>;
 }
 
 /// Provides read-only access to SALT trie commitments.
