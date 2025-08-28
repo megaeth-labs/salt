@@ -7,7 +7,10 @@
 use crate::{
     proof::witness::SaltWitness,
     proof::ProofError,
-    state::{hasher, state::EphemeralSaltState},
+    state::{
+        hasher,
+        state::{EphemeralSaltState, PlainStateProvider},
+    },
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -164,27 +167,6 @@ impl PlainKeysProof {
         Ok(())
     }
 
-    /// Retrieves the plain value associated with the given plain key.
-    ///
-    /// # Arguments
-    /// * `plain_key` - The plain key to look up
-    ///
-    /// # Returns
-    /// * `Ok(Some(value))` if the key exists and has a value
-    /// * `Ok(None)` if the key does not exist
-    /// * `Err(&'static str)` if the key was not included in this proof
-    #[cfg(test)]
-    fn get_plain_value(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
-        match self.plain_value_fast_path(plain_key) {
-            Ok(Some(salt_key)) => {
-                let salt_value = self.value(salt_key)?.unwrap();
-                Ok(Some(salt_value.value().to_vec()))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
     /// Retrieves all plain values for the keys in this proof.
     ///
     /// Returns a vector where each element corresponds to the plain key at the same index.
@@ -238,6 +220,21 @@ impl StateReader for PlainKeysProof {
         match self.key_mapping.get(plain_key) {
             Some(slot) => Ok(*slot),
             None => Err("Plain key not in witness"),
+        }
+    }
+}
+
+impl PlainStateProvider for PlainKeysProof {
+    type Error = &'static str;
+
+    fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        match self.plain_value_fast_path(plain_key) {
+            Ok(Some(salt_key)) => {
+                let salt_value = self.value(salt_key)?.unwrap();
+                Ok(Some(salt_value.value().to_vec()))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -335,11 +332,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_some());
@@ -356,11 +353,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_none());
@@ -401,11 +398,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_none());
@@ -450,11 +447,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_none());
@@ -495,11 +492,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_none());
@@ -533,11 +530,11 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.get_plain_value(&plain_key).unwrap();
+        let proof_value = proof.plain_value(&plain_key).unwrap();
         let proof_values = proof.get_values().unwrap();
 
         assert!(proof_value.is_none());

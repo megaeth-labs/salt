@@ -24,7 +24,7 @@ pub mod mock_evm_types;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::trie::StateRoot;
+    use crate::{state::state::PlainStateProvider, trie::trie::StateRoot};
     use std::collections::HashMap;
 
     #[test]

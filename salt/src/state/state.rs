@@ -50,6 +50,23 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
 
+/// Provides read-only access to plain values by plain keys.
+pub trait PlainStateProvider {
+    /// Error type for the provider.
+    type Error;
+
+    /// Retrieves a plain value by plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    ///
+    /// # Returns
+    /// * `Ok(Some(value))` - The plain value if the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
 /// `EphemeralSaltState` provides a mutable view over an immutable storage backend,
@@ -115,30 +132,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Self {
             cache_read: true,
             ..self
-        }
-    }
-
-    /// Retrieves the plain value associated with the given plain key.
-    ///
-    /// # Arguments
-    /// * `plain_key` - The raw key bytes to look up
-    ///
-    /// # Returns
-    /// * `Ok(Some(value))` - The plain value bytes if the key exists
-    /// * `Ok(None)` - If the key does not exist
-    /// * `Err(error)` - If there was an error accessing the underlying storage
-    pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
-        let bucket_id = hasher::bucket_id(plain_key);
-        let metadata = self.metadata(bucket_id, false)?;
-
-        // FIXME: too many memory copies on the read path currently
-        // 1. shi_find() has two internal paths:
-        //    - Cache hit: 1 copy from cache
-        //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
-        // 2. salt_val.value().to_vec() copies the plain value bytes upon return
-        match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
-            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
-            None => Ok(None),
         }
     }
 
@@ -591,6 +584,28 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     }
 }
 
+impl<'a, Store> PlainStateProvider for EphemeralSaltState<'a, Store>
+where
+    Store: StateReader,
+{
+    type Error = Store::Error;
+
+    fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
+        let bucket_id = hasher::bucket_id(plain_key);
+        let metadata = self.metadata(bucket_id, false)?;
+
+        // FIXME: too many memory copies on the read path currently
+        // 1. shi_find() has two internal paths:
+        //    - Cache hit: 1 copy from cache
+        //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
+        // 2. salt_val.value().to_vec() copies the plain value bytes upon return
+        match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
+            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
 ///
 /// This implements linear probing for collision resolution in the SHI hash table,
@@ -644,7 +659,7 @@ mod tests {
         mem_store::*,
         state::{
             hasher,
-            state::{probe, rank, EphemeralSaltState},
+            state::{probe, rank, EphemeralSaltState, PlainStateProvider},
             updates::StateUpdates,
         },
         traits::StateReader,
