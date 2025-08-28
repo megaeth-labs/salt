@@ -193,7 +193,7 @@ impl StateReader for PlainKeysProof {
         self.salt_witness.metadata(bucket_id)
     }
 
-    fn plain_value_fast_path(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error> {
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error> {
         match self.key_mapping.get(plain_key) {
             Some(slot) => Ok(*slot),
             None => Err("Plain key not in witness"),
@@ -205,7 +205,7 @@ impl PlainStateProvider for PlainKeysProof {
     type Error = &'static str;
 
     fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        match self.plain_value_fast_path(plain_key) {
+        match self.plain_value_fast(plain_key) {
             Ok(Some(salt_key)) => {
                 let salt_value = self.value(salt_key)?.unwrap();
                 Ok(Some(salt_value.value().to_vec()))

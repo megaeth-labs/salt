@@ -569,7 +569,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         &mut self,
         plain_key: &[u8],
     ) -> Result<Option<(SaltKey, SaltValue)>, Store::Error> {
-        match self.store.plain_value_fast_path(plain_key)? {
+        match self.store.plain_value_fast(plain_key)? {
             Some(salt_key) => {
                 match self.value(salt_key)? {
                     Some(salt_val) if salt_val.key() == plain_key => Ok(Some((salt_key, salt_val))),

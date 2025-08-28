@@ -141,7 +141,7 @@ pub trait StateReader: Debug + Send + Sync {
     /// - Partial state backends MUST implement this to provide known mappings.
     /// - Full state backends MAY return an error, or optionally implement this
     ///   as a performance optimization.
-    fn plain_value_fast_path(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error>;
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error>;
 }
 
 /// Provides read-only access to SALT trie commitments.
