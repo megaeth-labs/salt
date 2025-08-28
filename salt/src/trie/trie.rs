@@ -336,26 +336,32 @@ where
                 if let Some(subtree_change) = subtree_change_info.get(&bucket_id) {
                     // Handle capacity changes
                     match subtree_change
-                        .old_top_level
-                        .cmp(&subtree_change.new_top_level)
+                        .new_capacity
+                        .cmp(&subtree_change.old_capacity)
                     {
                         std::cmp::Ordering::Greater => {
-                            need_handle_buckets.insert(bucket_id);
                             // Will be handled in subtree processing
-                            if key.slot_id() < subtree_change.old_capacity {
-                                continue;
-                            }
-                            // Expansion: add old subtree root update
-                            add_expansion_update(&mut extra_updates, subtree_change)?;
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Will be handled in subtree processing
-                            if key.slot_id() < subtree_change.new_capacity {
+                            let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
+                            let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
+                            if key.slot_id() < level_capacity {
                                 need_handle_buckets.insert(bucket_id);
                                 continue;
                             }
-                            // Contraction: new subtree root equals bucket commitment
-                            add_contraction_update(&mut uncomputed_updates, subtree_change)?;
+                        }
+                        std::cmp::Ordering::Less => {
+                            // Will be handled in subtree processing
+                            let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
+                            let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
+                            if key.slot_id() < level_capacity {
+                                println!(
+                                    "b:{} slot {} lc {}",
+                                    bucket_id,
+                                    key.slot_id(),
+                                    level_capacity
+                                );
+                                need_handle_buckets.insert(bucket_id);
+                                continue;
+                            }
                         }
                         std::cmp::Ordering::Equal => {}
                     }
@@ -390,8 +396,8 @@ where
 
             for level in (subtree_change.old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
                 let extrat_end = ((capacity_start_index + MIN_BUCKET_SIZE as NodeId)
-                    .min(capacity_end_index)
                     & (NodeId::MAX - (MIN_BUCKET_SIZE as NodeId - 1)))
+                    .min(capacity_end_index)
                     + bucket_id
                     + STARTING_NODE_ID[level] as NodeId;
 
@@ -432,7 +438,10 @@ where
                     std::cmp::Ordering::Greater => {
                         // Expansion: update old subtree root
                         add_expansion_update(&mut extra_updates, subtree_change)?;
-                        // Also handle new top level
+                        need_handle_buckets.insert(*bucket_id);
+                        // Also handle both top level
+                        trigger_levels[subtree_change.old_top_level]
+                            .insert(*bucket_id, subtree_change.clone());
                         trigger_levels[subtree_change.new_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                     }
@@ -1281,6 +1290,85 @@ mod tests {
     }
 
     #[test]
+    fn expansion_and_contraction_at_same_level() {
+        let store = MemStore::new();
+        let mut trie = StateRoot::new(&store);
+        let bid = KV_BUCKET_OFFSET as BucketId + 4;
+        let salt_key = bucket_metadata_key(bid);
+        let state_updates = StateUpdates {
+            data: vec![
+                (
+                    salt_key,
+                    (
+                        Some(BucketMeta::default().into()),
+                        Some(bucket_meta(0, 512).into()),
+                    ),
+                ),
+                (
+                    (bid, 1).into(),
+                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        store.update_state(state_updates);
+        store.update_trie(trie_updates);
+        let (init_root, _) = StateRoot::rebuild(&store).unwrap();
+        assert_eq!(root, init_root);
+
+        // expansion at same level
+        let state_updates = StateUpdates {
+            data: vec![
+                (
+                    salt_key,
+                    (
+                        Some(bucket_meta(0, 512).into()),
+                        Some(bucket_meta(0, 4096).into()),
+                    ),
+                ),
+                (
+                    (bid, 4090).into(),
+                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        store.update_state(state_updates);
+        store.update_trie(trie_updates);
+        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
+        assert_eq!(root, cmp_root);
+
+        // contraction at same level
+        let state_updates = StateUpdates {
+            data: vec![
+                (
+                    salt_key,
+                    (
+                        Some(bucket_meta(0, 4096).into()),
+                        Some(bucket_meta(0, 1024).into()),
+                    ),
+                ),
+                (
+                    (bid, 4090).into(),
+                    (Some(SaltValue::new(&[2; 32], &[2; 32])), None),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        store.update_state(state_updates);
+        store.update_trie(trie_updates);
+        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
+        assert_eq!(root, cmp_root);
+    }
+
+    #[test]
     fn expansion_and_contraction_small() {
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
@@ -1413,7 +1501,6 @@ mod tests {
             .collect(),
         };
         let (contraction_root, _) = trie.update_fin(contract_state_updates).unwrap();
-
         assert_eq!(initialize_root, contraction_root);
     }
 
