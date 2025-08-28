@@ -223,8 +223,8 @@ mod tests {
         let state_updates = state.update(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new(&store, &store);
-        let (root, trie_updates) = trie.update(&state_updates).unwrap();
+        let mut trie = StateRoot::new();
+        let (root, trie_updates) = trie.update_one(&store, &state_updates).unwrap();
         store.update_trie(trie_updates);
 
         // Generate a proof for the inserted key
@@ -613,7 +613,7 @@ mod tests {
         let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new(&store, &store).update(&updates).unwrap();
+        let (_, trie_updates) = StateRoot::new().update_one(&store, &updates).unwrap();
 
         store.update_trie(trie_updates);
 
@@ -664,8 +664,8 @@ mod tests {
 
         store.update_state(state_updates.clone());
 
-        let mut trie = StateRoot::new(store, store);
-        let (root, trie_updates) = trie.update(&state_updates).unwrap();
+        let mut trie = StateRoot::new();
+        let (root, trie_updates) = trie.update_one(store, &state_updates).unwrap();
 
         store.update_trie(trie_updates);
         root

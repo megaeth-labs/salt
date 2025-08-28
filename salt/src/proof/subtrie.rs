@@ -283,8 +283,8 @@ mod tests {
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store, &mem_store);
-        let (_, trie_updates) = trie.update(&updates).unwrap();
+        let mut trie = StateRoot::new();
+        let (_, trie_updates) = trie.update_one(&mem_store, &updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 

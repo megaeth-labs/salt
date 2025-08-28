@@ -12,9 +12,7 @@ use crate::{
     BucketId,
 };
 use core::error::Error;
-use std::{
-    ops::{Range, RangeInclusive},
-};
+use std::ops::{Range, RangeInclusive};
 
 /// Provides read-only access to SALT state storage.
 ///

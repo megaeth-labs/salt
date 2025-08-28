@@ -33,7 +33,7 @@ use std::{
 /// Groups blockchain state storage and bucket usage cache together to ensure
 /// atomic consistency between the two related data structures.
 #[derive(Debug, Default, Clone)]
-struct StateStore {
+pub struct StateStore {
     /// The actual key-value state storage.
     ///
     /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
@@ -43,7 +43,7 @@ struct StateStore {
     /// **Note**: Default bucket metadata entries are not stored in this map. When
     /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
     /// present, it returns [`BucketMeta::default()`] values automatically.
-    kvs: BTreeMap<SaltKey, SaltValue>,
+    pub kvs: BTreeMap<SaltKey, SaltValue>,
 
     /// Cache for bucket used slot counts.
     ///
@@ -53,7 +53,7 @@ struct StateStore {
     /// **Interpretation**: If a bucket ID is not present in this map, it means
     /// the bucket has not been updated since the creation of this `MemStore`.
     /// For such buckets, the number of used slots is guaranteed to be zero.
-    used_slots: BTreeMap<BucketId, u64>,
+    pub used_slots: BTreeMap<BucketId, u64>,
 }
 
 /// In-memory storage backend for SALT.
