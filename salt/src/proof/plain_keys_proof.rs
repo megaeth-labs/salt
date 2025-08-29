@@ -284,6 +284,68 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_key_proof_exist_or_not_exist_case_2_1() {
+        // Tests three main scenarios for plain key proof generation:
+        //
+        // Case 1: Key exists - final slot contains the exact key
+        // Test: Insert keys [0..=6], prove key [6]
+        //
+        // Case 2: Key doesn't exist - final slot contains different key with lower priority
+        // Test 2.1: Insert key [6], prove key [0] (higher priority, would displace [6])
+        // Test 2.2: Insert keys [6,0], prove key [1] (higher priority than [6])
+        // Test 2.3: Insert keys [6,0,2], prove key [1] (higher priority than [2])
+        //
+        // Case 3: Key doesn't exist - final slot is empty
+        // Test 3.1: No insertions, prove key [0]
+        // Test 3.2: Insert keys [0..=5], prove key [6] (lands in empty slot)
+
+        // case 2.1
+        let store = MemStore::new();
+        let root = insert_kvs(get_plain_keys(vec![6]), &store);
+
+        let plain_key = plain_keys()[0].clone();
+        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let proof_values = get_proven_values(&mut proof);
+
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+
+        assert_eq!(plain_value, proof_value);
+        assert_eq!(proof_values, vec![proof_value]);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 1;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the plain_keys()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        // plain_keys()[0] has a high priority than the plain_keys()[6]
+        assert!(plain_keys()[0] > plain_keys()[6]);
+        assert_eq!(salt_value.key(), plain_keys()[6]);
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        // can't find the plain_keys()[0]
+        let find_res = proof_state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0])
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let find_res = proof_state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[6])
+            .unwrap();
+        assert_eq!(find_res, Some((slot_id, salt_value)));
+    }
+
+    #[test]
     fn test_plain_key_proof_exist_or_not_exist() {
         // Tests three main scenarios for plain key proof generation:
         //
