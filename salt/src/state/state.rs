@@ -65,6 +65,13 @@ pub struct EphemeralSaltStateCache(
     pub HashMap<BucketId, u64>,
 );
 
+impl EphemeralSaltStateCache {
+    pub fn clear(&mut self) {
+        self.0.clear();
+        self.1.clear();
+    }
+}
+
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
 /// `EphemeralSaltState` provides a mutable view over an immutable storage backend,
@@ -140,6 +147,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             cache_read: true,
             ..self
         }
+    }
+    
+    pub fn cache_ref(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.cache.0
     }
 
     /// Consumes the state and returns the underlying cache containing all changes made to the base
