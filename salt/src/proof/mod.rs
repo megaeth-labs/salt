@@ -1,16 +1,16 @@
 //! This module is the implementation of generating and verifying proofs of SALT.
 use thiserror::Error;
 
-pub mod plain_keys_proof;
 pub mod prover;
+pub mod salt_witness;
 pub mod shape;
 pub mod subtrie;
 pub mod verifier;
-pub mod salt_witness;
+pub mod witness;
 
-pub use plain_keys_proof::PlainKeysProof;
 pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
 pub use salt_witness::SaltWitness;
+pub use witness::Witness;
 
 /// Error type for proof operations
 #[derive(Debug, Error)]

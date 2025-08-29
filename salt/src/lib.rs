@@ -3,7 +3,7 @@
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{PlainKeysProof, ProofError, SaltProof, SaltWitness};
+pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
@@ -62,7 +62,7 @@ mod tests {
 
         // Alice creates a cryptographic proof for plain key-value pairs
         let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
+        let proof = Witness::create(&plain_keys_to_prove, &store)?;
 
         // Bob verifies the proof against its local state root
         let is_valid = proof.verify(root_hash);

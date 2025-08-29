@@ -5,7 +5,7 @@
 //! proofs that can be cryptographically verified.
 
 use crate::{
-    proof::witness::SaltWitness,
+    proof::salt_witness::SaltWitness,
     proof::ProofError,
     state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
@@ -18,7 +18,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlainKeysProof {
+pub struct Witness {
     // TODO: the builtin serialization mechanism has too much redundant data.
     // e.g., every plain key is stored twice: one in `direct_lookup_tbl` and
     // one in `salt_witness`.
@@ -29,7 +29,7 @@ pub struct PlainKeysProof {
     pub(crate) salt_witness: SaltWitness,
 }
 
-impl PlainKeysProof {
+impl Witness {
     /// Creates a cryptographic proof for a set of plain keys.
     ///
     /// This method generates inclusion proofs for existing keys and exclusion
@@ -43,7 +43,7 @@ impl PlainKeysProof {
     ///   (key-value pairs) and trie data (cryptographic commitments).
     ///
     /// # Returns
-    /// A `PlainKeysProof` containing:
+    /// A `Witness` containing:
     /// - A mapping from each plain key to its corresponding salt key (if it exists)
     /// - A `SaltWitness` with all state data and cryptographic proofs needed for verification
     ///
@@ -53,10 +53,7 @@ impl PlainKeysProof {
     /// - Unable to perform SHI search operations
     /// - Unable to access required state data
     /// - Witness creation fails
-    pub fn create<Store>(
-        plain_keys: &[Vec<u8>],
-        store: &Store,
-    ) -> Result<PlainKeysProof, ProofError>
+    pub fn create<Store>(plain_keys: &[Vec<u8>], store: &Store) -> Result<Witness, ProofError>
     where
         Store: StateReader + TrieReader,
     {
@@ -98,7 +95,7 @@ impl PlainKeysProof {
             reason: format!("{e:?}"),
         })?;
 
-        Ok(PlainKeysProof {
+        Ok(Witness {
             direct_lookup_tbl,
             salt_witness: SaltWitness::create(&witnessed_keys, store)?,
         })
@@ -160,10 +157,10 @@ impl PlainKeysProof {
     }
 }
 
-// Implementation of StateReader trait for PlainKeysProof
+// Implementation of StateReader trait for Witness
 // This allows the proof to be used as a state reader during verification,
 // providing only the data that was included in the proof
-impl StateReader for PlainKeysProof {
+impl StateReader for Witness {
     type Error = &'static str;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
@@ -189,7 +186,7 @@ impl StateReader for PlainKeysProof {
     }
 }
 
-impl TrieReader for PlainKeysProof {
+impl TrieReader for Witness {
     type Error = &'static str;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
@@ -218,9 +215,9 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
-    /// Test helper that extracts all proven values from a PlainKeysProof.
+    /// Test helper that extracts all proven values from a Witness.
     /// Returns values in the same order as in the proof's direct lookup table.
-    pub fn get_proven_values(proof: &PlainKeysProof) -> Vec<Option<Vec<u8>>> {
+    pub fn get_proven_values(proof: &Witness) -> Vec<Option<Vec<u8>>> {
         let keys: Vec<_> = proof.direct_lookup_tbl.keys().cloned().collect();
         let mut state = EphemeralSaltState::new(proof);
         keys.iter()
@@ -228,7 +225,7 @@ mod tests {
             .collect()
     }
 
-    /// Test serialization and deserialization of PlainKeysProof.
+    /// Test serialization and deserialization of Witness.
     /// Ensures that proofs can be transmitted and stored reliably.
     #[test]
     fn test_plain_keys_proof_serialize() {
@@ -257,12 +254,12 @@ mod tests {
 
         // Generate a proof for the inserted key
         let plain_keys_proof =
-            PlainKeysProof::create(&[kvs.keys().next().unwrap().clone()], &store).unwrap();
+            Witness::create(&[kvs.keys().next().unwrap().clone()], &store).unwrap();
 
         // Test serialization round-trip
         let serialized =
             bincode::serde::encode_to_vec(&plain_keys_proof, bincode::config::legacy()).unwrap();
-        let deserialized: (PlainKeysProof, usize) =
+        let deserialized: (Witness, usize) =
             bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
 
         // Verify the deserialized proof is identical and still valid
@@ -291,7 +288,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -313,7 +310,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -355,7 +352,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -401,7 +398,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -443,7 +440,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -478,7 +475,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -537,7 +534,7 @@ mod tests {
 
         let key = plain_keys()[7].clone();
 
-        let proof = PlainKeysProof::create(&[key.clone()], &store).unwrap();
+        let proof = Witness::create(&[key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -578,7 +575,7 @@ mod tests {
 
         let key = plain_keys()[8].clone();
 
-        let proof = PlainKeysProof::create(&[key.clone()], &store).unwrap();
+        let proof = Witness::create(&[key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -592,7 +589,7 @@ mod tests {
         assert_eq!(salt_value, salt_val);
     }
 
-    /// Test that PlainKeysProof correctly implements StateReader trait.
+    /// Test that Witness correctly implements StateReader trait.
     /// Verifies that the proof contains the same data as the original state.
     #[test]
     fn test_state_reader_for_plain_keys_proof() {
@@ -632,7 +629,7 @@ mod tests {
         store.update_trie(trie_updates);
 
         let plain_keys_proof =
-            PlainKeysProof::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
+            Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
 
         for key in plain_keys_proof.salt_witness.kvs.keys() {
             let proof_value = plain_keys_proof.value(*key).unwrap();
@@ -650,7 +647,7 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &store);
 
         let keys = get_plain_keys(vec![7, 8, 9]);
-        let proof = PlainKeysProof::create(&keys, &store).unwrap();
+        let proof = Witness::create(&keys, &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
