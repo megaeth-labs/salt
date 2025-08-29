@@ -12,7 +12,7 @@ use std::{
 /// salt in memory. It implements trait [`StateReader`] [`StateWriter`]
 /// [`TrieReader`] [`TrieWriter`].
 #[derive(Debug, Default)]
-pub(crate) struct MemSalt {
+pub struct MemSalt {
     /// Stores the buckect meta in the state.
     meta: RwLock<BTreeMap<BucketId, BucketMeta>>,
     /// Stores the key-value pairs that represent the blockchain state.
@@ -23,7 +23,7 @@ pub(crate) struct MemSalt {
 
 impl MemSalt {
     /// Create a new [`MemSalt`] instance, and the initial value of all nonce is 0.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             meta: RwLock::new(BTreeMap::new()),
             state: RwLock::new(BTreeMap::new()),
@@ -32,7 +32,7 @@ impl MemSalt {
     }
 
     /// Get all key-value pairs in the state.
-    pub(crate) fn get_all(&self) -> Vec<(SaltKey, SaltValue)> {
+    pub fn get_all(&self) -> Vec<(SaltKey, SaltValue)> {
         self.state.read().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 }

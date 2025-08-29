@@ -10,7 +10,7 @@ use alloy_primitives::{
     BlockNumber,
 };
 use bytes::BufMut;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+//use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
@@ -180,7 +180,7 @@ impl From<&StateUpdates> for SaltDeltas {
 
         // use rayon calc SaltDelta concurrent
         let state_updates: BTreeMap<SaltKey, SaltValueDelta> = state_update
-            .into_par_iter()
+            .into_iter()
             .filter_map(|(key, value)| match value {
                 (Some(ref old), Some(ref new)) => Some((*key, SaltValueDelta::new(old, new))),
                 _ => None,
@@ -299,7 +299,7 @@ mod tests {
         account::Account,
         mem_salt::*,
         state::{state::EphemeralSaltState, updates::StateUpdates},
-        types::{compute_xor, PlainKey, PlainValue},
+        types::{PlainKey, PlainValue},
     };
     use alloy_primitives::{Address, B256, U256};
     use std::collections::HashMap;
@@ -415,7 +415,7 @@ mod tests {
         state_updates1.write_to_store(&mock_db2).unwrap();
         // Using `range_bucket` would require accessing many invalid keys, resulting in slow
         // retrieval. Therefore, `get_all` is used instead.
-        let state1 = mock_db1.get_all();
+        let _state1 = mock_db1.get_all();
 
         // Insert kvs2, state1 -> state2
         let state_updates2 = EphemeralSaltState::new(&mock_db2).update(&kvs2).unwrap();
@@ -456,8 +456,8 @@ mod tests {
                 90, 21, 161, 152, 183, 37, 136, 79, 247, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
         };
-        let mut d1 =
+        let mut _d1 =
             SaltDeltas { deletes: BTreeMap::from([(key, old_value)]), ..Default::default() };
-        let d2 = SaltDeltas { puts: BTreeMap::from([(key, new_value)]), ..Default::default() };
+        let _d2 = SaltDeltas { puts: BTreeMap::from([(key, new_value)]), ..Default::default() };
     }
 }

@@ -53,7 +53,7 @@ use crate::{
     BucketId, NodeId, SaltKey, SlotId,
 };
 use itertools::Itertools;
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 /// A parent node and some or all of its children form a mini-tree
@@ -163,8 +163,8 @@ pub(crate) fn bucket_trie_parents_and_points(
     }
 
     let bucket_trie_nodes = salt_keys
-        .par_chunk_by(|&x, &y| x.bucket_id() == y.bucket_id())
-        .into_par_iter()
+        .chunk_by(|&x, &y| x.bucket_id() == y.bucket_id())
+        .into_iter()
         .flat_map(|keys| {
             let bucket_id = keys[0].bucket_id();
             let bucket_trie_top_level = buckets_top_level[&bucket_id];
@@ -207,8 +207,8 @@ pub(crate) fn bucket_trie_parents_and_points(
         .collect::<Vec<_>>();
 
     let bucket_state_nodes = salt_keys
-        .par_chunk_by(|&x, &y| x.bucket_id() == y.bucket_id())
-        .into_par_iter()
+        .chunk_by(|&x, &y| x.bucket_id() == y.bucket_id())
+        .into_iter()
         .map(|keys| {
             let bucket_id = keys[0].bucket_id();
             let bucket_trie_top_level = buckets_top_level[&bucket_id];

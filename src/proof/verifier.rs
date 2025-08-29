@@ -15,7 +15,7 @@ use crate::{
 use ark_ff::AdditiveGroup;
 use banderwagon::{Element, Fr};
 use ipa_multipoint::multiproof::VerifierQuery;
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
@@ -76,7 +76,7 @@ fn process_trie_queries(
 
     queries.extend(
         trie_nodes
-            .par_chunks((trie_nodes.len() + num_threads - 1) / num_threads)
+            .chunks((trie_nodes.len() + num_threads - 1) / num_threads)
             .flat_map(|chunk| {
                 let (multi_children_id, multi_children_commitment) = chunk
                     .iter()
@@ -161,7 +161,7 @@ where
 
     let mut queries = Vec::with_capacity(total_len);
 
-    let num_threads = rayon::current_num_threads();
+    let num_threads = 32;
 
     process_trie_queries(trie_nodes, path_commitments, num_threads, &mut queries);
 
@@ -174,7 +174,7 @@ where
     // process bucket state queries
     let chunk_size = (kvs.len() + num_threads - 1) / num_threads;
     let bucket_state_queries = kvs
-        .par_chunks(chunk_size)
+        .chunks(chunk_size)
         .flat_map(|chunk| {
             chunk
                 .into_iter()

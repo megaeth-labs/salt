@@ -9,7 +9,7 @@ use ipa_multipoint::{
     crs::CRS, lagrange_basis::PrecomputedWeights, multiproof::MultiPoint, transcript::Transcript,
 };
 use once_cell::sync::Lazy;
-use rayon::prelude::*;
+//use rayon::prelude::*;
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
@@ -35,7 +35,7 @@ where
     let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
 
     if needs_sorting {
-        keys.par_sort_unstable();
+        keys.sort();
     }
     keys.dedup();
 
@@ -57,7 +57,7 @@ mod tests {
     use crate::{
         genesis::EmptySalt,
         mem_salt::MemSalt,
-        traits::{BucketMetadataReader, StateReader, StateWriter, TrieReader},
+        traits::{BucketMetadataReader, StateReader, StateWriter},
         types::{BucketMeta, PlainKey, PlainValue, SaltValue},
     };
     use alloy_primitives::{Address, U256};
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_create_salt_proof_sorted_keys() {
-        let mut mem_salt = MemSalt::new();
+        let mem_salt = MemSalt::new();
 
         // Add some test data
         let addr = Address::repeat_byte(0x42);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_create_salt_proof_unsorted_keys() {
-        let mut mem_salt = MemSalt::new();
+        let mem_salt = MemSalt::new();
 
         // Add some test data
         let addr = Address::repeat_byte(0x42);
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_create_salt_proof_duplicate_keys() {
-        let mut mem_salt = MemSalt::new();
+        let mem_salt = MemSalt::new();
 
         // Add some test data
         let addr = Address::repeat_byte(0x42);
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_create_salt_proof_single_key() {
-        let mut mem_salt = MemSalt::new();
+        let mem_salt = MemSalt::new();
 
         // Add test data
         let addr = Address::repeat_byte(0x42);
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_create_salt_proof_complex_scenario() {
-        let mut mem_salt = MemSalt::new();
+        let mem_salt = MemSalt::new();
 
         // Add multiple types of data
         let addr1 = Address::repeat_byte(0x42);

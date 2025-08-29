@@ -48,5 +48,4 @@ pub mod traits;
 pub mod types;
 pub use types::*;
 
-#[cfg(test)]
 pub mod mem_salt;

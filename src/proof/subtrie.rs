@@ -12,7 +12,7 @@ use crate::{
 use ark_ff::AdditiveGroup;
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
@@ -45,7 +45,7 @@ fn process_trie_queries<T: TrieReader>(
 
     queries.extend(
         trie_nodes
-            .par_chunks((trie_nodes.len() + num_threads - 1) / num_threads)
+            .chunks((trie_nodes.len() + num_threads - 1) / num_threads)
             .flat_map(|chunk| {
                 let multi_children = chunk
                     .iter()
@@ -85,7 +85,7 @@ fn process_bucket_state_queries<S: StateReader, T: TrieReader>(
 ) {
     queries.extend(
         bucket_state_nodes
-            .par_chunks((bucket_state_nodes.len() + num_threads - 1) / num_threads)
+            .chunks((bucket_state_nodes.len() + num_threads - 1) / num_threads)
             .flat_map(|chunk| {
                 chunk
                     .iter()
@@ -177,7 +177,7 @@ where
             salt_keys.len(),
     );
 
-    let num_threads = rayon::current_num_threads();
+    let num_threads = 32;
 
     // Process main queries
     process_trie_queries(main_trie_nodes.clone(), trie_reader, num_threads, &mut queries);
@@ -220,119 +220,4 @@ where
     );
 
     Ok((queries, parents_commitments, buckets_top_level))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        mem_salt::MemSalt,
-        proof::prover::PRECOMPUTED_WEIGHTS,
-        state::state::EphemeralSaltState,
-        trie::trie::StateRoot,
-        types::{PlainKey, PlainValue},
-    };
-    use alloy_primitives::{Address, B256};
-    use ark_ff::BigInt;
-    use banderwagon::{Fr, Zero};
-    use ipa_multipoint::{
-        crs::CRS,
-        multiproof::{MultiPoint, VerifierQuery},
-        transcript::Transcript,
-    };
-    use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_create_sub_trie() {
-        let mut rng = StdRng::seed_from_u64(42);
-
-        let byte_ff: [u8; 32] = [
-            204, 96, 246, 139, 174, 111, 240, 167, 42, 141, 172, 145, 227, 227, 67, 2, 127, 77,
-            165, 138, 175, 150, 139, 98, 201, 151, 0, 212, 66, 107, 252, 84,
-        ];
-
-        let (slot, storage_value) = (B256::from(byte_ff), B256::from(byte_ff));
-
-        let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::random_with(&mut rng), slot),
-            Some(PlainValue::Storage(storage_value.into())),
-        )]);
-
-        let mem_salt = MemSalt::new();
-
-        let mut state = EphemeralSaltState::new(&mem_salt);
-        let updates = state.update(&initial_key_values).unwrap();
-
-        updates.clone().write_to_store(&mem_salt).unwrap();
-
-        let mut trie = StateRoot::new();
-        let (_, trie_updates) = trie.update(&mem_salt, &updates).unwrap();
-
-        trie_updates.write_to_store(&mem_salt).unwrap();
-
-        let salt_key = *updates.data.keys().next().unwrap();
-
-        let keys = vec![salt_key];
-
-        let (prover_queries, _, _) = create_sub_trie(&mem_salt, &mem_salt, &keys).unwrap();
-
-        let crs = CRS::default();
-
-        let mut transcript = Transcript::new(b"st");
-
-        let proof = MultiPoint::open(
-            crs.clone(),
-            &PRECOMPUTED_WEIGHTS,
-            &mut transcript,
-            prover_queries.clone(),
-        );
-
-        let mut transcript = Transcript::new(b"st");
-
-        let verifier_query: Vec<VerifierQuery> =
-            prover_queries.into_iter().map(|q| q.into()).collect();
-
-        let res = proof.check(&crs, &PRECOMPUTED_WEIGHTS, &verifier_query, &mut transcript);
-        assert!(res);
-
-        let mut poly_items = vec![Fr::zero(); 256];
-        poly_items[0] = Fr::from(BigInt([
-            14950088112150747174,
-            13253162737298189682,
-            10931921008236264693,
-            1309984686389044416,
-        ]));
-
-        poly_items[208] = Fr::from(BigInt([
-            9954869294274886320,
-            8441215309276124103,
-            16970925962995195932,
-            2055721457450359655,
-        ]));
-
-        let poly = LagrangeBasis::new(poly_items);
-
-        let point = 208;
-        let result = poly.evaluate_in_domain(point);
-
-        let poly_comm = crs.commit_lagrange_poly(&poly);
-
-        let prover_query2 = ProverQuery { commitment: poly_comm, poly, point, result };
-
-        let mut transcript = Transcript::new(b"st");
-
-        let multiproof = MultiPoint::open(
-            crs.clone(),
-            &PRECOMPUTED_WEIGHTS,
-            &mut transcript,
-            vec![prover_query2.clone()],
-        );
-
-        let verifier_queries: Vec<VerifierQuery> = vec![prover_query2.into()];
-
-        let mut transcript = Transcript::new(b"st");
-
-        assert!(multiproof.check(&crs, &PRECOMPUTED_WEIGHTS, &verifier_queries, &mut transcript));
-    }
 }

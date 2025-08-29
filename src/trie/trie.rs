@@ -16,7 +16,7 @@ use alloy_primitives::B256;
 use banderwagon::{salt_committer::Committer, Element};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::OnceCell;
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 
 /// Don't use parallel processing in computing vector commitments if the total
@@ -124,18 +124,18 @@ impl StateRoot {
         T: TrieReader,
     {
         let committer = get_global_committer();
-        let num_tasks = 10 * rayon::current_num_threads();
+        let num_tasks = 32;
         let task_size =
             std::cmp::max(MIN_TASK_SIZE, (child_updates.len() + num_tasks - 1) / num_tasks);
 
         // Sort the child updates by their positions within the VCs.
-        child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+        child_updates.sort_by(|(a, _), (b, _)| {
             get_child_idx(a, level + 1).cmp(&get_child_idx(b, level + 1))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let c_deltas = child_updates
-            .par_chunks(task_size)
+            .chunks(task_size)
             .map(|c_updates| {
                 let c_vec: Vec<CommitmentBytes> = c_updates
                     .iter()
@@ -397,7 +397,7 @@ impl StateRoot {
             // handle the corresponding subtrie.
             updates = if !event_levels[level].is_empty() {
                 let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = updates
-                    .into_par_iter()
+                    .into_iter()
                     .map(|(id, (old_c, mut new_c))| {
                         let bid = (id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
                         // Handle events for the bucket with  id = bid
@@ -454,20 +454,19 @@ impl StateRoot {
         T: TrieReader,
     {
         let committer = get_global_committer();
-        let num_tasks = 10 * rayon::current_num_threads();
+        let num_tasks = 32;
         let task_size =
             std::cmp::max(MIN_TASK_SIZE, (state_updates.len() + num_tasks - 1) / num_tasks);
 
         // Sort the state updates by slot IDs
-        state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+        state_updates.sort_by(|(a, _), (b, _)| {
             (a.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId)
                 .cmp(&(b.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let c_deltas: Vec<(NodeId, Element)> = state_updates
-            .par_iter()
-            .with_min_len(task_size)
+            .iter()
             .map(|(salt_key, (old_value, new_value))| {
                 (
                     get_node_id(salt_key),
@@ -491,7 +490,7 @@ impl StateRoot {
         task_size: usize,
     ) -> Result<Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>, <T as TrieReader>::Error> {
         // Sort the updated elements by their parent node IDs.
-        c_deltas.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        c_deltas.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Split the elements into chunks of roughly the same size.
         let mut splits = vec![0];
@@ -512,7 +511,7 @@ impl StateRoot {
 
         // Process chunks in parallel and collect the results.
         Ok(ranges
-            .par_iter()
+            .iter()
             .map(|(start, end)| {
                 let mut last_node = NodeId::MAX;
                 let mut new_e_vec = vec![];
@@ -798,7 +797,7 @@ mod tests {
         initialize_state_updates.clone().write_to_store(&store).unwrap();
         initialize_trie_updates.clone().write_to_store(&store).unwrap();
         let (root, mut init_trie_updates) = compute_from_scratch(&store).unwrap();
-        init_trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        init_trie_updates.data.sort_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
         // expand capacity and add kvs
@@ -1085,8 +1084,8 @@ mod tests {
         let mut trie = StateRoot::new();
         let (cmp_root, mut cmp_trie_updates) = trie.update(&store, &cmp_state_updates).unwrap();
         assert_eq!(root, cmp_root);
-        trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        cmp_trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        trie_updates.data.sort_by(|(a, _), (b, _)| a.cmp(b));
+        cmp_trie_updates.data.sort_by(|(a, _), (b, _)| a.cmp(b));
         trie_updates.data.iter().zip(cmp_trie_updates.data.iter()).for_each(
             |(trie_update, cmp_trie_update)| {
                 assert_eq!(trie_update.0, cmp_trie_update.0);
@@ -1124,8 +1123,8 @@ mod tests {
 
         assert_eq!(root, final_root);
         assert_eq!(total_state_updates, final_state_updates);
-        total_trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        final_trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        total_trie_updates.data.sort_by(|(a, _), (b, _)| a.cmp(b));
+        final_trie_updates.data.sort_by(|(a, _), (b, _)| a.cmp(b));
         total_trie_updates.data.iter().zip(final_trie_updates.data.iter()).for_each(|(r1, r2)| {
             assert_eq!(r1.0, r2.0);
             assert!(is_commitment_equal(r1.1 .0, r2.1 .0));
@@ -1412,7 +1411,7 @@ mod tests {
         state_updates.add((bucket_ids[1], 9).into(), kv1.clone(), kv2.clone());
 
         let (_, mut trie_updates) = trie.update(&EmptySalt, &state_updates).unwrap();
-        trie_updates.data.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
+        trie_updates.data.sort_by(|(a, _), (b, _)| b.cmp(a));
 
         // Check the commitment updates of the bottom-level node
         let c1 = committer.add_deltas(zero, &[(9, fr1, fr2)]).to_bytes_uncompressed();

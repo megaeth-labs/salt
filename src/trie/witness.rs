@@ -11,7 +11,7 @@ use crate::{
     types::*,
 };
 use alloy_primitives::{b256, Address, B256};
-use rayon::prelude::*;
+//use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -37,7 +37,7 @@ where
     // Using any() to find the first out-of-order pair for efficiency
     let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
     if needs_sorting {
-        keys.par_sort_unstable();
+        keys.sort();
     }
     keys.dedup();
 
@@ -487,7 +487,7 @@ mod tests {
         let mut res = HashMap::new();
 
         (0..l / 2).for_each(|_| {
-            let pk = PlainKey::Account(Address::random_with(&mut rng));
+            let pk = PlainKey::Account(Address::random());
             let pv = Some(PlainValue::Account(Account {
                 balance: U256::from(rng.gen_range(0..1000)),
                 nonce: rng.gen_range(0..100),
@@ -496,8 +496,8 @@ mod tests {
             res.insert(pk, pv);
         });
         (l / 2..l).for_each(|_| {
-            let pk = PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng));
-            let pv = Some(PlainValue::Storage(B256::random_with(&mut rng).into()));
+            let pk = PlainKey::Storage(Address::random(), B256::random());
+            let pv = Some(PlainValue::Storage(B256::random().into()));
             res.insert(pk, pv);
         });
         res

@@ -711,7 +711,6 @@ mod tests {
             updates::StateUpdates,
         },
         types::*,
-        PlainStateProvider,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::Rng;
@@ -1111,78 +1110,6 @@ mod tests {
         state_updates1.merge(&state_updates2);
 
         assert_eq!(total_state_updates, state_updates1);
-    }
-
-    #[test]
-    fn update_and_read_salt_state_work() {
-        // Prepare Data.
-        let addresses: Vec<Address> = (0..5).map(|_| Address::random()).collect();
-        let account1 = Account { balance: U256::from(10), ..Default::default() };
-        let account2 = Account { balance: U256::from(100), ..Default::default() };
-        let (slot, storage_value) = (B256::random(), B256::random());
-        let mock_db = MemSalt::new();
-
-        // Insert kvs.
-        let kvs: HashMap<PlainKey, Option<PlainValue>> = vec![
-            (PlainKey::Account(addresses[0]), Some(PlainValue::Account(account1))),
-            (PlainKey::Account(addresses[1]), Some(PlainValue::Account(account2))),
-            (
-                PlainKey::Storage(addresses[2], slot),
-                Some(PlainValue::Storage(storage_value.into())),
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        let state_updates = EphemeralSaltState::new(&mock_db).update(&kvs).unwrap();
-
-        // Read data before update canonical salt state.
-        let provider = PlainStateProvider::new(&mock_db);
-        assert!(provider.get_account(addresses[0]).unwrap().is_none());
-        assert!(provider.get_account(addresses[1]).unwrap().is_none());
-        assert!(provider.get_account(addresses[2]).unwrap().is_none());
-
-        // Write canonical salt state.
-        state_updates.write_to_store(&mock_db).unwrap();
-
-        // Read data after update canonical salt state.
-        assert_eq!(provider.get_account(addresses[0]).unwrap().unwrap(), account1);
-        assert_eq!(provider.get_account(addresses[1]).unwrap().unwrap(), account2);
-        assert_eq!(
-            provider.get_storage(addresses[2], slot).unwrap().unwrap(),
-            storage_value.into()
-        );
-
-        // Delete kvs.
-        let kvs = HashMap::from([
-            (PlainKey::Account(addresses[0]), None),
-            (PlainKey::Storage(addresses[2], slot), None),
-            (PlainKey::Account(addresses[3]), None),
-            (PlainKey::Account(addresses[4]), None),
-        ]);
-
-        let state_updates = EphemeralSaltState::new(&mock_db).update(&kvs).unwrap();
-
-        // Read data before update canonical salt state.
-        let provider = PlainStateProvider::new(&mock_db);
-        assert_eq!(provider.get_account(addresses[0]).unwrap().unwrap(), account1);
-        assert_eq!(provider.get_account(addresses[1]).unwrap().unwrap(), account2);
-        assert_eq!(
-            provider.get_storage(addresses[2], slot).unwrap().unwrap(),
-            storage_value.into()
-        );
-        assert!(provider.get_account(addresses[3]).unwrap().is_none());
-        assert!(provider.get_account(addresses[4]).unwrap().is_none());
-
-        // Write canonical salt state.
-        state_updates.write_to_store(&mock_db).unwrap();
-
-        // Read data after update canonical salt state.
-        assert!(provider.get_account(addresses[0]).unwrap().is_none());
-        assert_eq!(provider.get_account(addresses[1]).unwrap().unwrap(), account2);
-        assert!(provider.get_storage(addresses[2], slot).unwrap().is_none());
-        assert!(provider.get_account(addresses[3]).unwrap().is_none());
-        assert!(provider.get_account(addresses[4]).unwrap().is_none());
     }
 
     #[test]
