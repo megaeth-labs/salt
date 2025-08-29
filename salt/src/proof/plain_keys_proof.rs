@@ -9,7 +9,7 @@ use crate::{
     proof::ProofError,
     state::{
         hasher,
-        state::{EphemeralSaltState, PlainStateProvider},
+        state::EphemeralSaltState,
     },
     traits::{StateReader, TrieReader},
     types::*,
@@ -192,17 +192,6 @@ impl StateReader for PlainKeysProof {
     }
 }
 
-impl PlainStateProvider for PlainKeysProof {
-    type Error = &'static str;
-
-    fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        match self.plain_value_fast(plain_key) {
-            Ok(salt_key) => Ok(Some(self.value(salt_key)?.unwrap().value().to_vec())),
-            Err(_) => EphemeralSaltState::new(self).plain_value(plain_key),
-        }
-    }
-}
-
 impl TrieReader for PlainKeysProof {
     type Error = &'static str;
 
@@ -235,10 +224,11 @@ mod tests {
 
     /// Test helper that extracts all proven values from a PlainKeysProof.
     /// Returns values in the same order as keys appear in the proof's key_mapping.
-    pub fn get_proven_values(proof: &mut PlainKeysProof) -> Vec<Option<Vec<u8>>> {
+    pub fn get_proven_values(proof: &PlainKeysProof) -> Vec<Option<Vec<u8>>> {
         let keys: Vec<_> = proof.key_mapping.keys().cloned().collect();
+        let mut state = EphemeralSaltState::new(proof);
         keys.iter()
-            .map(|plain_key| proof.plain_value(plain_key).unwrap())
+            .map(|plain_key| state.plain_value(plain_key).unwrap())
             .collect()
     }
 
@@ -305,12 +295,13 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
-        let proof_values = get_proven_values(&mut proof);
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        let proof_values = get_proven_values(&proof);
 
         assert!(proof_value.is_some());
 
@@ -326,11 +317,12 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
         assert!(proof_value.is_none());
 
         let plain_value = EphemeralSaltState::new(&store)
@@ -367,11 +359,12 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
         assert!(proof_value.is_none());
 
         let plain_value = EphemeralSaltState::new(&store)
@@ -412,11 +405,12 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
 
         let plain_key = plain_keys()[1].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
         assert!(proof_value.is_none());
 
         let plain_value = EphemeralSaltState::new(&store)
@@ -453,11 +447,12 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![]), &store);
 
         let plain_key = plain_keys()[0].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
         assert!(proof_value.is_none());
 
         let plain_value = EphemeralSaltState::new(&store)
@@ -487,11 +482,12 @@ mod tests {
         let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = plain_keys()[6].clone();
-        let mut proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
+        let proof = PlainKeysProof::create(&[plain_key.clone()], &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
-        let proof_value = proof.plain_value(&plain_key).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
         assert!(proof_value.is_none());
 
         let plain_value = EphemeralSaltState::new(&store)

@@ -24,7 +24,7 @@ pub mod mock_evm_types;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{state::state::PlainStateProvider, trie::trie::StateRoot};
+    use crate::trie::trie::StateRoot;
     use std::collections::HashMap;
 
     #[test]
@@ -62,17 +62,19 @@ mod tests {
 
         // Alice creates a cryptographic proof for plain key-value pairs
         let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let mut proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
+        let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
 
         // Bob verifies the proof against its local state root
         let is_valid = proof.verify(root_hash);
         assert!(is_valid.is_ok());
 
+        // Bob looks up values from the proof using EphemeralSaltState
+        let mut bob_state = EphemeralSaltState::new(&proof);
         assert_eq!(
-            proof.plain_value(b"account1")?,
+            bob_state.plain_value(b"account1")?,
             Some(b"balance100".to_vec())
         );
-        assert_eq!(proof.plain_value(b"non_existent_key")?, None);
+        assert_eq!(bob_state.plain_value(b"non_existent_key")?, None);
 
         Ok(())
     }
