@@ -450,6 +450,21 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    #[test]
+    fn test_empty_input() {
+        let store = MemStore::new();
+
+        let proof_res = SaltProof::create([], &store);
+
+        assert!(proof_res.is_err());
+
+        let proof = SaltProof::create([SaltKey::from((100, 42))], &store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store).unwrap();
+
+        let res = proof.check(&Default::default(), root);
+        assert!(res.is_err())
+    }
+
     /// Tests proof generation during bucket capacity expansion.
     /// Initializes a trie with a single value, expands the bucket from default
     /// capacity (256) to 65536, and verifies that:
