@@ -7,10 +7,7 @@
 use crate::{
     proof::witness::SaltWitness,
     proof::ProofError,
-    state::{
-        hasher,
-        state::EphemeralSaltState,
-    },
+    state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -23,10 +20,10 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlainKeysProof {
     // TODO: the builtin serialization mechanism has too much redundant data.
-    // e.g., every plain key is stored twice: one in `key_mapping` and one in
-    // `salt_witness`.
+    // e.g., every plain key is stored twice: one in `direct_lookup_tbl` and
+    // one in `salt_witness`.
     /// Mapping from plain keys to their corresponding salt keys.
-    pub(crate) key_mapping: BTreeMap<Vec<u8>, SaltKey>,
+    pub(crate) direct_lookup_tbl: BTreeMap<Vec<u8>, SaltKey>,
     /// Low-level SALT witness containing all bucket slots needed for proving the
     /// existence or non-existence of the plain keys and their cryptographic proof.
     pub(crate) salt_witness: SaltWitness,
@@ -64,7 +61,7 @@ impl PlainKeysProof {
         Store: StateReader + TrieReader,
     {
         let mut witnessed_keys = vec![];
-        let mut key_mapping = BTreeMap::new();
+        let mut direct_lookup_tbl = BTreeMap::new();
 
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:
@@ -80,10 +77,10 @@ impl PlainKeysProof {
                 if let Some((slot_id, _)) =
                     state.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)?
                 {
-                    // Key exists: Record the mapping and directly witness
-                    // the salt key for inclusion proof
+                    // Key exists: Record the mapping in the lookup table and
+                    // directly witness the salt key for inclusion proof
                     let salt_key = SaltKey::from((bucket_id, slot_id));
-                    key_mapping.insert(plain_key.clone(), salt_key);
+                    direct_lookup_tbl.insert(plain_key.clone(), salt_key);
                     witnessed_keys.push(salt_key);
                 } else {
                     // Key doesn't exist: Perform a full search to capture all
@@ -102,7 +99,7 @@ impl PlainKeysProof {
         })?;
 
         Ok(PlainKeysProof {
-            key_mapping,
+            direct_lookup_tbl,
             salt_witness: SaltWitness::create(&witnessed_keys, store)?,
         })
     }
@@ -127,21 +124,21 @@ impl PlainKeysProof {
     /// * `Ok(())` - If both cryptographic proof and key locations are valid
     /// * `Err(ProofError)` - If verification fails due to:
     ///   - Invalid cryptographic proof
-    ///   - Incorrect key mapping
+    ///   - Incorrect lookup table
     pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
         self.salt_witness.verify_proof(root)?;
 
         let mut state = EphemeralSaltState::new(self);
 
-        for (plain_key, expected_salt_key) in &self.key_mapping {
-            // Verify key mapping consistency with underlying SaltWitness:
+        for (plain_key, expected_salt_key) in &self.direct_lookup_tbl {
+            // Verify lookup table consistency with underlying SaltWitness:
             // direct_find -> Self::plain_value_fast -> Self::value -> SaltWitness::value
             let found_key = state.direct_find(plain_key).ok().flatten().map(|(k, _)| k);
 
             match found_key {
                 Some(k) if k == *expected_salt_key => {}
                 Some(_) => {
-                    return Err(ProofError::InvalidKeyMapping {
+                    return Err(ProofError::InvalidLookupTable {
                         reason: format!(
                             "Key found in wrong location: {:?}",
                             String::from_utf8_lossy(plain_key)
@@ -149,7 +146,7 @@ impl PlainKeysProof {
                     })
                 }
                 None => {
-                    return Err(ProofError::InvalidKeyMapping {
+                    return Err(ProofError::InvalidLookupTable {
                         reason: format!(
                             "Key claimed to exist but not found: {:?}",
                             String::from_utf8_lossy(plain_key)
@@ -185,7 +182,7 @@ impl StateReader for PlainKeysProof {
     }
 
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        match self.key_mapping.get(plain_key) {
+        match self.direct_lookup_tbl.get(plain_key) {
             Some(salt_key) => Ok(*salt_key),
             None => Err("Plain key not in witness"),
         }
@@ -223,9 +220,9 @@ mod tests {
     use std::collections::HashMap;
 
     /// Test helper that extracts all proven values from a PlainKeysProof.
-    /// Returns values in the same order as keys appear in the proof's key_mapping.
+    /// Returns values in the same order as in the proof's direct lookup table.
     pub fn get_proven_values(proof: &PlainKeysProof) -> Vec<Option<Vec<u8>>> {
-        let keys: Vec<_> = proof.key_mapping.keys().cloned().collect();
+        let keys: Vec<_> = proof.direct_lookup_tbl.keys().cloned().collect();
         let mut state = EphemeralSaltState::new(proof);
         keys.iter()
             .map(|plain_key| state.plain_value(plain_key).unwrap())
@@ -586,7 +583,7 @@ mod tests {
 
         assert!(proof.verify(root).is_ok());
 
-        assert_eq!(proof.key_mapping.keys().next().unwrap(), &key);
+        assert_eq!(proof.direct_lookup_tbl.keys().next().unwrap(), &key);
 
         let salt_key = SaltKey::from((bucket_id, 1));
         let salt_value = proof.value(salt_key).unwrap().unwrap();
@@ -658,12 +655,12 @@ mod tests {
 
         assert!(proof.verify(root).is_ok());
 
-        assert_eq!(proof.key_mapping.len(), 3);
+        assert_eq!(proof.direct_lookup_tbl.len(), 3);
         assert_eq!(proof.salt_witness.kvs.len(), 3);
 
         let salt_keys = proof.salt_witness.kvs.keys().copied().collect::<Vec<_>>();
         let salt_keys2 = proof
-            .key_mapping
+            .direct_lookup_tbl
             .values()
             .cloned()
             .sorted_unstable()

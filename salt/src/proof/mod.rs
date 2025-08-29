@@ -34,7 +34,7 @@ pub enum ProofError {
     #[error("multi-point proof check failed")]
     MultiPointProofFailed,
 
-    /// Key mapping verification failed during proof validation
-    #[error("invalid key mapping: {reason}")]
-    InvalidKeyMapping { reason: String },
+    /// Direct lookup table verification failed during proof validation
+    #[error("invalid lookup table: {reason}")]
+    InvalidLookupTable { reason: String },
 }

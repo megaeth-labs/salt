@@ -50,7 +50,6 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
 
-
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
 /// `EphemeralSaltState` provides a mutable view over an immutable storage backend,
