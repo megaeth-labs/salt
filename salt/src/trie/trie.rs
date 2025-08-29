@@ -336,33 +336,34 @@ where
                 if let Some(subtree_change) = subtree_change_info.get(&bucket_id) {
                     // Handle capacity changes
                     match subtree_change
-                        .old_top_level
-                        .cmp(&subtree_change.new_top_level)
+                        .new_capacity
+                        .cmp(&subtree_change.old_capacity)
                     {
                         std::cmp::Ordering::Greater => {
-                            need_handle_buckets.insert(bucket_id);
                             // Will be handled in subtree processing
-                            if key.slot_id() < subtree_change.old_capacity {
-                                continue;
-                            }
-                            // Expansion: add old subtree root update
-                            add_expansion_update(&mut extra_updates, subtree_change)?;
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Will be handled in subtree processing
-                            if key.slot_id() < subtree_change.new_capacity {
+                            let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
+                            let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
+                            if key.slot_id() < level_capacity {
                                 need_handle_buckets.insert(bucket_id);
                                 continue;
                             }
-                            // Contraction: new subtree root equals bucket commitment
-                            add_contraction_update(&mut uncomputed_updates, subtree_change)?;
+                        }
+                        std::cmp::Ordering::Less => {
+                            // Will be handled in subtree processing
+                            let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
+                            let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
+                            if key.slot_id() < level_capacity {
+                                need_handle_buckets.insert(bucket_id);
+                                continue;
+                            }
                         }
                         std::cmp::Ordering::Equal => {}
                     }
-                } else if self.store.metadata(bucket_id)?.capacity > MIN_BUCKET_SIZE as u64 {
+                } else if self.store.get_subtree_levels(bucket_id)? > 1 {
                     // KV changes in expanded bucket (capacity unchanged)
                     need_handle_buckets.insert(bucket_id);
-                    let bucket_capacity = self.store.metadata(bucket_id)?.capacity;
+                    let bucket_capacity = (TRIE_WIDTH as NodeId)
+                        .pow(self.store.get_subtree_levels(bucket_id)? as u32);
                     subtree_change_info.insert(
                         bucket_id,
                         SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
@@ -390,8 +391,8 @@ where
 
             for level in (subtree_change.old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
                 let extrat_end = ((capacity_start_index + MIN_BUCKET_SIZE as NodeId)
-                    .min(capacity_end_index)
                     & (NodeId::MAX - (MIN_BUCKET_SIZE as NodeId - 1)))
+                    .min(capacity_end_index)
                     + bucket_id
                     + STARTING_NODE_ID[level] as NodeId;
 
@@ -432,7 +433,10 @@ where
                     std::cmp::Ordering::Greater => {
                         // Expansion: update old subtree root
                         add_expansion_update(&mut extra_updates, subtree_change)?;
-                        // Also handle new top level
+                        need_handle_buckets.insert(*bucket_id);
+                        // Also handle both top level
+                        trigger_levels[subtree_change.old_top_level]
+                            .insert(*bucket_id, subtree_change.clone());
                         trigger_levels[subtree_change.new_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                     }
@@ -1280,6 +1284,95 @@ mod tests {
         assert_eq!(root1, root);
     }
 
+    /// Tests bucket capacity expansion and contraction within the same subtree level.
+    ///
+    /// This test verifies that the trie correctly handles bucket capacity changes
+    /// when those changes don't change the bucket subtree's root.
+    ///
+    /// The test uses capacities 512, 4096, and 1024, all of which require a Level 3
+    /// subtree root, ensuring the trie structure remains stable during resizing.
+    ///
+    /// # Test Flow
+    /// 1. **Initial Setup**: Create bucket with capacity 512 and one key-value pair
+    /// 2. **Expansion**: Increase capacity to 4096, add a key at a high slot
+    /// 3. **Contraction**: Reduce capacity to 1024, remove the out-of-bounds key
+    ///
+    /// # Verification Strategy
+    /// After each operation, the test:
+    /// - Updates the trie incrementally using `update_fin()`
+    /// - Rebuilds the entire trie from scratch using `rebuild()`
+    /// - Verifies both methods produce identical root hashes
+    ///
+    /// This ensures incremental updates correctly maintain trie integrity
+    /// during capacity changes that don't alter the subtree structure.
+    #[test]
+    fn expansion_and_contraction_at_same_level() {
+        let store = MemStore::new();
+        let mut trie = StateRoot::new(&store);
+
+        // Use data bucket 65540 (NUM_META_BUCKETS + 4)
+        // Data buckets start at 65536, so this is the 5th data bucket
+        let bid = KV_BUCKET_OFFSET as BucketId + 4;
+        let meta_key = bucket_metadata_key(bid);
+
+        // Define test phases: (old_capacity, new_capacity, slot_changes)
+        // All capacities (512, 4096, 1024) require Level 3 as subtree root:
+        // - 512 > 256 but < 65,536: needs 2 Level 4 nodes (512/256 = 2)
+        // - 4096 < 65,536: needs 16 Level 4 nodes (4096/256 = 16)
+        // - 1024 < 65,536: needs 4 Level 4 nodes (1024/256 = 4)
+        // The subtree root stays at Level 3 throughout, hence "same level"
+        let phases = [
+            // Phase 1: Initialize with capacity 512, add key at slot 1
+            // Creates subtree with 2 Level 4 nodes under Level 3 root
+            (None, 512, vec![(1, None, Some([1; 32]))]),
+            // Phase 2: Expand to 4096, add key at slot 4090 near end of range
+            // Expands subtree to 16 Level 4 nodes, root still at Level 3
+            (Some(512), 4096, vec![(4090, None, Some([2; 32]))]),
+            // Phase 3: Contract to 1024, remove key now out of bounds
+            // Contracts subtree to 4 Level 4 nodes, root remains at Level 3
+            (Some(4096), 1024, vec![(4090, Some([2; 32]), None)]),
+        ];
+
+        for (phase, (old_cap, new_cap, slot_changes)) in phases.iter().enumerate() {
+            // Build metadata update for capacity change
+            let mut updates = vec![(
+                meta_key,
+                (
+                    // Old metadata: either previous capacity or default (256)
+                    old_cap
+                        .map(|c| bucket_meta(0, c).into())
+                        .or(Some(BucketMeta::default().into())),
+                    // New metadata: target capacity
+                    Some(bucket_meta(0, *new_cap).into()),
+                ),
+            )];
+
+            // Add slot-level changes (insertions/deletions)
+            for (slot, old_val, new_val) in slot_changes {
+                updates.push((
+                    (bid, *slot).into(),
+                    (
+                        old_val.map(|v| SaltValue::new(&v, &v)),
+                        new_val.map(|v| SaltValue::new(&v, &v)),
+                    ),
+                ));
+            }
+
+            let state_updates = StateUpdates {
+                data: updates.into_iter().collect(),
+            };
+
+            // Apply incremental updates and verify against full rebuild
+            let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+            store.update_state(state_updates);
+            store.update_trie(trie_updates);
+
+            // Ensure incremental update matches full trie reconstruction
+            let (rebuilt_root, _) = StateRoot::rebuild(&store).unwrap();
+            assert_eq!(root, rebuilt_root, "Phase {} root mismatch", phase + 1);
+        }
+    }
+
     #[test]
     fn expansion_and_contraction_small() {
         let store = MemStore::new();
@@ -1413,7 +1506,6 @@ mod tests {
             .collect(),
         };
         let (contraction_root, _) = trie.update_fin(contract_state_updates).unwrap();
-
         assert_eq!(initialize_root, contraction_root);
     }
 

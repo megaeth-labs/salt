@@ -1,306 +1,263 @@
-//! Salt witness implementation for stateless validation.
+//! Witness generation and verification for plain (user-provided) keys.
 //!
-//! This module provides the `SaltWitness` data structure, which contains a subset
-//! of state data along with cryptographic proofs for stateless validation. The witness
-//! enforces critical security properties to prevent state manipulation attacks.
+//! This module implements a high-level proof system that allows clients to prove
+//! the existence or non-existence of plain keys without requiring access to the
+//! full state. It acts as an abstraction layer over the lower-level `SaltWitness`
+//! proof system.
+
 use crate::{
-    proof::{ProofError, SaltProof},
+    proof::salt_witness::SaltWitness,
+    proof::ProofError,
+    state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
     types::*,
 };
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     ops::{Range, RangeInclusive},
 };
 
-/// Salt witness for stateless validation with security guarantees.
+/// A cryptographic witness enabling stateless validation and execution.
 ///
-/// A `SaltWitness` contains a curated subset of state data along with cryptographic
-/// proofs that allow stateless validators to verify state transitions without having
-/// access to the full state tree.
+/// The `Witness` allows stateless validators to:
+/// - Re-execute transactions by providing necessary state data through
+///   the `StateReader` trait
+/// - Compute the new state root after transaction execution
 ///
-/// # Security Model
-///
-/// The witness enforces a critical distinction between three types of keys:
-///
-/// ## Key States
-/// 1. **Witnessed Existing**: Key is in the witness with a value (`Some(Some(value))`)
-/// 2. **Witnessed Non-existent**: Key is in the witness as absent (`Some(None)`)
-/// 3. **Unknown**: Key is not included in the witness at all (`None`)
-///
-/// ## Security Properties
-///
-/// - **No State Hiding**: A malicious prover cannot make an existing key appear
-///   as non-existent by omitting it from the witness. Unknown keys always return
-///   errors, preventing confusion with proven non-existence.
-///
-/// - **Proof Integrity**: The cryptographic proof ensures that all witnessed data
-///   (both existing and non-existent) is correctly authenticated against the state root.
-///
-/// - **No Range Manipulation**: Range queries are disabled to prevent selective
-///   omission attacks where a prover hides some keys while including others in a range.
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SaltWitness {
-    /// All witnessed data in this proof, including both metadata and regular
-    /// key-value pairs.
-    /// - `Some(value)`: Key exists with the given value
-    /// - `None`: Key does not exist
-    /// - Missing key: Key not witnessed (unknown)
-    ///
-    /// Unlike regular data buckets, metadata bucket slots can never be empty.
-    /// Default metadata is stored explicity as `Some(SaltValue)`, not `None`,
-    /// to simplify the witness code.
-    pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
+/// Critically, the witness contains the minimal partial trie with all internal nodes
+/// necessary to recompute the state root after applying state updates. This enables
+/// stateless nodes to not only re-execute transactions but also produce new state roots.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Witness {
+    /// Direct mapping from plain keys to their salt key locations.
+    /// Only contains keys that exist.
+    pub(crate) direct_lookup_tbl: HashMap<Vec<u8>, SaltKey>,
 
-    /// Cryptographic proof authenticating all witnessed data
-    pub proof: SaltProof,
+    /// The underlying cryptographic witness containing:
+    /// - All salt keys needed for inclusion/exclusion proofs
+    /// - Their values (or None for empty slots)
+    /// - Cryptographic commitments proving authenticity
+    pub(crate) salt_witness: SaltWitness,
 }
 
-impl SaltWitness {
-    /// Creates a salt witness for a given set of keys with their cryptographic proof.
+impl From<SaltWitness> for Witness {
+    /// Reconstructs a Witness from a SaltWitness by extracting plain keys.
     ///
-    /// This method constructs a witness that includes the specified keys' data along
-    /// with a cryptographic proof that authenticates the data against the state root.
-    /// Every key is cryptographically proven to either exist (with its value) or not
-    /// exist.
-    ///
-    /// # Arguments
-    /// * `keys` - The set of salt keys to include in the witness
-    /// * `store` - The storage backend providing access to state data
-    ///
-    /// # Returns
-    /// * `Ok(SaltWitness)` - A witness containing the requested keys' data and their proof
-    /// * `Err(ProofError)` - If reading any key fails or proof generation fails
-    ///
-    /// # Notes
-    /// - For metadata keys, retrieves bucket metadata instead of regular values
-    /// - For regular keys, retrieves their values (or None if non-existent)
-    /// - The proof is generated for all requested keys to ensure completeness
-    pub fn create<Store>(keys: &[SaltKey], store: &Store) -> Result<SaltWitness, ProofError>
-    where
-        Store: StateReader + TrieReader,
-    {
-        let kvs = keys
-            .par_iter()
-            .map(|&salt_key| {
-                let value = (if salt_key.is_in_meta_bucket() {
-                    // Handle metadata keys
-                    let bucket_id = bucket_id_from_metadata_key(salt_key);
-                    store.metadata(bucket_id).map(|meta| Some(meta.into()))
-                } else {
-                    // Handle regular data keys
-                    store.value(salt_key)
-                })
-                .map_err(|e| ProofError::StateReadError {
-                    reason: format!("Failed to read key: {e:?}"),
-                })?;
-                Ok((salt_key, value))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+    /// This enables transmitting only the SaltWitness over the network, avoiding
+    /// redundant storage of plain keys. The direct_lookup_tbl is rebuilt by:
+    /// - Extracting plain keys from SaltValue data (where they're already stored)
+    /// - Skipping metadata entries (which don't contain plain key-value pairs)
+    fn from(salt_witness: SaltWitness) -> Self {
+        let mut direct_lookup_tbl = HashMap::new();
+        for (salt_key, value) in &salt_witness.kvs {
+            if salt_key.is_in_meta_bucket() {
+                continue;
+            }
 
-        let proof = SaltProof::create(kvs.keys().copied(), store)?;
-        Ok(SaltWitness { kvs, proof })
-    }
-
-    /// Verify the salt witness against the given state root.
-    ///
-    /// This method verifies that the witness correctly represents the state by
-    /// checking the cryptographic proof. Importantly, it preserves the distinction
-    /// between non-existent values (None) and existing values (Some) in the proof.
-    ///
-    /// # Security Note
-    ///
-    /// This verification ensures that:
-    /// - All witnessed keys are correctly proven against the state root
-    /// - Non-existent values (None) are properly verified as absent
-    /// - The proof cannot be manipulated to hide or fabricate state
-    pub fn verify_proof(&self, root: ScalarBytes) -> Result<(), ProofError> {
-        self.proof.check(&self.kvs, root)
-    }
-}
-
-impl StateReader for SaltWitness {
-    type Error = &'static str;
-
-    /// Retrieves a state value by key from the witness.
-    ///
-    /// # Security Model
-    ///
-    /// This method enforces a critical distinction for stateless validation:
-    /// - `Ok(Some(value))` - Key exists with the given value (witnessed)
-    /// - `Ok(None)` - Key is proven to not exist (witnessed as absent)
-    /// - `Err(_)` - Key was not included in the witness (unknown state)
-    ///
-    /// **Security Property**: A malicious prover cannot make an unknown key appear
-    /// as non-existent by omitting it from the witness. Unknown keys will always
-    /// return an error, preventing state manipulation attacks.
-    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        match self.kvs.get(&key) {
-            Some(Some(value)) => Ok(Some(value.clone())), // Key exists with value
-            Some(None) => Ok(None),                       // Key witnessed as non-existent
-            None => Err("Key not in witness"),            // Unknown - not witnessed
-        }
-    }
-
-    /// Range queries are not supported for SaltWitness.
-    ///
-    /// # Security Rationale
-    ///
-    /// Range queries cannot be safely implemented for witnesses because we cannot
-    /// guarantee that all keys in the requested range are included in the witness.
-    /// A malicious prover could selectively omit keys from the witness, making
-    /// them appear as non-existent when they are actually unknown.
-    ///
-    /// **For stateless validation**: Use individual `value()` calls instead of
-    /// range queries. This ensures proper distinction between unknown and
-    /// non-existent keys.
-    fn entries(
-        &self,
-        _range: RangeInclusive<SaltKey>,
-    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
-    }
-
-    /// Retrieves metadata for a specific bucket from the witness.
-    ///
-    /// This method only provides metadata for buckets that were included in the
-    /// proof during witness generation. The behavior depends on what was stored:
-    ///
-    /// - If explicit metadata was stored: returns that metadata as-is
-    /// - If bucket was not included in proof: returns an error
-    ///
-    /// # Arguments
-    /// * `bucket_id` - The ID of the bucket whose metadata to retrieve
-    ///
-    /// # Returns
-    /// - `Ok(BucketMeta)` - The bucket's metadata if it was included in the proof
-    /// - `Err(str)` - If the bucket was not included in the proof
-    ///
-    /// # Note
-    /// This method will never fabricate metadata for unknown buckets, ensuring proof integrity.
-    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-        let metadata_key = bucket_metadata_key(bucket_id);
-        match self.kvs.get(&metadata_key) {
-            Some(Some(salt_value)) => BucketMeta::try_from(salt_value.clone())
-                .map_err(|_| "Failed to decode metadata from SaltValue"),
-            Some(None) => Err("Metadata stored as None in witness - unexpected state"),
-            None => Err("Bucket metadata not available in witness"),
-        }
-    }
-
-    /// Counts occupied slots in a bucket by checking every slot in the witness.
-    ///
-    /// This method provides an accurate count of occupied slots, but only if ALL slots
-    /// in the bucket are included in the witness. If any slot is missing from the witness,
-    /// this method returns an error to maintain security guarantees.
-    ///
-    /// # Security Model
-    ///
-    /// - **Complete coverage required**: Returns error if ANY slot in the bucket is not witnessed
-    /// - **No partial counts**: Either counts ALL slots accurately or fails with error
-    /// - **Malicious prover protection**: Cannot be tricked by selective slot omission
-    ///
-    /// # Arguments
-    ///
-    /// * `bucket_id` - The bucket ID to count slots for
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(count)` - Number of occupied slots if all slots are witnessed
-    /// - `Err(_)` - If bucket metadata is missing or any slot is not witnessed
-    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        // Follow the convention of the default implementation
-        if !is_valid_data_bucket(bucket_id) {
-            return Ok(0);
-        }
-
-        // Get bucket metadata to determine capacity
-        let metadata = self.metadata(bucket_id)?;
-        let capacity = metadata.capacity;
-
-        let mut used_count = 0u64;
-
-        // Check every slot in the bucket
-        for slot in 0..capacity {
-            let salt_key = SaltKey::from((bucket_id, slot));
-            // Returns error if any slot is not witnessed (`Err` from `value()`)
-            if self.value(salt_key)?.is_some() {
-                used_count += 1;
+            if let Some(salt_value) = value {
+                let plain_key = salt_value.key().to_vec();
+                direct_lookup_tbl.insert(plain_key, *salt_key);
             }
         }
 
-        Ok(used_count)
-    }
-
-    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported for SaltWitness")
-    }
-}
-
-impl TrieReader for SaltWitness {
-    type Error = &'static str;
-
-    /// Retrieves the commitment for a specific trie node from the witness.
-    ///
-    /// # Security Model
-    ///
-    /// This method enforces the same security properties as other SaltWitness methods:
-    /// - Returns the commitment if the node is witnessed in the proof
-    /// - Returns an error if the node is not included in the witness
-    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        match self.proof.parents_commitments.get(&node_id) {
-            Some(commitment) => Ok(commitment.0),
-            None => Err("Trie node not in witness"),
+        Witness {
+            direct_lookup_tbl,
+            salt_witness,
         }
     }
+}
 
-    /// Range queries are not supported for SaltWitness.
+impl Witness {
+    /// Creates a comprehensive cryptographic witness for stateless validators.
     ///
-    /// **For stateless validation**: Use individual `commitment()` calls instead
-    /// of range queries. This ensures proper distinction between unknown and
-    /// default-valued nodes.
+    /// This method generates a witness that enables stateless validators to both
+    /// re-execute transactions (using the lookup keys) and update the state root
+    /// afterwards (using the state updates). It generates inclusion proofs for
+    /// existing keys and exclusion proofs for non-existing keys.
+    ///
+    /// # Arguments
+    /// * `lookups` - The read-set of plain keys needed to execute transactions.
+    ///   These are keys that need to be read during transaction execution.
+    /// * `updates` - The write-set of state updates resulting from transaction execution.
+    ///   Each item is a tuple of (plain_key, optional_value) where None indicates deletion.
+    ///   Updates that duplicate lookup keys are filtered out (except deletions which are
+    ///   always processed to maintain correct state transitions).
+    /// * `store` - The storage backend providing access to both state data
+    ///   (key-value pairs) and trie data (cryptographic commitments).
+    ///
+    /// # Returns
+    /// A `Witness` containing:
+    /// - A mapping from each lookup key to its corresponding salt key (if it exists)
+    /// - All state data needed for transaction execution (from lookups)
+    /// - All state changes needed to update the root (from filtered updates)
+    /// - Cryptographic proofs (SaltWitness) for verification
+    ///
+    /// # Errors
+    /// Returns `ProofError::StateReadError` if:
+    /// - Unable to read bucket metadata
+    /// - Unable to perform SHI search operations
+    /// - Unable to access required state data
+    /// - Witness creation fails
+    pub fn create<'b, Store>(
+        lookups: &[Vec<u8>],
+        updates: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+        store: &Store,
+    ) -> Result<Witness, ProofError>
+    where
+        Store: StateReader + TrieReader,
+    {
+        let mut witnessed_keys = vec![];
+        let mut direct_lookup_tbl = HashMap::new();
+
+        (|| -> Result<(), <Store as StateReader>::Error> {
+            // We use two separate state instances to collect witness data:
+            // - 'state': For performing lookups to determine if keys exist
+            // - 'recorder': For recording slot accesses during non-existence
+            //   proofs and state updates
+            let mut state = EphemeralSaltState::new(store);
+            let mut recorder = EphemeralSaltState::new(store).cache_read();
+
+            for plain_key in lookups {
+                let bucket_id = hasher::bucket_id(plain_key);
+                let metadata = store.metadata(bucket_id)?;
+
+                if let Some((slot_id, _)) =
+                    state.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)?
+                {
+                    // Key exists: Record the mapping in the lookup table and
+                    // directly witness the salt key for inclusion proof
+                    let salt_key = SaltKey::from((bucket_id, slot_id));
+                    direct_lookup_tbl.insert(plain_key.clone(), salt_key);
+                    witnessed_keys.push(salt_key);
+                } else {
+                    // Key doesn't exist: Perform a full search to capture all
+                    // slots checked during the SHI lookup. These slots form the
+                    // exclusion proof.
+                    recorder.plain_value(plain_key)?;
+                }
+            }
+
+            // Filter out plain keys from updates that are already in direct_lookup_tbl,
+            // but only if the update is not a deletion (None value indicates deletion).
+            // Since most updates are in-place, this optimization reduces the number of
+            // slots that need to be tracked in the witness significantly.
+            let filtered_updates: Vec<_> = updates
+                .into_iter()
+                .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
+                .collect();
+            recorder.update(filtered_updates)?;
+
+            witnessed_keys.extend(recorder.cache.into_keys());
+
+            Ok(())
+        })()
+        .map_err(|e| ProofError::StateReadError {
+            reason: format!("{e:?}"),
+        })?;
+
+        Ok(Witness {
+            direct_lookup_tbl,
+            salt_witness: SaltWitness::create(&witnessed_keys, store)?,
+        })
+    }
+
+    /// Verifies the proof's integrity and validates key locations.
+    ///
+    /// This method performs a two-phase verification process:
+    ///
+    /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT
+    ///    witness proof against the provided state root to ensure the proof is
+    ///    cryptographically sound and the claimed key-value pairs are authentic.
+    ///
+    /// 2. **Key Location Verification**: For each plain key in the proof, verifies
+    ///    that it can be found exactly at the claimed salt key location.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The expected state root hash to verify the proof against
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If both cryptographic proof and key locations are valid
+    /// * `Err(ProofError)` - If verification fails due to:
+    ///   - Invalid cryptographic proof
+    ///   - Incorrect lookup table
+    pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
+        self.salt_witness.verify_proof(root)?;
+
+        let mut state = EphemeralSaltState::new(self);
+
+        for (plain_key, expected_salt_key) in &self.direct_lookup_tbl {
+            // Verify lookup table consistency with underlying SaltWitness:
+            // direct_find -> Self::plain_value_fast -> Self::value -> SaltWitness::value
+            let found_key = state.direct_find(plain_key).ok().flatten().map(|(k, _)| k);
+
+            match found_key {
+                Some(k) if k == *expected_salt_key => {}
+                Some(_) => {
+                    return Err(ProofError::InvalidLookupTable {
+                        reason: format!(
+                            "Key found in wrong location: {:?}",
+                            String::from_utf8_lossy(plain_key)
+                        ),
+                    })
+                }
+                None => {
+                    return Err(ProofError::InvalidLookupTable {
+                        reason: format!(
+                            "Key claimed to exist but not found: {:?}",
+                            String::from_utf8_lossy(plain_key)
+                        ),
+                    })
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// Implementation of StateReader trait for Witness
+// This allows the proof to be used as a state reader during verification,
+// providing only the data that was included in the proof
+impl StateReader for Witness {
+    type Error = &'static str;
+
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
+        self.salt_witness.value(key)
+    }
+
+    fn entries(
+        &self,
+        range: RangeInclusive<SaltKey>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        self.salt_witness.entries(range)
+    }
+
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        self.salt_witness.metadata(bucket_id)
+    }
+
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        match self.direct_lookup_tbl.get(plain_key) {
+            Some(salt_key) => Ok(*salt_key),
+            None => Err("Plain key not in witness"),
+        }
+    }
+}
+
+impl TrieReader for Witness {
+    type Error = &'static str;
+
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+        self.salt_witness.commitment(node_id)
+    }
+
     fn node_entries(
         &self,
-        _range: Range<NodeId>,
+        range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
-    }
-}
-
-#[cfg(test)]
-/// Helper function to create a mock SaltProof for testing
-pub fn create_mock_proof() -> SaltProof {
-    use crate::{empty_salt::EmptySalt, proof::SaltProof};
-
-    // Create a minimal real proof using EmptySalt
-    SaltProof::create([SaltKey(0)], &EmptySalt).unwrap()
-}
-
-#[cfg(test)]
-/// Helper function to create a SaltWitness for testing
-pub fn create_witness(
-    bucket_id: BucketId,
-    metadata: Option<BucketMeta>,
-    slots: Vec<(u64, Option<SaltValue>)>,
-) -> SaltWitness {
-    let mut kvs = BTreeMap::new();
-
-    if let Some(meta) = metadata {
-        let metadata_key = bucket_metadata_key(bucket_id);
-        kvs.insert(metadata_key, Some(meta.into()));
-    }
-
-    for (slot, val) in slots {
-        let salt_key = SaltKey::from((bucket_id, slot));
-        kvs.insert(salt_key, val);
-    }
-
-    SaltWitness {
-        kvs,
-        proof: create_mock_proof(),
+        self.salt_witness.node_entries(range)
     }
 }
 
@@ -308,142 +265,531 @@ pub fn create_witness(
 mod tests {
     use super::*;
     use crate::{
-        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        constant::NUM_META_BUCKETS,
         mem_store::MemStore,
-        mock_evm_types::*,
-        proof::SerdeCommitment,
-        state::state::EphemeralSaltState,
-        state::updates::StateUpdates,
+        mock_evm_types::{Account, PlainKey, PlainValue},
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
+    /// Extracts all values from a witness in the order of its lookup table keys.
+    pub fn extract_witness_values(witness: &Witness) -> Vec<Option<Vec<u8>>> {
+        let mut state = EphemeralSaltState::new(witness);
+        witness
+            .direct_lookup_tbl
+            .keys()
+            .map(|key| state.plain_value(key).unwrap())
+            .collect()
+    }
+
+    /// Selects specific test keys by their indices from the predefined set.
+    fn select_test_keys(indices: Vec<usize>) -> Vec<Vec<u8>> {
+        indices
+            .into_iter()
+            .map(|i| test_keys_with_known_mappings()[i].clone())
+            .collect()
+    }
+
+    /// Sets up state with given keys and returns the computed state root.
+    fn setup_state_with_keys(keys: Vec<Vec<u8>>, store: &MemStore) -> [u8; 32] {
+        let kvs: HashMap<_, _> = keys
+            .iter()
+            .map(|k| (k.clone(), Some(k[0..20].to_vec())))
+            .collect();
+        let updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(store).update_fin(updates).unwrap();
+        store.update_trie(trie_updates);
+        root
+    }
+
+    /// Provides 10 test keys with predetermined bucket/slot mappings.
+    ///
+    /// When all keys are inserted, their storage locations are:
+    /// ```
+    /// Index:    [0,       1,       2,       3,       4,       5,       6,       7,       8,       9]
+    /// Bucket:   [2448221, 2448221, 2448221, 2448221, 2448221, 2448221, 2448221, 4030087, 4030087, 4030087]
+    /// Slot:     [1,       2,       3,       4,       5,       6,       7,       0,       1,       255]
+    /// ```
+    ///
+    /// Insertion conflicts (keys that need comparison during insertion):
+    /// - key[2]: compares with slots 2,3
+    /// - key[4]: compares with slots 4,5
+    /// - key[6]: compares with slots 1,2,3,4,5,6,7
+    /// - key[7]: compares with slots 255,0
+    /// - key[8]: compares with slots 255,0,1
+    fn test_keys_with_known_mappings() -> Vec<Vec<u8>> {
+        vec![
+            vec![
+                48, 1, 62, 32, 116, 157, 191, 48, 139, 176, 173, 251, 201, 192, 82, 146, 212, 212,
+                72, 62, 42, 70, 230, 98, 153, 254, 5, 225, 54, 96, 119, 133, 13, 215, 150, 9, 239,
+                78, 219, 57, 82, 47, 114, 62, 236, 212, 57, 81, 129, 32, 94, 28,
+            ],
+            vec![
+                154, 221, 159, 18, 92, 229, 18, 12, 78, 44, 173, 46, 157, 25, 86, 74, 216, 124,
+                123, 179, 73, 164, 70, 136, 156, 92, 251, 144, 116, 127, 24, 118, 238, 22, 158,
+                125, 220, 88, 65, 208, 178, 202, 229, 44, 56, 87, 12, 136, 239, 134, 175, 120,
+            ],
+            vec![
+                52, 220, 58, 90, 110, 77, 173, 74, 122, 102, 155, 171, 25, 2, 104, 65, 76, 187,
+                122, 62,
+            ],
+            vec![
+                164, 97, 20, 34, 94, 46, 59, 72, 254, 212, 177, 227, 38, 87, 20, 201, 80, 119, 63,
+                148, 109, 7, 147, 15, 168, 242, 212, 100, 160, 114, 171, 80, 130, 82, 98, 215, 183,
+                116, 78, 225, 48, 74, 210, 145, 191, 5, 202, 254, 206, 141, 251, 140,
+            ],
+            vec![
+                37, 229, 167, 117, 247, 21, 40, 63, 212, 58, 225, 130, 62, 135, 163, 144, 210, 234,
+                213, 243, 231, 221, 164, 152, 71, 179, 252, 229, 81, 170, 6, 206, 191, 153, 67,
+                182, 67, 89, 82, 210, 22, 233, 56, 198, 208, 249, 164, 178, 27, 240, 162, 215,
+            ],
+            vec![
+                179, 236, 188, 23, 90, 152, 46, 106, 112, 142, 244, 94, 214, 218, 253, 19, 104,
+                147, 240, 226, 229, 175, 205, 249, 122, 208, 184, 248, 71, 252, 137, 173, 130, 37,
+                47, 60, 197, 229, 225, 64, 209, 91, 80, 107, 188, 104, 249, 49, 219, 252, 212, 177,
+            ],
+            vec![
+                2, 13, 181, 123, 127, 242, 138, 79, 226, 65, 186, 108, 10, 174, 161, 222, 31, 234,
+                49, 177, 125, 148, 69, 98, 190, 26, 78, 124, 211, 119, 56, 133, 8, 197, 31, 181,
+                53, 116, 123, 38, 95, 216, 90, 175, 5, 20, 221, 160, 98, 197, 192, 6,
+            ],
+            vec![
+                149, 45, 146, 81, 212, 25, 86, 33, 50, 177, 251, 62, 110, 80, 177, 245, 126, 152,
+                112, 52, 48, 128, 16, 227, 225, 129, 23, 220, 122, 36, 0, 26, 162, 51, 114, 163,
+                100, 158, 146, 215, 211, 73, 30, 181, 160, 174, 176, 38, 52, 169, 255, 10,
+            ],
+            vec![
+                66, 233, 111, 188, 160, 150, 80, 85, 10, 41, 149, 150, 89, 107, 41, 216, 5, 8, 255,
+                4, 206, 232, 49, 88, 39, 218, 35, 43, 73, 131, 95, 92, 236, 144, 32, 159, 181, 216,
+                21, 171, 177, 129, 249, 202, 223, 90, 237, 11, 55, 229, 229, 12,
+            ],
+            vec![
+                159, 161, 59, 17, 118, 13, 243, 71, 32, 130, 21, 45, 24, 198, 214, 98, 137, 205,
+                191, 172, 198, 20, 132, 194, 250, 133, 217, 69, 40, 45, 250, 235, 159, 64, 10, 79,
+                142, 17, 252, 205, 83, 197, 51, 40, 108, 213, 83, 79, 193, 236, 57, 140,
+            ],
+        ]
+    }
+
+    /// Test serialization and deserialization of SaltWitness and that Witness
+    /// can be reconstructed from the deserialized SaltWitness.
     #[test]
-    fn get_mini_trie() {
-        let kvs = create_random_kv_pairs(1000);
+    fn test_witness_serde() {
+        // Create test account data
+        let kvs = HashMap::from([(
+            PlainKey::Account(Address::random()).encode(),
+            Some(
+                PlainValue::Account(Account {
+                    balance: U256::from(10),
+                    nonce: 10,
+                    bytecode_hash: None,
+                })
+                .encode(),
+            ),
+        )]);
 
-        let mem_store = MemStore::new();
+        // Insert into Salt storage and update the trie
+        let store = MemStore::new();
+        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
 
-        // 1. Initialize the state & trie to represent the origin state.
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
-        mem_store.update_state(initial_updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        store.update_trie(trie_updates);
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (old_trie_root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        // Generate a witness for the inserted key
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
 
-        mem_store.update_trie(initial_trie_updates);
+        // Test serialization round-trip of the underlying SaltWitness
+        let serialized =
+            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy())
+                .unwrap();
+        let (deserialized, _): (SaltWitness, _) =
+            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
 
-        // 2. Suppose that 100 new kv pairs need to be inserted
-        // after the execution of the block.
-        let new_kvs = create_random_kv_pairs(100);
+        // Reconstruct the Witness from the deserialized SaltWitness
+        let reconstructed = Witness::from(deserialized);
 
-        let mut state = EphemeralSaltState::new(&mem_store).cache_read();
-        let state_updates = state.update(&new_kvs).unwrap();
-
-        // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
-
-        // 3.options in prover node
-        // 3.1 verify the salt witness
-        let res = salt_witness.verify_proof(old_trie_root);
-        assert!(res.is_ok());
-
-        // 3.2 create EphemeralSaltState from salt witness
-        let mut prover_state = EphemeralSaltState::new(&salt_witness);
-
-        // 3.3 prover client execute the same blocks, and get the same new_kvs
-        let prover_updates = prover_state.update(&new_kvs).unwrap();
-
-        assert_eq!(state_updates, prover_updates);
-
-        let mut prover_trie = StateRoot::new(&salt_witness);
-        let (prover_trie_root, mut prover_trie_updates) =
-            prover_trie.update_fin(prover_updates).unwrap();
-
-        trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        prover_trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-
-        assert_eq!(trie_updates, prover_trie_updates);
-
-        assert_eq!(new_trie_root, prover_trie_root);
+        // Verify the reconstructed witness is identical and still valid
+        assert_eq!(witness, reconstructed);
+        reconstructed.verify(root).unwrap();
     }
 
     #[test]
-    fn test_error() {
-        let kvs = create_random_kv_pairs(100);
+    fn test_witness_exist_or_not_exist() {
+        // Tests three main scenarios for plain key proof generation:
+        //
+        // Case 1: Key exists - final slot contains the exact key
+        // Test: Insert keys [0..=6], prove key [6]
+        //
+        // Case 2: Key doesn't exist - final slot contains different key with lower priority
+        // Test 2.1: Insert key [6], prove key [0] (higher priority, would displace [6])
+        // Test 2.2: Insert keys [6,0], prove key [1] (higher priority than [6])
+        // Test 2.3: Insert keys [6,0,2], prove key [1] (higher priority than [2])
+        //
+        // Case 3: Key doesn't exist - final slot is empty
+        // Test 3.1: No insertions, prove key [0]
+        // Test 3.2: Insert keys [0..=5], prove key [6] (lands in empty slot)
 
-        // 1. Initialize the state & trie to represent the origin state.
-        let mem_store = MemStore::new();
+        // case 1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
-        mem_store.update_state(initial_updates.clone());
+        let plain_key = test_keys_with_known_mappings()[6].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        assert!(proof.verify(root).is_ok());
 
-        mem_store.update_trie(initial_trie_updates);
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        let proof_values = extract_witness_values(&proof);
 
-        // 2. Suppose that 100 new kv pairs need to be inserted
-        // after the execution of the block.
+        assert!(proof_value.is_some());
 
-        let pk = PlainKey::Storage(Address::ZERO, B256::ZERO).encode();
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
 
-        let pv = Some(PlainValue::Storage(B256::ZERO.into()).encode());
+        assert_eq!(plain_value, proof_value);
+        assert_eq!(proof_values, vec![proof_value]);
 
-        let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(vec![(&pk, &pv)]).unwrap();
+        // case 2.1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6]), &store);
 
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
-        let salt_witness_res = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
+        let plain_key = test_keys_with_known_mappings()[0].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        let res = salt_witness_res.verify_proof(root);
-        assert!(res.is_ok());
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 1;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        // test_keys_with_known_mappings()[0] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[0] > test_keys_with_known_mappings()[6]);
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[6]);
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        // can't find the test_keys_with_known_mappings()[0]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[0],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[6],
+            )
+            .unwrap();
+        assert_eq!(find_res, Some((slot_id, salt_value)));
+
+        // case 2.2
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6, 0]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[1].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 2;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[6]);
+        // test_keys_with_known_mappings()[1] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[1] > salt_value.key().to_vec());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[1],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+        assert_eq!(related_keys, vec![SaltKey::from((bucket_id, 2))]);
+
+        // case 2.3
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6, 0, 2]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[1].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 2;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[2]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[2]);
+        // test_keys_with_known_mappings()[1] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[1] > salt_value.key().to_vec());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&store);
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[1],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[2],
+            )
+            .unwrap();
+        assert_eq!(find_res, Some((slot_id, salt_value)));
+
+        // case 3.1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[0].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 1;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores none value
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&store);
+        // can't find the test_keys_with_known_mappings()[0]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[0],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        // case 3.2
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[6].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 7;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[6],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+
+        assert_eq!(
+            related_keys,
+            vec![
+                SaltKey::from((bucket_id, 1)),
+                SaltKey::from((bucket_id, 2)),
+                SaltKey::from((bucket_id, 3)),
+                SaltKey::from((bucket_id, 4)),
+                SaltKey::from((bucket_id, 5)),
+                SaltKey::from((bucket_id, 6)),
+                SaltKey::from((bucket_id, 7)),
+            ]
+        );
     }
 
     #[test]
-    fn test_state_reader_for_witness() {
-        let kvs = create_random_kv_pairs(1000);
+    fn test_witness_in_loop_slot_id() {
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![9]), &store);
 
-        // 1. Initialize the state & trie to represent the origin state.
-        let mem_store = MemStore::new();
+        let key = test_keys_with_known_mappings()[7].clone();
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
-        mem_store.update_state(initial_updates.clone());
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (_, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        assert!(proof.verify(root).is_ok());
 
-        mem_store.update_trie(initial_trie_updates);
+        let bucket_id = 4030087;
+        let salt_key = SaltKey::from((bucket_id, 0));
 
-        // 2. Suppose that 100 new kv pairs need to be inserted
-        // after the execution of the block.
-        let new_kvs = create_random_kv_pairs(100);
-        let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(&new_kvs).unwrap();
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
 
-        let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
+        let meta = proof.metadata(bucket_id).unwrap();
 
-        let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &key)
+            .unwrap();
+        assert!(find_res.is_none());
 
-        // use the old state
-        for key in min_sub_tree_keys {
-            let witness_value = salt_witness.value(key).unwrap();
-            let state_value = mem_store.value(key).unwrap();
-            assert_eq!(witness_value, state_value);
-        }
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+
+        assert_eq!(
+            related_keys,
+            vec![
+                SaltKey::from((bucket_id, 0)),
+                SaltKey::from((bucket_id, 255))
+            ]
+        );
+
+        // another case
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![7, 8, 9]), &store);
+
+        let key = test_keys_with_known_mappings()[8].clone();
+
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        assert_eq!(proof.direct_lookup_tbl.keys().next().unwrap(), &key);
+
+        let salt_key = SaltKey::from((bucket_id, 1));
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+
+        let salt_val = store.value(salt_key).unwrap().unwrap();
+
+        assert_eq!(salt_value, salt_val);
     }
 
-    fn create_random_kv_pairs(l: usize) -> HashMap<Vec<u8>, Option<Vec<u8>>> {
+    /// Test that Witness correctly implements StateReader trait.
+    /// Verifies that the proof contains the same data as the original state.
+    #[test]
+    fn test_witness_state_reader_trait() {
+        let l = 100;
         let mut rng = StdRng::seed_from_u64(42);
-        let mut res = HashMap::new();
+        let mut kvs = HashMap::new();
 
+        // Generate random account data for half the test cases
         (0..l / 2).for_each(|_| {
-            let pk = PlainKey::Account(Address::from(rng.gen::<[u8; 20]>())).encode();
+            let pk = PlainKey::Account(Address::random_with(&mut rng)).encode();
             let pv = Some(
                 PlainValue::Account(Account {
                     balance: U256::from(rng.gen_range(0..1000)),
@@ -452,318 +798,71 @@ mod tests {
                 })
                 .encode(),
             );
-            res.insert(pk, pv);
+            kvs.insert(pk, pv);
         });
+
+        // Generate random storage data for the other half
         (l / 2..l).for_each(|_| {
-            let pk = PlainKey::Storage(
-                Address::from(rng.gen::<[u8; 20]>()),
-                B256::from(rng.gen::<[u8; 32]>()),
-            );
-            let pv = Some(PlainValue::Storage(B256::from(rng.gen::<[u8; 32]>()).into()).encode());
-            res.insert(pk.encode(), pv);
+            let pk = PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng))
+                .encode();
+            let pv = Some(PlainValue::Storage(B256::random_with(&mut rng).into()).encode());
+            kvs.insert(pk, pv);
         });
-        res
-    }
 
-    /// Test all three cases of the SaltWitness::metadata() method
-    #[test]
-    fn test_salt_witness_metadata_cases() {
-        let mock_salt_value = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update(&kvs).unwrap();
+        store.update_state(updates.clone());
 
-        // Use valid data bucket IDs (>= NUM_META_BUCKETS)
-        let bucket1 = NUM_META_BUCKETS as u32;
-        let bucket2 = NUM_META_BUCKETS as u32 + 1;
-        let bucket3 = NUM_META_BUCKETS as u32 + 2;
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
 
-        // Test Case 1: Explicit metadata present (Some(Some(meta)))
-        let mut explicit_meta = BucketMeta::default();
-        explicit_meta.nonce = 42;
-        explicit_meta.capacity = 512;
+        store.update_trie(trie_updates);
 
-        let mut kvs = BTreeMap::new();
-        let metadata_key = bucket_metadata_key(bucket1);
-        kvs.insert(metadata_key, Some(explicit_meta.into()));
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
 
-        let witness = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
-        };
-
-        let result = witness.metadata(bucket1).unwrap();
-        assert_eq!(result.nonce, 42);
-        assert_eq!(result.capacity, 512);
-
-        // Test Case 2: Default metadata case
-        let default_meta = BucketMeta::default();
-        let mut kvs = BTreeMap::new();
-        let metadata_key = bucket_metadata_key(bucket2);
-        kvs.insert(metadata_key, Some(default_meta.into()));
-
-        // Add some kvs for used count calculation
-        kvs.insert(
-            SaltKey::from((bucket2, 0u64)),
-            Some(mock_salt_value.clone()),
-        );
-        kvs.insert(
-            SaltKey::from((bucket2, 1u64)),
-            Some(mock_salt_value.clone()),
-        );
-        kvs.insert(
-            SaltKey::from((bucket2, 5u64)),
-            Some(mock_salt_value.clone()),
-        );
-
-        let witness = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
-        };
-
-        let result = witness.metadata(bucket2).unwrap();
-        assert_eq!(result.nonce, 0); // Default value
-        assert_eq!(result.capacity, MIN_BUCKET_SIZE as u64); // Default value
-        assert_eq!(result.used, None); // Cannot compute reliably from partial witness
-
-        // Test Case 3: Bucket not in proof (None)
-        let witness = SaltWitness {
-            kvs: BTreeMap::new(), // Empty - bucket not in proof
-            proof: create_mock_proof(),
-        };
-
-        let result = witness.metadata(bucket3);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "Bucket metadata not available in witness"
-        );
-    }
-
-    /// Test that verifies the security properties of SaltWitness StateReader
-    /// implementation.
-    ///
-    /// This test ensures that the witness correctly distinguishes between:
-    /// - Witnessed existing values (Ok(Some(value)))
-    /// - Witnessed non-existent values (Ok(None))
-    /// - Unknown values not in witness (Err)
-    ///
-    /// This prevents state manipulation attacks where a malicious prover
-    /// could make unknown values appear as non-existent.
-    #[test]
-    fn test_witness_state_reader_security() {
-        // Setup test keys
-        let key_exists = SaltKey::from((100000, 1)); // Will be witnessed as existing
-        let key_nonexistent = SaltKey::from((100000, 2)); // Will be witnessed as non-existent
-        let key_unknown = SaltKey::from((100000, 3)); // Will NOT be in witness (unknown)
-
-        // Create witness with partial data
-        let mut kvs = BTreeMap::new();
-        kvs.insert(key_exists, Some(SaltValue::new(&[1; 32], &[2; 32]))); // Exists
-        kvs.insert(key_nonexistent, None); // Proven non-existent
-                                           // key_unknown is intentionally omitted (unknown)
-
-        let witness = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
-        };
-
-        // Test witnessed existing key
-        match witness.value(key_exists) {
-            Ok(Some(_)) => {} // Correct: witnessed as existing
-            other => panic!("Expected Ok(Some(_)), got {:?}", other),
+        for key in witness.salt_witness.kvs.keys() {
+            let proof_value = witness.value(*key).unwrap();
+            let mut state_value = state.value(*key).unwrap();
+            if state_value.is_none() && key.is_in_meta_bucket() {
+                state_value = Some(BucketMeta::default().into());
+            }
+            assert_eq!(proof_value, state_value);
         }
-
-        // Test witnessed non-existent key
-        match witness.value(key_nonexistent) {
-            Ok(None) => {} // Correct: witnessed as non-existent
-            other => panic!("Expected Ok(None), got {:?}", other),
-        }
-
-        // Test unknown key (not in witness) - CRITICAL SECURITY TEST
-        match witness.value(key_unknown) {
-            Err(_) => {}, // Correct: unknown key returns error
-            Ok(None) => panic!("SECURITY VIOLATION: Unknown key returned Ok(None) - could be exploited by malicious prover!"),
-            Ok(Some(_)) => panic!("SECURITY VIOLATION: Unknown key returned Ok(Some(_)) - impossible case!"),
-        }
-
-        // Test that range queries are disabled for security
-        assert!(witness.entries(key_exists..=key_unknown).is_err());
-
-        // Test that bucket_used_slots requires complete bucket witness
-        assert!(witness.bucket_used_slots(100000).is_err());
-
-        // Test metadata security properties
-        let bucket_exists = 100000;
-        let bucket_default = 100001;
-        let bucket_unknown = 100002;
-
-        let mut kvs = BTreeMap::new();
-        let meta_key_exists = bucket_metadata_key(bucket_exists);
-        kvs.insert(
-            meta_key_exists,
-            Some(
-                BucketMeta {
-                    nonce: 42,
-                    capacity: 512,
-                    used: Some(10),
-                }
-                .into(),
-            ),
-        );
-        let meta_key_default = bucket_metadata_key(bucket_default);
-        kvs.insert(meta_key_default, Some(BucketMeta::default().into())); // Default metadata
-                                                                          // bucket_unknown intentionally omitted
-
-        let witness_meta = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
-        };
-
-        // Existing metadata
-        assert!(witness_meta.metadata(bucket_exists).is_ok());
-
-        // Default metadata
-        let default_meta = witness_meta.metadata(bucket_default).unwrap();
-        assert_eq!(default_meta.nonce, 0);
-        assert_eq!(default_meta.capacity, MIN_BUCKET_SIZE as u64);
-        assert_eq!(default_meta.used, None); // Cannot compute from partial witness
-
-        // Unknown metadata - should error
-        assert!(witness_meta.metadata(bucket_unknown).is_err());
     }
 
-    /// Comprehensive tests for the bucket_used_slots method.
+    /// Verifies that witnesses for existing keys do not include bucket metadata.
     ///
-    /// Tests all scenarios:
-    /// - Error when bucket metadata is missing
-    /// - Successful counting with fully witnessed bucket
-    /// - Error when some slots are not witnessed
-    /// - Correct counting with mix of occupied and empty slots
-    /// - Handling of default metadata buckets
+    /// When creating a witness for keys that exist in storage, the witness should
+    /// contain only the key-value pairs themselves, not the bucket metadata. This
+    /// optimization reduces witness size since existing keys can be verified directly
+    /// without needing bucket configuration (nonce, capacity) that's only required
+    /// for non-existence proofs.
     #[test]
-    fn test_bucket_used_slots() {
-        let bucket_id = 100000;
-        let val = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+    fn test_existing_keys_witness_excludes_bucket_metadata() {
+        // Setup: Insert 3 specific test keys into storage
+        // These keys (indices 7,8,9) are chosen to test various bucket scenarios
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![7, 8, 9]), &store);
 
-        // Test 1: Missing metadata
-        let witness = create_witness(bucket_id, None, vec![]);
-        assert_eq!(
-            witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Bucket metadata not available in witness"
-        );
+        // Create a witness for the same 3 keys that were inserted
+        let keys = select_test_keys(vec![7, 8, 9]);
+        let proof = Witness::create(&keys, std::iter::empty(), &store).unwrap();
 
-        // Test 2: Fully witnessed bucket
-        let meta = BucketMeta {
-            nonce: 0,
-            capacity: 8,
-            used: Some(3),
-        };
-        let slots = vec![
-            (0, Some(val.clone())),
-            (1, None),
-            (2, Some(val.clone())),
-            (3, None),
-            (4, None),
-            (5, Some(val.clone())),
-            (6, None),
-            (7, None),
-        ];
-        let witness = create_witness(bucket_id, Some(meta), slots);
-        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), 3);
+        // Verify the witness is valid against the state root
+        assert!(proof.verify(root).is_ok());
 
-        // Test 3: Partial witness (missing slots)
-        let meta = BucketMeta {
-            nonce: 0,
-            capacity: 5,
-            used: None,
-        };
-        let slots = vec![(0, Some(val.clone())), (1, None), (2, Some(val.clone()))];
-        let witness = create_witness(bucket_id, Some(meta), slots);
-        assert_eq!(
-            witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Key not in witness"
-        );
+        // Verify witness contains exactly 3 entries (no metadata included)
+        assert_eq!(proof.direct_lookup_tbl.len(), 3);
+        assert_eq!(proof.salt_witness.kvs.len(), 3);
 
-        // Test 4: Empty bucket
-        let meta = BucketMeta {
-            nonce: 0,
-            capacity: 3,
-            used: None,
-        };
-        let slots = vec![(0, None), (1, None), (2, None)];
-        let witness = create_witness(bucket_id, Some(meta), slots);
-        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), 0);
-
-        // Test 5: Default metadata bucket
-        let mut kvs = BTreeMap::new();
-        let metadata_key = bucket_metadata_key(bucket_id);
-        kvs.insert(metadata_key, Some(BucketMeta::default().into()));
-        for slot in 0..MIN_BUCKET_SIZE as u64 {
-            let val_opt = if slot % 3 == 0 {
-                Some(val.clone())
-            } else {
-                None
-            };
-            kvs.insert(SaltKey::from((bucket_id, slot)), val_opt);
-        }
-        let witness = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
-        };
-        let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
-        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
-    }
-
-    /// Test that verifies the security properties of SaltWitness TrieReader
-    /// implementation.
-    ///
-    /// This test ensures that the TrieReader correctly distinguishes between:
-    /// - Witnessed nodes (returns commitment)
-    /// - Unknown nodes not in witness (returns error)
-    ///
-    /// This prevents state manipulation attacks where a malicious prover
-    /// could omit critical trie nodes to hide state modifications.
-    #[test]
-    fn test_witness_trie_reader_security() {
-        // Build witness with two witnessed nodes
-        let mut proof = create_mock_proof();
-        proof.parents_commitments = [
-            (12345, SerdeCommitment([1u8; 64])),
-            (67890, SerdeCommitment([2u8; 64])),
-        ]
-        .into();
-
-        let witness = SaltWitness {
-            kvs: BTreeMap::new(),
-            proof,
-        };
-
-        // Witnessed nodes return correct commitments
-        assert_eq!(witness.commitment(12345).unwrap(), [1u8; 64]);
-        assert_eq!(witness.commitment(67890).unwrap(), [2u8; 64]);
-
-        // Unknown nodes must return errors (critical security test)
-        assert!(
-            witness.commitment(99999).is_err(),
-            "SECURITY: Unknown node must return error, not default!"
-        );
-
-        // Range queries must be disabled
-        assert!(
-            witness.node_entries(0..1000).is_err(),
-            "SECURITY: Range queries must be disabled!"
-        );
-    }
-
-    #[test]
-    fn test_default_bucket_meta_proof() {
-        let mem_store = MemStore::new();
-
-        let mut trie = StateRoot::new(&mem_store);
-        let (root, _) = trie.update_fin(StateUpdates::default()).unwrap();
-
-        let bucket_id: BucketId = 100000;
-        let salt_key = bucket_metadata_key(bucket_id);
-        let witness = SaltWitness::create(&[salt_key], &mem_store).unwrap();
-        let res = witness.verify_proof(root);
-        assert!(res.is_ok());
+        // Verify both structures contain the same salt keys (no extra metadata)
+        let witness_keys: HashSet<_> = proof.salt_witness.kvs.keys().collect();
+        let lookup_values: HashSet<_> = proof.direct_lookup_tbl.values().collect();
+        assert_eq!(witness_keys, lookup_values);
     }
 }

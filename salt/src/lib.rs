@@ -3,7 +3,7 @@
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{PlainKeysProof, ProofError, SaltProof, SaltWitness};
+pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
@@ -25,7 +25,7 @@ pub mod mock_evm_types;
 mod tests {
     use super::*;
     use crate::trie::trie::StateRoot;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     /// A simple end-to-end test demonstrating the complete SALT workflow.
@@ -60,16 +60,17 @@ mod tests {
         // "Persist" the trie updates to storage
         store.update_trie(trie_updates);
 
-        // Alice creates a cryptographic proof for plain key-value pairs
-        let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let proof = PlainKeysProof::create(&plain_keys_to_prove, &store)?;
+        // Alice creates a witness for plain key-value pairs
+        let lookups = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
+        let updates = BTreeMap::new();
+        let witness = Witness::create(&lookups, updates, &store)?;
 
-        // Bob verifies the proof against its local state root
-        let is_valid = proof.verify(root_hash);
+        // Bob verifies the witness against its local state root
+        let is_valid = witness.verify(root_hash);
         assert!(is_valid.is_ok());
 
-        // Bob looks up values from the proof using EphemeralSaltState
-        let mut bob_state = EphemeralSaltState::new(&proof);
+        // Bob looks up values from the witness using EphemeralSaltState
+        let mut bob_state = EphemeralSaltState::new(&witness);
         assert_eq!(
             bob_state.plain_value(b"account1")?,
             Some(b"balance100".to_vec())
