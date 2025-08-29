@@ -239,12 +239,23 @@ impl StateReader for SaltWitness {
         Err("plain_value_fast not supported for SaltWitness")
     }
 
+    /// Retrieves the number of subtree levels for a bucket from the witness proof.
+    ///
+    /// Unlike the default implementation which calculates levels from bucket metadata,
+    /// this method directly returns pre-computed levels stored in the proof. This is
+    /// necessary because witnesses only contain partial state information and do not
+    /// always have access to the bucket capacity.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(levels)` if the bucket's level information is included in the witness
+    /// - `Err("Bucket root not in witness")` if the bucket root is not witnessed
     fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
         let num_levels = self
             .proof
             .levels
             .get(&bucket_id)
-            .ok_or("Bucket top level not available in proof")?;
+            .ok_or("Bucket root not in witness")?;
         Ok(*num_levels as usize)
     }
 }

@@ -1,8 +1,9 @@
-//! Plain key proof implementation for Salt trie.
+//! Witness generation and verification for plain (user-provided) keys.
 //!
-//! This module provides functionality to create and verify proofs for plain keys in the Salt
-//! storage system. It handles both existing and non-existing keys by generating inclusion/exclusion
-//! proofs that can be cryptographically verified.
+//! This module implements a high-level proof system that allows clients to prove
+//! the existence or non-existence of plain keys without requiring access to the
+//! full state. It acts as an abstraction layer over the lower-level `SaltWitness`
+//! proof system.
 
 use crate::{
     proof::salt_witness::SaltWitness,
@@ -13,19 +14,33 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ops::{Range, RangeInclusive},
 };
 
+/// A cryptographic witness enabling stateless validation and execution.
+///
+/// The `Witness` allows stateless validators to:
+/// - Re-execute transactions by providing necessary state data through
+///   the `StateReader` trait
+/// - Compute the new state root after transaction execution
+///
+/// Critically, the witness contains the minimal partial trie with all internal nodes
+/// necessary to recompute the state root after applying state updates. This enables
+/// stateless nodes to not only re-execute transactions but also produce new state roots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Witness {
     // TODO: the builtin serialization mechanism has too much redundant data.
     // e.g., every plain key is stored twice: one in `direct_lookup_tbl` and
     // one in `salt_witness`.
-    /// Mapping from plain keys to their corresponding salt keys.
-    pub(crate) direct_lookup_tbl: BTreeMap<Vec<u8>, SaltKey>,
-    /// Low-level SALT witness containing all bucket slots needed for proving the
-    /// existence or non-existence of the plain keys and their cryptographic proof.
+    /// Direct mapping from plain keys to their salt key locations.
+    /// Only contains keys that exist.
+    pub(crate) direct_lookup_tbl: HashMap<Vec<u8>, SaltKey>,
+
+    /// The underlying cryptographic witness containing:
+    /// - All salt keys needed for inclusion/exclusion proofs
+    /// - Their values (or None for empty slots)
+    /// - Cryptographic commitments proving authenticity
     pub(crate) salt_witness: SaltWitness,
 }
 
@@ -58,7 +73,7 @@ impl Witness {
         Store: StateReader + TrieReader,
     {
         let mut witnessed_keys = vec![];
-        let mut direct_lookup_tbl = BTreeMap::new();
+        let mut direct_lookup_tbl = HashMap::new();
 
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:
