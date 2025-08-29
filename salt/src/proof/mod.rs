@@ -51,9 +51,6 @@
 //! - [`prover`]: Core proof generation logic, including IPA multi-point proofs and
 //!   commitment serialization. Handles the cryptographic heavy lifting for creating proofs.
 //!
-//! - [`verifier`]: Proof verification logic that reconstructs and validates authentication
-//!   paths. Creates verifier queries for IPA validation without requiring full state access.
-//!
 //! - [`salt_witness`]: Low-level witness structure containing authenticated state subsets
 //!   with cryptographic proofs. Enforces security properties against state manipulation.
 //!
@@ -72,7 +69,6 @@ pub mod prover;
 pub mod salt_witness;
 pub mod shape;
 pub mod subtrie;
-pub mod verifier;
 pub mod witness;
 
 pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
