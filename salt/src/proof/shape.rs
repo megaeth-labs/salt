@@ -1,4 +1,4 @@
-//! # SALT Proof Shape Analysis
+//! # SALT Proof SubTrees Analysis
 //!
 //! This module provides utilities for analyzing the hierarchical structure of SALT's dual-tier
 //! addressing system to determine the minimal set of parent-child relationships required for
