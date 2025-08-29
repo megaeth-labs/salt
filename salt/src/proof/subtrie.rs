@@ -20,15 +20,15 @@ use crate::{
     },
     proof::{
         prover::slot_to_field,
-        shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
-        ProofError, SerdeCommitment,
+        shape::{connect_parent_id, logic_parent_id, parents_and_points},
+        ProofError, ProofResult, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::Element;
+use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -45,16 +45,13 @@ type SubTrieInfo = (
     FxHashMap<BucketId, u8>,
 );
 
-/// Result type for operations that can fail during subtrie creation
-type SubTrieResult<T> = Result<T, ProofError>;
-
 /// Processes a leaf node to create prover queries.
 fn process_leaf_node<Store>(
     store: &Store,
     parent: NodeId,
     parent_commitment: Element,
     points: BTreeSet<usize>,
-) -> SubTrieResult<Vec<ProverQuery>>
+) -> ProofResult<Vec<ProverQuery>>
 where
     Store: StateReader,
 {
@@ -107,52 +104,45 @@ where
     ))
 }
 
-/// Processes an internal node to create prover queries.
-fn process_internal_node<Store>(
+fn multi_commitments_to_scalars<Store>(
     store: &Store,
-    parent: NodeId,
-    parent_commitment: Element,
-    points: BTreeSet<usize>,
-) -> SubTrieResult<Vec<ProverQuery>>
+    nodes: &[(NodeId, BTreeSet<usize>)],
+) -> ProofResult<Vec<Fr>>
 where
     Store: TrieReader,
 {
-    // Find the range of child nodes for this internal node
-    let child_idx = get_child_node(&logic_parent_id(parent), 0);
+    let multi_children = nodes
+        .iter()
+        .map(|(node, _)| {
+            // Find the range of child nodes for this internal node
+            let child_idx = get_child_node(&logic_parent_id(*node), 0);
 
-    // Load commitments for all 256 children of this internal node
-    let children = store
-        .node_entries(child_idx..child_idx + POLY_DEGREE as NodeId)
-        .map_err(|e| ProofError::StateReadError {
-            reason: format!("Failed to load child nodes for parent {parent}: {e:?}"),
-        })?;
+            // Load commitments for all 256 children of this internal node
+            let children = store
+                .node_entries(child_idx..child_idx + POLY_DEGREE as NodeId)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to load child nodes for parent {node}: {e:?}"),
+                })?;
 
-    // Initialize with default commitments (for empty subtrees)
-    let mut default_commitments = if child_idx == 1 {
-        // Special case: main trie level 1 has different default commitments for different positions
-        let mut commitments = vec![default_commitment(child_idx + 1); POLY_DEGREE];
-        commitments[0] = default_commitment(child_idx);
-        commitments
-    } else {
-        // All children at this level have the same default commitment
-        vec![default_commitment(child_idx); POLY_DEGREE]
-    };
+            let mut default_commitment = if child_idx == 1 {
+                let mut v = vec![default_commitment(child_idx + 1); POLY_DEGREE];
+                v[0] = default_commitment(child_idx);
+                v
+            } else {
+                vec![default_commitment(child_idx); POLY_DEGREE]
+            };
+            for (k, v) in children {
+                default_commitment[k as usize - child_idx as usize] = v;
+            }
 
-    // Replace defaults with actual child commitments where they exist
-    for (node_id, commitment) in children {
-        let index = node_id as usize - child_idx as usize;
-        default_commitments[index] = commitment;
-    }
+            Ok(default_commitment)
+        })
+        .collect::<ProofResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
-    // Convert commitment bytes to scalar field elements for the polynomial
-    let children_scalars = Element::serial_batch_map_to_scalar_field(default_commitments);
-
-    // Create IPA prover queries for the specified evaluation points
-    Ok(create_prover_queries(
-        parent_commitment,
-        LagrangeBasis::new(children_scalars),
-        points,
-    ))
+    Ok(Element::serial_batch_map_to_scalar_field(multi_children))
 }
 
 /// Creates IPA prover queries for a given commitment and evaluation points.
@@ -212,10 +202,16 @@ fn create_prover_queries(
 pub(crate) fn create_sub_trie<Store>(
     store: &Store,
     salt_keys: &[SaltKey],
-) -> SubTrieResult<SubTrieInfo>
+) -> ProofResult<SubTrieInfo>
 where
     Store: StateReader + TrieReader,
 {
+    if salt_keys.is_empty() {
+        return Err(ProofError::StateReadError {
+            reason: "empty key set".to_string(),
+        });
+    }
+
     // Step 1: Extract and deduplicate bucket IDs from the input keys
     let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
     bucket_ids.dedup();
@@ -239,14 +235,15 @@ where
                 Ok((bucket_id, level as u8))
             }
         })
-        .collect::<SubTrieResult<_>>()?;
+        .collect::<ProofResult<_>>()?;
 
     // Step 3: Build the minimal node hierarchy needed for authentication
-    let nodes = parents_and_points(salt_keys, &buckets_level);
+    let (internal_nodes, leaf_nodes) = parents_and_points(salt_keys, &buckets_level);
 
     // Step 4: Collect cryptographic commitments for all parent nodes
-    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = nodes
+    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = internal_nodes
         .iter()
+        .chain(leaf_nodes.iter())
         .map(|(&parent, _)| {
             let physical_parent = connect_parent_id(parent);
             let commitment =
@@ -260,10 +257,46 @@ where
 
             Ok((physical_parent, SerdeCommitment(commitment)))
         })
-        .collect::<SubTrieResult<_>>()?;
+        .collect::<ProofResult<_>>()?;
 
-    // Step 5: Generate IPA prover queries for each node in the authentication path
-    let queries = nodes
+    // Step 5: Generate IPA prover queries for each node in internal nodes
+    let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
+    let mut queries = in_nodes
+        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+        .map(|nodes| {
+            let children_scalars = multi_commitments_to_scalars(store, nodes)?;
+
+            let res = nodes
+                .iter()
+                .zip(children_scalars.chunks(POLY_DEGREE))
+                .map(|((parent, points), children_scalars)| {
+                    let commitment = store
+                        .commitment(connect_parent_id(*parent))
+                        .map(Element::from_bytes_unchecked_uncompressed)
+                        .map_err(|e| ProofError::StateReadError {
+                            reason: format!("Failed to load commitment for node {parent}: {e:?}"),
+                        })?;
+
+                    Ok(create_prover_queries(
+                        commitment,
+                        LagrangeBasis::new(children_scalars.to_vec()),
+                        points.clone(),
+                    ))
+                })
+                .collect::<ProofResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+
+            Ok(res)
+        })
+        .collect::<ProofResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    // Step 6: Generate IPA prover queries for each node in leaf nodes
+    let leaf_queries = leaf_nodes
         .into_par_iter()
         .map(|(parent, points)| {
             let physical_parent = connect_parent_id(parent);
@@ -275,16 +308,13 @@ where
                         "Failed to load element commitment for node {physical_parent}: {e:?}"
                     ),
                 })?;
-            if is_leaf_node(parent) {
-                process_leaf_node(store, parent, parent_commitment, points)
-            } else {
-                process_internal_node(store, parent, parent_commitment, points)
-            }
+            process_leaf_node(store, parent, parent_commitment, points)
         })
-        .collect::<SubTrieResult<Vec<_>>>()?
+        .collect::<ProofResult<Vec<_>>>()?
         .into_iter()
-        .flatten()
-        .collect();
+        .flatten();
+
+    queries.extend(leaf_queries);
 
     Ok((queries, parents_commitments, buckets_level))
 }
@@ -423,8 +453,8 @@ mod tests {
         assert_eq!(b4[&0], 1);
 
         // Empty input
-        let (q5, c5, b5) = create_sub_trie(&store, &[]).unwrap();
-        assert!(q5.is_empty() && c5.is_empty() && b5.is_empty());
+        let res = create_sub_trie(&store, &[]);
+        assert!(res.is_err());
     }
 
     #[test]

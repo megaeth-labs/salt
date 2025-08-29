@@ -15,10 +15,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    constant::{
-        BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS,
-        STARTING_NODE_ID,
-    },
+    constant::{BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},
     trie::node_utils::{
         bucket_root_node_id, get_parent_node, subtree_leaf_for_key, vc_position_in_parent,
     },
@@ -48,17 +45,23 @@ use crate::{
 ///
 /// # Returns
 ///
-/// A mapping from parent node IDs to sets of child positions that must be proven.
-/// This structure enables minimal proof generation by identifying exactly which
-/// child commitments are needed at each level for verification.
+/// A tuple of two mappings:
+/// 1. Internal nodes mapping from parent node IDs to sets of child positions for structural nodes
+/// 2. Key-Value Slot Position nodes mapping for actual data slot positions
+///    This structure enables minimal proof generation by identifying exactly which
+///    child commitments are needed at each level for verification.
 pub(crate) fn parents_and_points(
     salt_keys: &[SaltKey],
     levels: &FxHashMap<BucketId, u8>,
-) -> BTreeMap<NodeId, BTreeSet<usize>> {
+) -> (
+    BTreeMap<NodeId, BTreeSet<usize>>,
+    BTreeMap<NodeId, BTreeSet<usize>>,
+) {
     salt_keys
         .par_iter()
         .map(|salt_key| {
-            let mut local_res: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
+            let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
+            let mut slot_position_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let bucket_id = salt_key.bucket_id();
             let level = levels[&bucket_id];
 
@@ -72,7 +75,7 @@ pub(crate) fn parents_and_points(
             while node != 0 {
                 let parent_node = get_parent_node(&node);
                 // Record that this parent needs to prove the child at this position
-                local_res
+                internal_nodes
                     .entry(parent_node)
                     .or_default()
                     .insert(vc_position_in_parent(&node));
@@ -92,7 +95,7 @@ pub(crate) fn parents_and_points(
             while count > 2 {
                 let parent_node = get_parent_node(&node);
                 // Record parent-child relationships within the bucket subtree
-                local_res
+                internal_nodes
                     .entry(parent_node)
                     .or_default()
                     .insert(vc_position_in_parent(&node));
@@ -110,7 +113,7 @@ pub(crate) fn parents_and_points(
             if count == 2 {
                 let main_trie_node = bucket_root_node_id(salt_key.bucket_id());
                 // Use encoded parent to bridge bucket tree to main trie
-                local_res
+                internal_nodes
                     .entry(encode_parent(main_trie_node, level))
                     .or_default()
                     .insert(vc_position_in_parent(&node));
@@ -132,19 +135,25 @@ pub(crate) fn parents_and_points(
 
             // Record which slot position within the segment contains this key
             // Use lowest 8 bits of slot_id as position within 256-slot segment
-            local_res
+            slot_position_nodes
                 .entry(node)
                 .or_default()
                 .insert((salt_key.slot_id() & 0xFF) as usize);
 
-            local_res
+            (internal_nodes, slot_position_nodes)
         })
-        .reduce(BTreeMap::new, |mut acc, local_map| {
-            for (node_id, positions) in local_map {
-                acc.entry(node_id).or_default().extend(positions);
-            }
-            acc
-        })
+        .reduce(
+            || (BTreeMap::new(), BTreeMap::new()),
+            |mut acc, (internal_map, slot_map)| {
+                for (node_id, positions) in internal_map {
+                    acc.0.entry(node_id).or_default().extend(positions);
+                }
+                for (node_id, positions) in slot_map {
+                    acc.1.entry(node_id).or_default().extend(positions);
+                }
+                acc
+            },
+        )
 }
 
 /// Encodes bucket tree level information into a main trie node ID.
@@ -291,48 +300,6 @@ pub const fn logic_parent_id(maybe_encoded_node: NodeId) -> NodeId {
     }
 }
 
-/// Determines if a NodeID represents a leaf node in either the main trie or bucket subtree.
-///
-/// # Detection Algorithm
-///
-/// Uses a three-way classification based on NodeID structure:
-///
-/// ## 1. Bucket Subtree Nodes
-/// - **High 24 bits**: bucket_id (bucket 0 will never has a bucket tree)
-/// - **Low 40 bits**: local position within subtree
-/// - **Leaf test**: `local_position >= STARTING_NODE_ID[4]` (level 4 = leaf level)
-///
-/// ## 2. Encoded Bridge Nodes
-/// - **Always internal**: Bridge nodes connect trees, never store data
-///
-/// ## 3. Main Trie Nodes
-/// - **Level 3**: Main trie leaves
-///
-/// # Leaf Levels by Tree Type
-///
-/// - **Main Trie**: Level 3 nodes
-/// - **Bucket Subtrees**: Level 4 nodes
-/// - **Encoded Nodes**: Never leaves (bridge/connection nodes)
-///
-/// # Arguments
-///
-/// * `maybe_encoded_node` - NodeID to test for leaf status
-///
-/// # Returns
-///
-/// `true` if the node is a main trie leaf or bucket subtree leaf (whose children stores
-/// actual data), `false` if internal
-pub const fn is_leaf_node(maybe_encoded_node: NodeId) -> bool {
-    if (maybe_encoded_node >> BUCKET_SLOT_BITS) != 0 {
-        (maybe_encoded_node & BUCKET_SLOT_ID_MASK)
-            >= STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
-    } else if is_encoded_node(maybe_encoded_node) {
-        false
-    } else {
-        maybe_encoded_node >= STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as u64
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,24 +333,33 @@ mod tests {
             })
             .unzip();
 
-        let result = parents_and_points(&salt_keys, &levels);
+        let (internal_nodes, slot_position_nodes) = parents_and_points(&salt_keys, &levels);
 
         // Validate basic structure and constraints
-        assert!(!result.is_empty());
-        result.values().for_each(|positions| {
+        assert!(!internal_nodes.is_empty());
+        assert!(!slot_position_nodes.is_empty());
+        internal_nodes.values().for_each(|positions| {
+            assert!(!positions.is_empty() && positions.iter().all(|&p| p < 256));
+        });
+        slot_position_nodes.values().for_each(|positions| {
             assert!(!positions.is_empty() && positions.iter().all(|&p| p < 256));
         });
 
-        // Verify expected nodes exist with correct values
-        let expected = [
+        // Verify expected internal nodes exist with correct values
+        let expected_internal = [
             (0, &[0, 1, 15, 76, 255][..]),
             (1, &[0, 1, 255]),
             (256, &[255]),
-            (513, &[0, 4]),
-            (4163, &[64]),
         ];
-        expected.iter().for_each(|&(node, exp)| {
-            let actual: Vec<_> = result[&node].iter().copied().collect();
+        expected_internal.iter().for_each(|&(node, exp)| {
+            let actual: Vec<_> = internal_nodes[&node].iter().copied().collect();
+            assert_eq!(actual, exp);
+        });
+
+        // Verify expected slot position nodes exist with correct values
+        let expected_slots = [(131329, &[125, 162][..]), (72061992101282085, &[162])];
+        expected_slots.iter().for_each(|&(node, exp)| {
+            let actual: Vec<_> = slot_position_nodes[&node].iter().copied().collect();
             assert_eq!(actual, exp);
         });
 
@@ -391,7 +367,7 @@ mod tests {
         [(131333, 2), (1065793, 3), (5065793, 4), (16843008, 5)]
             .iter()
             .for_each(|&(node, level)| {
-                assert!(!result[&encode_parent(node, level)].is_empty());
+                assert!(!internal_nodes[&encode_parent(node, level)].is_empty());
             });
     }
 
@@ -510,51 +486,6 @@ mod tests {
                 let expected_base = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize] as u64;
                 assert!((logic_id & !((0xFFFFFFu64) << BUCKET_SLOT_BITS)) == expected_base);
             }
-        }
-    }
-
-    #[test]
-    fn test_is_leaf_node() {
-        // Test main trie nodes
-        assert!(!is_leaf_node(0)); // Root - not leaf
-        assert!(!is_leaf_node(1)); // Level 1 - not leaf
-        assert!(!is_leaf_node(257)); // Level 2 - not leaf
-        assert!(is_leaf_node(STARTING_NODE_ID[3] as u64)); // Level 3 - leaf in main trie
-
-        // Test encoded nodes (should never be leaves)
-        let bucket_id = 1_000_000;
-        let parent_id = STARTING_NODE_ID[3] as u64 + bucket_id;
-        for level in 1..=5 {
-            let encoded = encode_parent(parent_id, level);
-            assert!(!is_leaf_node(encoded));
-        }
-
-        // Test bucket subtree nodes
-        let bucket_base = bucket_id << BUCKET_SLOT_BITS; // First bucket subtree
-
-        // Test internal nodes in bucket subtree (levels 0-3)
-        for level in 0..4 {
-            let node_id = bucket_base | (STARTING_NODE_ID[level] as u64);
-            assert!(!is_leaf_node(node_id));
-        }
-
-        // Test leaf nodes in bucket subtree (level 4)
-        let leaf_node = bucket_base | (STARTING_NODE_ID[4] as u64);
-        assert!(is_leaf_node(leaf_node));
-
-        // Test edge cases
-        assert!(!is_leaf_node(STARTING_NODE_ID[3] as u64 - 1)); // Just below main trie leaf level
-        assert!(is_leaf_node(STARTING_NODE_ID[3] as u64 + 100)); // Well above main trie leaf level
-
-        // Test various bucket subtree leaf nodes
-        for bucket_id in [1, 100, 1000] {
-            let bucket_base = (bucket_id as u64) << BUCKET_SLOT_BITS;
-            let leaf = bucket_base | (STARTING_NODE_ID[4] as u64);
-            assert!(is_leaf_node(leaf));
-
-            // Test non-leaf in same bucket
-            let internal = bucket_base | (STARTING_NODE_ID[2] as u64);
-            assert!(!is_leaf_node(internal));
         }
     }
 }

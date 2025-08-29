@@ -38,3 +38,6 @@ pub enum ProofError {
     #[error("invalid lookup table: {reason}")]
     InvalidLookupTable { reason: String },
 }
+
+/// Result type for operations that can fail during subtrie creation
+pub type ProofResult<T> = Result<T, ProofError>;

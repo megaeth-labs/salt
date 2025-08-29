@@ -3,8 +3,8 @@ use crate::{
     constant::{BUCKET_SLOT_ID_MASK, STARTING_NODE_ID},
     proof::{
         prover::slot_to_field,
-        shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
-        ProofError, SerdeCommitment,
+        shape::{connect_parent_id, logic_parent_id, parents_and_points},
+        ProofError, ProofResult, SerdeCommitment,
     },
     trie::node_utils::{get_child_node, subtree_leaf_start_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 fn get_commitment_safe(
     path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     node_id: NodeId,
-) -> Result<Element, ProofError> {
+) -> ProofResult<Element> {
     let commitment_bytes =
         path_commitments
             .get(&node_id)
@@ -61,7 +61,7 @@ pub(crate) fn create_verifier_queries(
     path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
     buckets_level: &FxHashMap<BucketId, u8>,
-) -> Result<Vec<VerifierQuery>, ProofError> {
+) -> ProofResult<Vec<VerifierQuery>> {
     // Early return for empty inputs
     if kvs.is_empty() {
         return Ok(Vec::new());
@@ -84,11 +84,12 @@ pub(crate) fn create_verifier_queries(
     // Analyze the SALT tree structure to determine which parent nodes need verification
     // and what evaluation points (child indices or slot positions) are required
     let keys_to_verify: Vec<_> = kvs.keys().copied().collect();
-    let parent_points_map = parents_and_points(&keys_to_verify, buckets_level);
+    let (internal_nodes, leaf_nodes) = parents_and_points(&keys_to_verify, buckets_level);
 
     // Convert logical parent IDs to their commitment storage IDs and validate
-    let required_node_ids: Vec<_> = parent_points_map
+    let required_node_ids: Vec<_> = internal_nodes
         .keys()
+        .chain(leaf_nodes.keys())
         .map(|node_id| connect_parent_id(*node_id))
         .collect();
 
@@ -100,90 +101,127 @@ pub(crate) fn create_verifier_queries(
         });
     }
 
+    let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
+
+    let mut queries = in_nodes
+        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+        .map(|nodes| {
+            let (children_ids, children_commitments): (Vec<_>, Vec<_>) = nodes
+                .iter()
+                .map(|(encode_node, points)| {
+                    points
+                        .iter()
+                        .map(|&point| {
+                            let child_id = get_child_node(&logic_parent_id(*encode_node), point);
+                            Ok((
+                                child_id,
+                                path_commitments
+                                    .get(&child_id)
+                                    .ok_or_else(|| ProofError::StateReadError {
+                                        reason: format!(
+                                            "Missing commitment for node ID {child_id}"
+                                        ),
+                                    })?
+                                    .0,
+                            ))
+                        })
+                        .collect::<ProofResult<Vec<_>>>()
+                })
+                .collect::<ProofResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .unzip();
+
+            let children_frs = Element::serial_batch_map_to_scalar_field(children_commitments);
+            let child_map: FxHashMap<NodeId, Fr> =
+                children_ids.into_iter().zip(children_frs).collect();
+
+            Ok(nodes
+                .iter()
+                .map(|(encode_node, points)| {
+                    // Get the cryptographic commitment for this parent node
+                    let commitment =
+                        get_commitment_safe(path_commitments, connect_parent_id(*encode_node))?;
+
+                    points
+                        .iter()
+                        .map(|&point| {
+                            let child_id = get_child_node(&logic_parent_id(*encode_node), point);
+                            let fr = child_map.get(&child_id).ok_or_else(|| {
+                                ProofError::StateReadError {
+                                    reason: format!("Missing commitment for node ID {child_id}"),
+                                }
+                            })?;
+
+                            Ok(VerifierQuery {
+                                commitment,
+                                point: Fr::from(point as u64), // Child index (0-255)
+                                // Convert child's commitment to scalar for polynomial evaluation
+                                result: *fr,
+                            })
+                        })
+                        .collect::<ProofResult<Vec<_>>>()
+                })
+                .collect::<ProofResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>())
+        })
+        .collect::<ProofResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
     // Transform each parent-points pair into polynomial evaluation queries
-    let all_queries = parent_points_map
+    let leaf_queries = leaf_nodes
         .into_par_iter()
         .map(|(parent_node, evaluation_points)| {
             // Get the cryptographic commitment for this parent node
             let commitment = get_commitment_safe(path_commitments, connect_parent_id(parent_node))?;
 
-            // Generate different query types based on node type
-            if is_leaf_node(parent_node) {
-                // LEAF NODE QUERIES: Verify actual key-value data in buckets
-                // Calculate the starting SaltKey for this bucket/segment
-                let salt_key_start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
-                    // Main trie leaf (regular bucket)
-                    let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
-                    SaltKey::from((bucket_id, 0))
-                } else {
-                    // Subtree leaf (bucket segment)
-                    subtree_leaf_start_key(&parent_node)
-                };
-
-                evaluation_points
-                    .iter()
-                    .map(|&point| {
-                        // Calculate the exact SaltKey for this slot position
-                        let salt_key = SaltKey(salt_key_start.0 + point as u64);
-
-                        // Look up the value and convert to field element
-                        let salt_val =
-                            kvs.get(&salt_key)
-                                .ok_or_else(|| ProofError::StateReadError {
-                                    reason: format!(
-                                        "Missing key-value entry for salt_key: {salt_key:?}"
-                                    ),
-                                })?;
-
-                        let result = slot_to_field(salt_val);
-
-                        Ok(VerifierQuery {
-                            commitment,
-                            point: Fr::from(point as u64), // Slot position within bucket
-                            result,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+            // LEAF NODE QUERIES: Verify actual key-value data in buckets
+            // Calculate the starting SaltKey for this bucket/segment
+            let salt_key_start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
+                // Main trie leaf (regular bucket)
+                let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                SaltKey::from((bucket_id, 0))
             } else {
-                // INTERNAL NODE QUERIES: Verify trie structure by checking child commitments
-                let child_commitments = evaluation_points
-                    .iter()
-                    .map(|&point| {
-                        // Calculate the child node ID for this branch
-                        let child_id = get_child_node(&logic_parent_id(parent_node), point);
+                // Subtree leaf (bucket segment)
+                subtree_leaf_start_key(&parent_node)
+            };
 
-                        // Get the child's commitment from the proof
-                        Ok(path_commitments
-                            .get(&child_id)
+            evaluation_points
+                .iter()
+                .map(|&point| {
+                    // Calculate the exact SaltKey for this slot position
+                    let salt_key = SaltKey(salt_key_start.0 + point as u64);
+
+                    // Look up the value and convert to field element
+                    let salt_val =
+                        kvs.get(&salt_key)
                             .ok_or_else(|| ProofError::StateReadError {
-                                reason: format!("Missing commitment for node ID {child_id}"),
-                            })?
-                            .0)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                                reason: format!(
+                                    "Missing key-value entry for salt_key: {salt_key:?}"
+                                ),
+                            })?;
 
-                let children_frs = Element::serial_batch_map_to_scalar_field(child_commitments);
+                    let result = slot_to_field(salt_val);
 
-                Ok(evaluation_points
-                    .into_iter()
-                    .zip(children_frs)
-                    .map(|(point, result)| {
-                        VerifierQuery {
-                            commitment,
-                            point: Fr::from(point as u64), // Child index (0-255)
-                            // Convert child's commitment to scalar for polynomial evaluation
-                            result,
-                        }
+                    Ok(VerifierQuery {
+                        commitment,
+                        point: Fr::from(point as u64), // Slot position within bucket
+                        result,
                     })
-                    .collect::<Vec<_>>())
-            }
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .flatten()
-        .collect();
+        .flatten();
 
-    Ok(all_queries)
+    queries.extend(leaf_queries);
+
+    Ok(queries)
 }
 
 #[cfg(test)]
