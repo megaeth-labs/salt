@@ -25,9 +25,8 @@ pub struct PlainKeysProof {
     // TODO: the builtin serialization mechanism has too much redundant data.
     // e.g., every plain key is stored twice: one in `key_mapping` and one in
     // `salt_witness`.
-    /// Mapping from plain keys to their corresponding salt keys (if they exist).
-    pub(crate) key_mapping: BTreeMap<Vec<u8>, Option<SaltKey>>,
-
+    /// Mapping from plain keys to their corresponding salt keys.
+    pub(crate) key_mapping: BTreeMap<Vec<u8>, SaltKey>,
     /// Low-level SALT witness containing all bucket slots needed for proving the
     /// existence or non-existence of the plain keys and their cryptographic proof.
     pub(crate) salt_witness: SaltWitness,
@@ -68,33 +67,32 @@ impl PlainKeysProof {
         let mut key_mapping = BTreeMap::new();
 
         (|| -> Result<(), <Store as StateReader>::Error> {
-            // Phase 1: Key Lookup - Find salt keys for each plain key
+            // We use two separate state instances to collect witness data:
+            // - 'state': For performing lookups to determine if keys exist
+            // - 'recorder': For recording slot accesses during non-existence proofs
             let mut state = EphemeralSaltState::new(store);
+            let mut recorder = EphemeralSaltState::new(store).cache_read();
+
             for plain_key in plain_keys {
                 let bucket_id = hasher::bucket_id(plain_key);
                 let metadata = store.metadata(bucket_id)?;
 
-                let salt_key = state
-                    .shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)?
-                    .map(|(slot_id, _)| SaltKey::from((bucket_id, slot_id)));
-
-                key_mapping.insert(plain_key.clone(), salt_key);
-            }
-
-            // Phase 2: Witness Collection - Gather all data needed for verification
-            let mut recorder = EphemeralSaltState::new(store).cache_read();
-            for (plain_key, maybe_salt_key) in key_mapping.iter() {
-                match maybe_salt_key {
-                    // Non-existing keys: Trigger search to record all accessed slots
-                    // This creates exclusion proofs by showing the key's absence
-                    None => {
-                        recorder.plain_value(plain_key)?;
-                    }
-                    // Existing keys: Includes their salt keys directly
-                    Some(salt_key) => witnessed_keys.push(*salt_key),
+                if let Some((slot_id, _)) =
+                    state.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)?
+                {
+                    // Key exists: Record the mapping and directly witness
+                    // the salt key for inclusion proof
+                    let salt_key = SaltKey::from((bucket_id, slot_id));
+                    key_mapping.insert(plain_key.clone(), salt_key);
+                    witnessed_keys.push(salt_key);
+                } else {
+                    // Key doesn't exist: Perform a full search to capture all
+                    // slots checked during the SHI lookup. These slots form the
+                    // exclusion proof.
+                    recorder.plain_value(plain_key)?;
                 }
             }
-            // Include all slots accessed during searches - these form the witness data
+            // Add slots for exclusion proof.
             witnessed_keys.extend(recorder.cache.into_keys());
 
             Ok(())
@@ -113,13 +111,12 @@ impl PlainKeysProof {
     ///
     /// This method performs a two-phase verification process:
     ///
-    /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT witness
-    ///    proof against the provided state root to ensure the proof is cryptographically
-    ///    sound and the claimed key-value pairs are authentic.
+    /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT
+    ///    witness proof against the provided state root to ensure the proof is
+    ///    cryptographically sound and the claimed key-value pairs are authentic.
     ///
-    /// 2. **Key Location Verification**: For each plain key in the proof, verifies that:
-    ///    - Keys claimed to exist are found exactly at their specified salt key locations
-    ///    - Keys claimed not to exist are genuinely absent from the state
+    /// 2. **Key Location Verification**: For each plain key in the proof, verifies
+    ///    that it can be found exactly at the claimed salt key location.
     ///
     /// # Arguments
     ///
@@ -132,57 +129,32 @@ impl PlainKeysProof {
     ///   - Invalid cryptographic proof
     ///   - Incorrect key mapping
     pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
-        // Phase 1: Verify the underlying cryptographic proof using salt witness
         self.salt_witness.verify_proof(root)?;
 
-        // Phase 2: Verify that every plain key can be found in the claimed location
-        // or is correctly proven to be non-existent
         let mut state = EphemeralSaltState::new(self);
 
         for (plain_key, expected_salt_key) in &self.key_mapping {
-            // First try direct_find to see if the key is in the claimed location
-            match state.direct_find(plain_key) {
-                Ok(Some(_)) => {
-                    // Key found in the expected location - passes the check
-                    continue;
-                }
-                _ => {
-                    // Key not found via direct lookup, fall through to full search
-                }
-            }
+            // Verify key mapping consistency with underlying SaltWitness:
+            // direct_find -> Self::plain_value_fast -> Self::value -> SaltWitness::value
+            let found_key = state.direct_find(plain_key).ok().flatten().map(|(k, _)| k);
 
-            // If direct_find didn't succeed, use `plain_value()` to do a full search
-            match state.plain_value(plain_key) {
-                Ok(Some(_)) => {
-                    // Key exists but NOT in the claimed location - verification fails
-                    // (If it were in the right place, direct_find would have found it)
+            match found_key {
+                Some(k) if k == *expected_salt_key => {}
+                Some(_) => {
                     return Err(ProofError::InvalidKeyMapping {
                         reason: format!(
                             "Key found in wrong location: {:?}",
                             String::from_utf8_lossy(plain_key)
                         ),
-                    });
+                    })
                 }
-                Ok(None) => {
-                    // Key doesn't exist - passes only if we expected it not to exist
-                    if expected_salt_key.is_some() {
-                        return Err(ProofError::InvalidKeyMapping {
-                            reason: format!(
-                                "Key expected to exist but not found: {:?}",
-                                String::from_utf8_lossy(plain_key)
-                            ),
-                        });
-                    }
-                }
-                Err(e) => {
-                    // Error during lookup - verification fails
-                    return Err(ProofError::StateReadError {
+                None => {
+                    return Err(ProofError::InvalidKeyMapping {
                         reason: format!(
-                            "Failed to verify key {:?}: {}",
-                            String::from_utf8_lossy(plain_key),
-                            e
+                            "Key claimed to exist but not found: {:?}",
+                            String::from_utf8_lossy(plain_key)
                         ),
-                    });
+                    })
                 }
             }
         }
@@ -214,8 +186,7 @@ impl StateReader for PlainKeysProof {
 
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         match self.key_mapping.get(plain_key) {
-            Some(Some(salt_key)) => Ok(*salt_key),
-            Some(None) => Err("Plain key known not to exist"),
+            Some(salt_key) => Ok(*salt_key),
             None => Err("Plain key not in witness"),
         }
     }
@@ -225,14 +196,9 @@ impl PlainStateProvider for PlainKeysProof {
     type Error = &'static str;
 
     fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        match self.plain_value_fast(plain_key) {
-            Ok(Some(salt_key)) => {
-                let salt_value = self.value(salt_key)?.unwrap();
-                Ok(Some(salt_value.value().to_vec()))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
-        }
+        let salt_key = self.plain_value_fast(plain_key)?;
+        let salt_value = self.value(salt_key)?.unwrap();
+        Ok(Some(salt_value.value().to_vec()))
     }
 }
 
@@ -722,7 +688,7 @@ mod tests {
         let salt_keys2 = proof
             .key_mapping
             .values()
-            .map(|v| v.unwrap())
+            .cloned()
             .sorted_unstable()
             .collect::<Vec<_>>();
 
