@@ -68,22 +68,29 @@ impl From<SaltWitness> for Witness {
 }
 
 impl Witness {
-    /// Creates a cryptographic proof for a set of plain keys.
+    /// Creates a comprehensive cryptographic witness for stateless validators.
     ///
-    /// This method generates inclusion proofs for existing keys and exclusion
-    /// proofs for non-existing keys, allowing stateless verification without
-    /// full state access.
+    /// This method generates a witness that enables stateless validators to both
+    /// re-execute transactions (using the lookup keys) and update the state root
+    /// afterwards (using the state updates). It generates inclusion proofs for
+    /// existing keys and exclusion proofs for non-existing keys.
     ///
     /// # Arguments
-    /// * `plain_keys` - The plain keys to create proofs for. Can be any byte
-    ///   sequences representing user-provided keys in their original format.
+    /// * `lookups` - The read-set of plain keys needed to execute transactions.
+    ///   These are keys that need to be read during transaction execution.
+    /// * `updates` - The write-set of state updates resulting from transaction execution.
+    ///   Each item is a tuple of (plain_key, optional_value) where None indicates deletion.
+    ///   Updates that duplicate lookup keys are filtered out (except deletions which are
+    ///   always processed to maintain correct state transitions).
     /// * `store` - The storage backend providing access to both state data
     ///   (key-value pairs) and trie data (cryptographic commitments).
     ///
     /// # Returns
     /// A `Witness` containing:
-    /// - A mapping from each plain key to its corresponding salt key (if it exists)
-    /// - A `SaltWitness` with all state data and cryptographic proofs needed for verification
+    /// - A mapping from each lookup key to its corresponding salt key (if it exists)
+    /// - All state data needed for transaction execution (from lookups)
+    /// - All state changes needed to update the root (from filtered updates)
+    /// - Cryptographic proofs (SaltWitness) for verification
     ///
     /// # Errors
     /// Returns `ProofError::StateReadError` if:
@@ -91,7 +98,11 @@ impl Witness {
     /// - Unable to perform SHI search operations
     /// - Unable to access required state data
     /// - Witness creation fails
-    pub fn create<Store>(plain_keys: &[Vec<u8>], store: &Store) -> Result<Witness, ProofError>
+    pub fn create<'b, Store>(
+        lookups: &[Vec<u8>],
+        updates: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+        store: &Store,
+    ) -> Result<Witness, ProofError>
     where
         Store: StateReader + TrieReader,
     {
@@ -101,11 +112,12 @@ impl Witness {
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:
             // - 'state': For performing lookups to determine if keys exist
-            // - 'recorder': For recording slot accesses during non-existence proofs
+            // - 'recorder': For recording slot accesses during non-existence
+            //   proofs and state updates
             let mut state = EphemeralSaltState::new(store);
             let mut recorder = EphemeralSaltState::new(store).cache_read();
 
-            for plain_key in plain_keys {
+            for plain_key in lookups {
                 let bucket_id = hasher::bucket_id(plain_key);
                 let metadata = store.metadata(bucket_id)?;
 
@@ -124,7 +136,17 @@ impl Witness {
                     recorder.plain_value(plain_key)?;
                 }
             }
-            // Add slots for exclusion proof.
+
+            // Filter out plain keys from updates that are already in direct_lookup_tbl,
+            // but only if the update is not a deletion (None value indicates deletion).
+            // Since most updates are in-place, this optimization reduces the number of
+            // slots that need to be tracked in the witness significantly.
+            let filtered_updates: Vec<_> = updates
+                .into_iter()
+                .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
+                .collect();
+            recorder.update(filtered_updates)?;
+
             witnessed_keys.extend(recorder.cache.into_keys());
 
             Ok(())
@@ -378,7 +400,12 @@ mod tests {
         store.update_trie(trie_updates);
 
         // Generate a witness for the inserted key
-        let witness = Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
 
         // Test serialization round-trip of the underlying SaltWitness
         let serialized =
@@ -416,7 +443,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -438,7 +465,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -490,7 +517,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -541,7 +568,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0, 2]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -593,7 +620,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -633,7 +660,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -697,7 +724,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[7].clone();
 
-        let proof = Witness::create(&[key.clone()], &store).unwrap();
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -738,7 +765,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[8].clone();
 
-        let proof = Witness::create(&[key.clone()], &store).unwrap();
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
 
         assert!(proof.verify(root).is_ok());
 
@@ -791,7 +818,12 @@ mod tests {
 
         store.update_trie(trie_updates);
 
-        let witness = Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
 
         for key in witness.salt_witness.kvs.keys() {
             let proof_value = witness.value(*key).unwrap();
@@ -819,7 +851,7 @@ mod tests {
 
         // Create a witness for the same 3 keys that were inserted
         let keys = select_test_keys(vec![7, 8, 9]);
-        let proof = Witness::create(&keys, &store).unwrap();
+        let proof = Witness::create(&keys, std::iter::empty(), &store).unwrap();
 
         // Verify the witness is valid against the state root
         assert!(proof.verify(root).is_ok());
