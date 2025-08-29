@@ -6,11 +6,11 @@ pub mod prover;
 pub mod shape;
 pub mod subtrie;
 pub mod verifier;
-pub mod witness;
+pub mod salt_witness;
 
 pub use plain_keys_proof::PlainKeysProof;
 pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
-pub use witness::SaltWitness;
+pub use salt_witness::SaltWitness;
 
 /// Error type for proof operations
 #[derive(Debug, Error)]
