@@ -14,9 +14,9 @@ alloy-rlp = "0.3.4"
 
 # megaeth dependencies
 ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
-banderwagon = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "b18650962fadb4a3adc5f26032d1d4ae32d4241f" }
-ffi_interface = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "b18650962fadb4a3adc5f26032d1d4ae32d4241f" }
-ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "b18650962fadb4a3adc5f26032d1d4ae32d4241f" }
+banderwagon = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "227818e7fced629822c21a4eb0ef6eba48fe7dad" }
+ffi_interface = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "227818e7fced629822c21a4eb0ef6eba48fe7dad" }
+ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "227818e7fced629822c21a4eb0ef6eba48fe7dad" }
 megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
 
 # standard dependencies
