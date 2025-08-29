@@ -238,6 +238,15 @@ impl StateReader for SaltWitness {
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         Err("plain_value_fast not supported for SaltWitness")
     }
+
+    fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
+        let num_levels = self
+            .proof
+            .levels
+            .get(&bucket_id)
+            .ok_or("Bucket top level not available in proof")?;
+        Ok(*num_levels as usize)
+    }
 }
 
 impl TrieReader for SaltWitness {
