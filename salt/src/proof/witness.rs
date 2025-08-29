@@ -234,6 +234,10 @@ impl StateReader for SaltWitness {
 
         Ok(used_count)
     }
+
+    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        Err("plain_value_fast not supported for SaltWitness")
+    }
 }
 
 impl TrieReader for SaltWitness {
@@ -310,7 +314,6 @@ mod tests {
         proof::SerdeCommitment,
         state::state::EphemeralSaltState,
         state::updates::StateUpdates,
-        traits::TrieReader,
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};

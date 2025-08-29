@@ -220,6 +220,10 @@ impl StateReader for MemStore {
         let state = self.state.read().unwrap();
         Ok(*state.used_slots.get(&bucket_id).unwrap_or(&0))
     }
+
+    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        Err("plain_value_fast not supported for MemStore")
+    }
 }
 
 impl TrieReader for MemStore {

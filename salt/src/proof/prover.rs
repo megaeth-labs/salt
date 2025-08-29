@@ -87,9 +87,9 @@ pub struct SaltProof {
     /// the IPA proof
     pub proof: SerdeMultiPointProof,
 
-    /// the top level of the buckets trie
+    /// the level of the buckets trie
     /// used to let verifier determine the bucket trie level
-    pub buckets_top_level: FxHashMap<BucketId, u8>,
+    pub levels: FxHashMap<BucketId, u8>,
 }
 
 /// Converts a bucket slot entry into a field element for IPA polynomial commitments.
@@ -125,8 +125,7 @@ impl SaltProof {
         }
         keys.dedup();
 
-        let (prover_queries, parents_commitments, buckets_top_level) =
-            create_sub_trie(store, &keys)?;
+        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys)?;
 
         let crs = CRS::default();
 
@@ -137,7 +136,7 @@ impl SaltProof {
         Ok(SaltProof {
             parents_commitments,
             proof: SerdeMultiPointProof(proof),
-            buckets_top_level,
+            levels,
         })
     }
 
@@ -147,13 +146,8 @@ impl SaltProof {
         data: &BTreeMap<SaltKey, Option<SaltValue>>,
         state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
-        let kvs: Vec<_> = data.iter().map(|(&k, v)| (k, v.clone())).collect();
-
-        let queries = verifier::create_verifier_queries(
-            &self.parents_commitments,
-            kvs,
-            &self.buckets_top_level,
-        )?;
+        let queries =
+            verifier::create_verifier_queries(&self.parents_commitments, data, &self.levels)?;
 
         let root = self
             .parents_commitments
@@ -198,18 +192,16 @@ mod tests {
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
-        proof::prover::slot_to_field,
         state::{state::EphemeralSaltState, updates::StateUpdates},
-        traits::{StateReader, TrieReader},
         trie::trie::StateRoot,
-        types::{BucketId, SlotId},
-        BucketMeta, NodeId, SaltKey, SaltValue,
+        types::SlotId,
+        BucketMeta,
     };
     use alloy_primitives::{Address, B256};
-    use banderwagon::{CanonicalSerialize, Element, Fr, PrimeField};
-    use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
+    use banderwagon::CanonicalSerialize;
+    use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];

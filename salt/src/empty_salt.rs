@@ -35,6 +35,10 @@ impl StateReader for EmptySalt {
             ..BucketMeta::default()
         })
     }
+
+    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        Err("Empty salt has no keys")
+    }
 }
 
 impl TrieReader for EmptySalt {
