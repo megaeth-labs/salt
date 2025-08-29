@@ -12,9 +12,8 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     ops::{Range, RangeInclusive},
 };
 
@@ -28,11 +27,8 @@ use std::{
 /// Critically, the witness contains the minimal partial trie with all internal nodes
 /// necessary to recompute the state root after applying state updates. This enables
 /// stateless nodes to not only re-execute transactions but also produce new state roots.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Witness {
-    // TODO: the builtin serialization mechanism has too much redundant data.
-    // e.g., every plain key is stored twice: one in `direct_lookup_tbl` and
-    // one in `salt_witness`.
     /// Direct mapping from plain keys to their salt key locations.
     /// Only contains keys that exist.
     pub(crate) direct_lookup_tbl: HashMap<Vec<u8>, SaltKey>,
@@ -42,6 +38,33 @@ pub struct Witness {
     /// - Their values (or None for empty slots)
     /// - Cryptographic commitments proving authenticity
     pub(crate) salt_witness: SaltWitness,
+}
+
+impl From<SaltWitness> for Witness {
+    /// Reconstructs a Witness from a SaltWitness by extracting plain keys.
+    ///
+    /// This enables transmitting only the SaltWitness over the network, avoiding
+    /// redundant storage of plain keys. The direct_lookup_tbl is rebuilt by:
+    /// - Extracting plain keys from SaltValue data (where they're already stored)
+    /// - Skipping metadata entries (which don't contain plain key-value pairs)
+    fn from(salt_witness: SaltWitness) -> Self {
+        let mut direct_lookup_tbl = HashMap::new();
+        for (salt_key, value) in &salt_witness.kvs {
+            if salt_key.is_in_meta_bucket() {
+                continue;
+            }
+
+            if let Some(salt_value) = value {
+                let plain_key = salt_value.key().to_vec();
+                direct_lookup_tbl.insert(plain_key, *salt_key);
+            }
+        }
+
+        Witness {
+            direct_lookup_tbl,
+            salt_witness,
+        }
+    }
 }
 
 impl Witness {
@@ -240,46 +263,47 @@ mod tests {
             .collect()
     }
 
-    /// Test serialization and deserialization of Witness.
-    /// Ensures that proofs can be transmitted and stored reliably.
+    /// Test serialization and deserialization of SaltWitness and that Witness
+    /// can be reconstructed from the deserialized SaltWitness.
     #[test]
-    fn test_plain_keys_proof_serialize() {
-        // Create a test account to insert into Salt storage
-        let account1 = Account {
-            balance: U256::from(10),
-            nonce: 10,
-            bytecode_hash: None,
-        };
-
-        // Create a key-value pair for the account
+    fn test_witness_serde() {
+        // Create test account data
         let kvs = HashMap::from([(
             PlainKey::Account(Address::random()).encode(),
-            Some(PlainValue::Account(account1).encode()),
+            Some(
+                PlainValue::Account(Account {
+                    balance: U256::from(10),
+                    nonce: 10,
+                    bytecode_hash: None,
+                })
+                .encode(),
+            ),
         )]);
 
-        // Insert the account into Salt storage and update the trie
+        // Insert into Salt storage and update the trie
         let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
-        let state_updates = state.update(&kvs).unwrap();
-        store.update_state(state_updates.clone());
+        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new(&store);
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
         store.update_trie(trie_updates);
 
-        // Generate a proof for the inserted key
-        let plain_keys_proof =
-            Witness::create(&[kvs.keys().next().unwrap().clone()], &store).unwrap();
+        // Generate a witness for the inserted key
+        let witness = Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
 
-        // Test serialization round-trip
+        // Test serialization round-trip of the underlying SaltWitness
         let serialized =
-            bincode::serde::encode_to_vec(&plain_keys_proof, bincode::config::legacy()).unwrap();
-        let deserialized: (Witness, usize) =
+            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy())
+                .unwrap();
+        let (deserialized, _): (SaltWitness, _) =
             bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
 
-        // Verify the deserialized proof is identical and still valid
-        assert_eq!(plain_keys_proof, deserialized.0);
-        plain_keys_proof.verify(root).unwrap()
+        // Reconstruct the Witness from the deserialized SaltWitness
+        let reconstructed = Witness::from(deserialized);
+
+        // Verify the reconstructed witness is identical and still valid
+        assert_eq!(witness, reconstructed);
+        reconstructed.verify(root).unwrap();
     }
 
     #[test]
@@ -607,7 +631,7 @@ mod tests {
     /// Test that Witness correctly implements StateReader trait.
     /// Verifies that the proof contains the same data as the original state.
     #[test]
-    fn test_state_reader_for_plain_keys_proof() {
+    fn test_state_reader_for_witness() {
         let l = 100;
         let mut rng = StdRng::seed_from_u64(42);
         let mut kvs = HashMap::new();
@@ -643,11 +667,10 @@ mod tests {
 
         store.update_trie(trie_updates);
 
-        let plain_keys_proof =
-            Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
+        let witness = Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
 
-        for key in plain_keys_proof.salt_witness.kvs.keys() {
-            let proof_value = plain_keys_proof.value(*key).unwrap();
+        for key in witness.salt_witness.kvs.keys() {
+            let proof_value = witness.value(*key).unwrap();
             let mut state_value = state.value(*key).unwrap();
             if state_value.is_none() && key.is_in_meta_bucket() {
                 state_value = Some(BucketMeta::default().into());

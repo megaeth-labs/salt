@@ -62,14 +62,14 @@ mod tests {
 
         // Alice creates a cryptographic proof for plain key-value pairs
         let plain_keys_to_prove = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let proof = Witness::create(&plain_keys_to_prove, &store)?;
+        let witness = Witness::create(&plain_keys_to_prove, &store)?;
 
-        // Bob verifies the proof against its local state root
-        let is_valid = proof.verify(root_hash);
+        // Bob verifies the witness against its local state root
+        let is_valid = witness.verify(root_hash);
         assert!(is_valid.is_ok());
 
-        // Bob looks up values from the proof using EphemeralSaltState
-        let mut bob_state = EphemeralSaltState::new(&proof);
+        // Bob looks up values from the witness using EphemeralSaltState
+        let mut bob_state = EphemeralSaltState::new(&witness);
         assert_eq!(
             bob_state.plain_value(b"account1")?,
             Some(b"balance100".to_vec())
