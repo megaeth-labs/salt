@@ -305,7 +305,7 @@ where
             let physical_parent = connect_parent_id(parent);
             let parent_commitment = store
                 .commitment(physical_parent)
-                .map(|commitment| Element::from_bytes_unchecked_uncompressed(commitment))
+                .map(Element::from_bytes_unchecked_uncompressed)
                 .map_err(|e| ProofError::StateReadError {
                     reason: format!(
                         "Failed to load element commitment for node {physical_parent}: {e:?}"
@@ -338,43 +338,37 @@ mod tests {
     use alloy_primitives::{Address, B256};
     use ark_ff::BigInt;
     use banderwagon::{Fr, Zero};
-    use ipa_multipoint::{
-        crs::CRS,
-        multiproof::{MultiPoint, VerifierQuery},
-        transcript::Transcript,
-    };
+    use ipa_multipoint::{crs::CRS, multiproof::MultiPoint, transcript::Transcript};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::collections::HashMap;
 
-    /// Helper to create test data and initialize store
     fn setup_test_store() -> (MemStore, SaltKey) {
-        let mut rng = StdRng::seed_from_u64(42);
         let test_bytes = [
             204, 96, 246, 139, 174, 111, 240, 167, 42, 141, 172, 145, 227, 227, 67, 2, 127, 77,
             165, 138, 175, 150, 139, 98, 201, 151, 0, 212, 66, 107, 252, 84,
         ];
-        let (slot, storage_value) = (B256::from(test_bytes), B256::from(test_bytes));
-
-        let initial_kvs = HashMap::from([(
-            PlainKey::Storage(Address::from_slice(&rng.gen::<[u8; 20]>()), slot).encode(),
-            Some(PlainValue::Storage(storage_value.into()).encode()),
+        let kvs = HashMap::from([(
+            PlainKey::Storage(
+                Address::from_slice(&StdRng::seed_from_u64(42).gen::<[u8; 20]>()),
+                B256::from(test_bytes),
+            )
+            .encode(),
+            Some(PlainValue::Storage(B256::from(test_bytes).into()).encode()),
         )]);
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&initial_kvs).unwrap();
+        let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&store);
         let (_, trie_updates) = trie.update_fin(updates.clone()).unwrap();
         store.update_trie(trie_updates);
 
-        let salt_key = *updates.data.keys().next().unwrap();
-        (store, salt_key)
+        (store, *updates.data.keys().next().unwrap())
     }
 
-    /// Helper to verify IPA proof
-    fn verify_proof(queries: Vec<ProverQuery>) -> bool {
+    fn verify_ipa_proof(queries: Vec<ProverQuery>) -> bool {
         let crs = CRS::default();
         let proof = MultiPoint::open(
             crs.clone(),
@@ -382,51 +376,46 @@ mod tests {
             &mut Transcript::new(b"st"),
             queries.clone(),
         );
-        let verifier_queries: Vec<VerifierQuery> = queries.into_iter().map(Into::into).collect();
         proof.check(
             &crs,
             &PRECOMPUTED_WEIGHTS,
-            &verifier_queries,
+            &queries.into_iter().map(Into::into).collect::<Vec<_>>(),
             &mut Transcript::new(b"st"),
         )
     }
 
     #[test]
-    fn test_create_sub_trie() {
-        // Setup test data
+    fn create_sub_trie_generates_valid_proofs() {
         let (store, salt_key) = setup_test_store();
-
-        // Test create_sub_trie functionality
         let (prover_queries, _, _) = create_sub_trie(&store, &[salt_key]).unwrap();
-        assert!(verify_proof(prover_queries));
+        assert!(verify_ipa_proof(prover_queries));
+    }
 
-        // Test standalone polynomial proof
+    #[test]
+    fn lagrange_polynomial_proof_verification() {
         let crs = CRS::default();
-        let mut poly_items = vec![Fr::zero(); 256];
-        poly_items[0] = Fr::from(BigInt([
+        let mut coeffs = vec![Fr::zero(); 256];
+        coeffs[0] = Fr::from(BigInt([
             14950088112150747174,
             13253162737298189682,
             10931921008236264693,
             1309984686389044416,
         ]));
-        poly_items[208] = Fr::from(BigInt([
+        coeffs[208] = Fr::from(BigInt([
             9954869294274886320,
             8441215309276124103,
             16970925962995195932,
             2055721457450359655,
         ]));
 
-        let poly = LagrangeBasis::new(poly_items);
-        let point = 208;
-        let result = poly.evaluate_in_domain(point);
-        let commitment = crs.commit_lagrange_poly(&poly);
-
+        let poly = LagrangeBasis::new(coeffs);
         let query = ProverQuery {
-            commitment,
-            poly,
-            point,
-            result,
+            commitment: crs.commit_lagrange_poly(&poly),
+            poly: poly.clone(),
+            point: 208,
+            result: poly.evaluate_in_domain(208),
         };
+
         let proof = MultiPoint::open(
             crs.clone(),
             &PRECOMPUTED_WEIGHTS,
@@ -439,5 +428,144 @@ mod tests {
             &[query.into()],
             &mut Transcript::new(b"st")
         ));
+    }
+
+    #[test]
+    fn bucket_level_calculation() {
+        let store = MemStore::new();
+
+        // Metadata buckets always return level 1
+        assert_eq!(calculate_bucket_level(&store, 0).unwrap(), 1);
+        assert_eq!(
+            calculate_bucket_level(&store, NUM_META_BUCKETS as BucketId - 1).unwrap(),
+            1
+        );
+
+        // Data bucket with stored metadata
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        store.update_state(crate::state::updates::StateUpdates {
+            data: [(
+                crate::types::bucket_metadata_key(bucket_id),
+                (
+                    None,
+                    Some(crate::types::SaltValue::from(BucketMeta {
+                        capacity: 256u64.pow(4),
+                        ..Default::default()
+                    })),
+                ),
+            )]
+            .into(),
+        });
+
+        assert_eq!(calculate_bucket_level(&store, bucket_id).unwrap(), 4);
+
+        // Data bucket without metadata should error
+        assert_eq!(calculate_bucket_level(&store, bucket_id + 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn leaf_location_determination() {
+        // Main trie nodes
+        assert_eq!(
+            determine_leaf_location(STARTING_NODE_ID[3] as NodeId),
+            (0, 0)
+        );
+        assert_eq!(
+            determine_leaf_location(STARTING_NODE_ID[3] as NodeId + 100),
+            (0, 100)
+        );
+
+        // Subtree nodes
+        let bucket_id = 70000u32;
+        let slot_start = 512u64;
+        let node = (bucket_id as u64) << BUCKET_SLOT_BITS
+            | STARTING_NODE_ID[4] as u64 + slot_start / TRIE_WIDTH as u64;
+        assert_eq!(determine_leaf_location(node), (slot_start, bucket_id));
+    }
+
+    #[test]
+    fn default_coefficients_creation() {
+        // Metadata bucket coefficients
+        let meta_coeffs = create_default_coefficients(100);
+        assert_eq!(meta_coeffs.len(), TRIE_WIDTH);
+        assert!(meta_coeffs
+            .iter()
+            .all(|&c| c == calculate_fr_by_kv(&BucketMeta::default().into())));
+
+        // Data bucket coefficients
+        let data_coeffs = create_default_coefficients(NUM_META_BUCKETS as BucketId + 100);
+        assert_eq!(data_coeffs.len(), TRIE_WIDTH);
+        assert!(data_coeffs
+            .iter()
+            .all(|&c| c == Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH)));
+    }
+
+    #[test]
+    fn bucket_entry_loading() {
+        let (store, salt_key) = setup_test_store();
+        let bucket_id = salt_key.bucket_id();
+        let slot_start = salt_key.slot_id() & !SLOT_INDEX_MASK;
+        let default_coeffs = create_default_coefficients(bucket_id);
+
+        // With data
+        let coeffs =
+            load_bucket_entries(&store, bucket_id, slot_start, default_coeffs.clone()).unwrap();
+        assert_ne!(coeffs, default_coeffs);
+
+        // Empty bucket
+        let empty_coeffs = load_bucket_entries(
+            &MemStore::new(),
+            NUM_META_BUCKETS as BucketId,
+            0,
+            default_coeffs.clone(),
+        )
+        .unwrap();
+        assert_eq!(empty_coeffs, default_coeffs);
+    }
+
+    #[test]
+    fn create_sub_trie_scenarios() {
+        let (store, salt_key) = setup_test_store();
+
+        // Single key
+        let (q1, _, _) = create_sub_trie(&store, &[salt_key]).unwrap();
+        assert!(verify_ipa_proof(q1.clone()));
+
+        // Multiple keys
+        let (q2, _, _) = create_sub_trie(
+            &store,
+            &[
+                salt_key,
+                SaltKey::from((salt_key.bucket_id(), salt_key.slot_id() + 1)),
+            ],
+        )
+        .unwrap();
+        assert!(verify_ipa_proof(q2));
+
+        // Duplicate keys
+        let (q3, _, _) = create_sub_trie(&store, &[salt_key, salt_key]).unwrap();
+        assert_eq!(q1.len(), q3.len());
+
+        // Metadata bucket
+        let (q4, _, b4) = create_sub_trie(&store, &[SaltKey::from((0u32, 0u64))]).unwrap();
+        assert!(verify_ipa_proof(q4));
+        assert_eq!(b4[&0], 1);
+
+        // Empty input
+        let (q5, c5, b5) = create_sub_trie(&store, &[]).unwrap();
+        assert!(q5.is_empty() && c5.is_empty() && b5.is_empty());
+    }
+
+    #[test]
+    fn process_leaf_node_with_real_commitment() {
+        let (store, salt_key) = setup_test_store();
+        let parent_node = STARTING_NODE_ID[3] as NodeId + salt_key.bucket_id() as u64;
+        let commitment =
+            Element::from_bytes_unchecked_uncompressed(store.commitment(parent_node).unwrap());
+        let points = [0, salt_key.slot_id() as usize & 0xff].into();
+
+        let queries = process_leaf_node(&store, parent_node, commitment, points).unwrap();
+        assert_eq!(queries.len(), 2);
+        assert!(verify_ipa_proof(queries));
     }
 }

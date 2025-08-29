@@ -256,7 +256,7 @@ mod tests {
         let kvs = [(SaltKey::from((100, 0)), Some(mock_salt_value()))].into();
         let mut buckets_level = FxHashMap::default();
         buckets_level.insert(100, 1u8); // Proof has level info for bucket 100
-        
+
         // Validation should succeed since bucket IDs match
         assert!(validate_bucket_consistency(&kvs, &buckets_level).is_ok());
     }
@@ -268,7 +268,7 @@ mod tests {
         let kvs = [(SaltKey::from((100, 0)), Some(mock_salt_value()))].into();
         let mut buckets_level = FxHashMap::default();
         buckets_level.insert(200, 1u8); // Proof has level info for wrong bucket
-        
+
         // Validation should fail due to bucket ID mismatch
         assert!(validate_bucket_consistency(&kvs, &buckets_level).is_err());
     }
@@ -279,7 +279,7 @@ mod tests {
         // Setup: Proof contains commitment for node 1, verification requires node 1
         let commitments = [(1u64, mock_commitment())].into();
         let required = vec![1u64];
-        
+
         // Validation should succeed since all required commitments are present
         assert!(validate_commitment_consistency(&commitments, &required).is_ok());
     }
@@ -290,7 +290,7 @@ mod tests {
         // Setup: Empty proof but verification requires commitment for node 1
         let commitments = BTreeMap::new();
         let required = vec![1u64];
-        
+
         // Validation should fail due to missing commitment
         assert!(validate_commitment_consistency(&commitments, &required).is_err());
     }
@@ -300,7 +300,7 @@ mod tests {
     fn test_get_commitment_safe_success() {
         // Setup: Proof contains commitment for node 1
         let commitments = [(1u64, mock_commitment())].into();
-        
+
         // Should successfully retrieve and convert commitment to Element
         assert!(get_commitment_safe(&commitments, 1).is_ok());
     }
@@ -310,13 +310,13 @@ mod tests {
     fn test_get_commitment_safe_missing() {
         // Setup: Empty proof
         let commitments = BTreeMap::new();
-        
+
         // Should return error instead of panicking for missing node
         assert!(get_commitment_safe(&commitments, 1).is_err());
     }
 
     /// Tests leaf node query generation for bucket contents verification.
-    /// 
+    ///
     /// Leaf nodes represent actual buckets containing key-value data. This test verifies
     /// that queries are correctly generated for both existing and non-existing keys.
     #[test]
@@ -326,17 +326,18 @@ mod tests {
         let points = [0, 1].into_iter().collect(); // Query slots 0 and 1
         let kvs = [
             (SaltKey::from((100, 0)), Some(mock_salt_value())), // Slot 0: exists
-            (SaltKey::from((100, 1)), None), // Slot 1: non-existent
-        ].into();
+            (SaltKey::from((100, 1)), None),                    // Slot 1: non-existent
+        ]
+        .into();
         let commitment = Element::from_bytes_unchecked_uncompressed([1u8; 64]);
 
         let queries = create_leaf_node_queries(parent, &points, &kvs, commitment).unwrap();
-        
+
         // Should create 2 queries with correct slot positions as evaluation points
         assert_eq!(queries.len(), 2);
         assert_eq!(queries[0].point, Fr::from(0u64)); // First slot position
         assert_eq!(queries[1].point, Fr::from(1u64)); // Second slot position
-        // Note: Results differ based on key existence (hash vs empty slot hash)
+                                                      // Note: Results differ based on key existence (hash vs empty slot hash)
     }
 
     /// Tests internal node query generation for trie structure verification.
@@ -350,25 +351,28 @@ mod tests {
         let points = [0, 1].into_iter().collect(); // Query child indices 0 and 1
         let path_commitments = [
             (257u64, mock_commitment()), // Child 0 (first Level 2 node)
-            (258u64, mock_commitment()), // Child 1 (second Level 2 node) 
-        ].into();
+            (258u64, mock_commitment()), // Child 1 (second Level 2 node)
+        ]
+        .into();
         let commitment = Element::from_bytes_unchecked_uncompressed([1u8; 64]);
 
-        let queries = create_internal_node_queries(parent, &points, &path_commitments, commitment).unwrap();
-        
+        let queries =
+            create_internal_node_queries(parent, &points, &path_commitments, commitment).unwrap();
+
         // Should create 2 queries with child indices as evaluation points
         assert_eq!(queries.len(), 2);
         assert_eq!(queries[0].point, Fr::from(0u64)); // First child index
         assert_eq!(queries[1].point, Fr::from(1u64)); // Second child index
-        // Results contain child commitments converted to scalar field elements
+                                                      // Results contain child commitments converted to scalar field elements
     }
 
     /// Tests main function behavior with empty inputs (edge case).
     #[test]
     fn test_create_verifier_queries_empty() {
         // Setup: All inputs empty
-        let result = create_verifier_queries(&BTreeMap::new(), &BTreeMap::new(), &FxHashMap::default());
-        
+        let result =
+            create_verifier_queries(&BTreeMap::new(), &BTreeMap::new(), &FxHashMap::default());
+
         // Should return empty query list without error (early return optimization)
         assert_eq!(result.unwrap(), Vec::new());
     }
@@ -383,7 +387,7 @@ mod tests {
         let path_commitments = BTreeMap::new();
 
         let result = create_verifier_queries(&path_commitments, &kvs, &buckets_level);
-        
+
         // Should fail during bucket consistency validation
         assert!(matches!(result, Err(ProofError::StateReadError { .. })));
     }
@@ -392,13 +396,17 @@ mod tests {
     #[test]
     fn test_create_verifier_queries_commitment_mismatch() {
         // Setup: Valid bucket consistency but empty proof commitments
-        let kvs = [(SaltKey::from((NUM_META_BUCKETS as u32, 0)), Some(mock_salt_value()))].into();
+        let kvs = [(
+            SaltKey::from((NUM_META_BUCKETS as u32, 0)),
+            Some(mock_salt_value()),
+        )]
+        .into();
         let mut buckets_level = FxHashMap::default();
         buckets_level.insert(NUM_META_BUCKETS as u32, 0u8); // Bucket levels match
         let path_commitments = BTreeMap::new(); // Proof missing required node commitments
 
         let result = create_verifier_queries(&path_commitments, &kvs, &buckets_level);
-        
+
         // Should fail during commitment consistency validation
         assert!(matches!(result, Err(ProofError::StateReadError { .. })));
     }

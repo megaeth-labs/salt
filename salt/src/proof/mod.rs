@@ -34,4 +34,3 @@ pub enum ProofError {
     #[error("multi-point proof check failed")]
     MultiPointProofFailed,
 }
-
