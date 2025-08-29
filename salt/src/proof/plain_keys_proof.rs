@@ -211,7 +211,6 @@ mod tests {
         constant::NUM_META_BUCKETS,
         mem_store::MemStore,
         mock_evm_types::{Account, PlainKey, PlainValue},
-        state::state::EphemeralSaltState,
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};

@@ -87,7 +87,7 @@ pub struct SaltProof {
     /// the IPA proof
     pub proof: SerdeMultiPointProof,
 
-    /// the  level of the buckets trie
+    /// the level of the buckets trie
     /// used to let verifier determine the bucket trie level
     pub levels: FxHashMap<BucketId, u8>,
 }

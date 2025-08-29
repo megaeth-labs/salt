@@ -314,7 +314,6 @@ mod tests {
         proof::SerdeCommitment,
         state::state::EphemeralSaltState,
         state::updates::StateUpdates,
-        traits::TrieReader,
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
