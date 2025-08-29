@@ -26,6 +26,7 @@ rayon = "*"
 rustc-hash = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_arrays = "0.1.0"
+serde_with = "3.3.0"
 thiserror = "1.0"
 tracing = "0.1.0"
 

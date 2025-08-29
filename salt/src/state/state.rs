@@ -148,9 +148,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             ..self
         }
     }
-    
+
     pub fn cache_ref(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
-        &self.cache.0
+        &self.cache
     }
 
     /// Consumes the state and returns the underlying cache containing all changes made to the base
