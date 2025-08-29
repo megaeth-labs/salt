@@ -72,7 +72,6 @@ pub mod prover;
 pub mod salt_witness;
 pub mod shape;
 pub mod subtrie;
-pub mod verifier;
 pub mod witness;
 
 pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
