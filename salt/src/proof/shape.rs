@@ -58,7 +58,7 @@ pub(crate) fn parents_and_points(
     salt_keys
         .par_iter()
         .map(|salt_key| {
-            let mut local_res = BTreeMap::new();
+            let mut local_res: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let bucket_id = salt_key.bucket_id();
             let level = levels[&bucket_id];
 
@@ -74,7 +74,7 @@ pub(crate) fn parents_and_points(
                 // Record that this parent needs to prove the child at this position
                 local_res
                     .entry(parent_node)
-                    .or_insert(BTreeSet::new())
+                    .or_default()
                     .insert(vc_position_in_parent(&node));
 
                 node = parent_node;
@@ -94,7 +94,7 @@ pub(crate) fn parents_and_points(
                 // Record parent-child relationships within the bucket subtree
                 local_res
                     .entry(parent_node)
-                    .or_insert(BTreeSet::new())
+                    .or_default()
                     .insert(vc_position_in_parent(&node));
 
                 node = parent_node;
@@ -112,7 +112,7 @@ pub(crate) fn parents_and_points(
                 // Use encoded parent to bridge bucket tree to main trie
                 local_res
                     .entry(encode_parent(main_trie_node, level))
-                    .or_insert(BTreeSet::new())
+                    .or_default()
                     .insert(vc_position_in_parent(&node));
             }
 
@@ -134,16 +134,14 @@ pub(crate) fn parents_and_points(
             // Use lowest 8 bits of slot_id as position within 256-slot segment
             local_res
                 .entry(node)
-                .or_insert(BTreeSet::new())
+                .or_default()
                 .insert((salt_key.slot_id() & 0xFF) as usize);
 
             local_res
         })
         .reduce(BTreeMap::new, |mut acc, local_map| {
             for (node_id, positions) in local_map {
-                acc.entry(node_id)
-                    .or_insert(BTreeSet::new())
-                    .extend(positions);
+                acc.entry(node_id).or_default().extend(positions);
             }
             acc
         })
