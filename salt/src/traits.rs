@@ -1,6 +1,7 @@
 //! Core traits for SALT state and trie storage.
+use crate::trie::node_utils::subtree_root_level;
 use crate::{
-    constant::BUCKET_SLOT_ID_MASK,
+    constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
@@ -147,6 +148,51 @@ pub trait StateReader: Debug + Send + Sync {
     /// - Full state backends MAY return an error, or optionally implement this
     ///   as a performance optimization.
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error>;
+
+    /// Computes the number of levels in a bucket's subtree.
+    ///
+    /// For SALT's two-tier architecture, each bucket can expand into a dynamic subtree
+    /// when its capacity exceeds the minimum bucket size. This method returns the number
+    /// of levels in the subtree based on the bucket's current capacity.
+    ///
+    /// # Subtree Level Calculation
+    ///
+    /// - **Meta buckets** (0-65535): Always return 1 level (no expansion)
+    /// - **Data buckets**: Number of levels depends on capacity:
+    ///   - Capacity ≤ 256: 1 level (no internal nodes)
+    ///   - Capacity ≤ 65,536: 2 levels (1 internal + 1 leaf)
+    ///   - Capacity ≤ 16,777,216: 3 levels (2 internal + 1 leaf)
+    ///   - And so on, up to 5 levels maximum
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The ID of the bucket whose subtree levels to compute
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(levels)` - Number of levels in the subtree (1-5)
+    /// - `Err(_)` - If there's an error reading bucket metadata
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation reads bucket metadata to get capacity and uses
+    /// the `subtree_root_level` helper to calculate the number of levels.
+    fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
+        // Meta buckets always have 1 level (no expansion)
+        if bucket_id < NUM_META_BUCKETS as u32 {
+            return Ok(1);
+        }
+
+        // Get bucket capacity from metadata
+        let meta = self.metadata(bucket_id)?;
+        let capacity = meta.capacity;
+
+        // Calculate subtree levels based on capacity
+        // subtree_root_level returns which level is the root (0-4)
+        // We need to return the number of levels (1-5)
+        let root_level = subtree_root_level(capacity);
+        Ok(MAX_SUBTREE_LEVELS - root_level)
+    }
 }
 
 /// Provides read-only access to SALT trie commitments.
@@ -195,4 +241,83 @@ pub trait TrieReader: Sync {
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{constant::NUM_META_BUCKETS, mem_store::MemStore, types::BucketMeta};
+
+    #[test]
+    fn test_get_subtree_levels_meta_buckets() {
+        let store = MemStore::new();
+
+        // Test meta buckets always return 1 level
+        for bucket_id in [0u32, 1000u32, (NUM_META_BUCKETS - 1) as u32] {
+            let levels = store.get_subtree_levels(bucket_id).unwrap();
+            assert_eq!(levels, 1, "Meta bucket {} should have 1 level", bucket_id);
+        }
+    }
+
+    #[test]
+    fn test_get_subtree_levels_data_buckets() {
+        use crate::{bucket_metadata_key, state::updates::StateUpdates, types::SaltValue};
+
+        let store = MemStore::new();
+
+        // Test cases: (capacity, expected_levels)
+        let cases = [
+            (1, 1),          // Single slot → 1 level
+            (256, 1),        // Exactly MIN_BUCKET_SIZE → 1 level
+            (257, 2),        // Just over MIN_BUCKET_SIZE → 2 levels
+            (65536, 2),      // 256^2 slots → 2 levels
+            (65537, 3),      // Just over 256^2 → 3 levels
+            (16777216, 3),   // 256^3 slots → 3 levels
+            (16777217, 4),   // Just over 256^3 → 4 levels
+            (4294967296, 4), // 256^4 slots → 4 levels
+            (4294967297, 5), // Just over 256^4 → 5 levels (max)
+        ];
+
+        for (capacity, expected_levels) in cases {
+            // Create a data bucket with specific capacity
+            let bucket_id = NUM_META_BUCKETS as u32;
+
+            // Set up bucket metadata with the desired capacity
+            let meta = BucketMeta {
+                nonce: 0,
+                capacity,
+                used: Some(0),
+            };
+
+            // Create state updates to store the metadata
+            let mut updates = StateUpdates::default();
+            let meta_key = bucket_metadata_key(bucket_id);
+            let meta_value = SaltValue::try_from(meta).unwrap();
+            updates.add(meta_key, None, Some(meta_value));
+
+            // Update the store with this metadata
+            store.update_state(updates);
+
+            // Test the get_subtree_levels method
+            let levels = store.get_subtree_levels(bucket_id).unwrap();
+            assert_eq!(
+                levels, expected_levels,
+                "Bucket with capacity={} should have {} levels",
+                capacity, expected_levels
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_subtree_levels_default_capacity() {
+        let store = MemStore::new();
+        let bucket_id = (NUM_META_BUCKETS + 1000) as u32;
+
+        // For buckets without explicit metadata, should use default capacity (MIN_BUCKET_SIZE)
+        let levels = store.get_subtree_levels(bucket_id).unwrap();
+        assert_eq!(
+            levels, 1,
+            "Bucket with default capacity should have 1 level"
+        );
+    }
 }
