@@ -1669,7 +1669,7 @@ mod tests {
     /// Tests shi_upsert when the bucket usage count is unknown (incomplete witness).
     #[test]
     fn test_shi_upsert_without_usage_count() {
-        use crate::proof::witness::create_witness;
+        use crate::proof::salt_witness::create_witness;
 
         // Create SaltWitness with incomplete metadata (used: None)
         let key_to_insert = [1u8; 32];
@@ -1709,7 +1709,7 @@ mod tests {
     /// Tests shi_upsert recovery mechanism when bucket is completely full.
     #[test]
     fn test_shi_upsert_recovery_when_bucket_full() {
-        use crate::proof::witness::create_witness;
+        use crate::proof::salt_witness::create_witness;
 
         // Create a completely full bucket (capacity 4, all slots occupied)
         let key_to_insert = [1u8; 32];
