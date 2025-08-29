@@ -1,8 +1,9 @@
-//! Plain key proof implementation for Salt trie.
+//! Witness generation and verification for plain (user-provided) keys.
 //!
-//! This module provides functionality to create and verify proofs for plain keys in the Salt
-//! storage system. It handles both existing and non-existing keys by generating inclusion/exclusion
-//! proofs that can be cryptographically verified.
+//! This module implements a high-level proof system that allows clients to prove
+//! the existence or non-existence of plain keys without requiring access to the
+//! full state. It acts as an abstraction layer over the lower-level `SaltWitness`
+//! proof system.
 
 use crate::{
     proof::salt_witness::SaltWitness,
@@ -11,41 +12,85 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     ops::{Range, RangeInclusive},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A cryptographic witness enabling stateless validation and execution.
+///
+/// The `Witness` allows stateless validators to:
+/// - Re-execute transactions by providing necessary state data through
+///   the `StateReader` trait
+/// - Compute the new state root after transaction execution
+///
+/// Critically, the witness contains the minimal partial trie with all internal nodes
+/// necessary to recompute the state root after applying state updates. This enables
+/// stateless nodes to not only re-execute transactions but also produce new state roots.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Witness {
-    // TODO: the builtin serialization mechanism has too much redundant data.
-    // e.g., every plain key is stored twice: one in `direct_lookup_tbl` and
-    // one in `salt_witness`.
-    /// Mapping from plain keys to their corresponding salt keys.
-    pub(crate) direct_lookup_tbl: BTreeMap<Vec<u8>, SaltKey>,
-    /// Low-level SALT witness containing all bucket slots needed for proving the
-    /// existence or non-existence of the plain keys and their cryptographic proof.
+    /// Direct mapping from plain keys to their salt key locations.
+    /// Only contains keys that exist.
+    pub(crate) direct_lookup_tbl: HashMap<Vec<u8>, SaltKey>,
+
+    /// The underlying cryptographic witness containing:
+    /// - All salt keys needed for inclusion/exclusion proofs
+    /// - Their values (or None for empty slots)
+    /// - Cryptographic commitments proving authenticity
     pub(crate) salt_witness: SaltWitness,
 }
 
-impl Witness {
-    /// Creates a cryptographic proof for a set of plain keys.
+impl From<SaltWitness> for Witness {
+    /// Reconstructs a Witness from a SaltWitness by extracting plain keys.
     ///
-    /// This method generates inclusion proofs for existing keys and exclusion
-    /// proofs for non-existing keys, allowing stateless verification without
-    /// full state access.
+    /// This enables transmitting only the SaltWitness over the network, avoiding
+    /// redundant storage of plain keys. The direct_lookup_tbl is rebuilt by:
+    /// - Extracting plain keys from SaltValue data (where they're already stored)
+    /// - Skipping metadata entries (which don't contain plain key-value pairs)
+    fn from(salt_witness: SaltWitness) -> Self {
+        let mut direct_lookup_tbl = HashMap::new();
+        for (salt_key, value) in &salt_witness.kvs {
+            if salt_key.is_in_meta_bucket() {
+                continue;
+            }
+
+            if let Some(salt_value) = value {
+                let plain_key = salt_value.key().to_vec();
+                direct_lookup_tbl.insert(plain_key, *salt_key);
+            }
+        }
+
+        Witness {
+            direct_lookup_tbl,
+            salt_witness,
+        }
+    }
+}
+
+impl Witness {
+    /// Creates a comprehensive cryptographic witness for stateless validators.
+    ///
+    /// This method generates a witness that enables stateless validators to both
+    /// re-execute transactions (using the lookup keys) and update the state root
+    /// afterwards (using the state updates). It generates inclusion proofs for
+    /// existing keys and exclusion proofs for non-existing keys.
     ///
     /// # Arguments
-    /// * `plain_keys` - The plain keys to create proofs for. Can be any byte
-    ///   sequences representing user-provided keys in their original format.
+    /// * `lookups` - The read-set of plain keys needed to execute transactions.
+    ///   These are keys that need to be read during transaction execution.
+    /// * `updates` - The write-set of state updates resulting from transaction execution.
+    ///   Each item is a tuple of (plain_key, optional_value) where None indicates deletion.
+    ///   Updates that duplicate lookup keys are filtered out (except deletions which are
+    ///   always processed to maintain correct state transitions).
     /// * `store` - The storage backend providing access to both state data
     ///   (key-value pairs) and trie data (cryptographic commitments).
     ///
     /// # Returns
     /// A `Witness` containing:
-    /// - A mapping from each plain key to its corresponding salt key (if it exists)
-    /// - A `SaltWitness` with all state data and cryptographic proofs needed for verification
+    /// - A mapping from each lookup key to its corresponding salt key (if it exists)
+    /// - All state data needed for transaction execution (from lookups)
+    /// - All state changes needed to update the root (from filtered updates)
+    /// - Cryptographic proofs (SaltWitness) for verification
     ///
     /// # Errors
     /// Returns `ProofError::StateReadError` if:
@@ -53,21 +98,26 @@ impl Witness {
     /// - Unable to perform SHI search operations
     /// - Unable to access required state data
     /// - Witness creation fails
-    pub fn create<Store>(plain_keys: &[Vec<u8>], store: &Store) -> Result<Witness, ProofError>
+    pub fn create<'b, Store>(
+        lookups: &[Vec<u8>],
+        updates: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+        store: &Store,
+    ) -> Result<Witness, ProofError>
     where
         Store: StateReader + TrieReader,
     {
         let mut witnessed_keys = vec![];
-        let mut direct_lookup_tbl = BTreeMap::new();
+        let mut direct_lookup_tbl = HashMap::new();
 
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:
             // - 'state': For performing lookups to determine if keys exist
-            // - 'recorder': For recording slot accesses during non-existence proofs
+            // - 'recorder': For recording slot accesses during non-existence
+            //   proofs and state updates
             let mut state = EphemeralSaltState::new(store);
             let mut recorder = EphemeralSaltState::new(store).cache_read();
 
-            for plain_key in plain_keys {
+            for plain_key in lookups {
                 let bucket_id = hasher::bucket_id(plain_key);
                 let metadata = store.metadata(bucket_id)?;
 
@@ -86,7 +136,17 @@ impl Witness {
                     recorder.plain_value(plain_key)?;
                 }
             }
-            // Add slots for exclusion proof.
+
+            // Filter out plain keys from updates that are already in direct_lookup_tbl,
+            // but only if the update is not a deletion (None value indicates deletion).
+            // Since most updates are in-place, this optimization reduces the number of
+            // slots that need to be tracked in the witness significantly.
+            let filtered_updates: Vec<_> = updates
+                .into_iter()
+                .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
+                .collect();
+            recorder.update(filtered_updates)?;
+
             witnessed_keys.extend(recorder.cache.into_keys());
 
             Ok(())
@@ -211,487 +271,41 @@ mod tests {
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
-    use iter_tools::Itertools;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
-    /// Test helper that extracts all proven values from a Witness.
-    /// Returns values in the same order as in the proof's direct lookup table.
-    pub fn get_proven_values(proof: &Witness) -> Vec<Option<Vec<u8>>> {
-        let keys: Vec<_> = proof.direct_lookup_tbl.keys().cloned().collect();
-        let mut state = EphemeralSaltState::new(proof);
-        keys.iter()
-            .map(|plain_key| state.plain_value(plain_key).unwrap())
+    /// Extracts all values from a witness in the order of its lookup table keys.
+    pub fn extract_witness_values(witness: &Witness) -> Vec<Option<Vec<u8>>> {
+        let mut state = EphemeralSaltState::new(witness);
+        witness
+            .direct_lookup_tbl
+            .keys()
+            .map(|key| state.plain_value(key).unwrap())
             .collect()
     }
 
-    /// Test serialization and deserialization of Witness.
-    /// Ensures that proofs can be transmitted and stored reliably.
-    #[test]
-    fn test_plain_keys_proof_serialize() {
-        // Create a test account to insert into Salt storage
-        let account1 = Account {
-            balance: U256::from(10),
-            nonce: 10,
-            bytecode_hash: None,
-        };
-
-        // Create a key-value pair for the account
-        let kvs = HashMap::from([(
-            PlainKey::Account(Address::random()).encode(),
-            Some(PlainValue::Account(account1).encode()),
-        )]);
-
-        // Insert the account into Salt storage and update the trie
-        let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
-        let state_updates = state.update(&kvs).unwrap();
-        store.update_state(state_updates.clone());
-
-        let mut trie = StateRoot::new(&store);
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-        store.update_trie(trie_updates);
-
-        // Generate a proof for the inserted key
-        let plain_keys_proof =
-            Witness::create(&[kvs.keys().next().unwrap().clone()], &store).unwrap();
-
-        // Test serialization round-trip
-        let serialized =
-            bincode::serde::encode_to_vec(&plain_keys_proof, bincode::config::legacy()).unwrap();
-        let deserialized: (Witness, usize) =
-            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
-
-        // Verify the deserialized proof is identical and still valid
-        assert_eq!(plain_keys_proof, deserialized.0);
-        plain_keys_proof.verify(root).unwrap()
-    }
-
-    #[test]
-    fn test_plain_key_proof_exist_or_not_exist() {
-        // Tests three main scenarios for plain key proof generation:
-        //
-        // Case 1: Key exists - final slot contains the exact key
-        // Test: Insert keys [0..=6], prove key [6]
-        //
-        // Case 2: Key doesn't exist - final slot contains different key with lower priority
-        // Test 2.1: Insert key [6], prove key [0] (higher priority, would displace [6])
-        // Test 2.2: Insert keys [6,0], prove key [1] (higher priority than [6])
-        // Test 2.3: Insert keys [6,0,2], prove key [1] (higher priority than [2])
-        //
-        // Case 3: Key doesn't exist - final slot is empty
-        // Test 3.1: No insertions, prove key [0]
-        // Test 3.2: Insert keys [0..=5], prove key [6] (lands in empty slot)
-
-        // case 1
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
-
-        let plain_key = plain_keys()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        let proof_values = get_proven_values(&proof);
-
-        assert!(proof_value.is_some());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-
-        assert_eq!(plain_value, proof_value);
-        assert_eq!(proof_values, vec![proof_value]);
-
-        // case 2.1
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![6]), &store);
-
-        let plain_key = plain_keys()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        assert!(proof_value.is_none());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-        assert_eq!(plain_value, proof_value);
-
-        let bucket_id: BucketId = 2448221;
-        let slot_id: SlotId = 1;
-        let salt_key = SaltKey::from((bucket_id, slot_id));
-
-        // the salt_key stores the plain_keys()[6]'s salt_value
-        let salt_value = proof.value(salt_key).unwrap().unwrap();
-        // plain_keys()[0] has a high priority than the plain_keys()[6]
-        assert!(plain_keys()[0] > plain_keys()[6]);
-        assert_eq!(salt_value.key(), plain_keys()[6]);
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        // can't find the plain_keys()[0]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0])
-            .unwrap();
-        assert!(find_res.is_none());
-
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[6])
-            .unwrap();
-        assert_eq!(find_res, Some((slot_id, salt_value)));
-
-        // case 2.2
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![6, 0]), &store);
-
-        let plain_key = plain_keys()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        assert!(proof_value.is_none());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-        assert_eq!(plain_value, proof_value);
-
-        let bucket_id: BucketId = 2448221;
-        let slot_id: SlotId = 2;
-        let salt_key = SaltKey::from((bucket_id, slot_id));
-
-        // the salt_key stores the plain_keys()[6]'s salt_value
-        let salt_value = proof.value(salt_key).unwrap().unwrap();
-        assert_eq!(salt_value.key(), plain_keys()[6]);
-        // plain_keys()[1] has a high priority than the plain_keys()[6]
-        assert!(plain_keys()[1] > salt_value.key().to_vec());
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
-        // can't find the plain_keys()[1]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1])
-            .unwrap();
-        assert!(find_res.is_none());
-
-        let mut related_keys: Vec<SaltKey> = proof_state
-            .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
-            .collect();
-
-        related_keys.sort_unstable();
-        assert_eq!(related_keys, vec![SaltKey::from((bucket_id, 2))]);
-
-        // case 2.3
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![6, 0, 2]), &store);
-
-        let plain_key = plain_keys()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        assert!(proof_value.is_none());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-        assert_eq!(plain_value, proof_value);
-
-        let bucket_id: BucketId = 2448221;
-        let slot_id: SlotId = 2;
-        let salt_key = SaltKey::from((bucket_id, slot_id));
-
-        // the salt_key stores the plain_keys()[2]'s salt_value
-        let salt_value = proof.value(salt_key).unwrap().unwrap();
-        assert_eq!(salt_value.key(), plain_keys()[2]);
-        // plain_keys()[1] has a high priority than the plain_keys()[6]
-        assert!(plain_keys()[1] > salt_value.key().to_vec());
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&store);
-        // can't find the plain_keys()[1]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[1])
-            .unwrap();
-        assert!(find_res.is_none());
-
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[2])
-            .unwrap();
-        assert_eq!(find_res, Some((slot_id, salt_value)));
-
-        // case 3.1
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![]), &store);
-
-        let plain_key = plain_keys()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        assert!(proof_value.is_none());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-        assert_eq!(plain_value, proof_value);
-
-        let bucket_id: BucketId = 2448221;
-        let slot_id: SlotId = 1;
-        let salt_key = SaltKey::from((bucket_id, slot_id));
-
-        // the salt_key stores none value
-        let salt_value = proof.value(salt_key).unwrap();
-        assert!(salt_value.is_none());
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&store);
-        // can't find the plain_keys()[0]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[0])
-            .unwrap();
-        assert!(find_res.is_none());
-
-        // case 3.2
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![0, 1, 2, 3, 4, 5]), &store);
-
-        let plain_key = plain_keys()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let mut proof_state = EphemeralSaltState::new(&proof);
-        let proof_value = proof_state.plain_value(&plain_key).unwrap();
-        assert!(proof_value.is_none());
-
-        let plain_value = EphemeralSaltState::new(&store)
-            .plain_value(&plain_key)
-            .unwrap();
-        assert_eq!(plain_value, proof_value);
-
-        let bucket_id: BucketId = 2448221;
-        let slot_id: SlotId = 7;
-        let salt_key = SaltKey::from((bucket_id, slot_id));
-
-        // the salt_key stores the plain_keys()[6]'s salt_value
-        let salt_value = proof.value(salt_key).unwrap();
-        assert!(salt_value.is_none());
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
-        // can't find the plain_keys()[1]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &plain_keys()[6])
-            .unwrap();
-        assert!(find_res.is_none());
-
-        let mut related_keys: Vec<SaltKey> = proof_state
-            .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
-            .collect();
-
-        related_keys.sort_unstable();
-
-        assert_eq!(
-            related_keys,
-            vec![
-                SaltKey::from((bucket_id, 1)),
-                SaltKey::from((bucket_id, 2)),
-                SaltKey::from((bucket_id, 3)),
-                SaltKey::from((bucket_id, 4)),
-                SaltKey::from((bucket_id, 5)),
-                SaltKey::from((bucket_id, 6)),
-                SaltKey::from((bucket_id, 7)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_plain_key_proof_in_loop_slot_id() {
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![9]), &store);
-
-        let key = plain_keys()[7].clone();
-
-        let proof = Witness::create(&[key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        let bucket_id = 4030087;
-        let salt_key = SaltKey::from((bucket_id, 0));
-
-        let salt_value = proof.value(salt_key).unwrap();
-        assert!(salt_value.is_none());
-
-        let meta = proof.metadata(bucket_id).unwrap();
-
-        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
-        // can't find the plain_keys()[1]
-        let find_res = proof_state
-            .shi_find(bucket_id, meta.nonce, meta.capacity, &key)
-            .unwrap();
-        assert!(find_res.is_none());
-
-        let mut related_keys: Vec<SaltKey> = proof_state
-            .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
-            .collect();
-
-        related_keys.sort_unstable();
-
-        assert_eq!(
-            related_keys,
-            vec![
-                SaltKey::from((bucket_id, 0)),
-                SaltKey::from((bucket_id, 255))
-            ]
-        );
-
-        // another case
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &store);
-
-        let key = plain_keys()[8].clone();
-
-        let proof = Witness::create(&[key.clone()], &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        assert_eq!(proof.direct_lookup_tbl.keys().next().unwrap(), &key);
-
-        let salt_key = SaltKey::from((bucket_id, 1));
-        let salt_value = proof.value(salt_key).unwrap().unwrap();
-
-        let salt_val = store.value(salt_key).unwrap().unwrap();
-
-        assert_eq!(salt_value, salt_val);
-    }
-
-    /// Test that Witness correctly implements StateReader trait.
-    /// Verifies that the proof contains the same data as the original state.
-    #[test]
-    fn test_state_reader_for_plain_keys_proof() {
-        let l = 100;
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut kvs = HashMap::new();
-
-        // Generate random account data for half the test cases
-        (0..l / 2).for_each(|_| {
-            let pk = PlainKey::Account(Address::random_with(&mut rng)).encode();
-            let pv = Some(
-                PlainValue::Account(Account {
-                    balance: U256::from(rng.gen_range(0..1000)),
-                    nonce: rng.gen_range(0..100),
-                    bytecode_hash: None,
-                })
-                .encode(),
-            );
-            kvs.insert(pk, pv);
-        });
-
-        // Generate random storage data for the other half
-        (l / 2..l).for_each(|_| {
-            let pk = PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng))
-                .encode();
-            let pv = Some(PlainValue::Storage(B256::random_with(&mut rng).into()).encode());
-            kvs.insert(pk, pv);
-        });
-
-        let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&kvs).unwrap();
-        store.update_state(updates.clone());
-
-        let (_, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
-
-        store.update_trie(trie_updates);
-
-        let plain_keys_proof =
-            Witness::create(&kvs.keys().cloned().collect::<Vec<_>>(), &store).unwrap();
-
-        for key in plain_keys_proof.salt_witness.kvs.keys() {
-            let proof_value = plain_keys_proof.value(*key).unwrap();
-            let mut state_value = state.value(*key).unwrap();
-            if state_value.is_none() && key.is_in_meta_bucket() {
-                state_value = Some(BucketMeta::default().into());
-            }
-            assert_eq!(proof_value, state_value);
-        }
-    }
-
-    #[test]
-    fn test_plain_key_exist_proof_should_without_bucket_meta() {
-        let store = MemStore::new();
-        let root = insert_kvs(get_plain_keys(vec![7, 8, 9]), &store);
-
-        let keys = get_plain_keys(vec![7, 8, 9]);
-        let proof = Witness::create(&keys, &store).unwrap();
-
-        assert!(proof.verify(root).is_ok());
-
-        assert_eq!(proof.direct_lookup_tbl.len(), 3);
-        assert_eq!(proof.salt_witness.kvs.len(), 3);
-
-        let salt_keys = proof.salt_witness.kvs.keys().copied().collect::<Vec<_>>();
-        let salt_keys2 = proof
-            .direct_lookup_tbl
-            .values()
-            .cloned()
-            .sorted_unstable()
-            .collect::<Vec<_>>();
-
-        assert_eq!(salt_keys, salt_keys2);
-    }
-
-    /// Helper function to get a subset of test keys by their indices.
-    fn get_plain_keys(index: Vec<usize>) -> Vec<Vec<u8>> {
-        index
+    /// Selects specific test keys by their indices from the predefined set.
+    fn select_test_keys(indices: Vec<usize>) -> Vec<Vec<u8>> {
+        indices
             .into_iter()
-            .map(|v| plain_keys()[v].clone())
-            .collect::<Vec<_>>()
+            .map(|i| test_keys_with_known_mappings()[i].clone())
+            .collect()
     }
 
-    /// Helper function to insert key-value pairs and return the resulting state root.
-    fn insert_kvs(plain_keys: Vec<Vec<u8>>, store: &MemStore) -> [u8; 32] {
-        let kvs = plain_keys
+    /// Sets up state with given keys and returns the computed state root.
+    fn setup_state_with_keys(keys: Vec<Vec<u8>>, store: &MemStore) -> [u8; 32] {
+        let kvs: HashMap<_, _> = keys
             .iter()
             .map(|k| (k.clone(), Some(k[0..20].to_vec())))
-            .collect::<HashMap<_, _>>();
-
-        let state_updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
-
-        store.update_state(state_updates.clone());
-
-        let mut trie = StateRoot::new(store);
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-
+            .collect();
+        let updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(store).update_fin(updates).unwrap();
         store.update_trie(trie_updates);
         root
     }
 
-    /// Returns 10 predefined test keys with known bucket/slot mappings.
+    /// Provides 10 test keys with predetermined bucket/slot mappings.
     ///
     /// When all keys are inserted, their storage locations are:
     /// ```
@@ -706,7 +320,7 @@ mod tests {
     /// - key[6]: compares with slots 1,2,3,4,5,6,7
     /// - key[7]: compares with slots 255,0
     /// - key[8]: compares with slots 255,0,1
-    fn plain_keys() -> Vec<Vec<u8>> {
+    fn test_keys_with_known_mappings() -> Vec<Vec<u8>> {
         vec![
             vec![
                 48, 1, 62, 32, 116, 157, 191, 48, 139, 176, 173, 251, 201, 192, 82, 146, 212, 212,
@@ -758,5 +372,497 @@ mod tests {
                 142, 17, 252, 205, 83, 197, 51, 40, 108, 213, 83, 79, 193, 236, 57, 140,
             ],
         ]
+    }
+
+    /// Test serialization and deserialization of SaltWitness and that Witness
+    /// can be reconstructed from the deserialized SaltWitness.
+    #[test]
+    fn test_witness_serde() {
+        // Create test account data
+        let kvs = HashMap::from([(
+            PlainKey::Account(Address::random()).encode(),
+            Some(
+                PlainValue::Account(Account {
+                    balance: U256::from(10),
+                    nonce: 10,
+                    bytecode_hash: None,
+                })
+                .encode(),
+            ),
+        )]);
+
+        // Insert into Salt storage and update the trie
+        let store = MemStore::new();
+        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
+
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        store.update_trie(trie_updates);
+
+        // Generate a witness for the inserted key
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
+
+        // Test serialization round-trip of the underlying SaltWitness
+        let serialized =
+            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy())
+                .unwrap();
+        let (deserialized, _): (SaltWitness, _) =
+            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
+
+        // Reconstruct the Witness from the deserialized SaltWitness
+        let reconstructed = Witness::from(deserialized);
+
+        // Verify the reconstructed witness is identical and still valid
+        assert_eq!(witness, reconstructed);
+        reconstructed.verify(root).unwrap();
+    }
+
+    #[test]
+    fn test_witness_exist_or_not_exist() {
+        // Tests three main scenarios for plain key proof generation:
+        //
+        // Case 1: Key exists - final slot contains the exact key
+        // Test: Insert keys [0..=6], prove key [6]
+        //
+        // Case 2: Key doesn't exist - final slot contains different key with lower priority
+        // Test 2.1: Insert key [6], prove key [0] (higher priority, would displace [6])
+        // Test 2.2: Insert keys [6,0], prove key [1] (higher priority than [6])
+        // Test 2.3: Insert keys [6,0,2], prove key [1] (higher priority than [2])
+        //
+        // Case 3: Key doesn't exist - final slot is empty
+        // Test 3.1: No insertions, prove key [0]
+        // Test 3.2: Insert keys [0..=5], prove key [6] (lands in empty slot)
+
+        // case 1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[6].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        let proof_values = extract_witness_values(&proof);
+
+        assert!(proof_value.is_some());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+
+        assert_eq!(plain_value, proof_value);
+        assert_eq!(proof_values, vec![proof_value]);
+
+        // case 2.1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[0].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 1;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        // test_keys_with_known_mappings()[0] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[0] > test_keys_with_known_mappings()[6]);
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[6]);
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        // can't find the test_keys_with_known_mappings()[0]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[0],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[6],
+            )
+            .unwrap();
+        assert_eq!(find_res, Some((slot_id, salt_value)));
+
+        // case 2.2
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6, 0]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[1].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 2;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[6]);
+        // test_keys_with_known_mappings()[1] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[1] > salt_value.key().to_vec());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[1],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+        assert_eq!(related_keys, vec![SaltKey::from((bucket_id, 2))]);
+
+        // case 2.3
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![6, 0, 2]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[1].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 2;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[2]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+        assert_eq!(salt_value.key(), test_keys_with_known_mappings()[2]);
+        // test_keys_with_known_mappings()[1] has a high priority than the test_keys_with_known_mappings()[6]
+        assert!(test_keys_with_known_mappings()[1] > salt_value.key().to_vec());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&store);
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[1],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[2],
+            )
+            .unwrap();
+        assert_eq!(find_res, Some((slot_id, salt_value)));
+
+        // case 3.1
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[0].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 1;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores none value
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&store);
+        // can't find the test_keys_with_known_mappings()[0]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[0],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        // case 3.2
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5]), &store);
+
+        let plain_key = test_keys_with_known_mappings()[6].clone();
+        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let mut proof_state = EphemeralSaltState::new(&proof);
+        let proof_value = proof_state.plain_value(&plain_key).unwrap();
+        assert!(proof_value.is_none());
+
+        let plain_value = EphemeralSaltState::new(&store)
+            .plain_value(&plain_key)
+            .unwrap();
+        assert_eq!(plain_value, proof_value);
+
+        let bucket_id: BucketId = 2448221;
+        let slot_id: SlotId = 7;
+        let salt_key = SaltKey::from((bucket_id, slot_id));
+
+        // the salt_key stores the test_keys_with_known_mappings()[6]'s salt_value
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(
+                bucket_id,
+                meta.nonce,
+                meta.capacity,
+                &test_keys_with_known_mappings()[6],
+            )
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+
+        assert_eq!(
+            related_keys,
+            vec![
+                SaltKey::from((bucket_id, 1)),
+                SaltKey::from((bucket_id, 2)),
+                SaltKey::from((bucket_id, 3)),
+                SaltKey::from((bucket_id, 4)),
+                SaltKey::from((bucket_id, 5)),
+                SaltKey::from((bucket_id, 6)),
+                SaltKey::from((bucket_id, 7)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_witness_in_loop_slot_id() {
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![9]), &store);
+
+        let key = test_keys_with_known_mappings()[7].clone();
+
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        let bucket_id = 4030087;
+        let salt_key = SaltKey::from((bucket_id, 0));
+
+        let salt_value = proof.value(salt_key).unwrap();
+        assert!(salt_value.is_none());
+
+        let meta = proof.metadata(bucket_id).unwrap();
+
+        let mut proof_state = EphemeralSaltState::new(&proof).cache_read();
+        // can't find the test_keys_with_known_mappings()[1]
+        let find_res = proof_state
+            .shi_find(bucket_id, meta.nonce, meta.capacity, &key)
+            .unwrap();
+        assert!(find_res.is_none());
+
+        let mut related_keys: Vec<SaltKey> = proof_state
+            .cache
+            .iter()
+            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .collect();
+
+        related_keys.sort_unstable();
+
+        assert_eq!(
+            related_keys,
+            vec![
+                SaltKey::from((bucket_id, 0)),
+                SaltKey::from((bucket_id, 255))
+            ]
+        );
+
+        // another case
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![7, 8, 9]), &store);
+
+        let key = test_keys_with_known_mappings()[8].clone();
+
+        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
+
+        assert!(proof.verify(root).is_ok());
+
+        assert_eq!(proof.direct_lookup_tbl.keys().next().unwrap(), &key);
+
+        let salt_key = SaltKey::from((bucket_id, 1));
+        let salt_value = proof.value(salt_key).unwrap().unwrap();
+
+        let salt_val = store.value(salt_key).unwrap().unwrap();
+
+        assert_eq!(salt_value, salt_val);
+    }
+
+    /// Test that Witness correctly implements StateReader trait.
+    /// Verifies that the proof contains the same data as the original state.
+    #[test]
+    fn test_witness_state_reader_trait() {
+        let l = 100;
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut kvs = HashMap::new();
+
+        // Generate random account data for half the test cases
+        (0..l / 2).for_each(|_| {
+            let pk = PlainKey::Account(Address::random_with(&mut rng)).encode();
+            let pv = Some(
+                PlainValue::Account(Account {
+                    balance: U256::from(rng.gen_range(0..1000)),
+                    nonce: rng.gen_range(0..100),
+                    bytecode_hash: None,
+                })
+                .encode(),
+            );
+            kvs.insert(pk, pv);
+        });
+
+        // Generate random storage data for the other half
+        (l / 2..l).for_each(|_| {
+            let pk = PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng))
+                .encode();
+            let pv = Some(PlainValue::Storage(B256::random_with(&mut rng).into()).encode());
+            kvs.insert(pk, pv);
+        });
+
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update(&kvs).unwrap();
+        store.update_state(updates.clone());
+
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+
+        store.update_trie(trie_updates);
+
+        let witness = Witness::create(
+            &kvs.keys().cloned().collect::<Vec<_>>(),
+            std::iter::empty(),
+            &store,
+        )
+        .unwrap();
+
+        for key in witness.salt_witness.kvs.keys() {
+            let proof_value = witness.value(*key).unwrap();
+            let mut state_value = state.value(*key).unwrap();
+            if state_value.is_none() && key.is_in_meta_bucket() {
+                state_value = Some(BucketMeta::default().into());
+            }
+            assert_eq!(proof_value, state_value);
+        }
+    }
+
+    /// Verifies that witnesses for existing keys do not include bucket metadata.
+    ///
+    /// When creating a witness for keys that exist in storage, the witness should
+    /// contain only the key-value pairs themselves, not the bucket metadata. This
+    /// optimization reduces witness size since existing keys can be verified directly
+    /// without needing bucket configuration (nonce, capacity) that's only required
+    /// for non-existence proofs.
+    #[test]
+    fn test_existing_keys_witness_excludes_bucket_metadata() {
+        // Setup: Insert 3 specific test keys into storage
+        // These keys (indices 7,8,9) are chosen to test various bucket scenarios
+        let store = MemStore::new();
+        let root = setup_state_with_keys(select_test_keys(vec![7, 8, 9]), &store);
+
+        // Create a witness for the same 3 keys that were inserted
+        let keys = select_test_keys(vec![7, 8, 9]);
+        let proof = Witness::create(&keys, std::iter::empty(), &store).unwrap();
+
+        // Verify the witness is valid against the state root
+        assert!(proof.verify(root).is_ok());
+
+        // Verify witness contains exactly 3 entries (no metadata included)
+        assert_eq!(proof.direct_lookup_tbl.len(), 3);
+        assert_eq!(proof.salt_witness.kvs.len(), 3);
+
+        // Verify both structures contain the same salt keys (no extra metadata)
+        let witness_keys: HashSet<_> = proof.salt_witness.kvs.keys().collect();
+        let lookup_values: HashSet<_> = proof.direct_lookup_tbl.values().collect();
+        assert_eq!(witness_keys, lookup_values);
     }
 }
