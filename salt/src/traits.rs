@@ -129,19 +129,24 @@ pub trait StateReader: Debug + Send + Sync {
     /// state, they can maintain explicit mappings between plain keys and their
     /// corresponding salt keys to facilitate the SHI hash table lookup algorithm.
     ///
+    /// **Important**: This method cannot be used to conclude that a key doesn't exist.
+    /// Partial state storage only knows about a specific subset of keys, so returning
+    /// an error simply means "this key is not in my known mappings", not "this key
+    /// doesn't exist globally".
+    ///
     /// # Arguments
     /// * `plain_key` - The plain key to look up
     ///
     /// # Returns
-    /// - `Ok(Some(salt_key))` if the plain key exists and maps to the given salt key
-    /// - `Ok(None)` if the plain key is known to not exist
-    /// - `Err(_)` if the operation is not supported or fails
+    /// - `Ok(salt_key)` - The plain key exists and maps to this salt key
+    /// - `Err(_)` - The key is not in the partial state's known mappings, or the
+    ///   operation is not supported. This does NOT mean the key doesn't exist globally.
     ///
     /// # Implementation Notes
     /// - Partial state backends MUST implement this to provide known mappings.
     /// - Full state backends MAY return an error, or optionally implement this
     ///   as a performance optimization.
-    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error>;
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error>;
 }
 
 /// Provides read-only access to SALT trie commitments.

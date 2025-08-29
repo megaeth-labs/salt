@@ -212,9 +212,10 @@ impl StateReader for PlainKeysProof {
         self.salt_witness.metadata(bucket_id)
     }
 
-    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error> {
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         match self.key_mapping.get(plain_key) {
-            Some(slot) => Ok(*slot),
+            Some(Some(salt_key)) => Ok(*salt_key),
+            Some(None) => Err("Plain key known not to exist"),
             None => Err("Plain key not in witness"),
         }
     }

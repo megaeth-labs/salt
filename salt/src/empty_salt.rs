@@ -36,8 +36,8 @@ impl StateReader for EmptySalt {
         })
     }
 
-    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<Option<SaltKey>, Self::Error> {
-        Ok(None)
+    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        Err("Empty salt has no keys")
     }
 }
 

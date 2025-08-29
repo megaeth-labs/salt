@@ -569,14 +569,15 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         &mut self,
         plain_key: &[u8],
     ) -> Result<Option<(SaltKey, SaltValue)>, Store::Error> {
-        match self.store.plain_value_fast(plain_key)? {
-            Some(salt_key) => {
+        match self.store.plain_value_fast(plain_key) {
+            Ok(salt_key) => {
+                // Verify the plain key actually exists at this location
                 match self.value(salt_key)? {
                     Some(salt_val) if salt_val.key() == plain_key => Ok(Some((salt_key, salt_val))),
                     _ => Ok(None), // Key mismatch or empty slot - treated as not found
                 }
             }
-            None => Ok(None), // Key not found in direct lookup table
+            Err(_) => Ok(None), // Key not found in direct lookup table
         }
     }
 
