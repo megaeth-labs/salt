@@ -13,7 +13,7 @@ use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::multiproof::VerifierQuery;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Safely retrieves a commitment from the proof, returning an error instead of panicking.
 fn get_commitment_safe(
@@ -30,84 +30,6 @@ fn get_commitment_safe(
     Ok(Element::from_bytes_unchecked_uncompressed(
         commitment_bytes.0,
     ))
-}
-
-/// Creates verifier queries for leaf nodes (bucket contents).
-fn create_leaf_node_queries(
-    parent: NodeId,
-    points: &BTreeSet<usize>,
-    kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
-    commitment: Element,
-) -> Result<Vec<VerifierQuery>, ProofError> {
-    // Calculate the starting SaltKey for this bucket/segment
-    let salt_key_start = if parent < BUCKET_SLOT_ID_MASK as NodeId {
-        // Main trie leaf (regular bucket)
-        let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
-        SaltKey::from((bucket_id, 0))
-    } else {
-        // Subtree leaf (bucket segment)
-        subtree_leaf_start_key(&parent)
-    };
-
-    let queries = points
-        .iter()
-        .map(|&point| {
-            // Calculate the exact SaltKey for this slot position
-            let salt_key = SaltKey(salt_key_start.0 + point as u64);
-
-            // Look up the value and convert to field element
-            let salt_val = kvs
-                .get(&salt_key)
-                .ok_or_else(|| ProofError::StateReadError {
-                    reason: format!("Missing key-value entry for salt_key: {salt_key:?}"),
-                })?;
-
-            let result = salt_val.as_ref().map_or(
-                // Non-existent key: use empty slot hash
-                Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
-                // Existing key: hash the key-value pair
-                calculate_fr_by_kv,
-            );
-
-            Ok(VerifierQuery {
-                commitment,
-                point: Fr::from(point as u64), // Slot position within bucket
-                result,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(queries)
-}
-
-/// Creates verifier queries for internal nodes (tree structure).
-fn create_internal_node_queries(
-    parent: NodeId,
-    points: &BTreeSet<usize>,
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
-    commitment: Element,
-) -> Result<Vec<VerifierQuery>, ProofError> {
-    let logic_parent = logic_parent_id(parent);
-
-    let queries = points
-        .iter()
-        .map(|&point| {
-            // Calculate the child node ID for this branch
-            let child_id = get_child_node(&logic_parent, point);
-
-            // Get the child's commitment from the proof
-            let child_commitment = get_commitment_safe(path_commitments, child_id)?;
-
-            Ok(VerifierQuery {
-                commitment,
-                point: Fr::from(point as u64), // Child index (0-255)
-                // Convert child's commitment to scalar for polynomial evaluation
-                result: child_commitment.map_to_scalar_field(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(queries)
 }
 
 /// Creates cryptographic verifier queries for SALT proof verification.
@@ -183,21 +105,69 @@ pub(crate) fn create_verifier_queries(
         .into_par_iter()
         .map(|(parent_node, evaluation_points)| {
             // Get the cryptographic commitment for this parent node
-            let parent_commitment =
-                get_commitment_safe(path_commitments, connect_parent_id(parent_node))?;
+            let commitment = get_commitment_safe(path_commitments, connect_parent_id(parent_node))?;
 
             // Generate different query types based on node type
             if is_leaf_node(parent_node) {
                 // LEAF NODE QUERIES: Verify actual key-value data in buckets
-                create_leaf_node_queries(parent_node, &evaluation_points, kvs, parent_commitment)
+                // Calculate the starting SaltKey for this bucket/segment
+                let salt_key_start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
+                    // Main trie leaf (regular bucket)
+                    let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                    SaltKey::from((bucket_id, 0))
+                } else {
+                    // Subtree leaf (bucket segment)
+                    subtree_leaf_start_key(&parent_node)
+                };
+
+                evaluation_points
+                    .iter()
+                    .map(|&point| {
+                        // Calculate the exact SaltKey for this slot position
+                        let salt_key = SaltKey(salt_key_start.0 + point as u64);
+
+                        // Look up the value and convert to field element
+                        let salt_val =
+                            kvs.get(&salt_key)
+                                .ok_or_else(|| ProofError::StateReadError {
+                                    reason: format!(
+                                        "Missing key-value entry for salt_key: {salt_key:?}"
+                                    ),
+                                })?;
+
+                        let result = salt_val.as_ref().map_or(
+                            // Non-existent key: use empty slot hash
+                            Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
+                            // Existing key: hash the key-value pair
+                            calculate_fr_by_kv,
+                        );
+
+                        Ok(VerifierQuery {
+                            commitment,
+                            point: Fr::from(point as u64), // Slot position within bucket
+                            result,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
             } else {
                 // INTERNAL NODE QUERIES: Verify trie structure by checking child commitments
-                create_internal_node_queries(
-                    parent_node,
-                    &evaluation_points,
-                    path_commitments,
-                    parent_commitment,
-                )
+                evaluation_points
+                    .iter()
+                    .map(|&point| {
+                        // Calculate the child node ID for this branch
+                        let child_id = get_child_node(&logic_parent_id(parent_node), point);
+
+                        // Get the child's commitment from the proof
+                        let child_commitment = get_commitment_safe(path_commitments, child_id)?;
+
+                        Ok(VerifierQuery {
+                            commitment,
+                            point: Fr::from(point as u64), // Child index (0-255)
+                            // Convert child's commitment to scalar for polynomial evaluation
+                            result: child_commitment.map_to_scalar_field(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
             }
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -211,10 +181,7 @@ pub(crate) fn create_verifier_queries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        constant::{NUM_META_BUCKETS, STARTING_NODE_ID},
-        proof::CommitmentBytesW,
-    };
+    use crate::{constant::NUM_META_BUCKETS, proof::CommitmentBytesW};
     use std::collections::BTreeMap;
 
     /// Creates a dummy 64-byte cryptographic commitment for testing.
@@ -235,67 +202,9 @@ mod tests {
 
         // Should successfully retrieve and convert commitment to Element
         assert!(get_commitment_safe(&commitments, 1).is_ok());
-    }
-
-    /// Tests commitment retrieval failure for missing node IDs.
-    #[test]
-    fn test_get_commitment_safe_missing() {
-        // Setup: Empty proof
-        let commitments = BTreeMap::new();
 
         // Should return error instead of panicking for missing node
-        assert!(get_commitment_safe(&commitments, 1).is_err());
-    }
-
-    /// Tests leaf node query generation for bucket contents verification.
-    ///
-    /// Leaf nodes represent actual buckets containing key-value data. This test verifies
-    /// that queries are correctly generated for both existing and non-existing keys.
-    #[test]
-    fn test_create_leaf_node_queries() {
-        // Setup: Bucket 100 leaf node with evaluation points 0 and 1
-        let parent = STARTING_NODE_ID[3] as NodeId + 100; // Main trie leaf for bucket 100
-        let points = [0, 1].into_iter().collect(); // Query slots 0 and 1
-        let kvs = [
-            (SaltKey::from((100, 0)), Some(mock_salt_value())), // Slot 0: exists
-            (SaltKey::from((100, 1)), None),                    // Slot 1: non-existent
-        ]
-        .into();
-        let commitment = Element::from_bytes_unchecked_uncompressed([1u8; 64]);
-
-        let queries = create_leaf_node_queries(parent, &points, &kvs, commitment).unwrap();
-
-        // Should create 2 queries with correct slot positions as evaluation points
-        assert_eq!(queries.len(), 2);
-        assert_eq!(queries[0].point, Fr::from(0u64)); // First slot position
-        assert_eq!(queries[1].point, Fr::from(1u64)); // Second slot position
-                                                      // Note: Results differ based on key existence (hash vs empty slot hash)
-    }
-
-    /// Tests internal node query generation for trie structure verification.
-    ///
-    /// Internal nodes verify parent-child relationships in the SALT trie. This test
-    /// checks that queries correctly reference child commitments at specific indices.
-    #[test]
-    fn test_create_internal_node_queries() {
-        // Setup: Level 1 parent node with children at indices 0 and 1
-        let parent = 1u64; // Level 1 node (after root)
-        let points = [0, 1].into_iter().collect(); // Query child indices 0 and 1
-        let path_commitments = [
-            (257u64, mock_commitment()), // Child 0 (first Level 2 node)
-            (258u64, mock_commitment()), // Child 1 (second Level 2 node)
-        ]
-        .into();
-        let commitment = Element::from_bytes_unchecked_uncompressed([1u8; 64]);
-
-        let queries =
-            create_internal_node_queries(parent, &points, &path_commitments, commitment).unwrap();
-
-        // Should create 2 queries with child indices as evaluation points
-        assert_eq!(queries.len(), 2);
-        assert_eq!(queries[0].point, Fr::from(0u64)); // First child index
-        assert_eq!(queries[1].point, Fr::from(1u64)); // Second child index
-                                                      // Results contain child commitments converted to scalar field elements
+        assert!(get_commitment_safe(&commitments, 2).is_err());
     }
 
     /// Tests main function behavior with empty inputs (edge case).
