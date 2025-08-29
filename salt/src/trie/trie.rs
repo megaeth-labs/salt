@@ -353,12 +353,6 @@ where
                             let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
                             if key.slot_id() < level_capacity {
-                                println!(
-                                    "b:{} slot {} lc {}",
-                                    bucket_id,
-                                    key.slot_id(),
-                                    level_capacity
-                                );
                                 need_handle_buckets.insert(bucket_id);
                                 continue;
                             }
@@ -1289,83 +1283,93 @@ mod tests {
         assert_eq!(root1, root);
     }
 
+    /// Tests bucket capacity expansion and contraction within the same subtree level.
+    ///
+    /// This test verifies that the trie correctly handles bucket capacity changes
+    /// when those changes don't change the bucket subtree's root.
+    ///
+    /// The test uses capacities 512, 4096, and 1024, all of which require a Level 3
+    /// subtree root, ensuring the trie structure remains stable during resizing.
+    ///
+    /// # Test Flow
+    /// 1. **Initial Setup**: Create bucket with capacity 512 and one key-value pair
+    /// 2. **Expansion**: Increase capacity to 4096, add a key at a high slot
+    /// 3. **Contraction**: Reduce capacity to 1024, remove the out-of-bounds key
+    ///
+    /// # Verification Strategy
+    /// After each operation, the test:
+    /// - Updates the trie incrementally using `update_fin()`
+    /// - Rebuilds the entire trie from scratch using `rebuild()`
+    /// - Verifies both methods produce identical root hashes
+    ///
+    /// This ensures incremental updates correctly maintain trie integrity
+    /// during capacity changes that don't alter the subtree structure.
     #[test]
     fn expansion_and_contraction_at_same_level() {
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
+
+        // Use data bucket 65540 (NUM_META_BUCKETS + 4)
+        // Data buckets start at 65536, so this is the 5th data bucket
         let bid = KV_BUCKET_OFFSET as BucketId + 4;
-        let salt_key = bucket_metadata_key(bid);
-        let state_updates = StateUpdates {
-            data: vec![
-                (
-                    salt_key,
-                    (
-                        Some(BucketMeta::default().into()),
-                        Some(bucket_meta(0, 512).into()),
-                    ),
-                ),
-                (
-                    (bid, 1).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (init_root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, init_root);
+        let meta_key = bucket_metadata_key(bid);
 
-        // expansion at same level
-        let state_updates = StateUpdates {
-            data: vec![
-                (
-                    salt_key,
-                    (
-                        Some(bucket_meta(0, 512).into()),
-                        Some(bucket_meta(0, 4096).into()),
-                    ),
-                ),
-                (
-                    (bid, 4090).into(),
-                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, cmp_root);
+        // Define test phases: (old_capacity, new_capacity, slot_changes)
+        // All capacities (512, 4096, 1024) require Level 3 as subtree root:
+        // - 512 > 256 but < 65,536: needs 2 Level 4 nodes (512/256 = 2)
+        // - 4096 < 65,536: needs 16 Level 4 nodes (4096/256 = 16)
+        // - 1024 < 65,536: needs 4 Level 4 nodes (1024/256 = 4)
+        // The subtree root stays at Level 3 throughout, hence "same level"
+        let phases = [
+            // Phase 1: Initialize with capacity 512, add key at slot 1
+            // Creates subtree with 2 Level 4 nodes under Level 3 root
+            (None, 512, vec![(1, None, Some([1; 32]))]),
+            // Phase 2: Expand to 4096, add key at slot 4090 near end of range
+            // Expands subtree to 16 Level 4 nodes, root still at Level 3
+            (Some(512), 4096, vec![(4090, None, Some([2; 32]))]),
+            // Phase 3: Contract to 1024, remove key now out of bounds
+            // Contracts subtree to 4 Level 4 nodes, root remains at Level 3
+            (Some(4096), 1024, vec![(4090, Some([2; 32]), None)]),
+        ];
 
-        // contraction at same level
-        let state_updates = StateUpdates {
-            data: vec![
+        for (phase, (old_cap, new_cap, slot_changes)) in phases.iter().enumerate() {
+            // Build metadata update for capacity change
+            let mut updates = vec![(
+                meta_key,
                 (
-                    salt_key,
-                    (
-                        Some(bucket_meta(0, 4096).into()),
-                        Some(bucket_meta(0, 1024).into()),
-                    ),
+                    // Old metadata: either previous capacity or default (256)
+                    old_cap
+                        .map(|c| bucket_meta(0, c).into())
+                        .or(Some(BucketMeta::default().into())),
+                    // New metadata: target capacity
+                    Some(bucket_meta(0, *new_cap).into()),
                 ),
-                (
-                    (bid, 4090).into(),
-                    (Some(SaltValue::new(&[2; 32], &[2; 32])), None),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
+            )];
 
-        let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, cmp_root);
+            // Add slot-level changes (insertions/deletions)
+            for (slot, old_val, new_val) in slot_changes {
+                updates.push((
+                    (bid, *slot).into(),
+                    (
+                        old_val.map(|v| SaltValue::new(&v, &v)),
+                        new_val.map(|v| SaltValue::new(&v, &v)),
+                    ),
+                ));
+            }
+
+            let state_updates = StateUpdates {
+                data: updates.into_iter().collect(),
+            };
+
+            // Apply incremental updates and verify against full rebuild
+            let (root, trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+            store.update_state(state_updates);
+            store.update_trie(trie_updates);
+
+            // Ensure incremental update matches full trie reconstruction
+            let (rebuilt_root, _) = StateRoot::rebuild(&store).unwrap();
+            assert_eq!(root, rebuilt_root, "Phase {} root mismatch", phase + 1);
+        }
     }
 
     #[test]
