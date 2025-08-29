@@ -311,7 +311,7 @@ mod tests {
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         mem_store::MemStore,
         mock_evm_types::*,
-        proof::CommitmentBytesW,
+        proof::SerdeCommitment,
         state::state::EphemeralSaltState,
         state::updates::StateUpdates,
         traits::TrieReader,
@@ -727,8 +727,8 @@ mod tests {
         // Build witness with two witnessed nodes
         let mut proof = create_mock_proof();
         proof.parents_commitments = [
-            (12345, CommitmentBytesW([1u8; 64])),
-            (67890, CommitmentBytesW([2u8; 64])),
+            (12345, SerdeCommitment([1u8; 64])),
+            (67890, SerdeCommitment([2u8; 64])),
         ]
         .into();
 

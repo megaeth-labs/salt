@@ -15,20 +15,20 @@
 //! 5. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH,
-        MAX_SUBTREE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
+        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS,
+        NUM_META_BUCKETS, POLY_DEGREE, STARTING_NODE_ID,
     },
     proof::{
-        prover::calculate_fr_by_kv,
+        prover::slot_to_field,
         shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
-        CommitmentBytesW, ProofError,
+        ProofError, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr, PrimeField};
+use banderwagon::Element;
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -41,7 +41,7 @@ const SLOT_INDEX_MASK: u64 = 0xff;
 /// Information returned by the subtrie creation process
 type SubTrieInfo = (
     Vec<ProverQuery>,
-    BTreeMap<NodeId, CommitmentBytesW>,
+    BTreeMap<NodeId, SerdeCommitment>,
     FxHashMap<BucketId, u8>,
 );
 
@@ -72,13 +72,13 @@ where
     };
 
     let start_key = SaltKey::from((bucket_id, slot_start));
-    let end_key = SaltKey::from((bucket_id, slot_start + TRIE_WIDTH as SlotId - 1));
+    let end_key = SaltKey::from((bucket_id, slot_start + POLY_DEGREE as SlotId - 1));
 
     let entries = store.entries(start_key..=end_key).map_err(|e| {
         ProofError::StateReadError {
             reason: format!(
                 "Failed to load bucket entries for bucket {bucket_id}, slots {slot_start}-{}: {e:?}",
-                slot_start + TRIE_WIDTH as SlotId - 1
+                slot_start + POLY_DEGREE as SlotId - 1
             ),
         }
     })?;
@@ -86,17 +86,17 @@ where
     // Initialize polynomial coefficients with appropriate default values
     let mut default_coefficients = if bucket_id < NUM_META_BUCKETS as BucketId {
         // Metadata buckets: initialize with default metadata hash
-        vec![calculate_fr_by_kv(&BucketMeta::default().into()); TRIE_WIDTH]
+        vec![slot_to_field(&Some(BucketMeta::default().into())); POLY_DEGREE]
     } else {
         // Data buckets: initialize with empty slot hash
-        vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); TRIE_WIDTH]
+        vec![slot_to_field(&None); POLY_DEGREE]
     };
 
     // Replace default values with actual key-value hashes where data exists
     for (key, value) in entries {
         // Map slot ID to polynomial coefficient index (last 8 bits)
         let index = (key.slot_id() & SLOT_INDEX_MASK) as usize;
-        default_coefficients[index] = calculate_fr_by_kv(&value);
+        default_coefficients[index] = slot_to_field(&Some(value));
     }
 
     // Create IPA prover queries for the specified evaluation points
@@ -122,7 +122,7 @@ where
 
     // Load commitments for all 256 children of this internal node
     let children = store
-        .node_entries(child_idx..child_idx + TRIE_WIDTH as NodeId)
+        .node_entries(child_idx..child_idx + POLY_DEGREE as NodeId)
         .map_err(|e| ProofError::StateReadError {
             reason: format!("Failed to load child nodes for parent {parent}: {e:?}"),
         })?;
@@ -130,12 +130,12 @@ where
     // Initialize with default commitments (for empty subtrees)
     let mut default_commitments = if child_idx == 1 {
         // Special case: main trie level 1 has different default commitments for different positions
-        let mut commitments = vec![default_commitment(child_idx + 1); TRIE_WIDTH];
+        let mut commitments = vec![default_commitment(child_idx + 1); POLY_DEGREE];
         commitments[0] = default_commitment(child_idx);
         commitments
     } else {
         // All children at this level have the same default commitment
-        vec![default_commitment(child_idx); TRIE_WIDTH]
+        vec![default_commitment(child_idx); POLY_DEGREE]
     };
 
     // Replace defaults with actual child commitments where they exist
@@ -245,7 +245,7 @@ where
     let nodes = parents_and_points(salt_keys, &buckets_level);
 
     // Step 4: Collect cryptographic commitments for all parent nodes
-    let parents_commitments: BTreeMap<NodeId, CommitmentBytesW> = nodes
+    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = nodes
         .iter()
         .map(|(&parent, _)| {
             let physical_parent = connect_parent_id(parent);
@@ -258,7 +258,7 @@ where
                         ),
                     })?;
 
-            Ok((physical_parent, CommitmentBytesW(commitment)))
+            Ok((physical_parent, SerdeCommitment(commitment)))
         })
         .collect::<SubTrieResult<_>>()?;
 

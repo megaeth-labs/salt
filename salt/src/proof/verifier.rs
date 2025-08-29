@@ -1,15 +1,15 @@
 //! Verifier for the Salt proof
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, EMPTY_SLOT_HASH, STARTING_NODE_ID},
+    constant::{BUCKET_SLOT_ID_MASK, STARTING_NODE_ID},
     proof::{
-        prover::calculate_fr_by_kv,
+        prover::slot_to_field,
         shape::{connect_parent_id, is_leaf_node, logic_parent_id, parents_and_points},
-        CommitmentBytesW, ProofError,
+        ProofError, SerdeCommitment,
     },
     trie::node_utils::{get_child_node, subtree_leaf_start_key},
     types::{BucketId, NodeId, SaltKey, SaltValue},
 };
-use banderwagon::{Element, Fr, PrimeField};
+use banderwagon::{Element, Fr};
 use ipa_multipoint::multiproof::VerifierQuery;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 /// Safely retrieves a commitment from the proof, returning an error instead of panicking.
 fn get_commitment_safe(
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
+    path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     node_id: NodeId,
 ) -> Result<Element, ProofError> {
     let commitment_bytes =
@@ -58,7 +58,7 @@ fn get_commitment_safe(
 ///
 /// * `ProofError::StateReadError` - If bucket level info or path commitments are inconsistent with the queried keys
 pub(crate) fn create_verifier_queries(
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
+    path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
     buckets_level: &FxHashMap<BucketId, u8>,
 ) -> Result<Vec<VerifierQuery>, ProofError> {
@@ -135,12 +135,7 @@ pub(crate) fn create_verifier_queries(
                                     ),
                                 })?;
 
-                        let result = salt_val.as_ref().map_or(
-                            // Non-existent key: use empty slot hash
-                            Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
-                            // Existing key: hash the key-value pair
-                            calculate_fr_by_kv,
-                        );
+                        let result = slot_to_field(salt_val);
 
                         Ok(VerifierQuery {
                             commitment,
@@ -181,12 +176,11 @@ pub(crate) fn create_verifier_queries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constant::NUM_META_BUCKETS, proof::CommitmentBytesW};
-    use std::collections::BTreeMap;
+    use crate::constant::NUM_META_BUCKETS;
 
     /// Creates a dummy 64-byte cryptographic commitment for testing.
-    fn mock_commitment() -> CommitmentBytesW {
-        CommitmentBytesW([1u8; 64])
+    fn mock_commitment() -> SerdeCommitment {
+        SerdeCommitment([1u8; 64])
     }
 
     /// Creates a mock encoded key-value pair with fixed test data.

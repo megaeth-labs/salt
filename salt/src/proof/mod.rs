@@ -9,7 +9,7 @@ pub mod verifier;
 pub mod witness;
 
 pub use plain_keys_proof::PlainKeysProof;
-pub use prover::{CommitmentBytesW, SaltProof};
+pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
 pub use witness::SaltWitness;
 
 /// Error type for proof operations

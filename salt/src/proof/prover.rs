@@ -1,8 +1,9 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::TRIE_WIDTH,
+    constant::POLY_DEGREE,
     proof::{subtrie::create_sub_trie, verifier, ProofError},
     traits::{StateReader, TrieReader},
+    trie::trie::kv_hash,
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
@@ -21,20 +22,59 @@ use std::collections::BTreeMap;
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
-    Lazy::new(|| PrecomputedWeights::new(TRIE_WIDTH));
+    Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
 
-/// Wrapper of `CommitmentBytes` for serialization.
-#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
-pub struct CommitmentBytesW(
-    #[serde(serialize_with = "serialize_commitment")]
-    #[serde(deserialize_with = "deserialize_commitment")]
-    pub CommitmentBytes,
-);
+/// Serde wrapper for `CommitmentBytes`.
+#[derive(Clone, Debug, Eq)]
+pub struct SerdeCommitment(pub CommitmentBytes);
 
-impl PartialEq for CommitmentBytesW {
+impl PartialEq for SerdeCommitment {
     fn eq(&self, other: &Self) -> bool {
         Element::from_bytes_unchecked_uncompressed(self.0)
             == Element::from_bytes_unchecked_uncompressed(other.0)
+    }
+}
+
+impl Serialize for SerdeCommitment {
+    /// Serializes the commitment from uncompressed (64-byte) to compressed (32-byte) format.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Element::from_bytes_unchecked_uncompressed(self.0)
+            .to_bytes()
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SerdeCommitment {
+    /// Deserializes from compressed (32-byte) format back to uncompressed (64-byte) storage.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        Element::from_bytes(&bytes)
+            .map(|e| Self(e.to_bytes_uncompressed()))
+            .ok_or_else(|| serde::de::Error::custom("invalid element bytes"))
+    }
+}
+
+/// Serde wrapper for `MultiPointProof`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerdeMultiPointProof(pub MultiPointProof);
+
+impl Serialize for SerdeMultiPointProof {
+    /// Serializes the MultiPointProof to its byte representation.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0
+            .to_bytes()
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SerdeMultiPointProof {
+    /// Deserializes from bytes back to MultiPointProof with the configured polynomial degree.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        MultiPointProof::from_bytes(&bytes, POLY_DEGREE)
+            .map(SerdeMultiPointProof)
+            .map_err(|e| serde::de::Error::custom(e.to_string()))
     }
 }
 
@@ -42,65 +82,30 @@ impl PartialEq for CommitmentBytesW {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltProof {
     /// the node id of nodes in the path => node commitment
-    pub parents_commitments: BTreeMap<NodeId, CommitmentBytesW>,
+    pub parents_commitments: BTreeMap<NodeId, SerdeCommitment>,
 
     /// the IPA proof
-    #[serde(serialize_with = "serialize_multipoint_proof")]
-    #[serde(deserialize_with = "deserialize_multipoint_proof")]
-    pub proof: MultiPointProof,
+    pub proof: SerdeMultiPointProof,
 
     /// the  level of the buckets trie
     /// used to let verifier determine the bucket trie level
     pub levels: FxHashMap<BucketId, u8>,
 }
 
-fn serialize_multipoint_proof<S>(proof: &MultiPointProof, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let bytes = proof
-        .to_bytes()
-        .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-    bytes.serialize(serializer)
-}
-
-fn deserialize_multipoint_proof<'de, D>(deserializer: D) -> Result<MultiPointProof, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes = Vec::<u8>::deserialize(deserializer)?;
-    MultiPointProof::from_bytes(&bytes, crate::constant::POLY_DEGREE)
-        .map_err(|e| serde::de::Error::custom(e.to_string()))
-}
-
-fn serialize_commitment<S>(commitment: &CommitmentBytes, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let element = Element::from_bytes_unchecked_uncompressed(*commitment);
-    let bytes = element.to_bytes();
-
-    bytes.serialize(serializer)
-}
-
-fn deserialize_commitment<'de, D>(deserializer: D) -> Result<CommitmentBytes, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let bytes: [u8; 32] = <[u8; 32]>::deserialize(deserializer)?;
-    let element = Element::from_bytes(&bytes)
-        .ok_or_else(|| serde::de::Error::custom("from_bytes to an element is none"))?;
-
-    Ok(element.to_bytes_uncompressed())
-}
-
-/// Calculate the hash value of the key-value pair.
+/// Converts a bucket slot entry into a field element for IPA polynomial commitments.
+///
+/// This function maps key-value pairs (or empty slots) to field elements that serve
+/// as polynomial evaluations in SALT's proof system.
+///
+/// # Arguments
+/// * `entry` - Optional key-value pair from a bucket slot
+///
+/// # Returns
+/// A field element (`Fr`) in the Banderwagon scalar field suitable for IPA polynomial
+/// commitment schemes.
 #[inline(always)]
-pub(crate) fn calculate_fr_by_kv(entry: &SaltValue) -> Fr {
-    let mut data = blake3::Hasher::new();
-    data.update(entry.key());
-    data.update(entry.value());
-    Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
+pub(crate) fn slot_to_field(entry: &Option<SaltValue>) -> Fr {
+    Fr::from_le_bytes_mod_order(&kv_hash(entry))
 }
 
 impl SaltProof {
@@ -130,7 +135,7 @@ impl SaltProof {
 
         Ok(SaltProof {
             parents_commitments,
-            proof,
+            proof: SerdeMultiPointProof(proof),
             levels,
         })
     }
@@ -165,6 +170,7 @@ impl SaltProof {
         // call MultiPointProof::check to verify the proof
         if self
             .proof
+            .0
             .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
         {
             Ok(())
@@ -186,18 +192,16 @@ mod tests {
         empty_salt::EmptySalt,
         mem_store::MemStore,
         mock_evm_types::{PlainKey, PlainValue},
-        proof::prover::calculate_fr_by_kv,
         state::{state::EphemeralSaltState, updates::StateUpdates},
-        traits::{StateReader, TrieReader},
         trie::trie::StateRoot,
-        types::{BucketId, SlotId},
-        BucketMeta, NodeId, SaltKey, SaltValue,
+        types::SlotId,
+        BucketMeta,
     };
     use alloy_primitives::{Address, B256};
-    use banderwagon::{CanonicalSerialize, Element, Fr, PrimeField};
-    use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
+    use banderwagon::CanonicalSerialize;
+    use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -222,7 +226,7 @@ mod tests {
 
         let crs = CRS::default();
 
-        let meta_bucket_fr = calculate_fr_by_kv(&BucketMeta::default().into());
+        let meta_bucket_fr = slot_to_field(&Some(BucketMeta::default().into()));
         let meta_bucket_frs = vec![meta_bucket_fr; 256];
         let meta_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(meta_bucket_frs));
 
@@ -510,7 +514,7 @@ mod tests {
         let crs = CRS::default();
         let default_fr = Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH);
         let mut sub_bucket_frs = vec![default_fr; 256];
-        sub_bucket_frs[3] = calculate_fr_by_kv(&salt_value);
+        sub_bucket_frs[3] = slot_to_field(&Some(salt_value));
         let sub_bucket_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(sub_bucket_frs));
 
         // sub trie L4

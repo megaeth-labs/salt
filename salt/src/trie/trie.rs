@@ -918,7 +918,7 @@ impl StateRoot<'_, EmptySalt> {
 /// Generates a 256-bit secure hash from the bucket entry.
 /// Note: as a special case, empty entries are hashed to 0.
 #[inline(always)]
-fn kv_hash(entry: &Option<SaltValue>) -> ScalarBytes {
+pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> ScalarBytes {
     entry.as_ref().map_or_else(
         || EMPTY_SLOT_HASH,
         |salt_value| {
