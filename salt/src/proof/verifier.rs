@@ -146,23 +146,36 @@ pub(crate) fn create_verifier_queries(
                     .collect::<Result<Vec<_>, _>>()
             } else {
                 // INTERNAL NODE QUERIES: Verify trie structure by checking child commitments
-                evaluation_points
+                let child_commitments = evaluation_points
                     .iter()
                     .map(|&point| {
                         // Calculate the child node ID for this branch
                         let child_id = get_child_node(&logic_parent_id(parent_node), point);
 
                         // Get the child's commitment from the proof
-                        let child_commitment = get_commitment_safe(path_commitments, child_id)?;
+                        Ok(path_commitments
+                            .get(&child_id)
+                            .ok_or_else(|| ProofError::StateReadError {
+                                reason: format!("Missing commitment for node ID {child_id}"),
+                            })?
+                            .0)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
-                        Ok(VerifierQuery {
+                let children_frs = Element::serial_batch_map_to_scalar_field(child_commitments);
+
+                Ok(evaluation_points
+                    .into_iter()
+                    .zip(children_frs)
+                    .map(|(point, result)| {
+                        VerifierQuery {
                             commitment,
                             point: Fr::from(point as u64), // Child index (0-255)
                             // Convert child's commitment to scalar for polynomial evaluation
-                            result: child_commitment.map_to_scalar_field(),
-                        })
+                            result,
+                        }
                     })
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Vec<_>>())
             }
         })
         .collect::<Result<Vec<_>, _>>()?
