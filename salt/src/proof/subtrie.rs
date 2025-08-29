@@ -30,6 +30,7 @@ use crate::{
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,30 +48,18 @@ type SubTrieInfo = (
 /// Result type for operations that can fail during subtrie creation
 type SubTrieResult<T> = Result<T, ProofError>;
 
-/// Calculates the trie level for a given bucket ID.
-fn calculate_bucket_level<Store>(store: &Store, bucket_id: BucketId) -> SubTrieResult<u8>
+/// Processes a leaf node to create prover queries.
+fn process_leaf_node<Store>(
+    store: &Store,
+    parent: NodeId,
+    parent_commitment: Element,
+    points: BTreeSet<usize>,
+) -> SubTrieResult<Vec<ProverQuery>>
 where
     Store: StateReader,
 {
-    if bucket_id < NUM_META_BUCKETS as BucketId {
-        // Metadata buckets are always at level 1 (never expand into subtrees)
-        Ok(METADATA_BUCKET_LEVEL)
-    } else {
-        // Data buckets: read metadata to determine subtree structure
-        let meta = store
-            .metadata(bucket_id)
-            .map_err(|e| ProofError::StateReadError {
-                reason: format!("Failed to read metadata for bucket {bucket_id}: {e:?}"),
-            })?;
-        // Convert capacity to subtree root level (higher capacity = higher level root)
-        let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
-        Ok(level as u8)
-    }
-}
-
-/// Determines the bucket location (slot start and bucket ID) for a leaf node.
-fn determine_leaf_location(parent: NodeId) -> (SlotId, BucketId) {
-    if parent < BUCKET_SLOT_ID_MASK as NodeId {
+    // Determine the starting slot and bucket ID for this leaf
+    let (slot_start, bucket_id) = if parent < BUCKET_SLOT_ID_MASK as NodeId {
         // Main trie leaf: bucket ID derived from position in level 3
         let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
         (0, bucket_id)
@@ -80,30 +69,8 @@ fn determine_leaf_location(parent: NodeId) -> (SlotId, BucketId) {
             subtree_leaf_start_key(&parent).slot_id(),
             (parent >> BUCKET_SLOT_BITS) as BucketId,
         )
-    }
-}
+    };
 
-/// Creates the default polynomial coefficients for a bucket.
-fn create_default_coefficients(bucket_id: BucketId) -> Vec<Fr> {
-    if bucket_id < NUM_META_BUCKETS as BucketId {
-        // Metadata buckets: initialize with default metadata hash
-        vec![calculate_fr_by_kv(&BucketMeta::default().into()); TRIE_WIDTH]
-    } else {
-        // Data buckets: initialize with empty slot hash
-        vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); TRIE_WIDTH]
-    }
-}
-
-/// Loads bucket entries and populates the polynomial coefficients.
-fn load_bucket_entries<Store>(
-    store: &Store,
-    bucket_id: BucketId,
-    slot_start: SlotId,
-    mut coefficients: Vec<Fr>,
-) -> SubTrieResult<Vec<Fr>>
-where
-    Store: StateReader,
-{
     let start_key = SaltKey::from((bucket_id, slot_start));
     let end_key = SaltKey::from((bucket_id, slot_start + TRIE_WIDTH as SlotId - 1));
 
@@ -116,54 +83,28 @@ where
         }
     })?;
 
+    // Initialize polynomial coefficients with appropriate default values
+    let mut default_coefficients = if bucket_id < NUM_META_BUCKETS as BucketId {
+        // Metadata buckets: initialize with default metadata hash
+        vec![calculate_fr_by_kv(&BucketMeta::default().into()); TRIE_WIDTH]
+    } else {
+        // Data buckets: initialize with empty slot hash
+        vec![Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH); TRIE_WIDTH]
+    };
+
     // Replace default values with actual key-value hashes where data exists
     for (key, value) in entries {
         // Map slot ID to polynomial coefficient index (last 8 bits)
         let index = (key.slot_id() & SLOT_INDEX_MASK) as usize;
-        coefficients[index] = calculate_fr_by_kv(&value);
+        default_coefficients[index] = calculate_fr_by_kv(&value);
     }
-
-    Ok(coefficients)
-}
-
-/// Processes a leaf node to create prover queries.
-fn process_leaf_node<Store>(
-    store: &Store,
-    parent: NodeId,
-    parent_commitment: Element,
-    points: BTreeSet<usize>,
-) -> SubTrieResult<Vec<ProverQuery>>
-where
-    Store: StateReader,
-{
-    // Determine the starting slot and bucket ID for this leaf
-    let (slot_start, bucket_id) = determine_leaf_location(parent);
-
-    // Initialize polynomial coefficients with appropriate default values
-    let default_coefficients = create_default_coefficients(bucket_id);
-
-    // Load actual key-value pairs and update coefficients
-    let coefficients = load_bucket_entries(store, bucket_id, slot_start, default_coefficients)?;
 
     // Create IPA prover queries for the specified evaluation points
     Ok(create_prover_queries(
         parent_commitment,
-        LagrangeBasis::new(coefficients),
+        LagrangeBasis::new(default_coefficients),
         points,
     ))
-}
-
-/// Creates default commitments for internal nodes.
-fn create_default_node_commitments(child_idx: NodeId) -> Vec<[u8; 64]> {
-    if child_idx == 1 {
-        // Special case: main trie level 1 has different default commitments for different positions
-        let mut commitments = vec![default_commitment(child_idx + 1); TRIE_WIDTH];
-        commitments[0] = default_commitment(child_idx);
-        commitments
-    } else {
-        // All children at this level have the same default commitment
-        vec![default_commitment(child_idx); TRIE_WIDTH]
-    }
 }
 
 /// Processes an internal node to create prover queries.
@@ -187,7 +128,15 @@ where
         })?;
 
     // Initialize with default commitments (for empty subtrees)
-    let mut default_commitments = create_default_node_commitments(child_idx);
+    let mut default_commitments = if child_idx == 1 {
+        // Special case: main trie level 1 has different default commitments for different positions
+        let mut commitments = vec![default_commitment(child_idx + 1); TRIE_WIDTH];
+        commitments[0] = default_commitment(child_idx);
+        commitments
+    } else {
+        // All children at this level have the same default commitment
+        vec![default_commitment(child_idx); TRIE_WIDTH]
+    };
 
     // Replace defaults with actual child commitments where they exist
     for (node_id, commitment) in children {
@@ -274,7 +223,22 @@ where
     // Step 2: Determine the trie level for each bucket
     let buckets_level: FxHashMap<BucketId, u8> = bucket_ids
         .into_iter()
-        .map(|bucket_id| calculate_bucket_level(store, bucket_id).map(|level| (bucket_id, level)))
+        .map(|bucket_id| {
+            if bucket_id < NUM_META_BUCKETS as BucketId {
+                // Metadata buckets are always at level 1 (never expand into subtrees)
+                Ok((bucket_id, METADATA_BUCKET_LEVEL))
+            } else {
+                // Data buckets: read metadata to determine subtree structure
+                let meta = store
+                    .metadata(bucket_id)
+                    .map_err(|e| ProofError::StateReadError {
+                        reason: format!("Failed to read metadata for bucket {bucket_id}: {e:?}"),
+                    })?;
+                // Convert capacity to subtree root level (higher capacity = higher level root)
+                let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
+                Ok((bucket_id, level as u8))
+            }
+        })
         .collect::<SubTrieResult<_>>()?;
 
     // Step 3: Build the minimal node hierarchy needed for authentication
@@ -300,7 +264,7 @@ where
 
     // Step 5: Generate IPA prover queries for each node in the authentication path
     let queries = nodes
-        .into_iter()
+        .into_par_iter()
         .map(|(parent, points)| {
             let physical_parent = connect_parent_id(parent);
             let parent_commitment = store
@@ -428,99 +392,6 @@ mod tests {
             &[query.into()],
             &mut Transcript::new(b"st")
         ));
-    }
-
-    #[test]
-    fn bucket_level_calculation() {
-        let store = MemStore::new();
-
-        // Metadata buckets always return level 1
-        assert_eq!(calculate_bucket_level(&store, 0).unwrap(), 1);
-        assert_eq!(
-            calculate_bucket_level(&store, NUM_META_BUCKETS as BucketId - 1).unwrap(),
-            1
-        );
-
-        // Data bucket with stored metadata
-        let bucket_id = NUM_META_BUCKETS as BucketId;
-        store.update_state(crate::state::updates::StateUpdates {
-            data: [(
-                crate::types::bucket_metadata_key(bucket_id),
-                (
-                    None,
-                    Some(crate::types::SaltValue::from(BucketMeta {
-                        capacity: 256u64.pow(4),
-                        ..Default::default()
-                    })),
-                ),
-            )]
-            .into(),
-        });
-
-        assert_eq!(calculate_bucket_level(&store, bucket_id).unwrap(), 4);
-
-        // Data bucket without metadata should error
-        assert_eq!(calculate_bucket_level(&store, bucket_id + 1).unwrap(), 1);
-    }
-
-    #[test]
-    fn leaf_location_determination() {
-        // Main trie nodes
-        assert_eq!(
-            determine_leaf_location(STARTING_NODE_ID[3] as NodeId),
-            (0, 0)
-        );
-        assert_eq!(
-            determine_leaf_location(STARTING_NODE_ID[3] as NodeId + 100),
-            (0, 100)
-        );
-
-        // Subtree nodes
-        let bucket_id = 70000u32;
-        let slot_start = 512u64;
-        let node = (bucket_id as u64) << BUCKET_SLOT_BITS
-            | STARTING_NODE_ID[4] as u64 + slot_start / TRIE_WIDTH as u64;
-        assert_eq!(determine_leaf_location(node), (slot_start, bucket_id));
-    }
-
-    #[test]
-    fn default_coefficients_creation() {
-        // Metadata bucket coefficients
-        let meta_coeffs = create_default_coefficients(100);
-        assert_eq!(meta_coeffs.len(), TRIE_WIDTH);
-        assert!(meta_coeffs
-            .iter()
-            .all(|&c| c == calculate_fr_by_kv(&BucketMeta::default().into())));
-
-        // Data bucket coefficients
-        let data_coeffs = create_default_coefficients(NUM_META_BUCKETS as BucketId + 100);
-        assert_eq!(data_coeffs.len(), TRIE_WIDTH);
-        assert!(data_coeffs
-            .iter()
-            .all(|&c| c == Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH)));
-    }
-
-    #[test]
-    fn bucket_entry_loading() {
-        let (store, salt_key) = setup_test_store();
-        let bucket_id = salt_key.bucket_id();
-        let slot_start = salt_key.slot_id() & !SLOT_INDEX_MASK;
-        let default_coeffs = create_default_coefficients(bucket_id);
-
-        // With data
-        let coeffs =
-            load_bucket_entries(&store, bucket_id, slot_start, default_coeffs.clone()).unwrap();
-        assert_ne!(coeffs, default_coeffs);
-
-        // Empty bucket
-        let empty_coeffs = load_bucket_entries(
-            &MemStore::new(),
-            NUM_META_BUCKETS as BucketId,
-            0,
-            default_coeffs.clone(),
-        )
-        .unwrap();
-        assert_eq!(empty_coeffs, default_coeffs);
     }
 
     #[test]

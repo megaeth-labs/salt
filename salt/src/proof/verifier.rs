@@ -11,47 +11,9 @@ use crate::{
 };
 use banderwagon::{Element, Fr, PrimeField};
 use ipa_multipoint::multiproof::VerifierQuery;
-use iter_tools::Itertools;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Validates that bucket level information in the proof matches the queried keys.
-fn validate_bucket_consistency(
-    kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
-    buckets_level: &FxHashMap<BucketId, u8>,
-) -> Result<(), ProofError> {
-    let mut bucket_ids_from_keys: Vec<_> = kvs.keys().map(|k| k.bucket_id()).collect();
-    bucket_ids_from_keys.sort_unstable();
-    bucket_ids_from_keys.dedup();
-
-    let mut bucket_ids_from_proof: Vec<_> = buckets_level.keys().copied().collect();
-    bucket_ids_from_proof.sort_unstable();
-
-    if bucket_ids_from_proof != bucket_ids_from_keys {
-        return Err(ProofError::StateReadError {
-            reason: "buckets_top_level in proof contains unknown bucket level info".to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Validates that the proof contains commitments for all required nodes.
-fn validate_commitment_consistency(
-    path_commitments: &BTreeMap<NodeId, CommitmentBytesW>,
-    required_node_ids: &[NodeId],
-) -> Result<(), ProofError> {
-    let mut proof_node_ids: Vec<_> = path_commitments.keys().copied().collect();
-    proof_node_ids.sort_unstable();
-
-    if proof_node_ids != required_node_ids {
-        return Err(ProofError::StateReadError {
-            reason: "path_commitments in proof contains unknown node commitment".to_string(),
-        });
-    }
-
-    Ok(())
-}
 
 /// Safely retrieves a commitment from the proof, returning an error instead of panicking.
 fn get_commitment_safe(
@@ -183,8 +145,19 @@ pub(crate) fn create_verifier_queries(
         return Ok(Vec::new());
     }
 
-    // Validate input consistency
-    validate_bucket_consistency(kvs, buckets_level)?;
+    // Validates that bucket level information in the proof matches the queried keys.
+    let mut bucket_ids_from_keys: Vec<_> = kvs.keys().map(|k| k.bucket_id()).collect();
+    bucket_ids_from_keys.sort_unstable();
+    bucket_ids_from_keys.dedup();
+
+    let mut bucket_ids_from_proof: Vec<_> = buckets_level.keys().copied().collect();
+    bucket_ids_from_proof.sort_unstable();
+
+    if bucket_ids_from_proof != bucket_ids_from_keys {
+        return Err(ProofError::StateReadError {
+            reason: "buckets_top_level in proof contains unknown bucket level info".to_string(),
+        });
+    }
 
     // Analyze the SALT tree structure to determine which parent nodes need verification
     // and what evaluation points (child indices or slot positions) are required
@@ -195,14 +168,19 @@ pub(crate) fn create_verifier_queries(
     let required_node_ids: Vec<_> = parent_points_map
         .keys()
         .map(|node_id| connect_parent_id(*node_id))
-        .sorted_unstable()
         .collect();
 
-    validate_commitment_consistency(path_commitments, &required_node_ids)?;
+    // Validates that the proof contains and ONLY contains commitments for all required nodes, .
+    let proof_node_ids: Vec<_> = path_commitments.keys().copied().collect();
+    if proof_node_ids != required_node_ids {
+        return Err(ProofError::StateReadError {
+            reason: "path_commitments in proof contains unknown node commitment".to_string(),
+        });
+    }
 
     // Transform each parent-points pair into polynomial evaluation queries
     let all_queries = parent_points_map
-        .into_iter()
+        .into_par_iter()
         .map(|(parent_node, evaluation_points)| {
             // Get the cryptographic commitment for this parent node
             let parent_commitment =
@@ -247,52 +225,6 @@ mod tests {
     /// Creates a mock encoded key-value pair with fixed test data.
     fn mock_salt_value() -> SaltValue {
         SaltValue::new(&[1u8; 32], &[2u8; 32])
-    }
-
-    /// Tests successful bucket consistency validation when proof bucket levels match queried keys.
-    #[test]
-    fn test_validate_bucket_consistency_success() {
-        // Setup: Key from bucket 100, proof contains level info for bucket 100
-        let kvs = [(SaltKey::from((100, 0)), Some(mock_salt_value()))].into();
-        let mut buckets_level = FxHashMap::default();
-        buckets_level.insert(100, 1u8); // Proof has level info for bucket 100
-
-        // Validation should succeed since bucket IDs match
-        assert!(validate_bucket_consistency(&kvs, &buckets_level).is_ok());
-    }
-
-    /// Tests bucket consistency validation failure when proof contains wrong bucket level info.
-    #[test]
-    fn test_validate_bucket_consistency_mismatch() {
-        // Setup: Key from bucket 100, but proof contains level info for bucket 200
-        let kvs = [(SaltKey::from((100, 0)), Some(mock_salt_value()))].into();
-        let mut buckets_level = FxHashMap::default();
-        buckets_level.insert(200, 1u8); // Proof has level info for wrong bucket
-
-        // Validation should fail due to bucket ID mismatch
-        assert!(validate_bucket_consistency(&kvs, &buckets_level).is_err());
-    }
-
-    /// Tests successful commitment validation when proof contains all required node commitments.
-    #[test]
-    fn test_validate_commitment_consistency_success() {
-        // Setup: Proof contains commitment for node 1, verification requires node 1
-        let commitments = [(1u64, mock_commitment())].into();
-        let required = vec![1u64];
-
-        // Validation should succeed since all required commitments are present
-        assert!(validate_commitment_consistency(&commitments, &required).is_ok());
-    }
-
-    /// Tests commitment validation failure when proof is missing required node commitments.
-    #[test]
-    fn test_validate_commitment_consistency_missing() {
-        // Setup: Empty proof but verification requires commitment for node 1
-        let commitments = BTreeMap::new();
-        let required = vec![1u64];
-
-        // Validation should fail due to missing commitment
-        assert!(validate_commitment_consistency(&commitments, &required).is_err());
     }
 
     /// Tests successful commitment retrieval for existing node IDs.
