@@ -33,7 +33,7 @@ use std::{
 /// Groups blockchain state storage and bucket usage cache together to ensure
 /// atomic consistency between the two related data structures.
 #[derive(Debug, Default, Clone)]
-struct StateStore {
+pub struct StateStore {
     /// The actual key-value state storage.
     ///
     /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
@@ -43,7 +43,7 @@ struct StateStore {
     /// **Note**: Default bucket metadata entries are not stored in this map. When
     /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
     /// present, it returns [`BucketMeta::default()`] values automatically.
-    kvs: BTreeMap<SaltKey, SaltValue>,
+    pub kvs: BTreeMap<SaltKey, SaltValue>,
 
     /// Cache for bucket used slot counts.
     ///
@@ -53,7 +53,7 @@ struct StateStore {
     /// **Interpretation**: If a bucket ID is not present in this map, it means
     /// the bucket has not been updated since the creation of this `MemStore`.
     /// For such buckets, the number of used slots is guaranteed to be zero.
-    used_slots: BTreeMap<BucketId, u64>,
+    pub used_slots: BTreeMap<BucketId, u64>,
 }
 
 /// In-memory storage backend for SALT.
@@ -89,14 +89,14 @@ struct StateStore {
 #[derive(Debug, Default)]
 pub struct MemStore {
     /// Blockchain state storage.
-    state: RwLock<StateStore>,
+    pub state: RwLock<StateStore>,
 
     /// Trie node commitment storage.
     ///
     /// Maps [`NodeId`] to [`CommitmentBytes`] representing cryptographic commitments
     /// for nodes in the SALT trie. These commitments are used for state proofs
     /// and verification.
-    trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
+    pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
 }
 
 impl Clone for MemStore {
@@ -179,7 +179,7 @@ impl StateReader for MemStore {
     /// Error type for state read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let val = self.state.read().unwrap().kvs.get(&key).cloned();
@@ -222,7 +222,7 @@ impl StateReader for MemStore {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported for MemStore")
+        Err("plain_value_fast not supported for MemStore".into())
     }
 }
 
@@ -230,7 +230,7 @@ impl TrieReader for MemStore {
     /// Error type for trie read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self

@@ -94,7 +94,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(42);
 
     // Pre-initialize cryptographic precomputation tables to ensure consistent timing
-    let _ = StateRoot::new(&EmptySalt);
+    let _ = StateRoot::new();
 
     // BENCHMARK 1: Large Batch Update (100,000 KVs)
     // Simulates: Blockchain state sync, large data imports, initial state population
@@ -106,8 +106,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |inputs| {
                 // Measured operation: Single large update with immediate finalization
                 black_box(
-                    StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                    StateRoot::new()
+                        .update_fin_one(&EmptySalt, &inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -124,8 +124,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 1_000, &mut rng),
             |inputs| {
                 black_box(
-                    StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                    StateRoot::new()
+                        .update_fin_one(&EmptySalt, &inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -142,13 +142,13 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |inputs| {
                 black_box({
-                    let mut trie = StateRoot::new(&EmptySalt);
+                    let mut trie = StateRoot::new();
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
-                        trie.update(state_updates).unwrap();
+                        trie.update(&EmptySalt, &EmptySalt, &state_updates).unwrap();
                     }
                     // Single expensive commitment computation at the end
-                    trie.finalize().unwrap()
+                    trie.finalize(&EmptySalt).unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -166,8 +166,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
                 {
                     // Anti-pattern: Create fresh trie and compute root for each update
                     for state_updates in inputs.into_iter() {
-                        StateRoot::new(&EmptySalt)
-                            .update_fin(state_updates)
+                        StateRoot::new()
+                            .update_fin_one(&EmptySalt, &state_updates)
                             .unwrap();
                     }
                 }
@@ -186,8 +186,9 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 100_000, &mut rng),
             |inputs| {
                 black_box({
-                    StateRoot::new(&MockExpandedBuckets::new(65536 * 16, 512))
-                        .update_fin(inputs.into_iter().next().unwrap())
+                    let reader = &MockExpandedBuckets::new(65536 * 16, 512);
+                    StateRoot::new()
+                        .update_fin_one(reader, &inputs.into_iter().next().unwrap())
                         .unwrap()
                 })
             },
@@ -239,7 +240,7 @@ impl MockExpandedBuckets {
 }
 
 impl TrieReader for MockExpandedBuckets {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(default_commitment(node_id))
@@ -254,7 +255,7 @@ impl TrieReader for MockExpandedBuckets {
 }
 
 impl StateReader for MockExpandedBuckets {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
@@ -282,6 +283,10 @@ impl StateReader for MockExpandedBuckets {
         _range: std::ops::RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
         Ok(vec![])
+    }
+
+    fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        Err("`MockExpandedBuckets` salt has no keys".into())
     }
 }
 

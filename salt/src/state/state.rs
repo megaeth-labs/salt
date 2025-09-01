@@ -49,6 +49,28 @@ use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
+use tracing::info;
+
+/// EphemeralSaltStateCache is used to cache temporary SALT state.
+/// It contains two hash maps:
+/// - The first HashMap<SaltKey, Option<SaltValue>> caches the value for each
+///   SALT key (Option, None means deleted or missed)
+/// - The second HashMap<BucketId, BucketMeta> caches metadata for each bucket
+///   (such as capacity, usage, etc.)
+#[derive(Debug, Default, Clone)]
+pub struct EphemeralSaltStateCache(
+    // cache for kv
+    pub HashMap<SaltKey, Option<SaltValue>>,
+    // cache fo meta use
+    pub HashMap<BucketId, u64>,
+);
+
+impl EphemeralSaltStateCache {
+    pub fn clear(&mut self) {
+        self.0.clear();
+        self.1.clear();
+    }
+}
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -74,7 +96,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
-    store: &'a Store,
+    pub store: &'a Store,
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
@@ -110,6 +132,15 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
+    /// Create a [`EphemeralSaltState`] object with the given `state_cache`.
+    pub fn with_cache(self, state_cache: EphemeralSaltStateCache) -> Self {
+        Self {
+            cache: state_cache.0,
+            bucket_used_cache: state_cache.1,
+            ..self
+        }
+    }
+
     /// Enables caching of read values from the store.
     pub fn cache_read(self) -> Self {
         Self {
@@ -118,6 +149,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
+<<<<<<< HEAD
     /// Returns the salt key-value pair for the given plain key.
     ///
     /// # Arguments
@@ -143,6 +175,28 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
+=======
+    pub fn cache_ref(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
+        &self.cache
+    }
+
+    /// Consumes the state and returns the underlying cache containing all changes made to the base
+    /// state.
+    pub fn consume_cache(self) -> EphemeralSaltStateCache {
+        EphemeralSaltStateCache(self.cache, self.bucket_used_cache)
+    }
+
+    /// Accessing `keys` through `EphemeralSaltState`
+    pub fn touch_keys(&mut self, keys: Vec<&[u8]>) -> Result<(), Store::Error> {
+        for k in keys {
+            let bucket_id = hasher::bucket_id(k);
+            // get and record bucket meta
+            let meta = self.metadata(bucket_id, false)?;
+            self.shi_find(bucket_id, meta.nonce, meta.capacity, k)?;
+        }
+        Ok(())
+    }
+>>>>>>> b98f5fd (new interface for megareth)
     /// Retrieves a plain value by plain key.
     ///
     /// # Arguments
@@ -366,6 +420,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // Resize the bucket if load factor threshold exceeded
                     if used > metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                         let new_capacity = compute_resize_capacity(metadata.capacity, used);
+                        info!(
+                            "bucket_id {} capacity extend from {} to {}",
+                            bucket_id, metadata.capacity, new_capacity
+                        );
                         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
                     }
                 } else {
@@ -645,7 +703,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This method handles both the in-memory cache update and the delta tracking
     /// needed for generating [`StateUpdates`]. Changes are only recorded when the
     /// old and new values differ to avoid empty deltas.
-    fn update_value(
+    pub fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,
@@ -656,6 +714,54 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
+    }
+}
+
+/// This structure enables reading EVM account & storage data from a SALT state.
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The SALT state to read data from.
+    pub salt_state: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Create a [`SaltStateProvider`] object.
+    pub const fn new(salt_state: &'a S) -> Self {
+        Self { salt_state }
+    }
+
+    /// Return the SALT value associated with the given plain key.
+    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = hasher::bucket_id(plain_key);
+        self.get_raw_with_bucket(bucket_id, plain_key)
+    }
+
+    /// Returns the SALT value associated with the given plain key using a precomputed Salt key.
+    pub fn get_raw_with_bucket(
+        &self,
+        bucket_id: BucketId,
+        plain_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        let meta = self.salt_state.metadata(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = hasher::hash_with_nonce(plain_key, meta.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..meta.capacity {
+            let slot_id = probe(hashed_id, step, meta.capacity);
+            if let Some(slot_val) = self.salt_state.value((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 

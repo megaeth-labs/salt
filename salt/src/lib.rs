@@ -5,7 +5,11 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
+pub use state::{
+    hasher,
+    state::{EphemeralSaltState, EphemeralSaltStateCache, PlainStateProvider},
+    updates::StateUpdates,
+};
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
@@ -31,8 +35,8 @@ mod tests {
     /// A simple end-to-end test demonstrating the complete SALT workflow.
     fn basic_integration_test() -> Result<(), Box<dyn std::error::Error>> {
         // Create a PoC in-memory SALT instance
-        let store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&store);
+        let store = &MemStore::new();
+        let mut state = EphemeralSaltState::new(store);
 
         // Prepare plain key-value updates (EVM account/storage data)
         let kvs = HashMap::from([
@@ -50,11 +54,11 @@ mod tests {
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes
-        let mut state_root = StateRoot::new(&store);
-        let (root_hash, trie_updates) = state_root.update_fin(state_updates)?;
+        let mut state_root = StateRoot::new();
+        let (root_hash, trie_updates) = state_root.update_fin_one(store, &state_updates)?;
 
         // Or compute from scratch based on the previously updated state
-        let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
+        let (root_hash_from_scratch, _) = StateRoot::rebuild(store)?;
         assert_eq!(root_hash, root_hash_from_scratch);
 
         // "Persist" the trie updates to storage
