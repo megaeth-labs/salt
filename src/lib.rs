@@ -49,3 +49,6 @@ pub mod types;
 pub use types::*;
 
 pub mod mem_salt;
+
+pub mod log;
+pub use log::*;
