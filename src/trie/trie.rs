@@ -8,6 +8,7 @@ use crate::{
         TRIE_LEVELS, TRIE_WIDTH_BITS,
     },
     genesis::EmptySalt,
+    log::log,
     state::updates::StateUpdates,
     traits::{BucketMetadataReader, StateReader, TrieReader},
     types::*,
@@ -46,11 +47,17 @@ impl StateRoot {
         trie: &T,
         state_updates: &StateUpdates,
     ) -> Result<(), <T as TrieReader>::Error> {
+        let start = std::time::Instant::now();
+        log(&format!("  start update_leaf_nodes...."));
         let updates = self.update_leaf_nodes(trie, state_updates)?;
+        log(&format!("  after update_leaf_nodes cost {:?}....", start.elapsed()));
         // Cache the results of incremental calculations.
+        let start = std::time::Instant::now();
+        log(&format!("  start update cache(hashmap)...."));
         for (k, v) in updates {
             self.cache.entry(k).and_modify(|change| change.1 = v.1).or_insert(v);
         }
+        log(&format!("  after update cache(hashmap) cost {:?}....", start.elapsed()));
         Ok(())
     }
 
@@ -73,8 +80,15 @@ impl StateRoot {
         trie: &T,
         state_updates: &StateUpdates,
     ) -> Result<(B256, TrieUpdates), <T as TrieReader>::Error> {
+        let start = std::time::Instant::now();
+        log(&format!("start incremental_update...."));
         self.incremental_update(trie, state_updates)?;
-        self.finalize(trie)
+        log(&format!("after incremental_update cost {:?}....", start.elapsed()));
+        let start = std::time::Instant::now();
+        log(&format!("start finalize...."));
+        let rs = self.finalize(trie);
+        log(&format!("after finalize cost {:?}....", start.elapsed()));
+        rs
     }
 
     fn update_internal_nodes<T: TrieReader>(
@@ -96,6 +110,8 @@ impl StateRoot {
             )
             .collect::<Vec<_>>();
 
+        let start = std::time::Instant::now();
+        log(&format!("  start update_internal_nodes_inner({}..0)....", TRIE_LEVELS - 1));
         // Update the state trie in descending order of depth.
         (0..TRIE_LEVELS - 1).rev().try_for_each(|level| {
             updates = self.update_internal_nodes_inner(trie, &mut updates, level, get_parent_id)?;
@@ -103,6 +119,7 @@ impl StateRoot {
             trie_updates.data.extend(updates.iter());
             Ok(())
         })?;
+        log(&format!("  after update_internal_nodes_inner cost {:?}....", start.elapsed()));
 
         let root_commitment =
             if let Some(c) = trie_updates.data.last() { c.1 .1 } else { trie.get(0)? };
@@ -178,6 +195,8 @@ impl StateRoot {
         state_updates: &StateUpdates,
     ) -> Result<Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>, <T as TrieReader>::Error> {
         // expansion kvs and non-expansion kvs are sorted separately
+        let start = std::time::Instant::now();
+        log(&format!("    start div exp/non-exp kvs(BTreeMap and Hash Map)...."));
         let mut expansion_updates: Vec<(&SaltKey, &(Option<SaltValue>, Option<SaltValue>))> =
             vec![];
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
@@ -285,6 +304,12 @@ impl StateRoot {
                 !is_expansion
             })
             .collect::<Vec<_>>();
+        log(&format!(
+            "    after div exp/non-exp kvs(BTreeMap and Hash Map) cost {:?}....",
+            start.elapsed()
+        ));
+        let start = std::time::Instant::now();
+        log(&format!("    start update_leaf_nodes_inner...."));
         // Compute the commitment of the non-expansion kvs.
         let mut trie_updates =
             self.update_leaf_nodes_inner(trie, &mut normal_updates, |salt_key| {
@@ -292,6 +317,8 @@ impl StateRoot {
             })?;
 
         trie_updates.extend(pending_updates[SUB_TRIE_LEVELS].iter());
+
+        log(&format!("    after update_leaf_nodes_inner cost {:?}....", start.elapsed()));
 
         // Record (bucket, capacity changes) of unchanged KV but changed capacity to
         // expansion_updates. it is used to compute the commitment of the subtrie.
@@ -458,11 +485,19 @@ impl StateRoot {
         let task_size =
             std::cmp::max(MIN_TASK_SIZE, (state_updates.len() + num_tasks - 1) / num_tasks);
 
+        let start = std::time::Instant::now();
+        log(&format!("      start state_updates.sort_by...."));
+
         // Sort the state updates by slot IDs
         state_updates.sort_by(|(a, _), (b, _)| {
             (a.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId)
                 .cmp(&(b.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId))
         });
+
+        log(&format!("      after state_updates.sort_by cost {:?}....", start.elapsed()));
+
+        let start = std::time::Instant::now();
+        log(&format!("      start state_updates.msm...."));
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let c_deltas: Vec<(NodeId, Element)> = state_updates
@@ -479,7 +514,9 @@ impl StateRoot {
             })
             .collect();
 
-        self.apply_deltas(trie, c_deltas, task_size)
+        let rs = self.apply_deltas(trie, c_deltas, task_size);
+        log(&format!("      after state_updates.msm cost {:?}....", start.elapsed()));
+        rs
     }
 
     /// Updates node commitments by adding up the precomputed deltas.
@@ -619,7 +656,13 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 /// creating precomputed instances.
 pub fn get_global_committer() -> &'static Committer {
     static INSTANCE_COMMITTER: OnceCell<Committer> = OnceCell::new();
-    INSTANCE_COMMITTER.get_or_init(|| Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE))
+    INSTANCE_COMMITTER.get_or_init(|| {
+        let start = std::time::Instant::now();
+        log(&format!("      start create Committer table win_size({})....", PRECOMP_WINDOW_SIZE));
+        let committer = Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE);
+        log(&format!("      after create Committer table cost {:?}....", start.elapsed()));
+        committer
+    })
 }
 
 /// Given the ID and level of a node, return the ID of its parent node

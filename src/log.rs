@@ -19,10 +19,10 @@ extern crate std;
 ///
 /// # Platform-specific Behavior
 /// - On a `zkvm` target operating system:
-///   - Logs the message using the RISC Zero zkVM environment's logging mechanism (`risc0_zkvm::guest::env::log`).
+///   - Logs the message using the RISC Zero zkVM environment's logging mechanism
+///     (`risc0_zkvm::guest::env::log`).
 /// - On other target operating systems:
 ///   - Logs the message using the `tracing` crate's `info!` macro.
-///
 pub fn log(msg: &str) {
     #[cfg(target_os = "zkvm")]
     {
