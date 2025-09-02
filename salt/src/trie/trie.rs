@@ -123,8 +123,7 @@ pub struct StateRoot<'a, T, S> {
 impl<'a, T, S> StateRoot<'a, T, S>
 where
     T: TrieReader,
-    S: StateReader<Error = <T as TrieReader>::Error>,
-{
+    S: StateReader,
     /// Create a [`StateRoot`] object.
     pub fn new(trie: &'a T, state: &'a S) -> Self {
         Self {
