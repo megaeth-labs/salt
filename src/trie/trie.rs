@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 /// number of updated elements is below this threshold.
 const MIN_TASK_SIZE: usize = 64;
 /// The size of the precomputed window.
-const PRECOMP_WINDOW_SIZE: usize = 11;
+const PRECOMP_WINDOW_SIZE: usize = 4;
 
 /// Used to compute or update the root node of a SALT trie.
 #[derive(Debug, Default)]
