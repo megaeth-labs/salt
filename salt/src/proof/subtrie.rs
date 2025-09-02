@@ -393,8 +393,8 @@ mod tests {
         let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new();
-        let (_, trie_updates) = trie.update_fin_one(&store, &updates).unwrap();
+        let mut trie = StateRoot::new(&store, &store);
+        let (_, trie_updates) = trie.update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
 
         (store, *updates.data.keys().next().unwrap())

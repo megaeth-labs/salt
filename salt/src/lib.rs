@@ -54,8 +54,8 @@ mod tests {
         assert_eq!(balance, Some(b"balance100".to_vec()));
 
         // Incremental state root computation from the SALT-encoded state changes
-        let mut state_root = StateRoot::new();
-        let (root_hash, trie_updates) = state_root.update_fin_one(store, &state_updates)?;
+        let mut state_root = StateRoot::new(store, store);
+        let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
         let (root_hash_from_scratch, _) = StateRoot::rebuild(store)?;

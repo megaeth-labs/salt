@@ -94,7 +94,7 @@ fn salt_trie_bench(_c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(42);
 
     // Pre-initialize cryptographic precomputation tables to ensure consistent timing
-    let _ = StateRoot::new();
+    let _ = StateRoot::new(&EmptySalt, &EmptySalt);
 
     // BENCHMARK 1: Large Batch Update (100,000 KVs)
     // Simulates: Blockchain state sync, large data imports, initial state population
@@ -106,8 +106,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |inputs| {
                 // Measured operation: Single large update with immediate finalization
                 black_box(
-                    StateRoot::new()
-                        .update_fin_one(&EmptySalt, &inputs.into_iter().next().unwrap())
+                    StateRoot::new(&EmptySalt, &EmptySalt)
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -124,8 +124,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(1, 1_000, &mut rng),
             |inputs| {
                 black_box(
-                    StateRoot::new()
-                        .update_fin_one(&EmptySalt, &inputs.into_iter().next().unwrap())
+                    StateRoot::new(&EmptySalt, &EmptySalt)
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -142,13 +142,13 @@ fn salt_trie_bench(_c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |inputs| {
                 black_box({
-                    let mut trie = StateRoot::new();
+                    let mut trie = StateRoot::new(&EmptySalt, &EmptySalt);
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
-                        trie.update(&EmptySalt, &EmptySalt, &state_updates).unwrap();
+                        trie.update(&state_updates).unwrap();
                     }
                     // Single expensive commitment computation at the end
-                    trie.finalize(&EmptySalt).unwrap()
+                    trie.finalize().unwrap()
                 })
             },
             criterion::BatchSize::SmallInput,
@@ -166,8 +166,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
                 {
                     // Anti-pattern: Create fresh trie and compute root for each update
                     for state_updates in inputs.into_iter() {
-                        StateRoot::new()
-                            .update_fin_one(&EmptySalt, &state_updates)
+                        StateRoot::new(&EmptySalt, &EmptySalt)
+                            .update_fin(&state_updates)
                             .unwrap();
                     }
                 }
@@ -187,8 +187,8 @@ fn salt_trie_bench(_c: &mut Criterion) {
             |inputs| {
                 black_box({
                     let reader = &MockExpandedBuckets::new(65536 * 16, 512);
-                    StateRoot::new()
-                        .update_fin_one(reader, &inputs.into_iter().next().unwrap())
+                    StateRoot::new(reader, reader)
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap()
                 })
             },
