@@ -7,7 +7,7 @@ pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{
     hasher,
-    state::{EphemeralSaltState, EphemeralSaltStateCache, PlainStateProvider},
+    state::{EphemeralSaltState, PlainStateProvider},
     updates::StateUpdates,
 };
 pub mod trie;

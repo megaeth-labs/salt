@@ -187,17 +187,6 @@ impl StateRoot {
         Ok((root_hash, trie_updates))
     }
 
-    /// Use one store, updates the state root (and all the internal commitments on the trie)
-    /// based on the given state updates.
-    pub fn update_fin_one<A: TrieReader + StateReader>(
-        &mut self,
-        store: &A,
-        state_updates: &StateUpdates,
-    ) -> Result<([u8; 32], TrieUpdates), <A as TrieReader>::Error> {
-        self.update(store, store, state_updates)?;
-        self.finalize(store)
-    }
-
     /// Convenience method that combines `update()` and `finalize()` in one call.
     ///
     /// This method is equivalent to calling `update(state_updates)` followed by

@@ -51,27 +51,6 @@ use std::{
 };
 use tracing::info;
 
-/// EphemeralSaltStateCache is used to cache temporary SALT state.
-/// It contains two hash maps:
-/// - The first HashMap<SaltKey, Option<SaltValue>> caches the value for each
-///   SALT key (Option, None means deleted or missed)
-/// - The second HashMap<BucketId, BucketMeta> caches metadata for each bucket
-///   (such as capacity, usage, etc.)
-#[derive(Debug, Default, Clone)]
-pub struct EphemeralSaltStateCache(
-    // cache for kv
-    pub HashMap<SaltKey, Option<SaltValue>>,
-    // cache fo meta use
-    pub HashMap<BucketId, u64>,
-);
-
-impl EphemeralSaltStateCache {
-    pub fn clear(&mut self) {
-        self.0.clear();
-        self.1.clear();
-    }
-}
-
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
 /// `EphemeralSaltState` provides a mutable view over an immutable storage backend,
@@ -105,7 +84,7 @@ pub struct EphemeralSaltState<'a, Store> {
     ///
     /// Note: This field is `pub(crate)` to enable proof generation modules to
     /// access the set of touched keys for witness construction.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the current usage count for buckets modified in this session.
     ///
     /// This field is essential because when [`BucketMeta`] is serialized to [`SaltValue`],
@@ -113,9 +92,9 @@ pub struct EphemeralSaltState<'a, Store> {
     /// Without this cache, computing the current bucket occupancy would require complex
     /// logic to reconcile the base store's usage count with all insertions and deletions
     /// tracked in the main cache.
-    bucket_used_cache: HashMap<BucketId, u64>,
+    pub bucket_used_cache: HashMap<BucketId, u64>,
     /// Whether to cache values read from the store for subsequent access
-    cache_read: bool,
+    pub cache_read: bool,
 }
 
 impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
@@ -132,15 +111,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
-    /// Create a [`EphemeralSaltState`] object with the given `state_cache`.
-    pub fn with_cache(self, state_cache: EphemeralSaltStateCache) -> Self {
-        Self {
-            cache: state_cache.0,
-            bucket_used_cache: state_cache.1,
-            ..self
-        }
-    }
-
     /// Enables caching of read values from the store.
     pub fn cache_read(self) -> Self {
         Self {
@@ -149,7 +119,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
-<<<<<<< HEAD
     /// Returns the salt key-value pair for the given plain key.
     ///
     /// # Arguments
@@ -175,17 +144,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
-=======
-    pub fn cache_ref(&self) -> &HashMap<SaltKey, Option<SaltValue>> {
-        &self.cache
-    }
-
-    /// Consumes the state and returns the underlying cache containing all changes made to the base
-    /// state.
-    pub fn consume_cache(self) -> EphemeralSaltStateCache {
-        EphemeralSaltStateCache(self.cache, self.bucket_used_cache)
-    }
-
     /// Accessing `keys` through `EphemeralSaltState`
     pub fn touch_keys(&mut self, keys: Vec<&[u8]>) -> Result<(), Store::Error> {
         for k in keys {
@@ -196,7 +154,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
         Ok(())
     }
->>>>>>> b98f5fd (new interface for megareth)
+
     /// Retrieves a plain value by plain key.
     ///
     /// # Arguments

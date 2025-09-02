@@ -33,7 +33,7 @@ use std::{
 /// Groups blockchain state storage and bucket usage cache together to ensure
 /// atomic consistency between the two related data structures.
 #[derive(Debug, Default, Clone)]
-pub struct StateStore {
+struct StateStore {
     /// The actual key-value state storage.
     ///
     /// Maps [`SaltKey`] to [`SaltValue`] pairs representing the current state
@@ -43,7 +43,7 @@ pub struct StateStore {
     /// **Note**: Default bucket metadata entries are not stored in this map. When
     /// [`StateReader::metadata`] is called for a bucket whose metadata key is not
     /// present, it returns [`BucketMeta::default()`] values automatically.
-    pub kvs: BTreeMap<SaltKey, SaltValue>,
+    kvs: BTreeMap<SaltKey, SaltValue>,
 
     /// Cache for bucket used slot counts.
     ///
@@ -53,7 +53,7 @@ pub struct StateStore {
     /// **Interpretation**: If a bucket ID is not present in this map, it means
     /// the bucket has not been updated since the creation of this `MemStore`.
     /// For such buckets, the number of used slots is guaranteed to be zero.
-    pub used_slots: BTreeMap<BucketId, u64>,
+    used_slots: BTreeMap<BucketId, u64>,
 }
 
 /// In-memory storage backend for SALT.
@@ -89,14 +89,14 @@ pub struct StateStore {
 #[derive(Debug, Default)]
 pub struct MemStore {
     /// Blockchain state storage.
-    pub state: RwLock<StateStore>,
+    state: RwLock<StateStore>,
 
     /// Trie node commitment storage.
     ///
     /// Maps [`NodeId`] to [`CommitmentBytes`] representing cryptographic commitments
     /// for nodes in the SALT trie. These commitments are used for state proofs
     /// and verification.
-    pub trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
+    trie: RwLock<BTreeMap<NodeId, CommitmentBytes>>,
 }
 
 impl Clone for MemStore {
