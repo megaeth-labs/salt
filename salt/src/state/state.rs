@@ -118,6 +118,31 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
+    /// Returns the salt key-value pair for the given plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    ///
+    /// # Returns
+    /// * `Ok(Some((salt_key, salt_val)))` - The salt key and salt value if found
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    pub fn find(&mut self, plain_key: &[u8]) -> Result<Option<(SaltKey, SaltValue)>, Store::Error> {
+        // Step 1: Try direct lookup first (happy path for partial state storage
+        // or optimization)
+        if let Ok(Some(salt_kv)) = self.direct_find(plain_key) {
+            return Ok(Some(salt_kv));
+        }
+
+        // Step 2: Fall through to standard SHI find algorithm
+        let bucket_id = hasher::bucket_id(plain_key);
+        let metadata = self.metadata(bucket_id, false)?;
+        match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
+            Some((slot, salt_val)) => Ok(Some(((bucket_id, slot).into(), salt_val))),
+            None => Ok(None),
+        }
+    }
+
     /// Retrieves a plain value by plain key.
     ///
     /// # Arguments
@@ -128,22 +153,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// * `Ok(None)` - If the key does not exist
     /// * `Err(error)` - If there was an error accessing the underlying storage
     pub fn plain_value(&mut self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, Store::Error> {
-        // Step 1: Try direct lookup first (happy path for partial state storage
-        // or optimization)
-        if let Ok(Some((_, salt_val))) = self.direct_find(plain_key) {
-            return Ok(Some(salt_val.value().to_vec()));
-        }
-
         // FIXME: too many memory copies on the read path currently
-        // 1. shi_find() has two internal paths:
+        // 1. find() has two internal paths:
         //    - Cache hit: 1 copy from cache
         //    - Cache miss: 1 copy from store, plus 1 more copy if cache_read=true
         // 2. salt_val.value().to_vec() copies the plain value bytes upon return
 
-        // Step 2: Fall through to standard SHI find algorithm
-        let bucket_id = hasher::bucket_id(plain_key);
-        let metadata = self.metadata(bucket_id, false)?;
-        match self.shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)? {
+        match self.find(plain_key)? {
             Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
             None => Ok(None),
         }
