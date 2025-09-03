@@ -631,11 +631,27 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         &self,
         plain_key: &[u8],
     ) -> Result<Option<Vec<u8>>, <S as BucketMetadataReader>::Error> {
+        let check_all = false;
+        let check_key: [u8; 20] = [0, 15, 61, 246, 215, 50, 128, 126, 241, 49, 159, 183, 184, 187, 133, 34, 208, 190, 172, 2];
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(&plain_key);
+        if check_all || check_key == *plain_key {
+            log(&format!("[get raw] check_key bucket_id: {:?}", bucket_id));
+            tracing::info!("[get raw] check_key bucket_id: {:?}", bucket_id);
+        }
         let meta = self.salt_state.get_meta(bucket_id)?;
+        if check_all || check_key == *plain_key {
+            log(&format!("[get raw] check_key meta: {:?}", meta));
+            tracing::info!("[get raw] check_key meta: {:?}", meta);
+        }
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(&plain_key, meta.nonce);
+        if check_all || check_key == *plain_key {
+            log(&format!("[get raw] check_key hashed_id: {:?}", hashed_id));
+            tracing::info!("[get raw] check_key hashed_id: {:?}", hashed_id);
+        }
+
+        
 
         // Starts from the initial slot position and searches for the slot corresponding to the
         // `key`.
@@ -643,13 +659,29 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
             let slot_id = probe(hashed_id, step as u64, meta.capacity);
             if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
                 match slot_val.key().cmp(&plain_key) {
-                    Ordering::Less => return Ok(None),
-                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Less => {
+                        if check_all || check_key == *plain_key {
+                            log(&format!("[get raw] check_key None"));
+                            tracing::info!("[get raw] check_key None");
+                        }
+                        return Ok(None)
+                    },
+                    Ordering::Equal => {
+                        if check_all || check_key == *plain_key {
+                            log(&format!("[get raw] get value: {:?}", slot_val.value()));
+                            tracing::info!("[get raw] get value: {:?}", slot_val.value());
+                        }
+                        return  Ok(Some(slot_val.value().to_vec()))
+                    },
                     Ordering::Greater => continue,
                 }
             } else {
                 return Ok(None);
             }
+        }
+        if check_all || check_key == *plain_key {
+            log(&format!("[get raw] check_key end None"));
+            tracing::info!("[get raw] check_key end None");
         }
         Ok(None)
     }
