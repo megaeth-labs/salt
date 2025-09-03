@@ -144,17 +144,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
     }
 
-    /// Accessing `keys` through `EphemeralSaltState`
-    pub fn touch_keys(&mut self, keys: Vec<&[u8]>) -> Result<(), Store::Error> {
-        for k in keys {
-            let bucket_id = hasher::bucket_id(k);
-            // get and record bucket meta
-            let meta = self.metadata(bucket_id, false)?;
-            self.shi_find(bucket_id, meta.nonce, meta.capacity, k)?;
-        }
-        Ok(())
-    }
-
     /// Retrieves a plain value by plain key.
     ///
     /// # Arguments
