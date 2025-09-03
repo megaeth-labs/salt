@@ -22,8 +22,8 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS,
-        MAX_SUBTREE_LEVELS, META_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-        NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
+        MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS, NUM_META_BUCKETS,
+        STARTING_NODE_ID, TRIE_WIDTH,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -123,7 +123,7 @@ pub struct StateRoot<'a, T, S> {
 impl<'a, T, S> StateRoot<'a, T, S>
 where
     T: TrieReader,
-    S: StateReader
+    S: StateReader,
 {
     /// Create a [`StateRoot`] object.
     pub fn new(trie: &'a T, state: &'a S) -> Self {
@@ -885,57 +885,71 @@ impl StateRoot<'_, EmptySalt, EmptySalt> {
     /// * `Err(S::Error)` - If reading from storage fails
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
         let trie = StateRoot::new(&EmptySalt, &EmptySalt);
-        let mut all_trie_updates = Vec::new();
 
-        // Process data buckets in chunks (chunk size must be multiples of 256)
-        const CHUNK_SIZE: usize = META_BUCKET_SIZE;
-        (NUM_META_BUCKETS..NUM_BUCKETS)
-            .step_by(CHUNK_SIZE)
-            .try_for_each(|chunk_start| {
-                let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
+        const STEP_SIZE: usize = 256;
+        const META_STEP_SIZE: usize = 2048;
 
-                // Step 1: Read metadata for all buckets in this chunk
-                let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
-                let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
-                let mut chunk_updates = reader
-                    .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
+        // Step 1: Read metadata for all buckets from `reader`
+        let meta_updates: BTreeMap<_, _> = (0..NUM_META_BUCKETS)
+            .into_par_iter()
+            .step_by(META_STEP_SIZE)
+            .map(|start| {
+                let end = (start + META_STEP_SIZE).min(NUM_META_BUCKETS);
+                let range = SaltKey::bucket_range(start as BucketId, end as BucketId);
+
+                reader
+                    .entries(range)
+                    .expect("compute_from_scratch fail to load range")
                     .into_iter()
-                    .map(|(key, actual_metadata)| {
-                        // Simulate metadata change: default -> actual
-                        (
-                            key,
-                            (Some(BucketMeta::default().into()), Some(actual_metadata)),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
+                    .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
+                    .collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect();
 
-                // Step 2: Read all key-value pairs for buckets in this chunk
+        // compute bucket commitments
+        let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
+            .into_par_iter()
+            .step_by(STEP_SIZE)
+            .map(|bucket_start| {
+                let bucket_end =
+                    std::cmp::min(bucket_start + STEP_SIZE, NUM_BUCKETS) as BucketId - 1;
+                let meta_start = bucket_metadata_key(bucket_start as BucketId);
+                let meta_end = bucket_metadata_key(bucket_end as BucketId);
+                // Step 2: Read metadata for all buckets in this chunk
+                let mut state_updates = StateUpdates {
+                    data: meta_updates
+                        .range(meta_start..=meta_end)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                };
+
+                // Step 3: Read all key-value pairs for buckets in this chunk
                 // Treat as insertions since we're rebuilding from scratch
-                chunk_updates.extend(
+                let range = SaltKey::bucket_range(bucket_start as BucketId, bucket_end);
+                state_updates.data.extend(
                     reader
-                        .entries(SaltKey::bucket_range(
-                            chunk_start as BucketId,
-                            chunk_end as BucketId,
-                        ))?
+                        .entries(range)
+                        .expect("compute_from_scratch fail to load range")
                         .into_iter()
-                        .map(|(key, value)| (key, (None, Some(value)))),
+                        .map(|(k, v)| (k, (None, Some(v)))),
                 );
 
-                // Step 3: Apply updates to trie, handling expansion automatically
-                // `update_leaf_nodes` detects metadata capacity changes and creates
+                // Step 4: Apply updates to trie, handling expansion automatically
+                // `update_bucket_subtrees` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
-                let chunk_trie_updates = trie
-                    .update_bucket_subtrees(&StateUpdates {
-                        data: chunk_updates,
-                    })
-                    .unwrap();
+                StateRoot::new(&EmptySalt, &EmptySalt)
+                    .update_bucket_subtrees(&state_updates)
+                    .expect("no error in EmptySalt when update_bucket_subtrees")
+            })
+            .collect::<Vec<_>>();
 
-                all_trie_updates.extend(chunk_trie_updates);
-                Ok(())
-            })?;
+        let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
-        // Step 4: Compute commitments for all internal nodes in the main trie
-        let root_hash = trie.update_main_trie(&mut all_trie_updates).unwrap();
+        // Step 5: Compute commitments for all internal nodes in the main trie
+        let root_hash = trie
+            .update_main_trie(&mut all_trie_updates)
+            .expect("no error in EmptySalt when update_internal_nodes");
         Ok((root_hash, all_trie_updates))
     }
 }
