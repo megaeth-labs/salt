@@ -123,7 +123,7 @@ impl SaltWitness {
 }
 
 impl StateReader for SaltWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves a state value by key from the witness.
     ///
@@ -141,7 +141,7 @@ impl StateReader for SaltWitness {
         match self.kvs.get(&key) {
             Some(Some(value)) => Ok(Some(value.clone())), // Key exists with value
             Some(None) => Ok(None),                       // Key witnessed as non-existent
-            None => Err("Key not in witness"),            // Unknown - not witnessed
+            None => Err("Key not in witness".into()),     // Unknown - not witnessed
         }
     }
 
@@ -161,7 +161,7 @@ impl StateReader for SaltWitness {
         &self,
         _range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
+        Err("Range queries not supported for SaltWitness".into())
     }
 
     /// Retrieves metadata for a specific bucket from the witness.
@@ -185,9 +185,9 @@ impl StateReader for SaltWitness {
         let metadata_key = bucket_metadata_key(bucket_id);
         match self.kvs.get(&metadata_key) {
             Some(Some(salt_value)) => BucketMeta::try_from(salt_value.clone())
-                .map_err(|_| "Failed to decode metadata from SaltValue"),
-            Some(None) => Err("Metadata stored as None in witness - unexpected state"),
-            None => Err("Bucket metadata not available in witness"),
+                .map_err(|_| "Failed to decode metadata from SaltValue".into()),
+            Some(None) => Err("Metadata stored as None in witness - unexpected state".into()),
+            None => Err("Bucket metadata not available in witness".into()),
         }
     }
 
@@ -236,7 +236,7 @@ impl StateReader for SaltWitness {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported for SaltWitness")
+        Err("plain_value_fast not supported for SaltWitness".into())
     }
 
     /// Retrieves the number of subtree levels for a bucket from the witness proof.
@@ -261,7 +261,7 @@ impl StateReader for SaltWitness {
 }
 
 impl TrieReader for SaltWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves the commitment for a specific trie node from the witness.
     ///
@@ -273,7 +273,7 @@ impl TrieReader for SaltWitness {
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         match self.proof.parents_commitments.get(&node_id) {
             Some(commitment) => Ok(commitment.0),
-            None => Err("Trie node not in witness"),
+            None => Err("Trie node not in witness".into()),
         }
     }
 
@@ -286,7 +286,7 @@ impl TrieReader for SaltWitness {
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
+        Err("Range queries not supported for SaltWitness".into())
     }
 }
 
@@ -350,8 +350,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (old_trie_root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store, &mem_store);
+        let (old_trie_root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -363,7 +363,7 @@ mod tests {
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        let (new_trie_root, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
@@ -381,9 +381,9 @@ mod tests {
 
         assert_eq!(state_updates, prover_updates);
 
-        let mut prover_trie = StateRoot::new(&salt_witness);
+        let mut prover_trie = StateRoot::new(&salt_witness, &salt_witness);
         let (prover_trie_root, mut prover_trie_updates) =
-            prover_trie.update_fin(prover_updates).unwrap();
+            prover_trie.update_fin(&prover_updates).unwrap();
 
         trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         prover_trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -403,8 +403,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store, &mem_store);
+        let (root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -435,8 +435,8 @@ mod tests {
         let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
         mem_store.update_state(initial_updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (_, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let mut trie = StateRoot::new(&mem_store, &mem_store);
+        let (_, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -553,7 +553,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "Bucket metadata not available in witness"
+            "Bucket metadata not available in witness".into()
         );
     }
 
@@ -667,7 +667,7 @@ mod tests {
         let witness = create_witness(bucket_id, None, vec![]);
         assert_eq!(
             witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Bucket metadata not available in witness"
+            "Bucket metadata not available in witness".into()
         );
 
         // Test 2: Fully witnessed bucket
@@ -699,7 +699,7 @@ mod tests {
         let witness = create_witness(bucket_id, Some(meta), slots);
         assert_eq!(
             witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Key not in witness"
+            "Key not in witness".into()
         );
 
         // Test 4: Empty bucket
@@ -777,8 +777,8 @@ mod tests {
     fn test_default_bucket_meta_proof() {
         let mem_store = MemStore::new();
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (root, _) = trie.update_fin(StateUpdates::default()).unwrap();
+        let mut trie = StateRoot::new(&mem_store, &mem_store);
+        let (root, _) = trie.update_fin(&StateUpdates::default()).unwrap();
 
         let bucket_id: BucketId = 100000;
         let salt_key = bucket_metadata_key(bucket_id);

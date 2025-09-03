@@ -654,13 +654,13 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_store);
+        let mem_store = &MemStore::new();
+        let mut state = EphemeralSaltState::new(mem_store);
         let updates = state.update(&initial_key_values).unwrap();
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let mut trie = StateRoot::new(mem_store, mem_store);
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
@@ -691,14 +691,14 @@ mod tests {
             Some(PlainValue::Storage(storage_value.into()).encode()),
         )]);
 
-        let mem_store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_store);
+        let mem_store = &MemStore::new();
+        let mut state = EphemeralSaltState::new(mem_store);
         let updates = state.update(&initial_key_values).unwrap();
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let mut trie = StateRoot::new(mem_store, mem_store);
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -731,14 +731,14 @@ mod tests {
             })
             .collect::<HashMap<_, _>>();
 
-        let mem_store = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mem_store);
+        let mem_store = &MemStore::new();
+        let mut state = EphemeralSaltState::new(mem_store);
         let updates = state.update(&initial_kvs).unwrap();
 
         mem_store.update_state(updates.clone());
 
-        let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let mut trie = StateRoot::new(mem_store, mem_store);
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -767,14 +767,14 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let store = MemStore::new();
+        let store = &MemStore::new();
 
-        let proof_res = SaltProof::create([], &store);
+        let proof_res = SaltProof::create([], store);
 
         assert!(proof_res.is_err());
 
-        let proof = SaltProof::create([SaltKey::from((100, 42))], &store).unwrap();
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let proof = SaltProof::create([SaltKey::from((100, 42))], store).unwrap();
+        let (root, _) = StateRoot::rebuild(store).unwrap();
 
         let res = proof.check(&Default::default(), root);
         assert!(res.is_err())
@@ -787,8 +787,8 @@ mod tests {
     /// - Proofs for non-existent keys in the expanded bucket verify correctly
     #[test]
     fn salt_proof_in_bucket_expansion() {
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
+        let store = &MemStore::new();
+        let mut trie = StateRoot::new(store, store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let slot_id = 3;
         let salt_key: SaltKey = (bid, slot_id).into();
@@ -803,11 +803,11 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(initialize_state_updates.clone()).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
 
-        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        let (root, mut init_trie_updates) = StateRoot::rebuild(store).unwrap();
         init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
         assert_eq!(init_trie_updates, initialize_trie_updates);
@@ -833,12 +833,12 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
 
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(store).unwrap();
         assert_eq!(root, expansion_root);
 
         let crs = CRS::default();
@@ -908,8 +908,8 @@ mod tests {
             }
         }
 
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
+        let store = &MemStore::new();
+        let mut trie = StateRoot::new(store, store);
         let bid = KV_BUCKET_OFFSET as BucketId + 4; // 65540
         let salt_key: SaltKey = (
             bid >> MIN_BUCKET_SIZE_BITS,
@@ -934,10 +934,10 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(initialize_state_updates.clone()).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
-        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        let (root, mut init_trie_updates) = StateRoot::rebuild(store).unwrap();
         init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
@@ -961,10 +961,10 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(store).unwrap();
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(
@@ -1011,10 +1011,10 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(store).unwrap();
         assert_eq!(root, expansion_root);
 
         let proof = SaltProof::create(

@@ -179,7 +179,7 @@ impl StateReader for MemStore {
     /// Error type for state read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         let val = self.state.read().unwrap().kvs.get(&key).cloned();
@@ -222,7 +222,7 @@ impl StateReader for MemStore {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported for MemStore")
+        Err("plain_value_fast not supported for MemStore".into())
     }
 }
 
@@ -230,7 +230,7 @@ impl TrieReader for MemStore {
     /// Error type for trie read operations.
     ///
     /// Uses static string references for simplicity in this in-memory implementation.
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(self
