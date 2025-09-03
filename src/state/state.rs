@@ -7,6 +7,7 @@ use super::updates::StateUpdates;
 use crate::{
     account::Account,
     constant::{BUCKET_SLOT_BITS, ROOT_NODE_ID},
+    log::log,
     traits::{BucketMetadataReader, StateReader, TrieReader},
     trie::trie::hash_commitment,
     types::*,
@@ -583,7 +584,10 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
-                PlainValue::Account(account) => account,
+                PlainValue::Account(account) => {
+                    log(&format!("[get account] address {:?} : {:?} raw_key:{:?}", address, account, raw_key));
+                    account
+                }
                 _ => panic!("unexpected value type: {:?}, account type expected.", plain_value),
             }
         }))
@@ -599,7 +603,13 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
-                PlainValue::Storage(value) => value,
+                PlainValue::Storage(value) => {
+                    log(&format!(
+                        "[get storage] address {:?} slot {:?} : {:?} raw_key:{:?}",
+                        address, slot_id, value, raw_key
+                    ));
+                    value
+                }
                 _ => panic!("unexpected value type: {:?}, storage type expected.", plain_value),
             }
         }))

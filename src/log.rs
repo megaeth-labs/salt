@@ -32,7 +32,7 @@ pub fn log(msg: &str) {
     #[cfg(not(target_os = "zkvm"))]
     #[cfg(feature = "std")]
     {
-        tracing::info!("{msg}");
+        println!("{msg}");
     }
 
     #[cfg(not(target_os = "zkvm"))]
