@@ -581,11 +581,14 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         address: Address,
     ) -> Result<Option<Account>, <S as BucketMetadataReader>::Error> {
         let raw_key = PlainKey::Account(address).encode();
+        log(&format!("[salt get account] address {:?} raw_key {:?}", address, raw_key));
+        tracing::info!("[salt get account] address {:?} raw_key {:?}", address, raw_key);
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
                 PlainValue::Account(account) => {
-                    log(&format!("[get account] address {:?} : {:?} raw_key:{:?}", address, account, raw_key));
+                    log(&format!("[salt get account] value {:?}", account));
+                    tracing::info!("[salt get account] value {:?}", account);
                     account
                 }
                 _ => panic!("unexpected value type: {:?}, account type expected.", plain_value),
@@ -600,14 +603,22 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         slot_id: B256,
     ) -> Result<Option<U256>, <S as BucketMetadataReader>::Error> {
         let raw_key = PlainKey::Storage(address, slot_id).encode();
+        log(&format!(
+            "[get storage] address {:?} slot {:?} raw_key {:?}",
+            address, slot_id, raw_key
+        ));
+        tracing::info!(
+            "[get storage] address {:?} slot {:?} raw_key {:?}",
+            address,
+            slot_id,
+            raw_key
+        );
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
                 PlainValue::Storage(value) => {
-                    log(&format!(
-                        "[get storage] address {:?} slot {:?} : {:?} raw_key:{:?}",
-                        address, slot_id, value, raw_key
-                    ));
+                    log(&format!("[salt get storage] value {:?}", value));
+                    tracing::info!("[salt get storage] value {:?}", value);
                     value
                 }
                 _ => panic!("unexpected value type: {:?}, storage type expected.", plain_value),
