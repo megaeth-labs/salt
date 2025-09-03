@@ -14,7 +14,7 @@ ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9
 banderwagon = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "6d29a5205f75804e0a003e01c6df9307f677bc44" }
 ffi_interface = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "6d29a5205f75804e0a003e01c6df9307f677bc44" }
 ipa-multipoint = { git = "https://github.com/megaeth-labs/rust-salt.git", rev = "6d29a5205f75804e0a003e01c6df9307f677bc44" }
-megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", tag = "fallback-ahash" }
+megaeth-ahash = { package = "ahash", git = "https://github.com/megaeth-labs/ahash.git", rev = "6c6cc8c550c2bca41b1b761d344f61c91dfc2479" }
 
 # standard dependencies
 blake3 = "1.8"
