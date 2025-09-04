@@ -6,6 +6,9 @@
 //! strongly history-independent (SHI) hash tables for organizing data within
 //! buckets.
 
+/// AHash-based utilities for deterministic cross-platform hashing.
+pub mod ahash;
+
 /// Hashing utilities for deterministic bucket and slot assignment.
 pub mod hasher;
 
