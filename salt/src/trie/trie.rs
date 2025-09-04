@@ -864,26 +864,6 @@ impl StateRoot<'_, EmptySalt> {
     /// * `Err(S::Error)` - If reading from storage fails
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
         const STEP_SIZE: usize = 256;
-        const META_STEP_SIZE: usize = 2048;
-
-        // Step 1: Read metadata for all buckets from `reader`
-        let meta_updates: BTreeMap<_, _> = (0..NUM_META_BUCKETS)
-            .into_par_iter()
-            .step_by(META_STEP_SIZE)
-            .map(|start| -> Result<Vec<_>, S::Error> {
-                let end = (start + META_STEP_SIZE).min(NUM_META_BUCKETS);
-                let range = SaltKey::bucket_range(start as BucketId, end as BucketId);
-
-                Ok(reader
-                    .entries(range)?
-                    .into_iter()
-                    .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
-                    .collect::<Vec<_>>())
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
 
         // compute bucket commitments
         let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
@@ -892,17 +872,25 @@ impl StateRoot<'_, EmptySalt> {
             .map(|bucket_start| -> Result<TrieUpdates, S::Error> {
                 let bucket_end =
                     std::cmp::min(bucket_start + STEP_SIZE, NUM_BUCKETS) as BucketId - 1;
-                let meta_start = bucket_metadata_key(bucket_start as BucketId);
-                let meta_end = bucket_metadata_key(bucket_end as BucketId);
-                // Step 2: Read metadata for all buckets in this chunk
+
+                // Step 1: Read metadata for buckets in this chunk
+                let meta_bucket_start = (bucket_start / MIN_BUCKET_SIZE) as BucketId;
+                let meta_bucket_end = (bucket_end as usize / MIN_BUCKET_SIZE) as BucketId;
                 let mut state_updates = StateUpdates {
-                    data: meta_updates
-                        .range(meta_start..=meta_end)
-                        .map(|(k, v)| (*k, v.clone()))
-                        .collect(),
+                    data: reader
+                        .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
+                        .into_iter()
+                        .map(|(key, actual_metadata)| {
+                            // Simulate metadata change: default -> actual
+                            (
+                                key,
+                                (Some(BucketMeta::default().into()), Some(actual_metadata)),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>(),
                 };
 
-                // Step 3: Read all key-value pairs for buckets in this chunk
+                // Step 2: Read all key-value pairs for buckets in this chunk
                 // Treat as insertions since we're rebuilding from scratch
                 let range = SaltKey::bucket_range(bucket_start as BucketId, bucket_end);
                 state_updates.data.extend(
@@ -912,7 +900,7 @@ impl StateRoot<'_, EmptySalt> {
                         .map(|(k, v)| (k, (None, Some(v)))),
                 );
 
-                // Step 4: Apply updates to trie, handling expansion automatically
+                // Step 3: Apply updates to trie, handling expansion automatically
                 // `update_bucket_subtrees` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
                 StateRoot::new(&EmptySalt)
@@ -923,7 +911,7 @@ impl StateRoot<'_, EmptySalt> {
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
-        // Step 5: Compute commitments for all internal nodes in the main trie
+        // Step 4: Compute commitments for all internal nodes in the main trie
         let root_hash = StateRoot::new(&EmptySalt)
             .update_main_trie(&mut all_trie_updates)
             .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
