@@ -870,17 +870,18 @@ impl StateRoot<'_, EmptySalt> {
         let meta_updates: BTreeMap<_, _> = (0..NUM_META_BUCKETS)
             .into_par_iter()
             .step_by(META_STEP_SIZE)
-            .map(|start| {
+            .map(|start| -> Result<Vec<_>, S::Error> {
                 let end = (start + META_STEP_SIZE).min(NUM_META_BUCKETS);
                 let range = SaltKey::bucket_range(start as BucketId, end as BucketId);
 
-                reader
-                    .entries(range)
-                    .expect("compute_from_scratch fail to load range")
+                Ok(reader
+                    .entries(range)?
                     .into_iter()
                     .map(|(k, v)| (k, (Some(SaltValue::from(BucketMeta::default())), Some(v))))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>())
             })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .flatten()
             .collect();
 
@@ -888,7 +889,7 @@ impl StateRoot<'_, EmptySalt> {
         let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
             .into_par_iter()
             .step_by(STEP_SIZE)
-            .map(|bucket_start| {
+            .map(|bucket_start| -> Result<TrieUpdates, S::Error> {
                 let bucket_end =
                     std::cmp::min(bucket_start + STEP_SIZE, NUM_BUCKETS) as BucketId - 1;
                 let meta_start = bucket_metadata_key(bucket_start as BucketId);
@@ -906,8 +907,7 @@ impl StateRoot<'_, EmptySalt> {
                 let range = SaltKey::bucket_range(bucket_start as BucketId, bucket_end);
                 state_updates.data.extend(
                     reader
-                        .entries(range)
-                        .expect("compute_from_scratch fail to load range")
+                        .entries(range)?
                         .into_iter()
                         .map(|(k, v)| (k, (None, Some(v)))),
                 );
@@ -917,16 +917,16 @@ impl StateRoot<'_, EmptySalt> {
                 // appropriate subtrie structures without special handling
                 StateRoot::new(&EmptySalt)
                     .update_bucket_subtrees(state_updates)
-                    .expect("no error in EmptySalt when update_bucket_subtrees")
+                    .map_err(|_| unreachable!("EmptySalt never returns errors"))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
         // Step 5: Compute commitments for all internal nodes in the main trie
         let root_hash = StateRoot::new(&EmptySalt)
             .update_main_trie(&mut all_trie_updates)
-            .expect("no error in EmptySalt when update_internal_nodes");
+            .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
         Ok((root_hash, all_trie_updates))
     }
 }
