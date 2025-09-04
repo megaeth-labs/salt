@@ -8,7 +8,6 @@ use crate::{
         TRIE_LEVELS, TRIE_WIDTH_BITS,
     },
     genesis::EmptySalt,
-    log::log,
     state::updates::StateUpdates,
     traits::{BucketMetadataReader, StateReader, TrieReader},
     types::*,
@@ -47,15 +46,11 @@ impl StateRoot {
         trie: &T,
         state_updates: &StateUpdates,
     ) -> Result<(), <T as TrieReader>::Error> {
-        log("  start update_leaf_nodes....");
         let updates = self.update_leaf_nodes(trie, state_updates)?;
-        log("  after update_leaf_nodes....");
         // Cache the results of incremental calculations.
-        log("  start update cache(hashmap)....");
         for (k, v) in updates {
             self.cache.entry(k).and_modify(|change| change.1 = v.1).or_insert(v);
         }
-        log("  after update cache(hashmap)....");
         Ok(())
     }
 
@@ -78,12 +73,8 @@ impl StateRoot {
         trie: &T,
         state_updates: &StateUpdates,
     ) -> Result<(B256, TrieUpdates), <T as TrieReader>::Error> {
-        log("start incremental_update....");
         self.incremental_update(trie, state_updates)?;
-        log("after incremental_update ....");
-        log("start finalize....");
         let rs = self.finalize(trie);
-        log("after finalize....");
         rs
     }
 
@@ -106,7 +97,6 @@ impl StateRoot {
             )
             .collect::<Vec<_>>();
 
-        log("  start update_internal_nodes_inner(3..0)....");
         // Update the state trie in descending order of depth.
         (0..TRIE_LEVELS - 1).rev().try_for_each(|level| {
             updates = self.update_internal_nodes_inner(trie, &mut updates, level, get_parent_id)?;
@@ -114,7 +104,6 @@ impl StateRoot {
             trie_updates.data.extend(updates.iter());
             Ok(())
         })?;
-        log("  after update_internal_nodes_inner....");
 
         let root_commitment =
             if let Some(c) = trie_updates.data.last() { c.1 .1 } else { trie.get(0)? };
@@ -190,7 +179,6 @@ impl StateRoot {
         state_updates: &StateUpdates,
     ) -> Result<Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>, <T as TrieReader>::Error> {
         // expansion kvs and non-expansion kvs are sorted separately
-        log("    start div exp/non-exp kvs(BTreeMap and Hash Map)....");
         let mut expansion_updates: Vec<(&SaltKey, &(Option<SaltValue>, Option<SaltValue>))> =
             vec![];
         let mut event_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
@@ -298,8 +286,6 @@ impl StateRoot {
                 !is_expansion
             })
             .collect::<Vec<_>>();
-        log("    after div exp/non-exp kvs(BTreeMap and Hash Map)....");
-        log("    start update_leaf_nodes_inner....");
         // Compute the commitment of the non-expansion kvs.
         let mut trie_updates =
             self.update_leaf_nodes_inner(trie, &mut normal_updates, |salt_key| {
@@ -307,8 +293,6 @@ impl StateRoot {
             })?;
 
         trie_updates.extend(pending_updates[SUB_TRIE_LEVELS].iter());
-
-        log("    after update_leaf_nodes_inner....");
 
         // Record (bucket, capacity changes) of unchanged KV but changed capacity to
         // expansion_updates. it is used to compute the commitment of the subtrie.
@@ -475,16 +459,11 @@ impl StateRoot {
         let task_size =
             std::cmp::max(MIN_TASK_SIZE, (state_updates.len() + num_tasks - 1) / num_tasks);
 
-        log("      start state_updates.sort_by....");
-
         // Sort the state updates by slot IDs
         state_updates.sort_by(|(a, _), (b, _)| {
             (a.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId)
                 .cmp(&(b.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId))
         });
-
-        log("      after state_updates.sort_by....");
-        log("      start state_updates.msm....");
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let c_deltas: Vec<(NodeId, Element)> = state_updates
@@ -502,7 +481,6 @@ impl StateRoot {
             .collect();
 
         let rs = self.apply_deltas(trie, c_deltas, task_size);
-        log("      after state_updates.msm....");
         rs
     }
 
@@ -644,9 +622,7 @@ pub fn get_child_node(parent_id: &NodeId, child_idx: usize) -> NodeId {
 pub fn get_global_committer() -> &'static Committer {
     static INSTANCE_COMMITTER: OnceCell<Committer> = OnceCell::new();
     INSTANCE_COMMITTER.get_or_init(|| {
-        log(&"      start create Committer table....");
         let committer = Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE);
-        log(&"      after create Committer table....");
         committer
     })
 }

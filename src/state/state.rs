@@ -7,7 +7,6 @@ use super::updates::StateUpdates;
 use crate::{
     account::Account,
     constant::{BUCKET_SLOT_BITS, ROOT_NODE_ID},
-    log::log,
     traits::{BucketMetadataReader, StateReader, TrieReader},
     trie::trie::hash_commitment,
     types::*,
@@ -581,16 +580,10 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         address: Address,
     ) -> Result<Option<Account>, <S as BucketMetadataReader>::Error> {
         let raw_key = PlainKey::Account(address).encode();
-        log(&format!("[salt get account] address {:?} raw_key {:?}", address, raw_key));
-        tracing::info!("[salt get account] address {:?} raw_key {:?}", address, raw_key);
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
-                PlainValue::Account(account) => {
-                    log(&format!("[salt get account] value {:?}", account));
-                    tracing::info!("[salt get account] value {:?}", account);
-                    account
-                }
+                PlainValue::Account(account) => account,
                 _ => panic!("unexpected value type: {:?}, account type expected.", plain_value),
             }
         }))
@@ -603,24 +596,10 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         slot_id: B256,
     ) -> Result<Option<U256>, <S as BucketMetadataReader>::Error> {
         let raw_key = PlainKey::Storage(address, slot_id).encode();
-        log(&format!(
-            "[get storage] address {:?} slot {:?} raw_key {:?}",
-            address, slot_id, raw_key
-        ));
-        tracing::info!(
-            "[get storage] address {:?} slot {:?} raw_key {:?}",
-            address,
-            slot_id,
-            raw_key
-        );
         Ok(self.get_raw(&raw_key)?.map(|raw_value| {
             let (_, plain_value) = SaltValue::new(&raw_key, &raw_value).into();
             match plain_value {
-                PlainValue::Storage(value) => {
-                    log(&format!("[salt get storage] value {:?}", value));
-                    tracing::info!("[salt get storage] value {:?}", value);
-                    value
-                }
+                PlainValue::Storage(value) => value,
                 _ => panic!("unexpected value type: {:?}, storage type expected.", plain_value),
             }
         }))
@@ -631,27 +610,11 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         &self,
         plain_key: &[u8],
     ) -> Result<Option<Vec<u8>>, <S as BucketMetadataReader>::Error> {
-        let check_all = false;
-        let check_key: [u8; 20] = [0, 15, 61, 246, 215, 50, 128, 126, 241, 49, 159, 183, 184, 187, 133, 34, 208, 190, 172, 2];
         // Computes the `bucket_id` based on the `key`.
         let bucket_id = pk_hasher::bucket_id(&plain_key);
-        if check_all || check_key == *plain_key {
-            log(&format!("[get raw] check_key bucket_id: {:?}", bucket_id));
-            tracing::info!("[get raw] check_key bucket_id: {:?}", bucket_id);
-        }
         let meta = self.salt_state.get_meta(bucket_id)?;
-        if check_all || check_key == *plain_key {
-            log(&format!("[get raw] check_key meta: {:?}", meta));
-            tracing::info!("[get raw] check_key meta: {:?}", meta);
-        }
         // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
         let hashed_id = pk_hasher::hashed_key(&plain_key, meta.nonce);
-        if check_all || check_key == *plain_key {
-            log(&format!("[get raw] check_key hashed_id: {:?}", hashed_id));
-            tracing::info!("[get raw] check_key hashed_id: {:?}", hashed_id);
-        }
-
-        
 
         // Starts from the initial slot position and searches for the slot corresponding to the
         // `key`.
@@ -660,17 +623,9 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
             if let Some(slot_val) = self.salt_state.entry((bucket_id, slot_id).into())? {
                 match slot_val.key().cmp(&plain_key) {
                     Ordering::Less => {
-                        if check_all || check_key == *plain_key {
-                            log(&format!("[get raw] check_key None"));
-                            tracing::info!("[get raw] check_key None");
-                        }
                         return Ok(None)
                     },
                     Ordering::Equal => {
-                        if check_all || check_key == *plain_key {
-                            log(&format!("[get raw] get value: {:?}", slot_val.value()));
-                            tracing::info!("[get raw] get value: {:?}", slot_val.value());
-                        }
                         return  Ok(Some(slot_val.value().to_vec()))
                     },
                     Ordering::Greater => continue,
@@ -678,10 +633,6 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
             } else {
                 return Ok(None);
             }
-        }
-        if check_all || check_key == *plain_key {
-            log(&format!("[get raw] check_key end None"));
-            tracing::info!("[get raw] check_key end None");
         }
         Ok(None)
     }
