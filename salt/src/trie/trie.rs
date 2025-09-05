@@ -863,14 +863,13 @@ impl StateRoot<'_, EmptySalt> {
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
     /// * `Err(S::Error)` - If reading from storage fails
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
-        let trie = StateRoot::new(&EmptySalt);
-        let mut all_trie_updates = Vec::new();
-
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
-        (NUM_META_BUCKETS..NUM_BUCKETS)
+
+        let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
+            .into_par_iter()
             .step_by(CHUNK_SIZE)
-            .try_for_each(|chunk_start| {
+            .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
                 let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
                 // Step 1: Read metadata for all buckets in this chunk
@@ -901,20 +900,22 @@ impl StateRoot<'_, EmptySalt> {
                 );
 
                 // Step 3: Apply updates to trie, handling expansion automatically
-                // `update_leaf_nodes` detects metadata capacity changes and creates
+                // `update_bucket_subtrees` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
-                let chunk_trie_updates = trie
+                StateRoot::new(&EmptySalt)
                     .update_bucket_subtrees(StateUpdates {
                         data: chunk_updates,
                     })
-                    .unwrap();
+                    .map_err(|_| unreachable!("EmptySalt never returns errors"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-                all_trie_updates.extend(chunk_trie_updates);
-                Ok(())
-            })?;
+        let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
         // Step 4: Compute commitments for all internal nodes in the main trie
-        let root_hash = trie.update_main_trie(&mut all_trie_updates).unwrap();
+        let root_hash = StateRoot::new(&EmptySalt)
+            .update_main_trie(&mut all_trie_updates)
+            .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
         Ok((root_hash, all_trie_updates))
     }
 }
