@@ -12,6 +12,7 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     ops::{Range, RangeInclusive},
@@ -27,7 +28,7 @@ use std::{
 /// Critically, the witness contains the minimal partial trie with all internal nodes
 /// necessary to recompute the state root after applying state updates. This enables
 /// stateless nodes to not only re-execute transactions but also produce new state roots.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Witness {
     /// Direct mapping from plain keys to their salt key locations.
     /// Only contains keys that exist.
