@@ -238,6 +238,14 @@ impl StateReader for Witness {
         self.salt_witness.metadata(bucket_id)
     }
 
+    fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
+        self.salt_witness.get_subtree_levels(bucket_id)
+    }
+
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        self.salt_witness.bucket_used_slots(bucket_id)
+    }
+
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         match self.direct_lookup_tbl.get(plain_key) {
             Some(salt_key) => Ok(*salt_key),
@@ -265,14 +273,16 @@ impl TrieReader for Witness {
 mod tests {
     use super::*;
     use crate::{
-        constant::NUM_META_BUCKETS,
+        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         mem_store::MemStore,
         mock_evm_types::{Account, PlainKey, PlainValue},
+        proof::salt_witness::{create_mock_proof, SaltWitness},
         trie::trie::StateRoot,
+        types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// Extracts all values from a witness in the order of its lookup table keys.
     pub fn extract_witness_values(witness: &Witness) -> Vec<Option<Vec<u8>>> {
@@ -864,5 +874,53 @@ mod tests {
         let witness_keys: HashSet<_> = proof.salt_witness.kvs.keys().collect();
         let lookup_values: HashSet<_> = proof.direct_lookup_tbl.values().collect();
         assert_eq!(witness_keys, lookup_values);
+    }
+
+    /// Verifies that `Witness::get_subtree_levels` does not use the default
+    /// implementation. It delegates to `SaltWitness::get_subtree_levels`.
+    #[test]
+    fn test_witness_get_subtree_levels() {
+        let bucket_id = 100_000;
+        let mut proof = create_mock_proof();
+        proof.levels.insert(bucket_id, 3);
+
+        let salt_witness = SaltWitness {
+            kvs: BTreeMap::new(),
+            proof,
+        };
+        let witness = Witness::from(salt_witness);
+
+        assert_eq!(witness.get_subtree_levels(bucket_id).unwrap(), 3);
+    }
+
+    /// Verifies that `Witness::bucket_used_slots` does not use the default
+    /// implementation. It delegates to `SaltWitness::slots`.
+    #[test]
+    fn test_witness_bucket_used_slots() {
+        let bucket_id = 100_000;
+        let meta_key = bucket_metadata_key(bucket_id);
+
+        // SaltWitness::bucket_used_slots must know the bucket capacity
+        let mut kvs = BTreeMap::new();
+        kvs.insert(meta_key, Some(BucketMeta::default().into()));
+
+        // Initialize every bucket slot so SaltWitness::bucket_used_slots can
+        // scan and count the number of used slots.
+        for i in 0..MIN_BUCKET_SIZE {
+            kvs.insert(SaltKey::from((bucket_id, i as u64)), None);
+        }
+        let used_slots = 3;
+        for i in 0..used_slots {
+            let val = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+            kvs.insert(SaltKey::from((bucket_id, i)), Some(val));
+        }
+
+        let salt_witness = SaltWitness {
+            kvs,
+            proof: create_mock_proof(),
+        };
+        let witness = Witness::from(salt_witness);
+
+        assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), used_slots);
     }
 }
