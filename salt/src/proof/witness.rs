@@ -238,6 +238,14 @@ impl StateReader for Witness {
         self.salt_witness.metadata(bucket_id)
     }
 
+    fn get_subtree_levels(&self, bucket_id: BucketId) -> Result<usize, Self::Error> {
+        self.salt_witness.get_subtree_levels(bucket_id)
+    }
+
+    fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+        self.salt_witness.bucket_used_slots(bucket_id)
+    }
+
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         match self.direct_lookup_tbl.get(plain_key) {
             Some(salt_key) => Ok(*salt_key),
@@ -268,11 +276,13 @@ mod tests {
         constant::NUM_META_BUCKETS,
         mem_store::MemStore,
         mock_evm_types::{Account, PlainKey, PlainValue},
+        proof::salt_witness::{create_mock_proof, SaltWitness},
         trie::trie::StateRoot,
+        types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// Extracts all values from a witness in the order of its lookup table keys.
     pub fn extract_witness_values(witness: &Witness) -> Vec<Option<Vec<u8>>> {
@@ -864,5 +874,86 @@ mod tests {
         let witness_keys: HashSet<_> = proof.salt_witness.kvs.keys().collect();
         let lookup_values: HashSet<_> = proof.direct_lookup_tbl.values().collect();
         assert_eq!(witness_keys, lookup_values);
+    }
+
+    /// Verifies that `Witness` correctly delegates `StateReader` methods.
+    ///
+    /// This test ensures that when `get_subtree_levels` and `bucket_used_slots` are
+    /// called on a `Witness` instance, they are correctly forwarded to the inner
+    /// `SaltWitness` implementation rather than falling back to the default trait
+    /// implementation in `StateReader`.
+    #[test]
+    fn test_witness_state_reader_delegation() {
+        let bucket_id = 100_000;
+
+        // --- Part 1: Test get_subtree_levels delegation ---
+        // The default impl calculates levels from metadata capacity.
+        // A capacity of 256 would yield 1 level. We will store metadata with
+        // capacity=256, but set the proof's level for the bucket to 2.
+        // If get_subtree_levels returns 2, it proves it's using the SaltWitness
+        // implementation which reads from the proof, not the default one.
+        let mut kvs_for_levels_test = BTreeMap::new();
+        let meta = BucketMeta {
+            capacity: 256, // This implies 1 level for the default implementation
+            ..Default::default()
+        };
+        let meta_key = bucket_metadata_key(bucket_id);
+        kvs_for_levels_test.insert(meta_key, Some(meta.into()));
+
+        let mut proof_for_levels_test = create_mock_proof();
+        proof_for_levels_test.levels.insert(bucket_id, 2); // Set levels to 2 in the proof
+
+        let salt_witness_for_levels = SaltWitness {
+            kvs: kvs_for_levels_test,
+            proof: proof_for_levels_test,
+        };
+        let witness_for_levels = Witness::from(salt_witness_for_levels);
+
+        // Assert that the level comes from the proof (2), not from metadata capacity (1)
+        assert_eq!(
+            witness_for_levels.get_subtree_levels(bucket_id).unwrap(),
+            2,
+            "get_subtree_levels should be delegated and return the value from the proof"
+        );
+
+        // --- Part 2: Test bucket_used_slots delegation ---
+        // The default impl uses `entries`, which is unsupported and panics on Witness.
+        // A successful call that returns a valid count proves delegation is working.
+        // The SaltWitness implementation requires all slots to be in the witness,
+        // so we populate them.
+        let mut kvs_for_slots_test = BTreeMap::new();
+        let val = SaltValue::new(&[1u8; 32], &[2u8; 32]);
+
+        // Add metadata so get_subtree_levels can succeed inside bucket_used_slots
+        kvs_for_slots_test.insert(meta_key, Some(BucketMeta::default().into()));
+
+        // Add 3 used slots
+        kvs_for_slots_test.insert(SaltKey::from((bucket_id, 5)), Some(val.clone()));
+        kvs_for_slots_test.insert(SaltKey::from((bucket_id, 10)), Some(val));
+        kvs_for_slots_test.insert(SaltKey::from((bucket_id, 15)), None); // empty, not counted
+
+        // Populate all 256 slots as required by the implementation
+        for i in 0..256 {
+            kvs_for_slots_test
+                .entry(SaltKey::from((bucket_id, i)))
+                .or_insert(None);
+        }
+
+        let mut proof_for_slots_test = create_mock_proof();
+        proof_for_slots_test.levels.insert(bucket_id, 1); // Sets capacity to 256
+
+        let salt_witness_for_slots = SaltWitness {
+            kvs: kvs_for_slots_test,
+            proof: proof_for_slots_test,
+        };
+        let witness_for_slots = Witness::from(salt_witness_for_slots);
+
+        // Assert that the call succeeds and returns the correct count of used slots.
+        // A success proves it's not calling the default impl which would have failed.
+        assert_eq!(
+            witness_for_slots.bucket_used_slots(bucket_id).unwrap(),
+            2,
+            "bucket_used_slots should be delegated and return the correct count"
+        );
     }
 }
