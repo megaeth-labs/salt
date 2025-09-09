@@ -361,8 +361,8 @@ where
 mod tests {
     use super::*;
     use crate::{
+        evm_data_types::{PlainKey, PlainValue},
         mem_store::MemStore,
-        mock_evm_types::{PlainKey, PlainValue},
         proof::prover::PRECOMPUTED_WEIGHTS,
         state::state::EphemeralSaltState,
         trie::trie::StateRoot,

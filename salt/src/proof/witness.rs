@@ -274,8 +274,8 @@ mod tests {
     use super::*;
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        evm_data_types::{Account, PlainKey, PlainValue},
         mem_store::MemStore,
-        mock_evm_types::{Account, PlainKey, PlainValue},
         proof::salt_witness::{create_mock_proof, SaltWitness},
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
