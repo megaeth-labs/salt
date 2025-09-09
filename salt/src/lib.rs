@@ -18,8 +18,6 @@ pub use types::*;
 pub mod mem_store;
 pub use mem_store::MemStore;
 
-pub mod evm_data_types;
-
 #[cfg(test)]
 mod tests {
     use super::*;

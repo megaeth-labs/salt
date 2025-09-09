@@ -272,16 +272,15 @@ impl TrieReader for Witness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proof::test_utils::*;
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
-        evm_data_types::{Account, PlainKey, PlainValue},
         mem_store::MemStore,
         proof::salt_witness::{create_mock_proof, SaltWitness},
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
-    use alloy_primitives::{Address, B256, U256};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// Extracts all values from a witness in the order of its lookup table keys.
@@ -389,17 +388,8 @@ mod tests {
     #[test]
     fn test_witness_serde() {
         // Create test account data
-        let kvs = HashMap::from([(
-            PlainKey::Account(Address::random()).encode(),
-            Some(
-                PlainValue::Account(Account {
-                    balance: U256::from(10),
-                    nonce: 10,
-                    bytecode_hash: None,
-                })
-                .encode(),
-            ),
-        )]);
+        let mut rng = StdRng::seed_from_u64(42);
+        let kvs = HashMap::from([(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)))]);
 
         // Insert into Salt storage and update the trie
         let store = MemStore::new();
@@ -797,25 +787,17 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut kvs = HashMap::new();
 
-        // Generate random account data for half the test cases
+        // Generate shorter keys/values for half the test cases
         (0..l / 2).for_each(|_| {
-            let pk = PlainKey::Account(Address::random_with(&mut rng)).encode();
-            let pv = Some(
-                PlainValue::Account(Account {
-                    balance: U256::from(rng.gen_range(0..1000)),
-                    nonce: rng.gen_range(0..100),
-                    bytecode_hash: None,
-                })
-                .encode(),
-            );
+            let pk = mock_data(&mut rng, 20);
+            let pv = Some(mock_data(&mut rng, 40));
             kvs.insert(pk, pv);
         });
 
-        // Generate random storage data for the other half
+        // Generate longer keys/values for the other half
         (l / 2..l).for_each(|_| {
-            let pk = PlainKey::Storage(Address::random_with(&mut rng), B256::random_with(&mut rng))
-                .encode();
-            let pv = Some(PlainValue::Storage(B256::random_with(&mut rng).into()).encode());
+            let pk = mock_data(&mut rng, 52);
+            let pv = Some(mock_data(&mut rng, 32));
             kvs.insert(pk, pv);
         });
 

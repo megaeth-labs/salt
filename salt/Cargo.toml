@@ -13,7 +13,6 @@ banderwagon = { path = "../banderwagon" }
 ipa-multipoint = { path = "../ipa-multipoint" }
 
 # standard dependencies
-alloy-primitives = { version = "0.8.20", features = ["rand"] }
 blake3 = "1.8"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 hex = "0.4"

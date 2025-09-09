@@ -488,6 +488,7 @@ fn create_leaf_node_queries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proof::test_utils::*;
     use crate::{
         bucket_id_from_metadata_key, bucket_metadata_key,
         constant::{
@@ -495,17 +496,15 @@ mod tests {
             NUM_META_BUCKETS, STARTING_NODE_ID,
         },
         empty_salt::EmptySalt,
-        evm_data_types::{PlainKey, PlainValue},
         mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::StateRoot,
         types::SlotId,
         BucketMeta,
     };
-    use alloy_primitives::{Address, B256};
     use banderwagon::CanonicalSerialize;
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
@@ -513,16 +512,6 @@ mod tests {
         fr.serialize_compressed(&mut bytes[..])
             .expect("Failed to serialize scalar to bytes");
         bytes
-    }
-
-    /// Creates a dummy 64-byte cryptographic commitment for testing.
-    fn mock_commitment() -> SerdeCommitment {
-        SerdeCommitment([1u8; 64])
-    }
-
-    /// Creates a mock encoded key-value pair with fixed test data.
-    fn mock_salt_value() -> SaltValue {
-        SaltValue::new(&[1u8; 32], &[2u8; 32])
     }
 
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
@@ -642,17 +631,10 @@ mod tests {
     fn test_basic_proof_exist() {
         let mut rng = StdRng::seed_from_u64(42);
 
-        let bytes: [u8; 32] = [
-            204, 96, 246, 139, 174, 111, 240, 167, 42, 141, 172, 145, 227, 227, 67, 2, 127, 77,
-            165, 138, 175, 150, 139, 98, 201, 151, 0, 212, 66, 107, 252, 84,
-        ];
+        let key = mock_data(&mut rng, 52);
+        let value = mock_data(&mut rng, 32);
 
-        let (slot, storage_value) = (B256::from(bytes), B256::from(bytes));
-
-        let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::from(rng.gen::<[u8; 20]>()), slot).encode(),
-            Some(PlainValue::Storage(storage_value.into()).encode()),
-        )]);
+        let initial_key_values = HashMap::from([(key, Some(value))]);
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
@@ -679,17 +661,10 @@ mod tests {
     fn test_single_insert_commmitment() {
         let mut rng = StdRng::seed_from_u64(42);
 
-        let byte_ff: [u8; 32] = [
-            204, 96, 246, 139, 174, 111, 240, 167, 42, 141, 172, 145, 227, 227, 67, 2, 127, 77,
-            165, 138, 175, 150, 139, 98, 201, 151, 0, 212, 66, 107, 252, 84,
-        ];
+        let key = mock_data(&mut rng, 52);
+        let value = mock_data(&mut rng, 32);
 
-        let (slot, storage_value) = (B256::from(byte_ff), B256::from(byte_ff));
-
-        let initial_key_values = HashMap::from([(
-            PlainKey::Storage(Address::from(rng.gen::<[u8; 20]>()), slot).encode(),
-            Some(PlainValue::Storage(storage_value.into()).encode()),
-        )]);
+        let initial_key_values = HashMap::from([(key, Some(value))]);
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
@@ -704,11 +679,11 @@ mod tests {
 
         let trie_root_commitment = mem_store.commitment(0).unwrap();
 
-        let root_from_commitment = B256::from_slice(&fr_to_le_bytes(
+        let root_from_commitment = fr_to_le_bytes(
             Element::from_bytes_unchecked_uncompressed(trie_root_commitment).map_to_scalar_field(),
-        ));
+        );
 
-        assert_eq!(trie_root, root_from_commitment);
+        assert_eq!(trie_root.as_slice(), &root_from_commitment);
     }
 
     /// Tests proof generation with a large number of key-value pairs.
@@ -721,12 +696,8 @@ mod tests {
 
         let initial_kvs = (0..1000)
             .map(|_| {
-                let k = PlainKey::Storage(
-                    Address::from(rng.gen::<[u8; 20]>()),
-                    B256::from(rng.gen::<[u8; 32]>()),
-                )
-                .encode();
-                let v = PlainValue::Storage(B256::from(rng.gen::<[u8; 32]>()).into()).encode();
+                let k = mock_data(&mut rng, 52);
+                let v = mock_data(&mut rng, 32);
                 (k, Some(v))
             })
             .collect::<HashMap<_, _>>();
