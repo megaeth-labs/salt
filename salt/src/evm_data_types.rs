@@ -1,21 +1,15 @@
-//! EVM types for testing.
+//! EVM data types and encoding utilities.
 //!
 //! This module provides types and utilities for encoding/decoding Ethereum account
-//! and storage data into a compact binary format. It is used exclusively in tests
-//! throughout the SALT codebase to simulate EVM state operations.
-//!
-//! # Usage
-//!
-//! This module is only compiled when running tests (`#[cfg(test)]` in lib.rs) and provides
-//! mock implementations of EVM account and storage types for testing the SALT operations
-//! without depending on external EVM libraries.
+//! and storage data into a compact binary format. External projects such as stateless
+//! validator can use these types without depending on external EVM libraries.
 //!
 //! # Types
 //!
 //! The module defines:
-//! - [`PlainKey`]: Represents keys for accounts or storage slots
-//! - [`PlainValue`]: Represents values for accounts or storage data
-//! - [`Account`]: A simplified account structure for testing
+//! - [`PlainKey`]: An account address or storage slot
+//! - [`PlainValue`]: Account or storage data
+//! - [`Account`]: An EVM account containing nonce, balance, and optional bytecode hash
 //!
 //! # Encoding Format
 //!

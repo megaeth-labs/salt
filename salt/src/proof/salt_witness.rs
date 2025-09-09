@@ -329,8 +329,8 @@ mod tests {
     use super::*;
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        evm_data_types::*,
         mem_store::MemStore,
-        mock_evm_types::*,
         proof::SerdeCommitment,
         state::state::EphemeralSaltState,
         state::updates::StateUpdates,
