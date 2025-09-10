@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 enable-hugepages = ["banderwagon/enable-hugepages"]
+narrow_bucket_hash = []
 
 [dependencies]
 # megaeth dependencies
