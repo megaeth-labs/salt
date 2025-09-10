@@ -71,6 +71,9 @@ pub mod shape;
 pub mod subtrie;
 pub mod witness;
 
+#[cfg(test)]
+mod test_utils;
+
 pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
 pub use salt_witness::SaltWitness;
 pub use witness::Witness;

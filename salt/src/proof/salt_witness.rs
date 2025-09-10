@@ -327,17 +327,16 @@ pub fn create_witness(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proof::test_utils::*;
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
-        evm_data_types::*,
         mem_store::MemStore,
         proof::SerdeCommitment,
         state::state::EphemeralSaltState,
         state::updates::StateUpdates,
         trie::trie::StateRoot,
     };
-    use alloy_primitives::{Address, B256, U256};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
     #[test]
@@ -410,10 +409,9 @@ mod tests {
 
         // 2. Suppose that 100 new kv pairs need to be inserted
         // after the execution of the block.
-
-        let pk = PlainKey::Storage(Address::ZERO, B256::ZERO).encode();
-
-        let pv = Some(PlainValue::Storage(B256::ZERO.into()).encode());
+        let mut rng = StdRng::seed_from_u64(42);
+        let pk = mock_data(&mut rng, 52);
+        let pv = Some(mock_data(&mut rng, 32));
 
         let mut state = EphemeralSaltState::new(&mem_store);
         state.update(vec![(&pk, &pv)]).unwrap();
@@ -462,25 +460,18 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut res = HashMap::new();
 
+        // Create shorter keys/values (simulating account-like data)
         (0..l / 2).for_each(|_| {
-            let pk = PlainKey::Account(Address::from(rng.gen::<[u8; 20]>())).encode();
-            let pv = Some(
-                PlainValue::Account(Account {
-                    balance: U256::from(rng.gen_range(0..1000)),
-                    nonce: rng.gen_range(0..100),
-                    bytecode_hash: None,
-                })
-                .encode(),
-            );
+            let pk = mock_data(&mut rng, 20);
+            let pv = Some(mock_data(&mut rng, 40));
             res.insert(pk, pv);
         });
+
+        // Create longer keys/values (simulating storage-like data)
         (l / 2..l).for_each(|_| {
-            let pk = PlainKey::Storage(
-                Address::from(rng.gen::<[u8; 20]>()),
-                B256::from(rng.gen::<[u8; 32]>()),
-            );
-            let pv = Some(PlainValue::Storage(B256::from(rng.gen::<[u8; 32]>()).into()).encode());
-            res.insert(pk.encode(), pv);
+            let pk = mock_data(&mut rng, 52);
+            let pv = Some(mock_data(&mut rng, 32));
+            res.insert(pk, pv);
         });
         res
     }

@@ -360,33 +360,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proof::test_utils::*;
     use crate::{
-        evm_data_types::{PlainKey, PlainValue},
-        mem_store::MemStore,
-        proof::prover::PRECOMPUTED_WEIGHTS,
-        state::state::EphemeralSaltState,
+        mem_store::MemStore, proof::prover::PRECOMPUTED_WEIGHTS, state::state::EphemeralSaltState,
         trie::trie::StateRoot,
     };
-    use alloy_primitives::{Address, B256};
     use ark_ff::BigInt;
     use banderwagon::{Fr, Zero};
     use ipa_multipoint::{crs::CRS, multiproof::MultiPoint, transcript::Transcript};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
     fn setup_test_store() -> (MemStore, SaltKey) {
-        let test_bytes = [
-            204, 96, 246, 139, 174, 111, 240, 167, 42, 141, 172, 145, 227, 227, 67, 2, 127, 77,
-            165, 138, 175, 150, 139, 98, 201, 151, 0, 212, 66, 107, 252, 84,
-        ];
-        let kvs = HashMap::from([(
-            PlainKey::Storage(
-                Address::from_slice(&StdRng::seed_from_u64(42).gen::<[u8; 20]>()),
-                B256::from(test_bytes),
-            )
-            .encode(),
-            Some(PlainValue::Storage(B256::from(test_bytes).into()).encode()),
-        )]);
+        let mut rng = StdRng::seed_from_u64(42);
+        let key = mock_data(&mut rng, 52);
+        let value = mock_data(&mut rng, 32);
+        let kvs = HashMap::from([(key, Some(value))]);
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
