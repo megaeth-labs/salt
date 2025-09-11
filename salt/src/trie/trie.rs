@@ -1805,6 +1805,7 @@ mod tests {
         for kvs in &sub_kvs {
             let state_updates = state.update(kvs).unwrap();
             trie.update(&state_updates).unwrap();
+            mock_db.update_state(state_updates.clone());
             final_state_updates.merge(state_updates);
         }
         let (final_root, mut final_trie_updates) = trie.finalize().unwrap();
