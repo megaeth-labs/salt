@@ -475,7 +475,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// If the new capacity is smaller than the number of existing entries in the bucket,
     /// the function returns early without making any changes to prevent data loss.
-    fn shi_rehash(
+    pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
         new_nonce: u32,

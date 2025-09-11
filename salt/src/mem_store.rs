@@ -24,6 +24,7 @@
 //!
 //! All operations are thread-safe through the use of [`RwLock`] for interior mutability.
 use crate::{constant::*, traits::*, types::*, StateUpdates, TrieUpdates};
+use hex;
 use std::{
     collections::BTreeMap,
     ops::{Range, RangeInclusive},
@@ -86,7 +87,7 @@ struct StateStore {
 ///
 /// All data access is protected by [`RwLock`], allowing multiple concurrent readers
 /// or a single writer per data store.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemStore {
     /// Blockchain state storage.
     state: RwLock<StateStore>,
@@ -105,6 +106,48 @@ impl Clone for MemStore {
             state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
             trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
         }
+    }
+}
+
+impl std::fmt::Debug for MemStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== MemStore Contents ===\n--- State Storage ---")?;
+
+        let state_guard = self.state.read().expect("state lock poisoned");
+        writeln!(
+            f,
+            "Key-Value pairs in state storage ({} entries):",
+            state_guard.kvs.len()
+        )?;
+        for (key, value) in &state_guard.kvs {
+            writeln!(f, "  Key: {} (bucket: {}, slot: {})\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
+                key.0, key.bucket_id(), key.slot_id(),
+                hex::encode(value.data),
+                String::from_utf8_lossy(value.key()),
+                String::from_utf8_lossy(value.value())
+            )?;
+        }
+
+        writeln!(
+            f,
+            "\nBucket usage cache ({} entries):",
+            state_guard.used_slots.len()
+        )?;
+        for (bucket_id, used_slots) in &state_guard.used_slots {
+            writeln!(f, "  Bucket {}: {} used slots", bucket_id, used_slots)?;
+        }
+
+        let trie_guard = self.trie.read().expect("trie lock poisoned");
+        writeln!(
+            f,
+            "\n--- Trie Storage ---\nNode commitments in trie storage ({} entries):",
+            trie_guard.len()
+        )?;
+        for (node_id, commitment) in &*trie_guard {
+            writeln!(f, "  NodeId {}: {}", node_id, hex::encode(commitment))?;
+        }
+
+        writeln!(f, "=== End MemStore Contents ===")
     }
 }
 
