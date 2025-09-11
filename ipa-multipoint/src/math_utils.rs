@@ -1,5 +1,12 @@
 use banderwagon::{trait_defs::*, Fr};
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Computes the inner product between two scalar vectors
 pub fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {
@@ -18,6 +25,7 @@ pub fn powers_of(point: Fr, n: usize) -> Vec<Fr> {
 }
 
 #[inline(always)]
+#[cfg(feature = "parallel")]
 pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     let mut powers = vec![Fr::zero(); n];
 
@@ -41,14 +49,19 @@ pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     powers
 }
 
+#[inline(always)]
+#[cfg(not(feature = "parallel"))]
+pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
+    powers_of(point, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn simple_vandemonde() {
-        use ark_std::test_rng;
-        use ark_std::UniformRand;
+        use ark_std::{test_rng, UniformRand};
 
         let rand_fr = Fr::rand(&mut test_rng());
         let n = 100;

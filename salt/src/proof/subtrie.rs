@@ -30,8 +30,18 @@ use crate::{
 };
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::ToString,
+    vec,
+    vec::Vec,
+};
+#[cfg(feature = "std")]
 use std::collections::{BTreeMap, BTreeSet};
 
 // Constants for improved code readability
@@ -43,7 +53,7 @@ const ROOT_LEVEL_CHILD_START: NodeId = 1;
 type SubTrieInfo = (
     Vec<ProverQuery>,
     BTreeMap<NodeId, SerdeCommitment>,
-    FxHashMap<BucketId, u8>,
+    BTreeMap<BucketId, u8>,
 );
 
 /// Converts cryptographic commitments from multiple internal trie nodes into scalar field elements.
@@ -196,7 +206,7 @@ where
     bucket_ids.dedup();
 
     // Step 2: Determine the trie level for each bucket
-    let buckets_level: FxHashMap<BucketId, u8> = bucket_ids
+    let buckets_level: BTreeMap<BucketId, u8> = bucket_ids
         .into_iter()
         .map(|bucket_id| {
             if bucket_id < NUM_META_BUCKETS as BucketId {
@@ -240,9 +250,13 @@ where
 
     // Step 5: Generate IPA prover queries for each node in internal nodes
     let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let mut queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
-        .map(|nodes| {
+    let mut queries = {
+        #[cfg(feature = "parallel")]
+        let iter = in_nodes.par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()));
+        #[cfg(not(feature = "parallel"))]
+        let iter = in_nodes.chunks(in_nodes.len().div_ceil(1));
+
+        iter.map(|nodes| {
             let children_scalars = multi_commitments_to_scalars(store, nodes)?;
 
             let res = nodes
@@ -272,12 +286,17 @@ where
         .collect::<ProofResult<Vec<_>>>()?
         .into_iter()
         .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+    };
 
     // Step 6: Generate IPA prover queries for each node in leaf nodes
-    let leaf_queries = leaf_nodes
-        .into_par_iter()
-        .map(|(parent, points)| {
+    let leaf_queries = {
+        #[cfg(feature = "parallel")]
+        let iter = leaf_nodes.into_par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let iter = leaf_nodes.into_iter();
+
+        iter.map(|(parent, points)| {
             let physical_parent = connect_parent_id(parent);
             let parent_commitment = store
                 .commitment(physical_parent)
@@ -291,7 +310,8 @@ where
         })
         .collect::<ProofResult<Vec<_>>>()?
         .into_iter()
-        .flatten();
+        .flatten()
+    };
 
     queries.extend(leaf_queries);
 
@@ -372,6 +392,9 @@ mod tests {
     use banderwagon::{Fr, Zero};
     use ipa_multipoint::{crs::CRS, multiproof::MultiPoint, transcript::Transcript};
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    #[cfg(not(feature = "std"))]
+    use rustc_hash::FxHashMap as HashMap;
+    #[cfg(feature = "std")]
     use std::collections::HashMap;
 
     fn setup_test_store() -> (MemStore, SaltKey) {

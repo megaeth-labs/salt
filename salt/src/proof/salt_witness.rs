@@ -8,12 +8,20 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "std")]
 use std::{
     collections::BTreeMap,
     ops::{Range, RangeInclusive},
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, format, vec::Vec};
+#[cfg(not(feature = "std"))]
+use core::ops::{Range, RangeInclusive};
 
 /// Salt witness for stateless validation with security guarantees.
 ///
@@ -83,9 +91,13 @@ impl SaltWitness {
     where
         Store: StateReader + TrieReader,
     {
-        let kvs = keys
-            .par_iter()
-            .map(|&salt_key| {
+        let kvs = {
+            #[cfg(feature = "parallel")]
+            let iter = keys.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = keys.iter();
+
+            iter.map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
                     // Handle metadata keys
                     let bucket_id = bucket_id_from_metadata_key(salt_key);
@@ -99,7 +111,8 @@ impl SaltWitness {
                 })?;
                 Ok((salt_key, value))
             })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+        };
 
         let proof = SaltProof::create(kvs.keys().copied(), store)?;
         Ok(SaltWitness { kvs, proof })
@@ -332,12 +345,14 @@ mod tests {
         mem_store::MemStore,
         mock_evm_types::*,
         proof::SerdeCommitment,
-        state::state::EphemeralSaltState,
-        state::updates::StateUpdates,
+        state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::StateRoot,
     };
     use alloy_primitives::{Address, B256, U256};
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    #[cfg(not(feature = "std"))]
+    use rustc_hash::FxHashMap as HashMap;
+    #[cfg(feature = "std")]
     use std::collections::HashMap;
 
     #[test]

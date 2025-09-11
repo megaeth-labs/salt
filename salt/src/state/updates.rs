@@ -3,10 +3,21 @@ use crate::types::{SaltKey, SaltValue};
 use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "std")]
 use std::{
     collections::{btree_map::Entry, BTreeMap},
-    fmt,
+    fmt, mem,
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    collections::{btree_map::Entry, BTreeMap},
+    format,
+    string::ToString,
+};
+#[cfg(not(feature = "std"))]
+use core::{fmt, mem};
 
 /// Tracks state changes as (old, new) value pairs for atomic updates and rollbacks.
 ///
@@ -79,7 +90,7 @@ impl StateUpdates {
     pub fn inverse(mut self) -> Self {
         self.data
             .values_mut()
-            .for_each(|(old, new)| std::mem::swap(old, new));
+            .for_each(|(old, new)| mem::swap(old, new));
         self
     }
 }

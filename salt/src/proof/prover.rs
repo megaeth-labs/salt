@@ -22,9 +22,19 @@ use ipa_multipoint::{
     transcript::Transcript,
 };
 use once_cell::sync::Lazy;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::ToString,
+    vec::Vec,
+};
+#[cfg(feature = "std")]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Create a new CRS.
@@ -96,7 +106,7 @@ pub struct SaltProof {
 
     /// the level of the buckets trie
     /// used to let verifier determine the bucket trie level
-    pub levels: FxHashMap<BucketId, u8>,
+    pub levels: BTreeMap<BucketId, u8>,
 }
 
 /// Converts a bucket slot entry into a field element for IPA polynomial commitments.
@@ -128,7 +138,10 @@ impl SaltProof {
         let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
 
         if needs_sorting {
+            #[cfg(feature = "parallel")]
             keys.par_sort_unstable();
+            #[cfg(not(feature = "parallel"))]
+            keys.sort_unstable();
         }
         keys.dedup();
 
@@ -303,9 +316,13 @@ fn create_internal_node_queries(
     // Distribute internal nodes across CPU threads for parallel processing
     let in_nodes: Vec<_> = internal_nodes.iter().collect();
 
-    let queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
-        .map(|nodes| {
+    let queries = {
+        #[cfg(feature = "parallel")]
+        let iter = in_nodes.par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()));
+        #[cfg(not(feature = "parallel"))]
+        let iter = in_nodes.chunks(in_nodes.len().div_ceil(1));
+
+        iter.map(|nodes| {
             // Step 1: Collect all child commitments needed by this thread's nodes
             // This enables efficient batch conversion to field elements
             let (children_ids, children_commitments) =
@@ -351,7 +368,8 @@ fn create_internal_node_queries(
                 .flatten()
                 .collect::<Vec<_>>())
         })
-        .collect::<ProofResult<Vec<_>>>()?;
+        .collect::<ProofResult<Vec<_>>>()?
+    };
 
     Ok(queries.into_iter().flatten().collect())
 }
@@ -437,9 +455,13 @@ fn create_leaf_node_queries(
     kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
 ) -> ProofResult<impl Iterator<Item = VerifierQuery>> {
     // Process leaf nodes in parallel - each represents a data bucket
-    let queries = leaf_nodes
-        .par_iter()
-        .map(|(parent_node, evaluation_points)| {
+    let queries = {
+        #[cfg(feature = "parallel")]
+        let iter = leaf_nodes.par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let iter = leaf_nodes.iter();
+
+        iter.map(|(parent_node, evaluation_points)| {
             // Get the polynomial commitment for this bucket
             let commitment =
                 get_commitment_safe(path_commitments, connect_parent_id(*parent_node))?;
@@ -479,7 +501,8 @@ fn create_leaf_node_queries(
                 })
                 .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     // Return lazy iterator for memory efficiency - avoids materializing all queries at once
     Ok(queries.into_iter().flatten())
@@ -506,6 +529,10 @@ mod tests {
     use banderwagon::CanonicalSerialize;
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    #[cfg(not(feature = "std"))]
+    use rustc_hash::FxHashMap as HashMap;
+    #[cfg(feature = "std")]
     use std::collections::HashMap;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {

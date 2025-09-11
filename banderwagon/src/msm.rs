@@ -1,7 +1,13 @@
 use ark_ec::scalar_mul::wnaf::WnafContext;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsProjective, Fr};
 use ark_ff::Zero;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::Element;
 #[derive(Clone, Debug)]
@@ -47,6 +53,7 @@ impl MSMPrecompWnaf {
     }
     // TODO: This requires more benchmarking and feedback to see if we should
     // TODO put this behind a config flag
+    #[cfg(feature = "parallel")]
     pub fn mul_par(&self, scalars: &[Fr]) -> Element {
         let wnaf_context = WnafContext::new(self.window_size);
         let result: EdwardsProjective = scalars
@@ -81,9 +88,13 @@ mod tests {
 
         let precomp = MSMPrecompWnaf::new(&crs, 12);
         let got_result = precomp.mul(&scalars);
-        let got_par_result = precomp.mul_par(&scalars);
+
+        #[cfg(feature = "parallel")]
+        {
+            let got_par_result = precomp.mul_par(&scalars);
+            assert_eq!(result, got_par_result);
+        }
 
         assert_eq!(result, got_result);
-        assert_eq!(result, got_par_result);
     }
 }

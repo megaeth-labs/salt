@@ -34,10 +34,25 @@ use crate::{
 use banderwagon::{salt_committer::Committer, Element};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+#[cfg(not(feature = "std"))]
+use core::{cmp::Ordering, mem, ops::Range};
+#[cfg(not(feature = "std"))]
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+#[cfg(feature = "std")]
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    mem,
     ops::Range,
 };
 
@@ -124,8 +139,8 @@ where
     pub fn new(store: &'a Store) -> Self {
         Self {
             store,
-            updates: HashMap::new(),
-            cache: HashMap::new(),
+            updates: HashMap::default(),
+            cache: HashMap::default(),
             committer: Arc::clone(&SHARED_COMMITTER),
             min_par_batch_size: 64,
         }
@@ -167,7 +182,7 @@ where
     /// changes from the `updates` cache through the upper main trie levels (L2-L0)
     /// to compute the final state root commitment.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
-        let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
+        let mut trie_updates = mem::take(&mut self.updates).into_iter().collect();
         let root_hash = self.update_main_trie(&mut trie_updates)?;
         for (node_id, (_, new)) in &trie_updates {
             self.cache.insert(*node_id, *new);
@@ -299,7 +314,7 @@ where
             })
             .collect();
         // Step 1.2: Identify buckets that need subtree processing
-        let mut need_handle_buckets = HashSet::new();
+        let mut need_handle_buckets: HashSet<BucketId> = HashSet::default();
         let mut last_bucket_id = u32::MAX;
 
         // Helper closure for expansion without KV changes
@@ -339,7 +354,7 @@ where
                         .new_capacity
                         .cmp(&subtree_change.old_capacity)
                     {
-                        std::cmp::Ordering::Greater => {
+                        Ordering::Greater => {
                             // Will be handled in subtree processing
                             let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
@@ -348,7 +363,7 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Less => {
+                        Ordering::Less => {
                             // Will be handled in subtree processing
                             let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
@@ -357,7 +372,7 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Equal => {}
+                        Ordering::Equal => {}
                     }
                 } else if self.store.get_subtree_levels(bucket_id)? > 1 {
                     // KV changes in expanded bucket (capacity unchanged)
@@ -373,7 +388,8 @@ where
         }
 
         // Initialize trigger levels for later processing
-        let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
+        let mut trigger_levels: Vec<HashMap<BucketId, SubtrieChangeInfo>> =
+            vec![HashMap::default(); MAX_SUBTREE_LEVELS];
 
         // Step 2: Update leaf node commitments
         let mut trie_updates = self.update_leaf_nodes(&state_updates, &subtree_change_info)?;
@@ -396,15 +412,20 @@ where
                     + bucket_id
                     + STARTING_NODE_ID[level] as NodeId;
 
-                let updates = (capacity_start_index..capacity_end_index)
-                    .into_par_iter()
-                    .filter_map(|i| {
+                let updates = {
+                    #[cfg(feature = "parallel")]
+                    let iter = (capacity_start_index..capacity_end_index).into_par_iter();
+                    #[cfg(not(feature = "parallel"))]
+                    let iter = (capacity_start_index..capacity_end_index).into_iter();
+
+                    iter.filter_map(|i| {
                         let node_id = bucket_id + i + STARTING_NODE_ID[level] as NodeId;
                         let old_c = self.commitment(node_id).expect("node should exist in trie");
                         let new_c = default_commitment(node_id);
                         (new_c != old_c).then_some((node_id, (old_c, new_c)))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Vec<_>>()
+                };
 
                 let split_point = updates.partition_point(|node| node.0 < extrat_end);
                 uncomputed_updates.extend(updates[split_point..].iter());
@@ -430,7 +451,7 @@ where
                     .old_top_level
                     .cmp(&subtree_change.new_top_level)
                 {
-                    std::cmp::Ordering::Greater => {
+                    Ordering::Greater => {
                         // Expansion: update old subtree root
                         add_expansion_update(&mut extra_updates, subtree_change)?;
                         need_handle_buckets.insert(*bucket_id);
@@ -440,11 +461,11 @@ where
                         trigger_levels[subtree_change.new_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                     }
-                    std::cmp::Ordering::Less => {
+                    Ordering::Less => {
                         // Contraction: new root equals bucket commitment
                         add_contraction_update(&mut uncomputed_updates, subtree_change)?;
                     }
-                    std::cmp::Ordering::Equal => {}
+                    Ordering::Equal => {}
                 }
             }
         }
@@ -470,9 +491,13 @@ where
                     new_element.to_bytes_uncompressed()
                 };
 
-                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = subtree_commitmens
-                    .into_par_iter()
-                    .map(|(node_id, (old_commitment, new_commitment))| {
+                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = {
+                    #[cfg(feature = "parallel")]
+                    let iter = subtree_commitmens.into_par_iter();
+                    #[cfg(not(feature = "parallel"))]
+                    let iter = subtree_commitmens.into_iter();
+
+                    iter.map(|(node_id, (old_commitment, new_commitment))| {
                         let current_bucket_id = (node_id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
 
                         if let Some(subtree_change) = trigger_levels[level].get(&current_bucket_id)
@@ -518,7 +543,8 @@ where
                             (vec![(node_id, (old_commitment, new_commitment))], vec![])
                         }
                     })
-                    .unzip();
+                    .unzip()
+                };
 
                 // Add the new subtree root updates to the main trie updates
                 trie_updates.extend(subtrie_roots.into_iter().flatten());
@@ -576,16 +602,24 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort the state updates by slot IDs
         let mut state_updates = state_updates.data.iter().collect::<Vec<_>>();
+        #[cfg(feature = "parallel")]
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+            (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
+        });
+        #[cfg(not(feature = "parallel"))]
+        state_updates.sort_unstable_by(|(a, _), (b, _)| {
             (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let batch_size = self.par_batch_size(state_updates.len());
-        let c_deltas: DeltaList = state_updates
-            .par_iter()
-            .with_min_len(batch_size)
-            .filter_map(|(salt_key, (old_value, new_value))| {
+        let c_deltas: DeltaList = {
+            #[cfg(feature = "parallel")]
+            let iter = state_updates.par_iter().with_min_len(batch_size);
+            #[cfg(not(feature = "parallel"))]
+            let iter = state_updates.iter();
+
+            iter.filter_map(|(salt_key, (old_value, new_value))| {
                 let bucket_id = salt_key.bucket_id();
                 let (capacity, is_subtree) =
                     if let Some(meta_change) = subtree_change_info.get(&bucket_id) {
@@ -615,7 +649,8 @@ where
                     ))
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+        };
 
         self.add_commitment_deltas(c_deltas, batch_size)
     }
@@ -644,14 +679,23 @@ where
         mut child_updates: TrieUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort by position within parent vector commitments for cache locality
+        #[cfg(feature = "parallel")]
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+            vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
+        });
+        #[cfg(not(feature = "parallel"))]
+        child_updates.sort_unstable_by(|(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
 
         let batch_size = self.par_batch_size(child_updates.len());
-        let delta_list = child_updates
-            .par_chunks(batch_size)
-            .flat_map(|c_updates| {
+        let delta_list = {
+            #[cfg(feature = "parallel")]
+            let iter = child_updates.par_chunks(batch_size);
+            #[cfg(not(feature = "parallel"))]
+            let iter = child_updates.chunks(batch_size);
+
+            iter.flat_map(|c_updates| {
                 // Interleave old and new commitments for efficient batch hashing
                 let hashes = Element::hash_commitments(
                     &c_updates
@@ -672,7 +716,8 @@ where
                     })
                     .collect::<Vec<_>>()
             })
-            .collect();
+            .collect()
+        };
 
         self.add_commitment_deltas(delta_list, batch_size)
     }
@@ -691,7 +736,17 @@ where
     /// The batch size to use for parallel chunks, guaranteed to be at least `min_par_batch_size`
     fn par_batch_size(&self, num_tasks: usize) -> usize {
         // Factor of 10 provides a sweet spot for most workloads
-        let num_batches = 10 * rayon::current_num_threads();
+        let num_batches = {
+            #[cfg(feature = "parallel")]
+            {
+                10 * rayon::current_num_threads()
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                10
+            }
+        };
+
         self.min_par_batch_size.max(num_tasks.div_ceil(num_batches))
     }
 
@@ -729,16 +784,24 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort deltas by NodeId to group changes for the same node together
         // This enables efficient accumulation and ensures deterministic ordering
+        #[cfg(feature = "parallel")]
         commitment_deltas.par_sort_unstable_by_key(|&(node_id, _)| node_id);
+        #[cfg(not(feature = "parallel"))]
+        commitment_deltas.sort_unstable_by_key(|&(node_id, _)| node_id);
 
         // Create node-aligned chunks for parallel processing
         let chunks = self.create_node_aligned_chunks(&commitment_deltas, task_size);
 
         // Process each chunk in parallel and collect results
-        let results: Result<Vec<_>, _> = chunks
-            .par_iter()
-            .map(|chunk_range| self.accumulate_chunk_deltas(&commitment_deltas, chunk_range))
-            .collect();
+        let results: Result<Vec<_>, _> = {
+            #[cfg(feature = "parallel")]
+            let iter = chunks.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = chunks.iter();
+
+            iter.map(|chunk_range| self.accumulate_chunk_deltas(&commitment_deltas, chunk_range))
+                .collect()
+        };
 
         // Flatten results from all chunks
         Ok(results?.into_iter().flatten().collect())
@@ -750,7 +813,7 @@ where
         &self,
         deltas: &DeltaList,
         task_size: usize,
-    ) -> Vec<std::ops::Range<usize>> {
+    ) -> Vec<Range<usize>> {
         let mut chunk_boundaries = Vec::with_capacity(deltas.len() / task_size + 2);
         chunk_boundaries.push(0);
 
@@ -866,49 +929,54 @@ impl StateRoot<'_, EmptySalt> {
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
 
-        let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
-            .into_par_iter()
-            .step_by(CHUNK_SIZE)
-            .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
-                let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
+        let all_trie_updates = {
+            #[cfg(feature = "parallel")]
+            let iter = (NUM_META_BUCKETS..NUM_BUCKETS).into_par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = (NUM_META_BUCKETS..NUM_BUCKETS).into_iter();
 
-                // Step 1: Read metadata for all buckets in this chunk
-                let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
-                let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
-                let mut chunk_updates = reader
-                    .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
-                    .into_iter()
-                    .map(|(key, actual_metadata)| {
-                        // Simulate metadata change: default -> actual
-                        (
-                            key,
-                            (Some(BucketMeta::default().into()), Some(actual_metadata)),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
+            iter.step_by(CHUNK_SIZE)
+                .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
+                    let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
-                // Step 2: Read all key-value pairs for buckets in this chunk
-                // Treat as insertions since we're rebuilding from scratch
-                chunk_updates.extend(
-                    reader
-                        .entries(SaltKey::bucket_range(
-                            chunk_start as BucketId,
-                            chunk_end as BucketId,
-                        ))?
+                    // Step 1: Read metadata for all buckets in this chunk
+                    let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
+                    let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
+                    let mut chunk_updates = reader
+                        .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
                         .into_iter()
-                        .map(|(key, value)| (key, (None, Some(value)))),
-                );
+                        .map(|(key, actual_metadata)| {
+                            // Simulate metadata change: default -> actual
+                            (
+                                key,
+                                (Some(BucketMeta::default().into()), Some(actual_metadata)),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
 
-                // Step 3: Apply updates to trie, handling expansion automatically
-                // `update_bucket_subtrees` detects metadata capacity changes and creates
-                // appropriate subtrie structures without special handling
-                StateRoot::new(&EmptySalt)
-                    .update_bucket_subtrees(StateUpdates {
-                        data: chunk_updates,
-                    })
-                    .map_err(|_| unreachable!("EmptySalt never returns errors"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    // Step 2: Read all key-value pairs for buckets in this chunk
+                    // Treat as insertions since we're rebuilding from scratch
+                    chunk_updates.extend(
+                        reader
+                            .entries(SaltKey::bucket_range(
+                                chunk_start as BucketId,
+                                chunk_end as BucketId,
+                            ))?
+                            .into_iter()
+                            .map(|(key, value)| (key, (None, Some(value)))),
+                    );
+
+                    // Step 3: Apply updates to trie, handling expansion automatically
+                    // `update_bucket_subtrees` detects metadata capacity changes and creates
+                    // appropriate subtrie structures without special handling
+                    StateRoot::new(&EmptySalt)
+                        .update_bucket_subtrees(StateUpdates {
+                            data: chunk_updates,
+                        })
+                        .map_err(|_| unreachable!("EmptySalt never returns errors"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 

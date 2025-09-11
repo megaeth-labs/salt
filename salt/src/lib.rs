@@ -1,4 +1,8 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 pub mod constant;
 pub mod empty_salt;
@@ -25,10 +29,18 @@ pub mod mock_evm_types;
 mod tests {
     use super::*;
     use crate::trie::trie::StateRoot;
+
+    #[cfg(feature = "std")]
     use std::collections::{BTreeMap, HashMap};
+
+    #[cfg(not(feature = "std"))]
+    use alloc::collections::BTreeMap;
+    #[cfg(not(feature = "std"))]
+    use rustc_hash::FxHashMap as HashMap;
 
     #[test]
     /// A simple end-to-end test demonstrating the complete SALT workflow.
+    #[cfg(feature = "std")]
     fn basic_integration_test() -> Result<(), Box<dyn std::error::Error>> {
         // Create a PoC in-memory SALT instance
         let store = MemStore::new();

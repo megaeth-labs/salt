@@ -8,6 +8,9 @@ pub trait TranscriptProtocol {
 }
 
 use sha2::{Digest, Sha256};
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 pub struct Transcript {
     pub state: Vec<u8>,
 }

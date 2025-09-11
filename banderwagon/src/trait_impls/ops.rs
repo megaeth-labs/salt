@@ -1,7 +1,7 @@
 use crate::Element;
 use ark_ed_on_bls12_381_bandersnatch::Fr;
 
-use std::{
+use core::{
     hash::Hash,
     iter::Sum,
     ops::{Add, AddAssign, Mul, Neg, Sub},
@@ -55,7 +55,7 @@ impl Sum for Element {
 }
 
 impl Hash for Element {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.to_bytes().hash(state)
     }
 }

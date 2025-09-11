@@ -1,6 +1,11 @@
 use banderwagon::{trait_defs::*, Fr};
 
-use std::{
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use core::{
     convert::TryFrom,
     ops::{Add, Mul, Sub},
 };

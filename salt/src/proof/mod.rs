@@ -63,6 +63,11 @@
 //! - [`subtrie`]: Constructs minimal subtries and generates IPA proofs by building
 //!   authentication paths from specified keys to the state root.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use core::fmt;
+#[cfg(feature = "std")]
 use thiserror::Error;
 
 pub mod prover;
@@ -76,30 +81,61 @@ pub use salt_witness::SaltWitness;
 pub use witness::Witness;
 
 /// Error type for proof operations
-#[derive(Debug, Error)]
+#[cfg_attr(feature = "std", derive(Error))]
+#[derive(Debug)]
 pub enum ProofError {
     /// Failed to read state data during proof operations
-    #[error("failed to read state: {reason}")]
+    #[cfg_attr(feature = "std", error("failed to read state: {reason}"))]
     StateReadError { reason: String },
 
     /// Root commitment is missing from proof
-    #[error("missing root commitment in proof")]
+    #[cfg_attr(feature = "std", error("missing root commitment in proof"))]
     MissingRootCommitment,
 
     /// State root mismatch during verification
-    #[error("state root mismatch: expected {expected:?}, got {actual:?}")]
+    #[cfg_attr(
+        feature = "std",
+        error("state root mismatch: expected {expected:?}, got {actual:?}")
+    )]
     RootMismatch {
         expected: [u8; 32],
         actual: [u8; 32],
     },
 
     /// Multi-point proof verification failed
-    #[error("multi-point proof check failed")]
+    #[cfg_attr(feature = "std", error("multi-point proof check failed"))]
     MultiPointProofFailed,
 
     /// Direct lookup table verification failed during proof validation
-    #[error("invalid lookup table: {reason}")]
+    #[cfg_attr(feature = "std", error("invalid lookup table: {reason}"))]
     InvalidLookupTable { reason: String },
+}
+
+#[cfg(not(feature = "std"))]
+impl fmt::Display for ProofError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProofError::StateReadError { reason } => {
+                write!(f, "failed to read state: {}", reason)
+            }
+            ProofError::MissingRootCommitment => {
+                write!(f, "missing root commitment in proof")
+            }
+            ProofError::RootMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "state root mismatch: expected {:?}, got {:?}",
+                    expected, actual
+                )
+            }
+            ProofError::MultiPointProofFailed => {
+                write!(f, "multi-point proof check failed")
+            }
+            ProofError::InvalidLookupTable { reason } => {
+                write!(f, "invalid lookup table: {}", reason)
+            }
+        }
+    }
 }
 
 /// Result type for operations that can fail during subtrie creation

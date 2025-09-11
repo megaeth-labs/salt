@@ -1,11 +1,21 @@
 //! Core traits for SALT state and trie storage.
-use crate::trie::node_utils::subtree_root_level;
 use crate::{
     constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
+    trie::node_utils::subtree_root_level,
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
+
+#[cfg(feature = "std")]
 use std::{
+    fmt::Debug,
+    ops::{Range, RangeInclusive},
+};
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use core::{
     fmt::Debug,
     ops::{Range, RangeInclusive},
 };

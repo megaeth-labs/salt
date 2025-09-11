@@ -9,7 +9,10 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use std::ops::{Range, RangeInclusive};
+use core::ops::{Range, RangeInclusive};
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 
 /// Represents an empty SALT structure that contains no account or storage.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

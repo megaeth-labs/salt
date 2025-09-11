@@ -28,7 +28,9 @@
 //! All functions use `unsafe` blocks as they contain inline assembly. The assembly
 //! code assumes x86_64 architecture and may not work on other platforms.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "std")))]
+use core::arch::asm;
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 use std::arch::asm;
 
 /// Multiplies a field element by 5 in Montgomery form using optimized assembly.

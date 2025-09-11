@@ -45,10 +45,18 @@ use crate::{
     traits::StateReader,
     types::*,
 };
+#[cfg(feature = "std")]
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap},
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(not(feature = "std"))]
+use core::cmp::Ordering;
+#[cfg(not(feature = "std"))]
+use rustc_hash::FxHashMap as HashMap;
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -104,8 +112,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     pub fn new(store: &'a Store) -> Self {
         Self {
             store,
-            cache: HashMap::new(),
-            bucket_used_cache: HashMap::new(),
+            cache: HashMap::default(),
+            bucket_used_cache: HashMap::default(),
             cache_read: false,
         }
     }
@@ -169,15 +177,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// Always checks the cache first before querying the underlying store.
     pub fn value(&mut self, key: SaltKey) -> Result<Option<SaltValue>, Store::Error> {
-        let value = match self.cache.entry(key) {
-            Entry::Occupied(cache_entry) => cache_entry.into_mut().clone(),
-            Entry::Vacant(cache_entry) => {
-                let value = self.store.value(key)?;
-                if self.cache_read {
-                    cache_entry.insert(value.clone());
-                }
-                value
+        let value = if let Some(cached_value) = self.cache.get(&key) {
+            cached_value.clone()
+        } else {
+            let value = self.store.value(key)?;
+            if self.cache_read {
+                self.cache.insert(key, value.clone());
             }
+            value
         };
 
         Ok(value)
@@ -510,6 +517,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 let salt_key = SaltKey::from((bucket_id, probe(hashed_key, step, new_capacity)));
                 // Note the code below operates directly on `new_bucket` as the
                 // cache has not been cleared yet
+                #[cfg(not(feature = "std"))]
+                use alloc::collections::btree_map::Entry;
+                #[cfg(feature = "std")]
                 use std::collections::btree_map::Entry;
                 match new_bucket.entry(salt_key) {
                     Entry::Vacant(entry) => {
@@ -701,6 +711,9 @@ fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::collections::BTreeMap;
+    #[cfg(feature = "std")]
     use std::collections::BTreeMap;
 
     use crate::{
@@ -763,8 +776,7 @@ mod tests {
         num_keys: usize,
         num_iterations: usize,
     ) {
-        use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        use rand::{seq::SliceRandom, thread_rng};
 
         // Compute expected final capacity based on load factor
         let expect_resize =
@@ -1514,8 +1526,7 @@ mod tests {
     /// holds for real-world scenarios involving all types of hash table operations.
     #[test]
     fn test_history_independence_with_mixed_operations() {
-        use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        use rand::{seq::SliceRandom, thread_rng};
 
         const BUCKET_CAPACITY: u64 = 12;
 
@@ -1802,6 +1813,9 @@ mod tests {
     /// keys, and different termination conditions.
     #[test]
     fn test_shi_find() {
+        #[cfg(not(feature = "std"))]
+        use rustc_hash::FxHashSet as HashSet;
+        #[cfg(feature = "std")]
         use std::collections::HashSet;
         let mut state = EphemeralSaltState::new(&EmptySalt);
         let mut updates = StateUpdates::default();

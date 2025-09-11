@@ -6,16 +6,23 @@
 //! proof system.
 
 use crate::{
-    proof::salt_witness::SaltWitness,
-    proof::ProofError,
+    proof::{salt_witness::SaltWitness, ProofError},
     state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
     types::*,
 };
+#[cfg(feature = "std")]
 use std::{
     collections::HashMap,
     ops::{Range, RangeInclusive},
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String, vec, vec::Vec};
+#[cfg(not(feature = "std"))]
+use core::ops::{Range, RangeInclusive};
+#[cfg(not(feature = "std"))]
+use rustc_hash::FxHashMap as HashMap;
 
 /// A cryptographic witness enabling stateless validation and execution.
 ///
@@ -48,7 +55,7 @@ impl From<SaltWitness> for Witness {
     /// - Extracting plain keys from SaltValue data (where they're already stored)
     /// - Skipping metadata entries (which don't contain plain key-value pairs)
     fn from(salt_witness: SaltWitness) -> Self {
-        let mut direct_lookup_tbl = HashMap::new();
+        let mut direct_lookup_tbl = HashMap::default();
         for (salt_key, value) in &salt_witness.kvs {
             if salt_key.is_in_meta_bucket() {
                 continue;
@@ -107,7 +114,7 @@ impl Witness {
         Store: StateReader + TrieReader,
     {
         let mut witnessed_keys = vec![];
-        let mut direct_lookup_tbl = HashMap::new();
+        let mut direct_lookup_tbl = HashMap::default();
 
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:

@@ -3,6 +3,9 @@ use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Edward
 use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
 #[derive(Debug, Clone, Copy, Eq)]

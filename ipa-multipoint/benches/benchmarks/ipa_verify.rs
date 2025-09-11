@@ -1,12 +1,13 @@
-use ark_std::rand::SeedableRng;
-use ark_std::UniformRand;
+use ark_std::{rand::SeedableRng, UniformRand};
 use banderwagon::Fr;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ipa_multipoint::crs::CRS;
-use ipa_multipoint::ipa::create;
-use ipa_multipoint::lagrange_basis::LagrangeBasis;
-use ipa_multipoint::math_utils::{inner_product, powers_of};
-use ipa_multipoint::transcript::Transcript;
+use ipa_multipoint::{
+    crs::CRS,
+    ipa::create,
+    lagrange_basis::LagrangeBasis,
+    math_utils::{inner_product, powers_of},
+    transcript::Transcript,
+};
 use rand_chacha::ChaCha20Rng;
 
 pub fn criterion_benchmark(c: &mut Criterion) {

@@ -7,8 +7,13 @@
 //! All functions use AHash with fixed seeds to ensure deterministic results.
 
 use super::ahash::fallback::RandomState;
-use crate::constant::{NUM_KV_BUCKETS, NUM_META_BUCKETS};
-use crate::types::BucketId;
+use crate::{
+    constant::{NUM_KV_BUCKETS, NUM_META_BUCKETS},
+    types::BucketId,
+};
+#[cfg(not(feature = "std"))]
+use core::hash::{BuildHasher, Hasher};
+#[cfg(feature = "std")]
 use std::hash::{BuildHasher, Hasher};
 
 /// Fixed seeds derived from the lower 32 bytes of keccak256("Make Ethereum Great Again").

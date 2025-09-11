@@ -1,15 +1,19 @@
 // We get given multiple polynomials evaluated at different points
 #![allow(non_snake_case)]
 
-use crate::crs::CRS;
-use crate::ipa::{multi_scalar_mul_par, IPAProof};
-use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
+use crate::{
+    crs::CRS,
+    ipa::{multi_scalar_mul_par, IPAProof},
+    lagrange_basis::{LagrangeBasis, PrecomputedWeights},
+};
 
-use crate::math_utils::powers_of_par;
-use crate::transcript::Transcript;
-use crate::transcript::TranscriptProtocol;
+use crate::{
+    math_utils::powers_of_par,
+    transcript::{Transcript, TranscriptProtocol},
+};
 
 use banderwagon::{trait_defs::*, Element, Fr};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -81,11 +85,15 @@ impl MultiPoint {
 
         let grouped_queries = group_prover_queries(&queries, &powers_of_r);
 
+        #[cfg(feature = "parallel")]
         let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
+        #[cfg(not(feature = "parallel"))]
+        let grouped_queries: Vec<_> = grouped_queries.into_iter().collect();
 
         let chunk_size = grouped_queries.len().div_ceil(rayon::current_num_threads());
 
         // aggregate all of the queries evaluated at the same point
+        #[cfg(feature = "parallel")]
         let aggregated_queries: Vec<_> = grouped_queries
             .par_chunks(chunk_size)
             .flat_map(|chunk| {
@@ -104,12 +112,38 @@ impl MultiPoint {
             })
             .collect::<Vec<_>>();
 
+        #[cfg(not(feature = "parallel"))]
+        let aggregated_queries: Vec<_> = grouped_queries
+            .chunks(chunk_size)
+            .flat_map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(point, queries_challenges)| {
+                        let aggregated_polynomial = queries_challenges
+                            .iter()
+                            .map(|(query, challenge)| query.poly.clone() * *challenge)
+                            .reduce(|acc, x| acc + x)
+                            .expect("Failed to aggregate polynomial");
+
+                        (*point, aggregated_polynomial)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
         // Compute g(X)
         //
+        #[cfg(feature = "parallel")]
         let g_x: LagrangeBasis = aggregated_queries
             .par_iter()
             .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
             .reduce(LagrangeBasis::zero, |a, b| a + b);
+
+        #[cfg(not(feature = "parallel"))]
+        let g_x: LagrangeBasis = aggregated_queries
+            .iter()
+            .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
+            .fold(LagrangeBasis::zero(), |a, b| a + b);
 
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
 
@@ -120,13 +154,21 @@ impl MultiPoint {
         //
         let t = transcript.challenge_scalar(b"t");
 
+        #[cfg(feature = "parallel")]
         let mut g1_den: Vec<_> = aggregated_queries
             .par_iter()
             .map(|(z_i, _)| t - Fr::from(*z_i as u128))
             .collect();
 
+        #[cfg(not(feature = "parallel"))]
+        let mut g1_den: Vec<_> = aggregated_queries
+            .iter()
+            .map(|(z_i, _)| t - Fr::from(*z_i as u128))
+            .collect();
+
         serial_batch_inversion_and_mul(&mut g1_den, &Fr::one());
 
+        #[cfg(feature = "parallel")]
         let g1_x = aggregated_queries
             .into_par_iter()
             .zip(g1_den)
@@ -140,6 +182,21 @@ impl MultiPoint {
                 LagrangeBasis::new(term)
             })
             .reduce(LagrangeBasis::zero, |a, b| a + b);
+
+        #[cfg(not(feature = "parallel"))]
+        let g1_x = aggregated_queries
+            .into_iter()
+            .zip(g1_den)
+            .map(|((_, agg_f_x), den_inv)| {
+                let term: Vec<_> = agg_f_x
+                    .values()
+                    .iter()
+                    .map(|coeff| den_inv * coeff)
+                    .collect();
+
+                LagrangeBasis::new(term)
+            })
+            .fold(LagrangeBasis::zero(), |a, b| a + b);
 
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
 
@@ -206,29 +263,59 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
     let state_slice = &mut transcript.state[origin..];
 
     // Process chunks in parallel
-    state_slice
-        .par_chunks_mut(BYTES_PER_QUERY)
-        .zip(queries.par_iter())
-        .for_each(|(chunk_res, p)| {
-            // Commitment
-            chunk_res[0] = b'C';
-            p.commitment()
-                .serialize_compressed(&mut chunk_res[1..33])
-                .expect("Failed to serialize commitment");
+    #[cfg(feature = "parallel")]
+    {
+        state_slice
+            .par_chunks_mut(BYTES_PER_QUERY)
+            .zip(queries.par_iter())
+            .for_each(|(chunk_res, p)| {
+                // Commitment
+                chunk_res[0] = b'C';
+                p.commitment()
+                    .serialize_compressed(&mut chunk_res[1..33])
+                    .expect("Failed to serialize commitment");
 
-            // Point
-            chunk_res[33] = b'z';
-            let point_scalar = p.point_as_fr();
-            point_scalar
-                .serialize_compressed(&mut chunk_res[34..66])
-                .expect("Failed to serialize point");
+                // Point
+                chunk_res[33] = b'z';
+                let point_scalar = p.point_as_fr();
+                point_scalar
+                    .serialize_compressed(&mut chunk_res[34..66])
+                    .expect("Failed to serialize point");
 
-            // Result
-            chunk_res[66] = b'y';
-            p.result()
-                .serialize_compressed(&mut chunk_res[67..99])
-                .expect("Failed to serialize result");
-        });
+                // Result
+                chunk_res[66] = b'y';
+                p.result()
+                    .serialize_compressed(&mut chunk_res[67..99])
+                    .expect("Failed to serialize result");
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        state_slice
+            .chunks_mut(BYTES_PER_QUERY)
+            .zip(queries.iter())
+            .for_each(|(chunk_res, p)| {
+                // Commitment
+                chunk_res[0] = b'C';
+                p.commitment()
+                    .serialize_compressed(&mut chunk_res[1..33])
+                    .expect("Failed to serialize commitment");
+
+                // Point
+                chunk_res[33] = b'z';
+                let point_scalar = p.point_as_fr();
+                point_scalar
+                    .serialize_compressed(&mut chunk_res[34..66])
+                    .expect("Failed to serialize point");
+
+                // Result
+                chunk_res[66] = b'y';
+                p.result()
+                    .serialize_compressed(&mut chunk_res[67..99])
+                    .expect("Failed to serialize result");
+            });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,24 +372,48 @@ impl MultiPointProof {
 
         // 3. Compute g_2(t)
         //
+        #[cfg(feature = "parallel")]
         let mut g2_den: Vec<_> = queries.par_iter().map(|query| t - query.point).collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let mut g2_den: Vec<_> = queries.iter().map(|query| t - query.point).collect();
 
         batch_inversion(&mut g2_den);
 
+        #[cfg(feature = "parallel")]
         let helper_scalars: Vec<_> = powers_of_r
             .into_par_iter()
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
 
+        #[cfg(not(feature = "parallel"))]
+        let helper_scalars: Vec<_> = powers_of_r
+            .into_iter()
+            .zip(g2_den)
+            .map(|(r_i, den_inv)| den_inv * r_i)
+            .collect();
+
+        #[cfg(feature = "parallel")]
         let g2_t: Fr = helper_scalars
             .par_iter()
             .zip(queries.par_iter())
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
+        #[cfg(not(feature = "parallel"))]
+        let g2_t: Fr = helper_scalars
+            .iter()
+            .zip(queries.iter())
+            .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
+            .sum();
+
         //4. Compute [g_1(X)] = E
+        #[cfg(feature = "parallel")]
         let comms: Vec<_> = queries.par_iter().map(|query| query.commitment).collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let comms: Vec<_> = queries.iter().map(|query| query.commitment).collect();
 
         let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
 

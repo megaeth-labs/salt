@@ -13,13 +13,14 @@ ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9
 ark-ec = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
 ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
 
-rayon = "*"
+rayon = { version = "*", default-features = false, optional = true }
 hugepage-rs = { version = "0.1.0"}
 [dev-dependencies]
 hex = "0.4.3"
 rand_chacha = "0.3.1"
 
 [features]
-default = ["parallel"]
-parallel = ["ark-ff/parallel", "ark-ff/asm", "ark-ec/parallel"]
+default = ["std", "parallel"]
+std = []
+parallel = ["ark-ff/parallel", "ark-ff/asm", "ark-ec/parallel", "rayon"]
 enable-hugepages = []

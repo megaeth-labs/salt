@@ -1,9 +1,9 @@
-use banderwagon::{salt_committer::Committer, trait_defs::*, Fr};
-use ipa_multipoint::crs::CRS;
-use std::time::Instant;
-
-#[allow(clippy::needless_range_loop)]
+#[cfg(feature = "std")]
 fn main() {
+    use banderwagon::{salt_committer::Committer, trait_defs::*, Fr};
+    use ipa_multipoint::crs::CRS;
+    use std::time::Instant;
+
     println!("Benchmarking Pedersen hashing...");
     const N: usize = 5000;
 
@@ -35,4 +35,9 @@ fn main() {
 
         vec_len <<= 1;
     }
+}
+
+#[cfg(not(feature = "std"))]
+fn main() {
+    // no-std doesn't support main execution
 }

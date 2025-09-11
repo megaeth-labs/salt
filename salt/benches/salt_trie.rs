@@ -29,9 +29,7 @@ use salt::{
     trie::trie::StateRoot,
     types::*,
 };
-use std::collections::HashSet;
-use std::hint::black_box;
-use std::ops::Range;
+use std::{collections::HashSet, hint::black_box, ops::Range};
 
 /// Generates synthetic state updates for benchmarking SALT trie operations.
 ///

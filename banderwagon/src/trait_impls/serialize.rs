@@ -2,6 +2,8 @@ use crate::Element;
 use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::EdwardsProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError, Valid};
+
+#[cfg(feature = "std")]
 impl CanonicalSerialize for Element {
     fn serialize_with_mode<W: std::io::prelude::Write>(
         &self,
@@ -33,6 +35,7 @@ impl Valid for Element {
     }
 }
 
+#[cfg(feature = "std")]
 impl CanonicalDeserialize for Element {
     fn deserialize_with_mode<R: std::io::prelude::Read>(
         reader: R,

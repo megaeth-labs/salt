@@ -28,10 +28,15 @@
 use crate::element::Element;
 use ark_ec::AdditiveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
-use ark_ff::PrimeField;
-use ark_ff::{Field, Zero};
+use ark_ff::{Field, PrimeField, Zero};
 use ark_serialize::CanonicalSerialize;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
 /// The `Committer` precomputes and stores windowed multiples of a set of base points
@@ -65,7 +70,10 @@ pub struct Committer {
 impl Drop for Committer {
     #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
     fn drop(&mut self) {
+        #[cfg(not(feature = "std"))]
+        use core::alloc::Layout;
         use hugepage_rs;
+        #[cfg(feature = "std")]
         use std::alloc::Layout;
         // drop inner vectors
         for table in self.tables.iter_mut() {
@@ -93,32 +101,40 @@ impl Drop for Committer {
 impl Committer {
     #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
+        #[cfg(not(feature = "std"))]
+        use core::alloc::Layout;
         use hugepage_rs;
+        #[cfg(feature = "std")]
         use std::alloc::Layout;
 
         let table_num = bases.len();
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let src_tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
-            .map(|base| {
-                let mut table = Vec::with_capacity(inner_length);
-                let mut element = base.0;
-                // Calculate the element values for each window
-                for _ in 0..win_num {
-                    let base = element;
-                    table.push(EdwardsProjective::zero());
+        let src_tables: Vec<Vec<EdwardsAffine>> = {
+            #[cfg(feature = "parallel")]
+            let iter = bases.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = bases.iter();
+            iter
+        }
+        .map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
                     table.push(element);
-                    for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
-                        table.push(element);
-                    }
-                    element += element;
                 }
-                Element::batch_proj_to_affine(&table)
-            })
-            .collect();
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        })
+        .collect();
 
         let tables = {
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
@@ -159,25 +175,30 @@ impl Committer {
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
-            .map(|base| {
-                let mut table = Vec::with_capacity(inner_length);
-                let mut element = base.0;
-                // Calculate the element values for each window
-                for _ in 0..win_num {
-                    let base = element;
-                    table.push(EdwardsProjective::zero());
+        let tables: Vec<Vec<EdwardsAffine>> = {
+            #[cfg(feature = "parallel")]
+            let iter = bases.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = bases.iter();
+            iter
+        }
+        .map(|base| {
+            let mut table = Vec::with_capacity(inner_length);
+            let mut element = base.0;
+            // Calculate the element values for each window
+            for _ in 0..win_num {
+                let base = element;
+                table.push(EdwardsProjective::zero());
+                table.push(element);
+                for _i in 1..(1 << (window_size - 1)) {
+                    element += &base;
                     table.push(element);
-                    for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
-                        table.push(element);
-                    }
-                    element += element;
                 }
-                Element::batch_proj_to_affine(&table)
-            })
-            .collect();
+                element += element;
+            }
+            Element::batch_proj_to_affine(&table)
+        })
+        .collect();
 
         Committer {
             tables,
@@ -251,6 +272,9 @@ impl Committer {
     /// The result of `scalar * G[g_i]` as an `Element`.
     #[cfg(target_arch = "x86_64")]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+        #[cfg(all(target_arch = "x86_64", not(feature = "std")))]
+        use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
         let chunks = calculate_prefetch_index(scalar, self.window_size);
@@ -694,8 +718,8 @@ mod tests {
     use ark_ec::CurveGroup;
     use ark_ed_on_bls12_381_bandersnatch::Fr;
     use ark_ff::UniformRand;
-    use rand_chacha::rand_core::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
+    use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
+    #[cfg(feature = "std")]
     use std::str::FromStr;
 
     /// Tests the batch conversion from 64-byte commitments to 32-byte hash representations.
@@ -870,6 +894,7 @@ mod tests {
         let precompute = Committer::new(&basic_crs, 11);
         let mem_byte_size = precompute.tables.len() * precompute.tables[0].len() * 2 * 32;
         println!("precompute_size: {mem_byte_size:?}");
+        #[cfg(feature = "std")]
         use std::time::Instant;
         let start = Instant::now();
         let got_result = precompute.mul_index(&scalar, 0);

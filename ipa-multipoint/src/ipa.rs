@@ -1,14 +1,22 @@
 #![allow(non_snake_case)]
-use crate::crs::CRS;
-use crate::math_utils::inner_product;
-use crate::transcript::{Transcript, TranscriptProtocol};
+use crate::{
+    crs::CRS,
+    math_utils::inner_product,
+    transcript::{Transcript, TranscriptProtocol},
+};
 
+#[cfg(feature = "std")]
 use crate::{IOError, IOErrorKind, IOResult};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
 use itertools::Itertools;
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use std::iter;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use core::iter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IPAProof {
@@ -21,6 +29,8 @@ impl IPAProof {
     pub(crate) fn serialized_size(&self) -> usize {
         (self.L_vec.len() * 2 + 1) * 32
     }
+
+    #[cfg(feature = "std")]
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> IOResult<IPAProof> {
         // Given the polynomial degree, we will have log2 * 2 points
         let num_points = log2(poly_degree);
@@ -54,6 +64,7 @@ impl IPAProof {
 
         Ok(IPAProof { L_vec, R_vec, a })
     }
+    #[cfg(feature = "std")]
     pub fn to_bytes(&self) -> IOResult<Vec<u8>> {
         // We do not serialize the length. We assume that the deserializer knows this.
         let mut bytes = Vec::with_capacity(self.serialized_size());
@@ -402,6 +413,7 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     multi_scalar_mul(&points, &scalars)
 }
 
+#[cfg(feature = "parallel")]
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
     let chunk_size = bases.len().div_ceil(rayon::current_num_threads());
 
@@ -410,6 +422,11 @@ pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
         .zip(scalars.par_chunks(chunk_size))
         .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
         .sum()
+}
+
+#[cfg(not(feature = "parallel"))]
+pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
+    multi_scalar_mul(bases, scalars)
 }
 
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
@@ -429,8 +446,10 @@ fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crs::CRS;
-    use crate::math_utils::{inner_product, powers_of};
+    use crate::{
+        crs::CRS,
+        math_utils::{inner_product, powers_of},
+    };
     use ark_std::{rand::SeedableRng, UniformRand};
     use rand_chacha::ChaCha20Rng;
 

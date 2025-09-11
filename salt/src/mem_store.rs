@@ -24,11 +24,20 @@
 //!
 //! All operations are thread-safe through the use of [`RwLock`] for interior mutability.
 use crate::{constant::*, traits::*, types::*, StateUpdates, TrieUpdates};
+
+#[cfg(feature = "std")]
 use std::{
     collections::BTreeMap,
     ops::{Range, RangeInclusive},
     sync::RwLock,
 };
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(not(feature = "std"))]
+use core::ops::{Range, RangeInclusive};
+#[cfg(not(feature = "std"))]
+use spin::RwLock;
 
 /// Groups blockchain state storage and bucket usage cache together to ensure
 /// atomic consistency between the two related data structures.
@@ -102,8 +111,14 @@ pub struct MemStore {
 impl Clone for MemStore {
     fn clone(&self) -> Self {
         Self {
+            #[cfg(feature = "std")]
             state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
+            #[cfg(not(feature = "std"))]
+            state: RwLock::new(self.state.read().clone()),
+            #[cfg(feature = "std")]
             trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
+            #[cfg(not(feature = "std"))]
+            trie: RwLock::new(self.trie.read().clone()),
         }
     }
 }
@@ -133,7 +148,10 @@ impl MemStore {
     ///
     /// * `updates` - Batch of state changes to apply
     pub fn update_state(&self, updates: StateUpdates) {
+        #[cfg(feature = "std")]
         let mut state = self.state.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state.write();
 
         for (key, (old_value, new_value)) in updates.data {
             // Update used_slot information for data buckets only
@@ -168,7 +186,10 @@ impl MemStore {
     ///
     /// * `updates` - Batch of trie node commitment changes to apply
     pub fn update_trie(&self, updates: TrieUpdates) {
+        #[cfg(feature = "std")]
         let mut trie = self.trie.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut trie = self.trie.write();
         for (node_id, (_, new_val)) in updates {
             trie.insert(node_id, new_val);
         }
@@ -182,7 +203,10 @@ impl StateReader for MemStore {
     type Error = &'static str;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+        #[cfg(feature = "std")]
         let val = self.state.read().unwrap().kvs.get(&key).cloned();
+        #[cfg(not(feature = "std"))]
+        let val = self.state.read().kvs.get(&key).cloned();
         Ok(val)
     }
 
@@ -190,19 +214,32 @@ impl StateReader for MemStore {
         &self,
         range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Ok(self
+        #[cfg(feature = "std")]
+        let result = self
             .state
             .read()
             .unwrap()
             .kvs
             .range(range)
             .map(|(k, v)| (*k, v.clone()))
-            .collect())
+            .collect();
+        #[cfg(not(feature = "std"))]
+        let result = self
+            .state
+            .read()
+            .kvs
+            .range(range)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        Ok(result)
     }
 
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
+        #[cfg(feature = "std")]
         let state = self.state.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.read();
 
         let mut meta = match state.kvs.get(&key) {
             Some(v) => v.try_into()?,
@@ -217,7 +254,10 @@ impl StateReader for MemStore {
             return Ok(0);
         }
 
+        #[cfg(feature = "std")]
         let state = self.state.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        let state = self.state.read();
         Ok(*state.used_slots.get(&bucket_id).unwrap_or(&0))
     }
 
@@ -233,26 +273,44 @@ impl TrieReader for MemStore {
     type Error = &'static str;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        Ok(self
+        #[cfg(feature = "std")]
+        let result = self
             .trie
             .read()
             .unwrap()
             .get(&node_id)
             .copied()
-            .unwrap_or_else(|| default_commitment(node_id)))
+            .unwrap_or_else(|| default_commitment(node_id));
+        #[cfg(not(feature = "std"))]
+        let result = self
+            .trie
+            .read()
+            .get(&node_id)
+            .copied()
+            .unwrap_or_else(|| default_commitment(node_id));
+        Ok(result)
     }
 
     fn node_entries(
         &self,
         range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Ok(self
+        #[cfg(feature = "std")]
+        let result = self
             .trie
             .read()
             .unwrap()
             .range(range)
             .map(|(k, v)| (*k, *v))
-            .collect())
+            .collect();
+        #[cfg(not(feature = "std"))]
+        let result = self
+            .trie
+            .read()
+            .range(range)
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        Ok(result)
     }
 }
 

@@ -12,6 +12,11 @@
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
 use banderwagon::{try_reduce_to_element, Element};
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 /// Common Reference String for the Pedersen commitment scheme.
 #[allow(non_snake_case)]
 #[derive(Debug, Clone)]
@@ -127,12 +132,28 @@ impl CRS {
     ///
     /// This is a critical security check to ensure the CRS has full rank.
     /// Duplicate points would compromise the binding property of commitments.
+    #[cfg(feature = "std")]
     fn assert_dedup(points: &[Element]) {
         use std::collections::HashSet;
         let mut map = HashSet::new();
         for point in points {
             let value_is_new = map.insert(point.to_bytes());
             assert!(value_is_new, "crs has duplicated points")
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn assert_dedup(points: &[Element]) {
+        // For no-std, we use a simpler O(n²) deduplication check
+        // This is less efficient but doesn't require std::collections::HashSet
+        for i in 0..points.len() {
+            for j in (i + 1)..points.len() {
+                assert_ne!(
+                    points[i].to_bytes(),
+                    points[j].to_bytes(),
+                    "crs has duplicated points"
+                );
+            }
         }
     }
 
@@ -151,7 +172,7 @@ impl CRS {
     }
 }
 
-impl std::ops::Index<usize> for CRS {
+impl core::ops::Index<usize> for CRS {
     type Output = Element;
 
     fn index(&self, index: usize) -> &Self::Output {

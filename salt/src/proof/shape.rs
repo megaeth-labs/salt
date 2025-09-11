@@ -10,8 +10,15 @@
 //! - **Main Trie**: 4-level, 256-ary tree with 16,777,216 leaf nodes (buckets)  
 //! - **Bucket Subtrees**: Dynamic trees within buckets that can expand from 1-5 levels
 
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+
+#[cfg(not(feature = "std"))]
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
+#[cfg(feature = "std")]
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
@@ -52,14 +59,18 @@ use crate::{
 ///    child commitments are needed at each level for verification.
 pub(crate) fn parents_and_points(
     salt_keys: &[SaltKey],
-    levels: &FxHashMap<BucketId, u8>,
+    levels: &BTreeMap<BucketId, u8>,
 ) -> (
     BTreeMap<NodeId, BTreeSet<usize>>,
     BTreeMap<NodeId, BTreeSet<usize>>,
 ) {
-    salt_keys
-        .par_iter()
-        .map(|salt_key| {
+    let result = {
+        #[cfg(feature = "parallel")]
+        let iter = salt_keys.par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let iter = salt_keys.iter();
+
+        iter.map(|salt_key| {
             let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let mut slot_position_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let bucket_id = salt_key.bucket_id();
@@ -142,18 +153,29 @@ pub(crate) fn parents_and_points(
 
             (internal_nodes, slot_position_nodes)
         })
-        .reduce(
-            || (BTreeMap::new(), BTreeMap::new()),
-            |mut acc, (internal_map, slot_map)| {
-                for (node_id, positions) in internal_map {
-                    acc.0.entry(node_id).or_default().extend(positions);
-                }
-                for (node_id, positions) in slot_map {
-                    acc.1.entry(node_id).or_default().extend(positions);
-                }
-                acc
-            },
-        )
+        .collect::<Vec<_>>()
+    };
+
+    // Combine all results manually since reduce isn't available without parallel
+    let mut combined_internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
+    let mut combined_slot_position_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
+
+    for (internal_map, slot_map) in result {
+        for (node_id, positions) in internal_map {
+            combined_internal_nodes
+                .entry(node_id)
+                .or_default()
+                .extend(positions);
+        }
+        for (node_id, positions) in slot_map {
+            combined_slot_position_nodes
+                .entry(node_id)
+                .or_default()
+                .extend(positions);
+        }
+    }
+
+    (combined_internal_nodes, combined_slot_position_nodes)
 }
 
 /// Encodes bucket tree level information into a main trie node ID.
