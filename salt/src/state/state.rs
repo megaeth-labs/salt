@@ -470,7 +470,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This operation clears the existing bucket layout and reinserts all entries
     /// using the new bucket metadata (typically with increased capacity or changed
     /// nonce).
-    fn shi_rehash(
+    ///
+    /// ## Data Loss Prevention
+    ///
+    /// If the new capacity is smaller than the number of existing entries in the bucket,
+    /// the function returns early without making any changes to prevent data loss.
+    pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
         new_nonce: u32,
@@ -492,13 +497,20 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
 
-        // Step 2: Convert to plain key-value pairs for reinsertion
+        // Step 2: Validate that new capacity can accommodate all existing entries
+        if new_capacity < old_bucket.len() as u64 {
+            // Cannot fit all existing entries in the new capacity.
+            // Return early without making changes to prevent data loss.
+            return Ok(());
+        }
+
+        // Step 3: Convert to plain key-value pairs for reinsertion
         let plain_kv_pairs = old_bucket
             .values()
             .map(|salt_val| (salt_val.key().to_vec(), salt_val.value().to_vec()))
             .collect::<BTreeMap<_, _>>();
 
-        // Step 3: Reinsert plain key-value pairs in reverse lexicographic order.
+        // Step 4: Reinsert plain key-value pairs in reverse lexicographic order.
         // So we use the simplified SHI insertion algorithm without key comparisons.
         let mut new_bucket = BTreeMap::new();
         for (plain_key, plain_val) in plain_kv_pairs.iter().rev() {
@@ -521,7 +533,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
 
-        // Step 4: Record state changes by comparing slot-by-slot differences
+        // Step 5: Record state changes by comparing slot-by-slot differences
         for slot in 0..old_metadata.capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
             let old_value = old_bucket.get(&salt_key);
@@ -906,24 +918,29 @@ mod tests {
 
         // Verify metadata after rehash
         let new_meta = state.metadata(TEST_BUCKET, false).unwrap();
-        assert_eq!(new_meta.nonce, new_nonce, "Nonce should be updated");
-        assert_eq!(
-            new_meta.capacity, new_capacity,
-            "Capacity should be updated"
-        );
+        if new_capacity < num_entries as u64 {
+            assert!(rehash_updates.data.is_empty());
+            assert_eq!(old_meta, new_meta, "Metadata should stay unchanged");
+        } else {
+            assert_eq!(new_meta.nonce, new_nonce, "Nonce should be updated");
+            assert_eq!(
+                new_meta.capacity, new_capacity,
+                "Capacity should be updated"
+            );
+        }
 
         // Verify all entries are preserved with correct values
         verify_all_keys_present(
             &mut state,
             TEST_BUCKET,
-            new_nonce,
-            new_capacity,
+            new_meta.nonce,
+            new_meta.capacity,
             &keys,
             &vals,
         );
 
         // Verify StateUpdates contains metadata change
-        if old_nonce != new_nonce || old_capacity != new_capacity {
+        if old_nonce != new_meta.nonce || old_capacity != new_meta.capacity {
             let meta_key = bucket_metadata_key(TEST_BUCKET);
             assert!(
                 rehash_updates.data.contains_key(&meta_key),
@@ -1779,6 +1796,7 @@ mod tests {
             (0, 8, 1, 8, 5),  // Nonce change only
             (0, 8, 0, 16, 6), // Capacity expansion
             (0, 16, 0, 8, 5), // Capacity contraction (reduced entries to fit)
+            (0, 16, 0, 8, 9), // Capacity contraction (insufficient space)
             (0, 8, 1, 16, 6), // Both nonce and capacity change
             (0, 8, 0, 8, 6),  // Near-full bucket
         ];
