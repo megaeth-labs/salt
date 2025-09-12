@@ -40,10 +40,9 @@ pub fn bucket_id(key: &[u8]) -> BucketId {
 }
 
 #[cfg(feature = "narrow_bucket_hash")]
-const BUCKET_MASK: u64 = 2;
-#[cfg(feature = "narrow_bucket_hash")]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
+    const BUCKET_MASK: u64 = 2;
     (hash(key) % BUCKET_MASK as u64 + NUM_META_BUCKETS as u64) as BucketId
 }
 
