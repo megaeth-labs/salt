@@ -423,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "narrow_bucket_hash"))]
     fn test_witness_exist_or_not_exist() {
         // Tests three main scenarios for plain key proof generation:
         //
@@ -718,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "narrow_bucket_hash"))]
     fn test_witness_in_loop_slot_id() {
         let store = MemStore::new();
         let root = setup_state_with_keys(select_test_keys(vec![9]), &store);

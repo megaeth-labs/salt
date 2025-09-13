@@ -341,6 +341,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    #[cfg(not(feature = "narrow_bucket_hash"))]
     fn get_mini_trie() {
         let kvs = create_random_kv_pairs(1000);
 

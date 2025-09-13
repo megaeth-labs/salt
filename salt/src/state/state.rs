@@ -40,7 +40,6 @@
 //! DOI: [10.5555/1333875.1334201](https://dl.acm.org/doi/10.5555/1333875.1334201)
 
 use super::{hasher, updates::StateUpdates};
-use crate::constant::MIN_BUCKET_SIZE;
 use crate::{
     constant::{BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
     traits::StateReader,
@@ -463,26 +462,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         // the deletion. The table is now in the same state as if the
                         // deleted key had never been inserted (history independence).
                         self.update_value(out_updates, salt_key, Some(del_value), None);
-
-                        // Only shrink bucket for testing purposes. Immediate shrinking may cause
-                        // instability if usage rebounds.
-                        #[cfg(feature = "narrow_bucket_hash")]
-                        if metadata.capacity > MIN_BUCKET_SIZE as u64 {
-                            let used = metadata.used.unwrap() - 1;
-                            let new_capacity = metadata.capacity / 2;
-                            if used == new_capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
-                                debug!(
-                                    "bucket_id {} capacity shrink from {} to {}",
-                                    bucket_id, metadata.capacity, new_capacity
-                                );
-                                self.shi_rehash(
-                                    bucket_id,
-                                    metadata.nonce,
-                                    new_capacity,
-                                    out_updates,
-                                )?;
-                            }
-                        }
                         return Ok(());
                     }
                 }
@@ -496,7 +475,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This operation clears the existing bucket layout and reinserts all entries
     /// using the new bucket metadata (typically with increased capacity or changed
     /// nonce).
-    fn shi_rehash(
+    pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
         new_nonce: u32,

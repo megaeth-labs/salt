@@ -716,6 +716,7 @@ mod tests {
     /// both existing keys and non-existent keys. Verifies that existing keys
     /// return their values and non-existent keys return None.
     #[test]
+    #[cfg(not(feature = "narrow_bucket_hash"))]
     fn test_multi_insert_proof() {
         let mut rng = StdRng::seed_from_u64(42);
 

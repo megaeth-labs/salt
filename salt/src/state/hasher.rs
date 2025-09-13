@@ -414,6 +414,7 @@ pub mod tests {
     /// Verifies that all keys in SAME_BUCKET_TEST_KEYS actually hash to the same bucket.
     /// This ensures the test data integrity for bucket collision tests.
     #[test]
+    #[cfg(not(feature = "narrow_bucket_hash"))]
     fn test_same_bucket_keys() {
         let keys = get_same_bucket_test_keys();
 
