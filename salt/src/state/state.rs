@@ -226,6 +226,25 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(state_updates)
     }
 
+    /// Try our best to get the number of used slots in a bucket.
+    ///
+    /// This method first checks the local `bucket_used_cache`. If not found in cache,
+    /// it falls back to querying the underlying store via `bucket_used_slots()`.
+    ///
+    /// # Arguments
+    /// * `bucket_id` - The bucket ID to get the usage count for
+    ///
+    /// # Returns
+    /// * `Ok(count)` - The number of used slots in the bucket
+    /// * `Err(error)` - If the store query fails
+    fn try_bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Store::Error> {
+        if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
+            Ok(used)
+        } else {
+            self.store.bucket_used_slots(bucket_id)
+        }
+    }
+
     /// Retrieves bucket metadata for the given bucket ID.
     ///
     /// # Arguments
@@ -234,6 +253,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///   avoids unnecessary `bucket_used_slots()` calls to the underlying storage
     ///   backend when the usage count is not needed (e.g., for read operations like
     ///   `plain_value` that only require `nonce` and `capacity`).
+    ///
+    /// # Invariant
+    /// If `need_used` is `true`, the returned `BucketMeta.used` field is guaranteed
+    /// to be `Some(_)`. If `need_used` is `false`, the `used` field will be `None`.
     fn metadata(
         &mut self,
         bucket_id: BucketId,
@@ -241,38 +264,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ) -> Result<BucketMeta, Store::Error> {
         let metadata_key = bucket_metadata_key(bucket_id);
 
-        // Check cache first
-        let meta = if let Some(cached_value) = self.cache.get(&metadata_key) {
+        // Get nonce + capacity (either from cache or store)
+        let mut meta = if let Some(cached_value) = self.cache.get(&metadata_key) {
             // Found in cache - decode it
-            let mut meta = match cached_value {
+            match cached_value {
                 Some(v) => v.try_into().expect("Failed to decode bucket metadata"),
                 None => BucketMeta::default(),
-            };
-
-            // Cached value doesn't have 'used' field, populate if needed
-            if need_used {
-                meta.used = Some(
-                    if let Some(&used) = self.bucket_used_cache.get(&bucket_id) {
-                        used
-                    } else {
-                        self.store.bucket_used_slots(bucket_id)?
-                    },
-                );
             }
-            meta
         } else {
             // Common path: Not in cache, get from store (more efficient than self.value())
-            let mut meta = self.store.metadata(bucket_id)?;
-
-            if need_used {
-                // Look up cache for the latest usage count
-                if let Some(&cached_used) = self.bucket_used_cache.get(&bucket_id) {
-                    meta.used = Some(cached_used);
-                }
-            } else {
-                // Clear "used" if not needed
-                meta.used = None;
-            }
+            let meta = self.store.metadata(bucket_id)?;
 
             // Cache the metadata only if requested
             if self.cache_read {
@@ -290,6 +291,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 );
             }
             meta
+        };
+
+        // Get usage count only if requested
+        meta.used = if need_used {
+            Some(self.try_bucket_used_slots(bucket_id)?)
+        } else {
+            None
         };
 
         Ok(meta)
@@ -322,7 +330,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
 
         // Step 2: Fall through to standard SHI upsert algorithm
-        let metadata = self.metadata(bucket_id, true)?;
+        let metadata = self.metadata(bucket_id, false)?;
         let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
         // Linear probe through the bucket, creating a displacement chain
@@ -358,7 +366,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 // Found empty slot - insert the key and complete
                 self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
-                if let Some(mut used) = metadata.used {
+                // Now we need the number of used slots to decide bucket expansion
+                if let Ok(mut used) = self.try_bucket_used_slots(bucket_id) {
                     // Update the bucket usage cache.
                     used += 1;
                     self.bucket_used_cache.insert(bucket_id, used);
@@ -421,13 +430,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         key: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        let metadata = self.metadata(bucket_id, true)?;
+        let metadata = self.metadata(bucket_id, false)?;
         if let Some((slot, salt_val)) =
             self.shi_find(bucket_id, metadata.nonce, metadata.capacity, key)?
         {
-            // Update the bucket usage cache
-            self.bucket_used_cache
-                .insert(bucket_id, metadata.used.unwrap() - 1);
+            // Update bucket usage cache only if the old value is already cached
+            if let Some(cached_used) = self.bucket_used_cache.get_mut(&bucket_id) {
+                *cached_used -= 1;
+            }
 
             // Slot compaction: retrace the displacement chain created by shi_upsert.
             // When shi_upsert displaced keys to make room, deletion must undo this
@@ -1785,6 +1795,51 @@ mod tests {
         let salt_key = SaltKey::from((TEST_BUCKET, probe(hashed, 0, new_metadata.capacity)));
         let retrieved = state.value(salt_key).unwrap().unwrap();
         assert_eq!(retrieved.value(), [99u8; 32].as_slice());
+    }
+
+    #[test]
+    fn test_shi_delete_update_usage_count() {
+        use crate::proof::salt_witness::create_witness;
+
+        for cache_entry_exists in [false, true] {
+            // Create a witness with two known slots: an existing key and an empty
+            // slot next to it
+            let existing_key = [1u8; 32];
+            let hashed = hasher::hash_with_nonce(&existing_key, 0);
+            let slot = probe(hashed, 0, 4);
+
+            let witness = create_witness(
+                TEST_BUCKET,
+                Some(BucketMeta {
+                    nonce: 0,
+                    capacity: 4,
+                    used: None,
+                }),
+                vec![
+                    (slot, Some(SaltValue::new(&existing_key, &[2u8; 32]))),
+                    ((slot + 1) % 4, None),
+                ],
+            );
+
+            let mut state = EphemeralSaltState::new(&witness);
+            let mut updates = StateUpdates::default();
+
+            if cache_entry_exists {
+                state.bucket_used_cache.insert(TEST_BUCKET, 1);
+            }
+
+            // shi_delete algorithm should complete successfully
+            assert!(state
+                .shi_delete(TEST_BUCKET, &existing_key, &mut updates)
+                .is_ok());
+
+            // and update the bucket used cache iff the old value is already cached
+            if cache_entry_exists {
+                assert_eq!(state.bucket_used_cache.get(&TEST_BUCKET), Some(&0));
+            } else {
+                assert!(state.bucket_used_cache.is_empty());
+            }
+        }
     }
 
     /// Comprehensive test for shi_rehash method covering various scenarios.
