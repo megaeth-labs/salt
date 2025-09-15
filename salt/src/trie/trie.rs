@@ -77,12 +77,14 @@ type DeltaList = Vec<(NodeId, Element)>;
 /// - Call `finalize()` once to compute the final state root
 /// - Alternatively, use `update_fin()` for single-shot update and finalization
 #[derive(Debug)]
-pub struct StateRoot<'a, Store> {
-    /// Storage backend providing access to both trie nodes and state data.
-    ///
-    /// Must implement both `TrieReader` for accessing node commitments and
-    /// `StateReader` for accessing bucket entries and metadata.
-    store: &'a Store,
+pub struct StateRoot<'a, S, T> {
+    /// Storage backend that implements `StateReader` to provide access to bucket
+    /// entries and metadata.
+    state_store: &'a S,
+
+    /// Storage backend that implements `TrieReader` to provide access to trie node
+    /// commitments.
+    trie_store: &'a T,
 
     /// Accumulates commitment changes during the update phase.
     ///
@@ -116,14 +118,26 @@ pub struct StateRoot<'a, Store> {
     min_par_batch_size: usize,
 }
 
-impl<'a, Store> StateRoot<'a, Store>
+impl<'a, Store> StateRoot<'a, Store, Store>
 where
-    Store: TrieReader + StateReader<Error = <Store as TrieReader>::Error>,
+    Store: StateReader + TrieReader<Error = <Store as StateReader>::Error>,
 {
-    /// Create a [`StateRoot`] object with the given storage backend.
+    /// Create a [`StateRoot`] object with a combined storage backend.
     pub fn new(store: &'a Store) -> Self {
+        Self::new_with_stores(store, store)
+    }
+}
+
+impl<'a, S, T> StateRoot<'a, S, T>
+where
+    S: StateReader,
+    T: TrieReader<Error = S::Error>,
+{
+    /// Create a [`StateRoot`] object with separate state and trie storage backends.
+    pub fn new_with_stores(state_store: &'a S, trie_store: &'a T) -> Self {
         Self {
-            store,
+            state_store,
+            trie_store,
             updates: HashMap::new(),
             cache: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
@@ -147,10 +161,7 @@ where
     /// Changes are accumulated internally until `finalize()` is called to complete
     /// the computation. This avoids redundant updates of upper-level node commitments
     /// when processing sequential state updates.
-    pub fn update(
-        &mut self,
-        state_updates: StateUpdates,
-    ) -> Result<(), <Store as TrieReader>::Error> {
+    pub fn update(&mut self, state_updates: StateUpdates) -> Result<(), <T as TrieReader>::Error> {
         for (node_id, (old, new)) in self.update_bucket_subtrees(state_updates)? {
             self.cache.insert(node_id, new);
             self.updates
@@ -166,7 +177,7 @@ where
     /// This method implements the "finalize phase" by propagating all accumulated
     /// changes from the `updates` cache through the upper main trie levels (L2-L0)
     /// to compute the final state root commitment.
-    pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+    pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <T as TrieReader>::Error> {
         let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
         let root_hash = self.update_main_trie(&mut trie_updates)?;
         for (node_id, (_, new)) in &trie_updates {
@@ -183,7 +194,7 @@ where
     pub fn update_fin(
         &mut self,
         state_updates: StateUpdates,
-    ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+    ) -> Result<(ScalarBytes, TrieUpdates), <T as TrieReader>::Error> {
         self.update(state_updates)?;
         self.finalize()
     }
@@ -212,7 +223,7 @@ where
     fn update_main_trie(
         &self,
         trie_updates: &mut TrieUpdates,
-    ) -> Result<ScalarBytes, <Store as TrieReader>::Error> {
+    ) -> Result<ScalarBytes, <T as TrieReader>::Error> {
         // Filter out subtree nodes to get commitment updates at L3
         let mut level_updates = trie_updates
             .iter()
@@ -237,7 +248,7 @@ where
         let root_commitment = if let Some((0, (_, c))) = trie_updates.last() {
             *c
         } else {
-            self.store.commitment(0)?
+            self.trie_store.commitment(0)?
         };
 
         Ok(hash_commitment(root_commitment))
@@ -264,7 +275,7 @@ where
     fn update_bucket_subtrees(
         &self,
         state_updates: StateUpdates,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<TrieUpdates, <T as TrieReader>::Error> {
         let mut uncomputed_updates = vec![];
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
 
@@ -359,11 +370,11 @@ where
                         }
                         std::cmp::Ordering::Equal => {}
                     }
-                } else if self.store.get_subtree_levels(bucket_id)? > 1 {
+                } else if self.state_store.get_subtree_levels(bucket_id)? > 1 {
                     // KV changes in expanded bucket (capacity unchanged)
                     need_handle_buckets.insert(bucket_id);
                     let bucket_capacity = (TRIE_WIDTH as NodeId)
-                        .pow(self.store.get_subtree_levels(bucket_id)? as u32);
+                        .pow(self.state_store.get_subtree_levels(bucket_id)? as u32);
                     subtree_change_info.insert(
                         bucket_id,
                         SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
@@ -573,7 +584,7 @@ where
         &self,
         state_updates: &StateUpdates,
         subtree_change_info: &BTreeMap<BucketId, SubtrieChangeInfo>,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<TrieUpdates, <T as TrieReader>::Error> {
         // Sort the state updates by slot IDs
         let mut state_updates = state_updates.data.iter().collect::<Vec<_>>();
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
@@ -642,7 +653,7 @@ where
     fn update_internal_nodes(
         &self,
         mut child_updates: TrieUpdates,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<TrieUpdates, <T as TrieReader>::Error> {
         // Sort by position within parent vector commitments for cache locality
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
@@ -726,7 +737,7 @@ where
         &self,
         mut commitment_deltas: DeltaList,
         task_size: usize,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<TrieUpdates, <T as TrieReader>::Error> {
         // Sort deltas by NodeId to group changes for the same node together
         // This enables efficient accumulation and ensures deterministic ordering
         commitment_deltas.par_sort_unstable_by_key(|&(node_id, _)| node_id);
@@ -784,7 +795,7 @@ where
         &self,
         deltas: &DeltaList,
         chunk_range: &Range<usize>,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+    ) -> Result<TrieUpdates, <T as TrieReader>::Error> {
         let chunk_deltas = &deltas[chunk_range.clone()];
         let estimated_nodes = chunk_deltas.len().min(chunk_range.len());
         let mut accumulated_elements = Vec::with_capacity(estimated_nodes);
@@ -825,16 +836,16 @@ where
 
     /// Retrieves the commitment of a node from the trie or the cache.
     #[inline(always)]
-    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, <Store as TrieReader>::Error> {
+    fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, <T as TrieReader>::Error> {
         if let Some(c) = self.cache.get(&node_id) {
             Ok(*c)
         } else {
-            self.store.commitment(node_id)
+            self.trie_store.commitment(node_id)
         }
     }
 }
 
-impl StateRoot<'_, EmptySalt> {
+impl StateRoot<'_, EmptySalt, EmptySalt> {
     /// Reconstructs the entire trie from scratch using data stored in the database.
     ///
     /// This method reads all bucket metadata and key-value pairs from storage and
