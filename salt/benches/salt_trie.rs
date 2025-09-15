@@ -255,7 +255,7 @@ impl MockExpandedBuckets {
 }
 
 impl TrieReader for MockExpandedBuckets {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(default_commitment(node_id))
@@ -270,7 +270,7 @@ impl TrieReader for MockExpandedBuckets {
 }
 
 impl StateReader for MockExpandedBuckets {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
@@ -301,7 +301,9 @@ impl StateReader for MockExpandedBuckets {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported in MockExpandedBuckets")
+        Err(SaltError::UnsupportedOperation {
+            operation: "MockExpandedBuckets::plain_value_fast",
+        })
     }
 }
 
@@ -367,7 +369,7 @@ impl MockRebuildReader {
 }
 
 impl StateReader for MockRebuildReader {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         // Not used by rebuild - return None for all queries
@@ -418,7 +420,9 @@ impl StateReader for MockRebuildReader {
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         // Not used by rebuild - return error
-        Err("plain_value_fast not supported in MockRebuildReader")
+        Err(SaltError::UnsupportedOperation {
+            operation: "MockRebuildReader::plain_value_fast",
+        })
     }
 }
 
