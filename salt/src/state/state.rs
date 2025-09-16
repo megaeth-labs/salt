@@ -229,18 +229,20 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(state_updates)
     }
 
-    /// Try our best to get the number of used slots in a bucket.
+    /// Gets the current number of used slots in a bucket, accounting for cached modifications.
     ///
-    /// This method computes the current usage by adding any tracked deltas from
-    /// `usage_count_delta` to the base count from the underlying store.
+    /// **Important**: Always use this method instead of calling the store's `bucket_used_slots()`
+    /// directly to avoid reading stale data. This method computes the current usage by adding
+    /// any tracked deltas from `usage_count_delta` to the base count from the underlying store,
+    /// ensuring you get the most up-to-date count that reflects all cached insertions and deletions.
     ///
     /// # Arguments
     /// * `bucket_id` - The bucket ID to get the usage count for
     ///
     /// # Returns
-    /// * `Ok(count)` - The number of used slots in the bucket
+    /// * `Ok(count)` - The current number of used slots in the bucket
     /// * `Err(error)` - If the store query fails
-    fn try_bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Store::Error> {
+    fn usage_count(&self, bucket_id: BucketId) -> Result<u64, Store::Error> {
         let base_count = self.store.bucket_used_slots(bucket_id)?;
         let result = base_count as i64 + self.usage_count_delta.get(&bucket_id).unwrap_or(&0);
         Ok(result
@@ -294,7 +296,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 
         // Get usage count only if requested
         meta.used = if need_used {
-            Some(self.try_bucket_used_slots(bucket_id)?)
+            Some(self.usage_count(bucket_id)?)
         } else {
             // Clear `used` if not needed (must not return a stale base count)
             None
@@ -307,7 +309,15 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// This method implements the strongly history-independent hash table insertion
     /// algorithm, which maintains deterministic storage layout regardless of insertion
-    /// order. May trigger bucket resizing when load factor exceeds 80%.
+    /// order. May trigger bucket resizing when load factor exceeds a certain threshold.
+    ///
+    /// # Required Information
+    ///
+    /// For this method to succeed, the underlying store must provide:
+    /// - **Bucket metadata**: `nonce` and `capacity` for the target bucket
+    /// - **Slot access**: Ability to read/write individual slots within the bucket
+    /// - **Usage count**: Only needed for bucket resizing decisions when inserting
+    ///   new keys. Updating existing keys does not require usage count information.
     fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
@@ -369,7 +379,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 // Update the usage count delta for this insertion
                 *self.usage_count_delta.entry(bucket_id).or_insert(0) += 1;
 
-                if let Ok(used) = self.try_bucket_used_slots(bucket_id) {
+                if let Ok(used) = self.usage_count(bucket_id) {
                     // Resize the bucket if load factor threshold exceeded
                     if used > metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                         let new_capacity = compute_resize_capacity(metadata.capacity, used);
@@ -422,6 +432,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// Implements deletion with slot compaction to maintain the SHI property.
     /// After removing the target key, suitable entries are shifted to fill gaps
     /// and preserve the deterministic layout.
+    ///
+    /// # Required Information
+    ///
+    /// For this method to succeed, the underlying store must provide:
+    /// - **Bucket metadata**: `nonce` and `capacity` for the target bucket
+    /// - **Slot access**: Ability to read/write individual slots within the bucket
+    ///   for key lookup and slot compaction
+    /// - **Usage count**: Not required (deletion only updates internal delta tracking)
     fn shi_delete(
         &mut self,
         bucket_id: BucketId,
