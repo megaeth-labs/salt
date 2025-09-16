@@ -395,7 +395,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // 2. It can only delay bucket resizing (temporary deviation from the
                     //    canonical state)
                     // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal capacity, degrading performance but not correctness
+                    //    its ideal load factor, degrading performance but not correctness
                     //
                     // ## Self-Healing Mechanism
                     // When a legitimate sequencer performs the next insertion, it will:

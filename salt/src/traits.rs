@@ -71,8 +71,10 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// This method looks up the bucket's metadata using the bucket ID. If no metadata
     /// entry exists, it uses default values for `nonce` (0) and `capacity` (MIN_BUCKET_SIZE).
-    /// Regardless of whether metadata is stored or default, the `used` field is **always**
-    /// populated with the actual number of occupied slots.
+    /// The `used` field behavior is implementation-defined:
+    /// - Full node implementations may populate it with the actual number of occupied slots
+    /// - Witness implementations may leave it as `None` if they lack sufficient information
+    /// - For reliable slot counts, use the `bucket_used_slots()` method instead
     ///
     /// # Arguments
     ///
