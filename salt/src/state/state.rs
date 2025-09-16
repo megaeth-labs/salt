@@ -1422,6 +1422,46 @@ mod tests {
         }
     }
 
+    /// Tests the usage_count() method covering all delta scenarios.
+    #[test]
+    fn test_usage_count() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // Test 1: Empty bucket (base=0, delta=0) → 0
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
+
+        // Test 2: Add base data (base=1, delta=0) → 1
+        let test_key = SaltKey::from((TEST_BUCKET, 0u64));
+        store.update_state(StateUpdates {
+            data: [(
+                test_key,
+                (None, Some(SaltValue::new(&[1u8; 32], &[2u8; 32]))),
+            )]
+            .into(),
+        });
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 1);
+
+        // Test 3: Positive delta (base=1, delta=+5) → 6
+        state.usage_count_delta.insert(TEST_BUCKET, 5);
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 6);
+
+        // Test 4: Negative delta within bounds (base=1, delta=-1) → 0
+        state.usage_count_delta.insert(TEST_BUCKET, -1);
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
+    }
+
+    /// Tests that usage_count() panics when the result would be negative.
+    #[test]
+    #[should_panic(expected = "Bucket usage count became negative")]
+    fn test_usage_count_negative_panic() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        state.usage_count_delta.insert(TEST_BUCKET, -1); // base=0, delta=-1 → panic
+        let _ = state.usage_count(TEST_BUCKET);
+    }
+
     /// Comprehensive test for the metadata() method covering all scenarios.
     ///
     /// - **Default metadata**: Tests retrieval when no metadata is stored (returns `BucketMeta::default()`)
@@ -1429,6 +1469,7 @@ mod tests {
     /// - **Stored metadata**: Tests custom metadata retrieval (nonce=123, capacity=512)
     /// - **Non-zero usage counting**: Adds data to bucket and verifies usage count reflects actual entries
     /// - **Cache behavior**: Tests that `usage_count_delta` is used in usage calculations
+    /// - **Used field reset**: Verifies `used` field is reset to `None` when `need_used=false`, even if store has it populated
     #[test]
     fn test_metadata() {
         let store = MemStore::new();
@@ -1481,6 +1522,13 @@ mod tests {
         assert_eq!(meta.nonce, 123);
         assert_eq!(meta.capacity, 512);
         assert_eq!(meta.used, Some(100)); // 1 (base) + 99 (delta) = 100
+
+        // Test 6: Verify used field is always cleared when need_used=false
+        let store_meta = store.metadata(TEST_BUCKET).unwrap();
+        assert_eq!(store_meta.used, Some(1));
+
+        let meta_without_used = state.metadata(TEST_BUCKET, false).unwrap();
+        assert!(meta_without_used.used.is_none());
     }
 
     /// Test insertion order independence with small bucket and no resize.
@@ -1809,7 +1857,7 @@ mod tests {
 
     /// Tests shi_delete when the bucket usage count is unknown (incomplete witness).
     #[test]
-    fn test_shi_delete_update_usage_count() {
+    fn test_shi_delete_without_usage_count() {
         use crate::proof::salt_witness::create_witness;
 
         // Create a witness with two known slots: an existing key and an empty
