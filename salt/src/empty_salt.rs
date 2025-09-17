@@ -16,7 +16,7 @@ use std::ops::{Range, RangeInclusive};
 pub struct EmptySalt;
 
 impl StateReader for EmptySalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
         Ok(None)
@@ -37,12 +37,14 @@ impl StateReader for EmptySalt {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("Empty salt has no keys")
+        Err(SaltError::UnsupportedOperation {
+            operation: "EmptySalt::plain_value_fast",
+        })
     }
 }
 
 impl TrieReader for EmptySalt {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         Ok(default_commitment(node_id))

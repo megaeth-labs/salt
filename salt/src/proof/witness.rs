@@ -221,7 +221,7 @@ impl Witness {
 // This allows the proof to be used as a state reader during verification,
 // providing only the data that was included in the proof
 impl StateReader for Witness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, <Self as StateReader>::Error> {
         self.salt_witness.value(key)
@@ -249,13 +249,13 @@ impl StateReader for Witness {
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
         match self.direct_lookup_tbl.get(plain_key) {
             Some(salt_key) => Ok(*salt_key),
-            None => Err("Plain key not in witness"),
+            None => Err(SaltError::NotInWitness { what: "Plain key" }),
         }
     }
 }
 
 impl TrieReader for Witness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         self.salt_witness.commitment(node_id)

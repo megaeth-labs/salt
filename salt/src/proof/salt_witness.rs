@@ -123,7 +123,7 @@ impl SaltWitness {
 }
 
 impl StateReader for SaltWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves a state value by key from the witness.
     ///
@@ -141,7 +141,7 @@ impl StateReader for SaltWitness {
         match self.kvs.get(&key) {
             Some(Some(value)) => Ok(Some(value.clone())), // Key exists with value
             Some(None) => Ok(None),                       // Key witnessed as non-existent
-            None => Err("Key not in witness"),            // Unknown - not witnessed
+            None => Err(SaltError::NotInWitness { what: "Key" }), // Unknown - not witnessed
         }
     }
 
@@ -161,7 +161,9 @@ impl StateReader for SaltWitness {
         &self,
         _range: RangeInclusive<SaltKey>,
     ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
+        Err(SaltError::UnsupportedOperation {
+            operation: "SaltWitness::Range queries",
+        })
     }
 
     /// Retrieves metadata for a specific bucket from the witness.
@@ -184,10 +186,13 @@ impl StateReader for SaltWitness {
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let metadata_key = bucket_metadata_key(bucket_id);
         match self.kvs.get(&metadata_key) {
-            Some(Some(salt_value)) => BucketMeta::try_from(salt_value.clone())
-                .map_err(|_| "Failed to decode metadata from SaltValue"),
-            Some(None) => Err("Metadata stored as None in witness - unexpected state"),
-            None => Err("Bucket metadata not available in witness"),
+            Some(Some(salt_value)) => {
+                BucketMeta::try_from(salt_value.clone()).map_err(|_| SaltError::InvalidFormat {
+                    message: "Failed to decode metadata from SaltValue",
+                })
+            }
+            Some(None) => unreachable!("Metadata should never be stored as None in witness"),
+            None => Err(SaltError::NotInWitness { what: "Metadata" }),
         }
     }
 
@@ -236,7 +241,9 @@ impl StateReader for SaltWitness {
     }
 
     fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-        Err("plain_value_fast not supported for SaltWitness")
+        Err(SaltError::UnsupportedOperation {
+            operation: "SaltWitness::plain_value_fast",
+        })
     }
 
     /// Retrieves the number of subtree levels for a bucket from the witness proof.
@@ -255,13 +262,15 @@ impl StateReader for SaltWitness {
             .proof
             .levels
             .get(&bucket_id)
-            .ok_or("Bucket root not in witness")?;
+            .ok_or(SaltError::NotInWitness {
+                what: "Bucket root",
+            })?;
         Ok(*num_levels as usize)
     }
 }
 
 impl TrieReader for SaltWitness {
-    type Error = &'static str;
+    type Error = SaltError;
 
     /// Retrieves the commitment for a specific trie node from the witness.
     ///
@@ -273,7 +282,7 @@ impl TrieReader for SaltWitness {
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         match self.proof.parents_commitments.get(&node_id) {
             Some(commitment) => Ok(commitment.0),
-            None => Err("Trie node not in witness"),
+            None => Err(SaltError::NotInWitness { what: "Trie node" }),
         }
     }
 
@@ -286,7 +295,9 @@ impl TrieReader for SaltWitness {
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Err("Range queries not supported for SaltWitness")
+        Err(SaltError::UnsupportedOperation {
+            operation: "SaltWitness::Range queries",
+        })
     }
 }
 
@@ -544,7 +555,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "Bucket metadata not available in witness"
+            SaltError::NotInWitness { what: "Metadata" }
         );
     }
 
@@ -658,7 +669,7 @@ mod tests {
         let witness = create_witness(bucket_id, None, vec![]);
         assert_eq!(
             witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Bucket metadata not available in witness"
+            SaltError::NotInWitness { what: "Metadata" }
         );
 
         // Test 2: Fully witnessed bucket
@@ -690,7 +701,7 @@ mod tests {
         let witness = create_witness(bucket_id, Some(meta), slots);
         assert_eq!(
             witness.bucket_used_slots(bucket_id).unwrap_err(),
-            "Key not in witness"
+            SaltError::NotInWitness { what: "Key" }
         );
 
         // Test 4: Empty bucket

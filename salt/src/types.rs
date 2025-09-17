@@ -34,6 +34,23 @@ pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
 }
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Unified error type for SALT operations.
+///
+/// This enum consolidates all string-based errors throughout the SALT codebase
+/// into a structured, type-safe error system using the `thiserror` crate.
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum SaltError {
+    #[error("Invalid data format: {message}")]
+    InvalidFormat { message: &'static str },
+
+    #[error("{what} not available in witness")]
+    NotInWitness { what: &'static str },
+
+    #[error("Operation '{operation}' not supported")]
+    UnsupportedOperation { operation: &'static str },
+}
 
 /// 24-bit bucket identifier (up to ~16M buckets).
 pub type BucketId = u32;
@@ -76,21 +93,31 @@ impl Default for BucketMeta {
 }
 
 impl TryFrom<&[u8]> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() != 12 {
-            return Err("BucketMeta requires exactly 12 bytes");
+            return Err(SaltError::InvalidFormat {
+                message: "BucketMeta requires exactly 12 bytes",
+            });
         }
         Ok(Self {
-            nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| "nonce error")?),
-            capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| "capacity error")?),
+            nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
+                SaltError::InvalidFormat {
+                    message: "Failed to parse nonce from bytes",
+                }
+            })?),
+            capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| {
+                SaltError::InvalidFormat {
+                    message: "Failed to parse capacity from bytes",
+                }
+            })?),
             used: None,
         })
     }
 }
 
 impl TryFrom<&SaltValue> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(value: &SaltValue) -> Result<Self, Self::Error> {
         Self::try_from(value.key())
     }
@@ -290,7 +317,7 @@ impl From<BucketMeta> for SaltValue {
 }
 
 impl TryFrom<SaltValue> for BucketMeta {
-    type Error = &'static str;
+    type Error = SaltError;
     fn try_from(value: SaltValue) -> Result<Self, Self::Error> {
         Self::try_from(value.key())
     }
