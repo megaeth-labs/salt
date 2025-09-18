@@ -699,9 +699,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 ///
 /// This implements linear probing for collision resolution in the SHI hash table,
 /// where `i` is used as an offset from the initial hash position.
+///
+/// # Overflow Safety
+/// The function is overflow-safe under practical capacity values.
 #[inline(always)]
 pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
-    ((hashed_key + i) % capacity) as SlotId
+    // Use `(hashed_key % capacity) + i` instead of `hashed_key + i` to prevent
+    // arithmetic overflow. Since `i < capacity` in all call sites and
+    // `hashed_key % capacity < capacity`, their sum is always less than `2 * capacity`,
+    // which is well within u64 bounds given the maximum capacity constraints.
+    ((hashed_key % capacity) + i) % capacity
 }
 
 /// Computes the probe distance for a given slot position.
@@ -1047,10 +1054,8 @@ mod tests {
             (42u64, 256u64),
             (1234567890u64, 512u64),
             (999u64, 1024u64),
-            // Large hash keys
-            (u64::MAX / 2, 512u64),
-            (0x8000_0000_0000_0000u64, 256u64), // Large power of 2
-            (0xFFFF_FFFF_FFFF_F000u64, 512u64), // Large with low bits set
+            // Maximum hash value to test overflow safety
+            (u64::MAX, 256u64),
             // Non-power-of-2 capacities to test arbitrary capacity support
             (42u64, 12u64),
             (100u64, 15u64),
