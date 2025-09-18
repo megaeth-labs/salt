@@ -1,17 +1,14 @@
 //! Tracks state changes in SALT with before/after values for atomic updates and rollbacks.
-use crate::types::{SaltKey, SaltValue};
+use crate::types::{BucketMeta, SaltKey, SaltValue};
 use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    fmt,
-};
+use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Tracks state changes as (old, new) value pairs for atomic updates and rollbacks.
 ///
 /// Automatically deduplicates no-op changes where old equals new.
-#[derive(Clone, Debug, Deref, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Clone, Deref, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub struct StateUpdates {
     /// Maps keys to (old_value, new_value) pairs. None indicates absence/deletion.
     #[deref]
@@ -84,33 +81,86 @@ impl StateUpdates {
     }
 }
 
-/// Formats updates for debugging, showing bucket/slot IDs and key/value hex.
-impl fmt::Display for StateUpdates {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "StateUpdates {{")?;
-        for (salt_key, (old_value, new_value)) in &self.data {
+impl std::fmt::Debug for StateUpdates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "=== StateUpdates Contents ===\n--- State Transitions ---"
+        )?;
+
+        // Collect and sort entries by key
+        let mut sorted_entries: Vec<_> = self.data.iter().collect();
+        sorted_entries.sort_by_key(|(key, _)| key.0);
+
+        let total_entries = sorted_entries.len();
+        writeln!(f, "State change entries ({} entries):", total_entries)?;
+
+        let mut insert_count = 0;
+        let mut update_count = 0;
+        let mut delete_count = 0;
+
+        for (key, (old_value, new_value)) in &sorted_entries {
+            // Count transition types
+            match (old_value.is_some(), new_value.is_some()) {
+                (false, true) => insert_count += 1,
+                (true, false) => delete_count += 1,
+                (true, true) => update_count += 1,
+                (false, false) => {} // Should not occur due to no-op filtering
+            }
+
             writeln!(
                 f,
-                "  Entry(bucket: {}, slot: {}) {{",
-                salt_key.bucket_id(),
-                salt_key.slot_id()
+                "  Key: {} (bucket: {}, slot: {})",
+                key.0,
+                key.bucket_id(),
+                key.slot_id()
             )?;
-            let fmt_val = |v: &Option<SaltValue>| match v {
-                Some(salt_val) => format!(
-                    "key:{:?} value:{:?}",
-                    hex::encode(salt_val.key()),
-                    hex::encode(salt_val.value())
-                ),
-                None => "None".to_string(),
-            };
-            writeln!(
-                f,
-                "    old: {}\n    new: {}\n  }}",
-                fmt_val(old_value),
-                fmt_val(new_value)
-            )?;
+
+            // Format both old and new values using consolidated logic
+            for (label, value, none_msg) in [
+                ("OLD", old_value, "None (no previous value)"),
+                ("NEW", new_value, "None (deleted)"),
+            ] {
+                write!(f, "    {}: ", label)?;
+                match value {
+                    Some(val) => {
+                        if key.is_in_meta_bucket() {
+                            match BucketMeta::try_from(val) {
+                                Ok(meta) => writeln!(
+                                    f,
+                                    "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
+                                    meta.nonce, meta.capacity, meta.used
+                                )?,
+                                Err(_) => writeln!(
+                                    f,
+                                    "[METADATA - DECODE ERROR] Raw: {}",
+                                    hex::encode(val.data)
+                                )?,
+                            }
+                        } else {
+                            writeln!(
+                                f,
+                                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
+                                hex::encode(val.data),
+                                String::from_utf8_lossy(val.key()),
+                                String::from_utf8_lossy(val.value())
+                            )?;
+                        }
+                    }
+                    None => writeln!(f, "{}", none_msg)?,
+                }
+            }
+
+            writeln!(f)?; // Empty line between entries
         }
-        write!(f, "}}")
+
+        writeln!(f, "--- Transition Summary ---")?;
+        writeln!(f, "Total entries: {}", total_entries)?;
+        writeln!(f, "Inserts: {}", insert_count)?;
+        writeln!(f, "Updates: {}", update_count)?;
+        writeln!(f, "Deletes: {}", delete_count)?;
+
+        writeln!(f, "=== End StateUpdates Contents ===")
     }
 }
 
