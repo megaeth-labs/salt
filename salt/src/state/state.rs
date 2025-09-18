@@ -49,7 +49,6 @@ use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
-use tracing::debug;
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -367,10 +366,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // Resize the bucket if load factor threshold exceeded
                     if used > metadata.capacity * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100 {
                         let new_capacity = compute_resize_capacity(metadata.capacity, used);
-                        debug!(
-                            "bucket_id {} capacity extend from {} to {}",
-                            bucket_id, metadata.capacity, new_capacity
-                        );
                         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
                     }
                 } else {
