@@ -45,6 +45,7 @@ use crate::{
     traits::StateReader,
     types::*,
 };
+use hex;
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap},
@@ -71,7 +72,7 @@ use std::{
 /// - **Proof Generation**: Track all accessed state for cryptographic proof construction
 ///
 /// [`cache_read()`]: EphemeralSaltState::cache_read
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
     store: &'a Store,
@@ -97,6 +98,78 @@ pub struct EphemeralSaltState<'a, Store> {
     usage_count_delta: HashMap<BucketId, i64>,
     /// Whether to cache values read from the store for subsequent access
     cache_read: bool,
+}
+
+impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "=== EphemeralSaltState Contents ===\n--- Cached State Entries ---"
+        )?;
+
+        writeln!(
+            f,
+            "Key-Value pairs in cache ({} entries):",
+            self.cache.len()
+        )?;
+
+        // Collect and sort cache entries by key
+        let mut sorted_entries: Vec<_> = self.cache.iter().collect();
+        sorted_entries.sort_by_key(|(key, _)| key.0);
+
+        for (key, value) in sorted_entries {
+            let key_info = format!(
+                "  Key: {} (bucket: {}, slot: {})",
+                key.0,
+                key.bucket_id(),
+                key.slot_id()
+            );
+            match value {
+                Some(val) => {
+                    write!(f, "{}", key_info)?;
+                    if key.is_in_meta_bucket() {
+                        match BucketMeta::try_from(val) {
+                            Ok(meta) => writeln!(
+                                f,
+                                " [METADATA]\n    Nonce: {}\n    Capacity: {}\n    Used: {:?}",
+                                meta.nonce, meta.capacity, meta.used
+                            )?,
+                            Err(_) => writeln!(
+                                f,
+                                " [METADATA - DECODE ERROR]\n    Raw Value: {}",
+                                hex::encode(val.data)
+                            )?,
+                        }
+                    } else {
+                        writeln!(
+                            f,
+                            "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
+                            hex::encode(val.data),
+                            String::from_utf8_lossy(val.key()),
+                            String::from_utf8_lossy(val.value())
+                        )?
+                    }
+                }
+                None => writeln!(f, "{} -> DELETED", key_info)?,
+            }
+        }
+
+        writeln!(
+            f,
+            "\n--- Bucket Usage Deltas ---\nBucket usage count changes ({} entries):",
+            self.usage_count_delta.len()
+        )?;
+        for (bucket_id, delta) in &self.usage_count_delta {
+            let sign = if *delta >= 0 { "+" } else { "" };
+            writeln!(f, "  Bucket {}: {}{} slots", bucket_id, sign, delta)?;
+        }
+
+        writeln!(f, "\n--- Configuration ---")?;
+        writeln!(f, "Cache read operations: {}", self.cache_read)?;
+        writeln!(f, "Store reference: <Store>")?;
+
+        writeln!(f, "=== End EphemeralSaltState Contents ===")
+    }
 }
 
 impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
@@ -699,9 +772,16 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 ///
 /// This implements linear probing for collision resolution in the SHI hash table,
 /// where `i` is used as an offset from the initial hash position.
+///
+/// # Overflow Safety
+/// The function is overflow-safe under practical capacity values.
 #[inline(always)]
 pub(crate) fn probe(hashed_key: u64, i: u64, capacity: u64) -> SlotId {
-    ((hashed_key + i) % capacity) as SlotId
+    // Use `(hashed_key % capacity) + i` instead of `hashed_key + i` to prevent
+    // arithmetic overflow. Since `i < capacity` in all call sites and
+    // `hashed_key % capacity < capacity`, their sum is always less than `2 * capacity`,
+    // which is well within u64 bounds given the maximum capacity constraints.
+    ((hashed_key % capacity) + i) % capacity
 }
 
 /// Computes the probe distance for a given slot position.
@@ -1047,10 +1127,8 @@ mod tests {
             (42u64, 256u64),
             (1234567890u64, 512u64),
             (999u64, 1024u64),
-            // Large hash keys
-            (u64::MAX / 2, 512u64),
-            (0x8000_0000_0000_0000u64, 256u64), // Large power of 2
-            (0xFFFF_FFFF_FFFF_F000u64, 512u64), // Large with low bits set
+            // Maximum hash value to test overflow safety
+            (u64::MAX, 256u64),
             // Non-power-of-2 capacities to test arbitrary capacity support
             (42u64, 12u64),
             (100u64, 15u64),

@@ -28,7 +28,7 @@ impl IPAProof {
         let mut R_vec = Vec::with_capacity(num_points as usize);
 
         assert_eq!(((num_points * 2) + 1) * 32, bytes.len() as u32);
-        assert!(bytes.len() % 32 == 0);
+        assert!(bytes.len().is_multiple_of(32));
 
         // Chunk the byte slice into 32 bytes
         let mut chunks = bytes.chunks_exact(32);
