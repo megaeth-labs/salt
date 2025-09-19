@@ -272,11 +272,11 @@ impl TrieReader for Witness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proof::test_utils::*;
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
         mem_store::MemStore,
         proof::salt_witness::{create_mock_proof, SaltWitness},
+        proof::test_utils::*,
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };

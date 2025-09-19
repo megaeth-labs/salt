@@ -221,12 +221,9 @@ impl SaltProof {
         }
 
         // Validates that bucket level information in the proof matches the queried keys.
-        let mut bucket_ids_from_keys: Vec<_> = kvs.keys().map(|k| k.bucket_id()).collect();
-        bucket_ids_from_keys.sort_unstable();
-        bucket_ids_from_keys.dedup();
+        let bucket_ids_from_keys: BTreeSet<_> = kvs.keys().map(|k| k.bucket_id()).collect();
 
-        let mut bucket_ids_from_proof: Vec<_> = self.levels.keys().copied().collect();
-        bucket_ids_from_proof.sort_unstable();
+        let bucket_ids_from_proof: BTreeSet<_> = self.levels.keys().copied().collect();
 
         if bucket_ids_from_proof != bucket_ids_from_keys {
             return Err(ProofError::StateReadError {
@@ -240,14 +237,14 @@ impl SaltProof {
         let (internal_nodes, leaf_nodes) = parents_and_points(&keys_to_verify, &self.levels);
 
         // Convert logical parent IDs to their commitment storage IDs and validate
-        let required_node_ids: Vec<_> = internal_nodes
+        let required_node_ids: BTreeSet<_> = internal_nodes
             .keys()
             .chain(leaf_nodes.keys())
             .map(|node_id| connect_parent_id(*node_id))
             .collect();
 
         // Validates that the proof contains and ONLY contains commitments for all required nodes, .
-        let proof_node_ids: Vec<_> = self.parents_commitments.keys().copied().collect();
+        let proof_node_ids: BTreeSet<_> = self.parents_commitments.keys().copied().collect();
         if proof_node_ids != required_node_ids {
             return Err(ProofError::StateReadError {
                 reason: "path_commitments in proof contains unknown node commitment".to_string(),
@@ -496,6 +493,7 @@ mod tests {
             NUM_META_BUCKETS, STARTING_NODE_ID,
         },
         empty_salt::EmptySalt,
+        hasher::tests::get_same_bucket_test_keys,
         mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::StateRoot,
@@ -1019,6 +1017,41 @@ mod tests {
             expansion_root,
         );
 
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_proof_in_auto_bucket_expansion() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        let plain_keys = get_same_bucket_test_keys();
+        let kvs_iter = plain_keys
+            .iter()
+            .enumerate()
+            .take(260)
+            .map(|(i, key)| (key.clone(), Some(i.to_be_bytes().to_vec())));
+        let kvs = HashMap::<Vec<u8>, Option<Vec<u8>>>::from_iter(kvs_iter);
+
+        let state_updates = state.update(&kvs).unwrap();
+        store.update_state(state_updates.clone());
+
+        let (root_hash, trie_updates) = StateRoot::new(&store)
+            .update_fin(state_updates.clone())
+            .unwrap();
+        store.update_trie(trie_updates);
+
+        let salt_keys = state_updates.data.keys().cloned().collect::<Vec<_>>();
+
+        let data = state_updates
+            .data
+            .iter()
+            .map(|(key, (_, new))| (*key, new.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let proof = SaltProof::create(salt_keys.iter().copied(), &store).unwrap();
+
+        let res = proof.check(&data, root_hash);
         assert!(res.is_ok());
     }
 
