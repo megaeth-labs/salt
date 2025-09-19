@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+narrow_bucket_hash = []
 
 [dependencies]
 # megaeth dependencies

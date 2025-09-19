@@ -144,7 +144,7 @@ pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
 /// Load factor threshold (as percentage) that triggers bucket resizing.
 /// When a bucket's usage exceeds this percentage of its capacity, it will be resized.
 /// 80% provides a good balance between space efficiency and collision avoidance.
-pub const BUCKET_RESIZE_LOAD_FACTOR_PCT: u64 = 80;
+pub const BUCKET_RESIZE_LOAD_FACTOR_PCT: u64 = 1;
 
 /// Multiplier used when expanding bucket capacity during resize operations.
 /// The new capacity will be the old capacity multiplied by this factor.

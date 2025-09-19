@@ -33,9 +33,17 @@ fn hash(bytes: &[u8]) -> u64 {
 ///
 /// Returns a bucket ID in the range [NUM_META_BUCKETS, NUM_BUCKETS).
 /// The first NUM_META_BUCKETS buckets are reserved for metadata storage.
+#[cfg(not(feature = "narrow_bucket_hash"))]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
     (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
+}
+
+#[cfg(feature = "narrow_bucket_hash")]
+#[inline(always)]
+pub fn bucket_id(key: &[u8]) -> BucketId {
+    const BUCKET_MASK: u64 = 1;
+    (hash(key) % BUCKET_MASK as u64 + NUM_META_BUCKETS as u64) as BucketId
 }
 
 /// Hashes a plain key with a nonce to generate probe sequences.

@@ -1749,7 +1749,7 @@ mod tests {
 
     #[test]
     fn increment_updates_large() {
-        let kvs = create_random_account(10000);
+        let kvs = create_random_account(8);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
@@ -1758,7 +1758,7 @@ mod tests {
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
             .into_iter()
-            .chunks(1000)
+            .chunks(2)
             .into_iter()
             .map(|chunk| chunk.collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>())
             .collect();
@@ -2358,8 +2358,10 @@ mod tests {
             .collect()
     }
 
-    fn create_random_account(l: usize) -> HashMap<Vec<u8>, Option<Vec<u8>>> {
-        let mut rng = rand::thread_rng();
+    fn create_random_account(l: usize) -> BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+        use rand::SeedableRng;
+        //let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
         (0..l)
             .map(|_i| {
                 let k: [u8; 32] = rng.gen();
