@@ -361,7 +361,7 @@ fn create_internal_node_queries(
 ///
 /// # Arguments
 ///
-/// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk  
+/// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk
 /// * `path_commitments` - Map of all node commitments in the proof
 ///
 /// # Returns
@@ -1020,19 +1020,21 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    /// Tests proof generation and verification when automatic bucket expansion occurs.
     #[test]
     fn test_proof_in_auto_bucket_expansion() {
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
 
-        let plain_keys = get_same_bucket_test_keys();
-        let kvs_iter = plain_keys
+        // Use 260 keys that hash to same bucket - triggering expansion
+        let kvs = get_same_bucket_test_keys()
             .iter()
             .enumerate()
             .take(260)
-            .map(|(i, key)| (key.clone(), Some(i.to_be_bytes().to_vec())));
-        let kvs = HashMap::<Vec<u8>, Option<Vec<u8>>>::from_iter(kvs_iter);
+            .map(|(i, key)| (key.clone(), Some(i.to_be_bytes().to_vec())))
+            .collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>();
 
+        // Update state and trie with expanded bucket
         let state_updates = state.update(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
@@ -1041,18 +1043,17 @@ mod tests {
             .unwrap();
         store.update_trie(trie_updates);
 
-        let salt_keys = state_updates.data.keys().cloned().collect::<Vec<_>>();
-
+        // Prepare data for proof verification
         let data = state_updates
             .data
             .iter()
             .map(|(key, (_, new))| (*key, new.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        let proof = SaltProof::create(salt_keys.iter().copied(), &store).unwrap();
+        // Create and verify proof works correctly after automatic expansion
+        let proof = SaltProof::create(state_updates.data.keys().copied(), &store).unwrap();
 
-        let res = proof.check(&data, root_hash);
-        assert!(res.is_ok());
+        assert!(proof.check(&data, root_hash).is_ok());
     }
 
     /// Tests successful commitment retrieval for existing node IDs.
