@@ -364,7 +364,7 @@ fn create_internal_node_queries(
 ///
 /// # Arguments
 ///
-/// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk  
+/// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk
 /// * `path_commitments` - Map of all node commitments in the proof
 ///
 /// # Returns

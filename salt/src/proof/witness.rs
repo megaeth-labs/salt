@@ -274,7 +274,7 @@ mod tests {
     use super::*;
     use crate::proof::test_utils::*;
     use crate::{
-        constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
+        constant::*,
         mem_store::MemStore,
         proof::salt_witness::{create_mock_proof, SaltWitness},
         trie::trie::StateRoot,
@@ -284,6 +284,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// Extracts all values from a witness in the order of its lookup table keys.
+    #[cfg(not(feature = "test-bucket-resize"))]
     pub fn extract_witness_values(witness: &Witness) -> Vec<Option<Vec<u8>>> {
         let mut state = EphemeralSaltState::new(witness);
         witness
@@ -423,6 +424,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
     fn test_witness_exist_or_not_exist() {
         // Tests three main scenarios for plain key proof generation:
         //
@@ -718,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
     fn test_witness_in_loop_slot_id() {
         let store = MemStore::new();
         let root = setup_state_with_keys(select_test_keys(vec![9]), &store);
