@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-test-small-bucket-range = []
+test-bucket-resize = []
 
 [dependencies]
 # megaeth dependencies

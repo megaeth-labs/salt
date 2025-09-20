@@ -7,7 +7,7 @@
 //! All functions use AHash with fixed seeds to ensure deterministic results.
 
 use super::ahash::fallback::RandomState;
-use crate::constant::{NUM_KV_BUCKETS, NUM_META_BUCKETS};
+use crate::constant::NUM_META_BUCKETS;
 use crate::types::BucketId;
 use std::hash::{BuildHasher, Hasher};
 
@@ -33,18 +33,19 @@ fn hash(bytes: &[u8]) -> u64 {
 ///
 /// Returns a bucket ID in the range [NUM_META_BUCKETS, NUM_BUCKETS).
 /// The first NUM_META_BUCKETS buckets are reserved for metadata storage.
-#[cfg(not(feature = "test-small-bucket-range"))]
+#[cfg(not(feature = "test-bucket-resize"))]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
+    use crate::constant::NUM_KV_BUCKETS;
     (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
 }
 
 /// Determines which bucket a plain key belongs to.
 ///
-/// When the `test-small-bucket-range` feature is enabled, this function maps
+/// When the `test-bucket-resize` feature is enabled, this function maps
 /// keys into a smaller number of buckets for testing purposes. The number of
 /// buckets can be controlled via the `NUM_DATA_BUCKETS` environment variable.
-#[cfg(feature = "test-small-bucket-range")]
+#[cfg(feature = "test-bucket-resize")]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
     let num_buckets = std::env::var("NUM_DATA_BUCKETS")
@@ -80,6 +81,7 @@ pub fn hash_with_nonce(plain_key: &[u8], nonce: u32) -> u64 {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::constant::NUM_KV_BUCKETS;
 
     /// Test data: 260 20-byte keys that all hash to the same bucket.
     /// These are Ethereum address-like values specifically chosen to collide in bucket assignment.
