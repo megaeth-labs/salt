@@ -272,6 +272,24 @@ To enable hugepages for better performance:
 banderwagon = { path = "banderwagon", features = ["enable-hugepages"] }
 ```
 
+## Development and Testing
+
+### Bucket Range Testing Feature
+
+For testing and debugging purposes, SALT includes a `test-small-bucket-range` feature that concentrates keys into a smaller number of buckets instead of the full range of ~16.7 million data buckets.
+
+#### Usage
+
+Enable the feature with cargo:
+```bash
+# Use default (2 buckets)
+cargo test --features test-small-bucket-range
+
+# Configure custom bucket count
+NUM_DATA_BUCKETS=5 cargo test --features test-small-bucket-range
+NUM_DATA_BUCKETS=3 cargo build --features test-small-bucket-range
+```
+
 ## References
 
 ### Papers

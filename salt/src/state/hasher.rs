@@ -33,9 +33,25 @@ fn hash(bytes: &[u8]) -> u64 {
 ///
 /// Returns a bucket ID in the range [NUM_META_BUCKETS, NUM_BUCKETS).
 /// The first NUM_META_BUCKETS buckets are reserved for metadata storage.
+#[cfg(not(feature = "test-small-bucket-range"))]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
     (hash(key) % NUM_KV_BUCKETS as u64 + NUM_META_BUCKETS as u64) as BucketId
+}
+
+/// Determines which bucket a plain key belongs to.
+///
+/// When the `test-small-bucket-range` feature is enabled, this function maps
+/// keys into a smaller number of buckets for testing purposes. The number of
+/// buckets can be controlled via the `NUM_DATA_BUCKETS` environment variable.
+#[cfg(feature = "test-small-bucket-range")]
+#[inline(always)]
+pub fn bucket_id(key: &[u8]) -> BucketId {
+    let num_buckets = std::env::var("NUM_DATA_BUCKETS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    (hash(key) % num_buckets + NUM_META_BUCKETS as u64) as BucketId
 }
 
 /// Hashes a plain key with a nonce to generate probe sequences.
