@@ -103,6 +103,21 @@ pub struct StateRoot<'a, Store> {
     /// multiple times.
     cache: HashMap<NodeId, CommitmentBytes>,
 
+    /// Tracks the current logical capacity of each bucket in the trie.
+    ///
+    /// This map maintains the actual number of elements each bucket can currently hold,
+    /// which may differ from the physical subtree size due to:
+    /// - **Bucket expansion**: When a bucket exceeds `MIN_BUCKET_SIZE`, it expands into
+    ///   a subtree with multiple levels, increasing its capacity exponentially
+    /// - **Bucket contraction**: When elements are removed, buckets may shrink back to
+    ///   single-node form if they fall below the expansion threshold
+    ///
+    /// # Key details:
+    /// - **Key**: `BucketId` identifying the specific bucket in the trie structure
+    /// - **Value**: Current capacity as `u64` (number of elements the bucket can hold)
+    /// - **Default**: If a bucket ID is not found, it's assumed to have `MIN_BUCKET_SIZE` capacity
+    capacities: HashMap<BucketId, u64>,
+
     /// Shared IPA committer for computing vector commitments.
     ///
     /// Uses a globally shared instance with precomputed tables (window size 11)
@@ -126,6 +141,7 @@ where
             store,
             updates: HashMap::new(),
             cache: HashMap::new(),
+            capacities: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
             min_par_batch_size: 64,
         }
@@ -262,7 +278,7 @@ where
     /// * `Ok(TrieUpdates)` - Commitment updates for all affected trie nodes
     /// * `Err` - On store failures or invalid metadata
     fn update_bucket_subtrees(
-        &self,
+        &mut self,
         state_updates: StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         let mut uncomputed_updates = vec![];
@@ -302,32 +318,6 @@ where
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
 
-        // Helper closure for expansion without KV changes
-        let add_expansion_update =
-            |extra_updates: &mut Vec<Vec<_>>, subtree_change: &SubtrieChangeInfo| {
-                extra_updates[subtree_change.old_top_level].push((
-                    subtree_change.old_top_id,
-                    (
-                        default_commitment(subtree_change.old_top_id),
-                        self.commitment(subtree_change.root_id)?,
-                    ),
-                ));
-                Ok(())
-            };
-
-        // Helper closure for contraction without KV changes
-        let add_contraction_update =
-            |uncomputed_updates: &mut Vec<_>, subtree_change: &SubtrieChangeInfo| {
-                uncomputed_updates.push((
-                    subtree_change.root_id,
-                    (
-                        self.commitment(subtree_change.root_id)?,
-                        self.commitment(subtree_change.new_top_id)?,
-                    ),
-                ));
-                Ok(())
-            };
-
         for key in state_updates.data.keys() {
             let bucket_id = key.bucket_id();
             if last_bucket_id != bucket_id && bucket_id >= NUM_META_BUCKETS as BucketId {
@@ -359,17 +349,29 @@ where
                         }
                         std::cmp::Ordering::Equal => {}
                     }
-                } else if self.store.get_subtree_levels(bucket_id)? > 1 {
-                    // KV changes in expanded bucket (capacity unchanged)
-                    need_handle_buckets.insert(bucket_id);
-                    let bucket_capacity = (TRIE_WIDTH as NodeId)
-                        .pow(self.store.get_subtree_levels(bucket_id)? as u32);
-                    subtree_change_info.insert(
-                        bucket_id,
-                        SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
-                    );
+                } else {
+                    let bucket_capacity = if let Some(capacity) = self.capacities.get(&bucket_id) {
+                        *capacity
+                    } else {
+                        let level = self.store.get_subtree_levels(bucket_id)?;
+                        (TRIE_WIDTH as NodeId).pow(level as u32)
+                    };
+
+                    if bucket_capacity > MIN_BUCKET_SIZE as u64 {
+                        // KV changes in expanded bucket (capacity unchanged)
+                        need_handle_buckets.insert(bucket_id);
+                        subtree_change_info.insert(
+                            bucket_id,
+                            SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
+                        );
+                    }
                 }
             }
+        }
+
+        // Step 1.3: update capacities for next `update_bucket_subtrees` call
+        for (ub_id, change) in &subtree_change_info {
+            self.capacities.insert(*ub_id, change.new_capacity);
         }
 
         // Initialize trigger levels for later processing
@@ -377,6 +379,31 @@ where
 
         // Step 2: Update leaf node commitments
         let mut trie_updates = self.update_leaf_nodes(&state_updates, &subtree_change_info)?;
+
+        // Helper closure for expansion without KV changes
+        let add_expansion_update =
+            |extra_updates: &mut Vec<Vec<_>>, subtree_change: &SubtrieChangeInfo| {
+                let default_c = default_commitment(subtree_change.old_top_id);
+                let bucket_root = self.commitment(subtree_change.root_id)?;
+                if default_c != bucket_root {
+                    extra_updates[subtree_change.old_top_level]
+                        .push((subtree_change.old_top_id, (default_c, bucket_root)));
+                }
+                Ok(())
+            };
+
+        // Helper closure for contraction without KV changes
+        let add_contraction_update =
+            |uncomputed_updates: &mut Vec<_>, subtree_change: &SubtrieChangeInfo| {
+                uncomputed_updates.push((
+                    subtree_change.root_id,
+                    (
+                        self.commitment(subtree_change.root_id)?,
+                        self.commitment(subtree_change.new_top_id)?,
+                    ),
+                ));
+                Ok(())
+            };
 
         // Step 3: Optimize contracted buckets by resetting unused nodes to defaults
         for (bucket_id, subtree_change) in &subtree_change_info {
@@ -1754,7 +1781,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
         let total_state_updates = state.update(&kvs).unwrap();
-        let (root, mut total_trie_updates) = trie.update_fin(total_state_updates.clone()).unwrap();
+        let (root, total_trie_updates) = trie.update_fin(total_state_updates.clone()).unwrap();
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
             .into_iter()
@@ -1771,20 +1798,40 @@ mod tests {
             trie.update(state_updates.clone()).unwrap();
             final_state_updates.merge(state_updates);
         }
-        let (final_root, mut final_trie_updates) = trie.finalize().unwrap();
+        let (final_root, final_trie_updates) = trie.finalize().unwrap();
 
         assert_eq!(root, final_root);
         assert_eq!(total_state_updates, final_state_updates);
-        total_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        final_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        total_trie_updates
-            .iter()
-            .zip(final_trie_updates.iter())
-            .for_each(|(r1, r2)| {
-                assert_eq!(r1.0, r2.0);
-                assert!(is_commitment_equal(r1.1 .0, r2.1 .0));
-                assert!(is_commitment_equal(r1.1 .1, r2.1 .1));
-            });
+        // Clear or Merge the duplicate updates in final_trie_updates
+        let mut merged_final_trie_updates: BTreeMap<u64, ([u8; 64], [u8; 64])> = BTreeMap::new();
+        for i in 0..final_trie_updates.len() {
+            if merged_final_trie_updates.contains_key(&final_trie_updates[i].0) {
+                let pre: ([u8; 64], [u8; 64]) = merged_final_trie_updates
+                    .get(&final_trie_updates[i].0)
+                    .unwrap()
+                    .clone();
+                if is_commitment_equal(pre.0, final_trie_updates[i].1 .1) {
+                    merged_final_trie_updates.remove(&final_trie_updates[i].0);
+                } else {
+                    merged_final_trie_updates
+                        .insert(final_trie_updates[i].0, (pre.0, final_trie_updates[i].1 .1));
+                }
+            } else if !is_commitment_equal(final_trie_updates[i].1 .0, final_trie_updates[i].1 .1) {
+                merged_final_trie_updates.insert(final_trie_updates[i].0, final_trie_updates[i].1);
+            }
+        }
+        assert_eq!(total_trie_updates.len(), merged_final_trie_updates.len());
+        total_trie_updates.iter().for_each(|r| {
+            assert!(merged_final_trie_updates.contains_key(&r.0));
+            assert!(is_commitment_equal(
+                r.1 .0,
+                merged_final_trie_updates.get(&r.0).unwrap().0
+            ));
+            assert!(is_commitment_equal(
+                r.1 .1,
+                merged_final_trie_updates.get(&r.0).unwrap().1
+            ));
+        });
     }
 
     #[test]
@@ -1933,8 +1980,8 @@ mod tests {
     #[test]
     fn trie_update_leaf_nodes() {
         let store = MemStore::new();
-        let trie = StateRoot::new(&store);
-        let committer = &trie.committer;
+        let mut trie = StateRoot::new(&store);
+        //let committer = &trie.committer;
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
@@ -1965,7 +2012,8 @@ mod tests {
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
-        let c1 = committer
+        let c1 = trie
+            .committer
             .add_deltas(
                 bottom_meta_c,
                 &[(
@@ -1978,7 +2026,8 @@ mod tests {
                 )],
             )
             .to_bytes_uncompressed();
-        let c2 = committer
+        let c2 = trie
+            .committer
             .add_deltas(
                 bottom_data_c,
                 &[
