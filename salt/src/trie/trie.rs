@@ -103,20 +103,13 @@ pub struct StateRoot<'a, Store> {
     /// multiple times.
     cache: HashMap<NodeId, CommitmentBytes>,
 
-    /// Tracks the current logical capacity of each bucket in the trie.
+    /// Maintains current bucket capacities during incremental update sequences.
     ///
-    /// This map maintains the actual number of elements each bucket can currently hold,
-    /// which may differ from the physical subtree size due to:
-    /// - **Bucket expansion**: When a bucket exceeds `MIN_BUCKET_SIZE`, it expands into
-    ///   a subtree with multiple levels, increasing its capacity exponentially
-    /// - **Bucket contraction**: When elements are removed, buckets may shrink back to
-    ///   single-node form if they fall below the expansion threshold
-    ///
-    /// # Key details:
-    /// - **Key**: `BucketId` identifying the specific bucket in the trie structure
-    /// - **Value**: Current capacity as `u64` (number of elements the bucket can hold)
-    /// - **Default**: If a bucket ID is not found, it's assumed to have `MIN_BUCKET_SIZE` capacity
-    capacities: HashMap<BucketId, u64>,
+    /// This map is critical for correctness during multi-step incremental updates.
+    /// Since `store.get_subtree_levels()` returns stale information before storage
+    /// is committed, this cache tracks the working state of bucket capacities
+    /// to ensure consistent capacity lookups throughout the update process.
+    bucket_capacity_cache: HashMap<BucketId, u64>,
 
     /// Shared IPA committer for computing vector commitments.
     ///
@@ -141,7 +134,7 @@ where
             store,
             updates: HashMap::new(),
             cache: HashMap::new(),
-            capacities: HashMap::new(),
+            bucket_capacity_cache: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
             min_par_batch_size: 64,
         }
@@ -350,12 +343,13 @@ where
                         std::cmp::Ordering::Equal => {}
                     }
                 } else {
-                    let bucket_capacity = if let Some(capacity) = self.capacities.get(&bucket_id) {
-                        *capacity
-                    } else {
-                        let level = self.store.get_subtree_levels(bucket_id)?;
-                        (TRIE_WIDTH as NodeId).pow(level as u32)
-                    };
+                    let bucket_capacity =
+                        if let Some(capacity) = self.bucket_capacity_cache.get(&bucket_id) {
+                            *capacity
+                        } else {
+                            let level = self.store.get_subtree_levels(bucket_id)?;
+                            (TRIE_WIDTH as NodeId).pow(level as u32)
+                        };
 
                     if bucket_capacity > MIN_BUCKET_SIZE as u64 {
                         // KV changes in expanded bucket (capacity unchanged)
@@ -371,7 +365,8 @@ where
 
         // Step 1.3: update capacities for next `update_bucket_subtrees` call
         for (ub_id, change) in &subtree_change_info {
-            self.capacities.insert(*ub_id, change.new_capacity);
+            self.bucket_capacity_cache
+                .insert(*ub_id, change.new_capacity);
         }
 
         // Initialize trigger levels for later processing
