@@ -4,6 +4,7 @@
 //! of state data along with cryptographic proofs for stateless validation. The witness
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
+    constant::ROOT_NODE_ID,
     proof::{ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
@@ -105,7 +106,19 @@ impl SaltWitness {
         Ok(SaltWitness { kvs, proof })
     }
 
-    /// Verify the salt witness against the given state root.
+    /// Returns the state root computed from the witness's root commitment.
+    ///
+    /// # Returns
+    /// - `Ok(ScalarBytes)` - The 32-byte state root
+    /// - `Err(ProofError)` - If the root commitment is not in the witness
+    pub fn state_root(&self) -> Result<ScalarBytes, ProofError> {
+        let root_commitment = self
+            .commitment(ROOT_NODE_ID)
+            .map_err(|_| ProofError::MissingRootCommitment)?;
+        Ok(hash_commitment(root_commitment))
+    }
+
+    /// Verify the salt witness against the internal state root.
     ///
     /// This method verifies that the witness correctly represents the state by
     /// checking the cryptographic proof. Importantly, it preserves the distinction
@@ -114,10 +127,11 @@ impl SaltWitness {
     /// # Security Note
     ///
     /// This verification ensures that:
-    /// - All witnessed keys are correctly proven against the state root
+    /// - All witnessed keys are correctly proven against the internal state root
     /// - Non-existent values (None) are properly verified as absent
     /// - The proof cannot be manipulated to hide or fabricate state
-    pub fn verify_proof(&self, root: ScalarBytes) -> Result<(), ProofError> {
+    pub fn verify_proof(&self) -> Result<(), ProofError> {
+        let root = self.state_root()?;
         self.proof.check(&self.kvs, root)
     }
 }
@@ -380,8 +394,8 @@ mod tests {
 
         // 3.options in prover node
         // 3.1 verify the salt witness
-        let res = salt_witness.verify_proof(old_trie_root);
-        assert!(res.is_ok());
+        assert_eq!(old_trie_root, salt_witness.state_root().unwrap());
+        assert!(salt_witness.verify_proof().is_ok());
 
         // 3.2 create EphemeralSaltState from salt witness
         let mut prover_state = EphemeralSaltState::new(&salt_witness);
@@ -430,8 +444,8 @@ mod tests {
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness_res = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
 
-        let res = salt_witness_res.verify_proof(root);
-        assert!(res.is_ok());
+        assert_eq!(root, salt_witness_res.state_root().unwrap());
+        assert!(salt_witness_res.verify_proof().is_ok());
     }
 
     #[test]
@@ -785,7 +799,7 @@ mod tests {
         let bucket_id: BucketId = 100000;
         let salt_key = bucket_metadata_key(bucket_id);
         let witness = SaltWitness::create(&[salt_key], &mem_store).unwrap();
-        let res = witness.verify_proof(root);
-        assert!(res.is_ok());
+        assert_eq!(root, witness.state_root().unwrap());
+        assert!(witness.verify_proof().is_ok());
     }
 }
