@@ -49,6 +49,15 @@ jobs:
         with:
           command: test
 
+      - name: Run cargo test with bucket resize feature
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --features test-bucket-resize
+        env:
+          NUM_DATA_BUCKETS: 2
+          BUCKET_RESIZE_LOAD_FACTOR_PCT: 1
+
   lints:
     name: Lints
     runs-on: ubuntu-latest

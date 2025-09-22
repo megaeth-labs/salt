@@ -272,6 +272,26 @@ To enable hugepages for better performance:
 banderwagon = { path = "banderwagon", features = ["enable-hugepages"] }
 ```
 
+## Development and Testing
+
+### Bucket Resize Testing Feature
+
+For testing and debugging purposes, SALT includes a `test-bucket-resize` feature that facilitates testing of bucket expansion behavior by:
+1. Concentrating keys into a smaller number of buckets instead of the full range of ~16.7 million data buckets
+2. Using a much lower load factor threshold to trigger bucket expansions more easily
+
+#### Usage
+
+Enable the feature with cargo:
+```bash
+# Use defaults (2 buckets, 1% load factor)
+cargo test --features test-bucket-resize
+
+# Configure custom settings
+NUM_DATA_BUCKETS=5 BUCKET_RESIZE_LOAD_FACTOR_PCT=5 cargo test --features test-bucket-resize
+NUM_DATA_BUCKETS=3 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo build --features test-bucket-resize
+```
+
 ## References
 
 ### Papers
