@@ -127,8 +127,8 @@ let expected_values = vec![Some(b"balance100".to_vec()), None];
 let witness = Witness::create(&plain_keys_to_prove, &store)?;
 
 // Bob verifies the witness against its local state root
-let is_valid = witness.verify(root_hash);
-assert!(is_valid.is_ok());
+assert_eq!(root_hash, witness.state_root().unwrap());
+assert!(witness.verify().is_ok());
 ```
 
 ## Data Types

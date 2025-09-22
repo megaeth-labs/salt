@@ -161,20 +161,25 @@ impl Witness {
         })
     }
 
+    /// Returns the state root computed from the witness's root commitment.
+    ///
+    /// # Returns
+    /// - `Ok(ScalarBytes)` - The 32-byte state root
+    /// - `Err(ProofError)` - If the root commitment is not in the witness
+    pub fn state_root(&self) -> Result<ScalarBytes, ProofError> {
+        self.salt_witness.state_root()
+    }
+
     /// Verifies the proof's integrity and validates key locations.
     ///
     /// This method performs a two-phase verification process:
     ///
     /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT
-    ///    witness proof against the provided state root to ensure the proof is
+    ///    witness proof against the [`state_root()`] to ensure the proof is
     ///    cryptographically sound and the claimed key-value pairs are authentic.
     ///
     /// 2. **Key Location Verification**: For each plain key in the proof, verifies
     ///    that it can be found exactly at the claimed salt key location.
-    ///
-    /// # Arguments
-    ///
-    /// * `root` - The expected state root hash to verify the proof against
     ///
     /// # Returns
     ///
@@ -182,8 +187,9 @@ impl Witness {
     /// * `Err(ProofError)` - If verification fails due to:
     ///   - Invalid cryptographic proof
     ///   - Incorrect lookup table
-    pub fn verify(&self, root: ScalarBytes) -> Result<(), ProofError> {
-        self.salt_witness.verify_proof(root)?;
+    ///   - Missing root commitment in witness
+    pub fn verify(&self) -> Result<(), ProofError> {
+        self.salt_witness.verify_proof()?;
 
         let mut state = EphemeralSaltState::new(self);
 
@@ -420,7 +426,8 @@ mod tests {
 
         // Verify the reconstructed witness is identical and still valid
         assert_eq!(witness, reconstructed);
-        reconstructed.verify(root).unwrap();
+        assert_eq!(root, reconstructed.state_root().unwrap());
+        assert!(reconstructed.verify().is_ok());
     }
 
     #[test]
@@ -447,7 +454,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[6].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -469,7 +477,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[0].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -521,7 +530,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[1].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -572,7 +582,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[1].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -624,7 +635,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[0].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -664,7 +676,8 @@ mod tests {
         let plain_key = test_keys_with_known_mappings()[6].clone();
         let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let mut proof_state = EphemeralSaltState::new(&proof);
         let proof_value = proof_state.plain_value(&plain_key).unwrap();
@@ -729,7 +742,8 @@ mod tests {
 
         let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         let bucket_id = 4030087;
         let salt_key = SaltKey::from((bucket_id, 0));
@@ -770,7 +784,8 @@ mod tests {
 
         let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
 
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         assert_eq!(proof.direct_lookup_tbl.keys().next().unwrap(), &key);
 
@@ -849,7 +864,8 @@ mod tests {
         let proof = Witness::create(&keys, std::iter::empty(), &store).unwrap();
 
         // Verify the witness is valid against the state root
-        assert!(proof.verify(root).is_ok());
+        assert_eq!(root, proof.state_root().unwrap());
+        assert!(proof.verify().is_ok());
 
         // Verify witness contains exactly 3 entries (no metadata included)
         assert_eq!(proof.direct_lookup_tbl.len(), 3);
