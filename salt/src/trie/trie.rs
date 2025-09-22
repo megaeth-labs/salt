@@ -1797,35 +1797,13 @@ mod tests {
 
         assert_eq!(root, final_root);
         assert_eq!(total_state_updates, final_state_updates);
-        // Clear or Merge the duplicate updates in final_trie_updates
-        let mut merged_final_trie_updates: BTreeMap<u64, ([u8; 64], [u8; 64])> = BTreeMap::new();
-        for i in 0..final_trie_updates.len() {
-            if merged_final_trie_updates.contains_key(&final_trie_updates[i].0) {
-                let pre: ([u8; 64], [u8; 64]) = merged_final_trie_updates
-                    .get(&final_trie_updates[i].0)
-                    .unwrap()
-                    .clone();
-                if is_commitment_equal(pre.0, final_trie_updates[i].1 .1) {
-                    merged_final_trie_updates.remove(&final_trie_updates[i].0);
-                } else {
-                    merged_final_trie_updates
-                        .insert(final_trie_updates[i].0, (pre.0, final_trie_updates[i].1 .1));
-                }
-            } else if !is_commitment_equal(final_trie_updates[i].1 .0, final_trie_updates[i].1 .1) {
-                merged_final_trie_updates.insert(final_trie_updates[i].0, final_trie_updates[i].1);
-            }
-        }
-        assert_eq!(total_trie_updates.len(), merged_final_trie_updates.len());
-        total_trie_updates.iter().for_each(|r| {
-            assert!(merged_final_trie_updates.contains_key(&r.0));
-            assert!(is_commitment_equal(
-                r.1 .0,
-                merged_final_trie_updates.get(&r.0).unwrap().0
-            ));
-            assert!(is_commitment_equal(
-                r.1 .1,
-                merged_final_trie_updates.get(&r.0).unwrap().1
-            ));
+
+        let minified_updates = minify_trie_updates(final_trie_updates);
+        assert_eq!(total_trie_updates.len(), minified_updates.len());
+        total_trie_updates.iter().for_each(|(id, (old, new))| {
+            let update = minified_updates.get(id).unwrap();
+            assert!(is_commitment_equal(*old, update.0));
+            assert!(is_commitment_equal(*new, update.1));
         });
     }
 
@@ -1976,7 +1954,6 @@ mod tests {
     fn trie_update_leaf_nodes() {
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
-        //let committer = &trie.committer;
         let mut state_updates = StateUpdates::default();
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
@@ -2415,6 +2392,32 @@ mod tests {
 
     fn is_commitment_equal(c1: CommitmentBytes, c2: CommitmentBytes) -> bool {
         hash_commitment(c1) == hash_commitment(c2)
+    }
+
+    /// Converts trie updates into a canonical format, removing duplicates and no-ops.
+    ///
+    /// Merges duplicate node IDs by chaining updates and removes updates where old == new.
+    fn minify_trie_updates(
+        updates: TrieUpdates,
+    ) -> BTreeMap<NodeId, (CommitmentBytes, CommitmentBytes)> {
+        let mut result: BTreeMap<_, (CommitmentBytes, CommitmentBytes)> = BTreeMap::new();
+        for (id, (old, new)) in updates {
+            match result.entry(id) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if is_commitment_equal(entry.get().0, new) {
+                        entry.remove();
+                    } else {
+                        entry.insert((entry.get().0, new));
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if !is_commitment_equal(old, new) {
+                        entry.insert((old, new));
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn bucket_meta(nonce: u32, capacity: SlotId) -> BucketMeta {
