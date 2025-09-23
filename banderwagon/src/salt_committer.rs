@@ -26,12 +26,17 @@
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
+#[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+use crate::riscv_zkvm_ops::*;
 use ark_ec::AdditiveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+use crate::{use_edw_proj_zero, use_iter};
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
 /// The `Committer` precomputes and stores windowed multiples of a set of base points
@@ -159,21 +164,42 @@ impl Committer {
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
+        let tables: Vec<Vec<EdwardsAffine>> = use_iter!(bases)
             .map(|base| {
                 let mut table = Vec::with_capacity(inner_length);
                 let mut element = base.0;
+                #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+                {
+                    from_mont_to_bigint(&mut element.x.0 .0, &base.0.x.0 .0);
+                    from_mont_to_bigint(&mut element.y.0 .0, &base.0.y.0 .0);
+                    from_mont_to_bigint(&mut element.t.0 .0, &base.0.t.0 .0);
+                    from_mont_to_bigint(&mut element.z.0 .0, &base.0.z.0 .0);
+                }
+
                 // Calculate the element values for each window
                 for _ in 0..win_num {
                     let base = element;
-                    table.push(EdwardsProjective::zero());
+                    let zero = use_edw_proj_zero!();
+                    table.push(zero);
                     table.push(element);
                     for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
+                        #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+                        add_projective(&mut element, &base);
+                        #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+                        {
+                            element += &base;
+                        }
                         table.push(element);
                     }
-                    element += element;
+                    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+                    {
+                        let element_copy = element.clone();
+                        add_projective(&mut element, &element_copy);
+                    }
+                    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+                    {
+                        element += element;
+                    }
                 }
                 Element::batch_proj_to_affine(&table)
             })
@@ -353,6 +379,13 @@ impl Committer {
         let mut result = EdwardsProjective::default();
         let precom_table = &self.tables[g_i];
         let mut ponits = Vec::with_capacity(chunks.len());
+        #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+        init_zero(
+            &mut result.x.0 .0,
+            &mut result.y.0 .0,
+            &mut result.t.0 .0,
+            &mut result.z.0 .0,
+        );
         for i in 0..chunks.len() {
             let mut index = (chunks[i] + carry) as usize;
             if index == 0 {
@@ -414,7 +447,10 @@ impl Committer {
 /// * `result` - The projective point to update (in-place)
 /// * `p2_x` - X-coordinate of the affine point to add
 /// * `p2_y` - Y-coordinate of the affine point to add
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_os = "zkvm", target_arch = "riscv32")
+)))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
 
@@ -443,6 +479,77 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     result.y = g * h;
     result.t = e * h;
     result.z = f * g;
+}
+
+/// Adds an affine point to a projective point using extended Edwards coordinates.
+///
+/// This x86_64-optimized version uses hand-written assembly for Montgomery multiplication
+/// to achieve better performance than the generic implementation.
+///
+/// # Arguments
+///
+/// * `result` - The projective point to update (in-place)
+/// * `p2_x` - X-coordinate of the affine point to add
+/// * `p2_y` - Y-coordinate of the affine point to add
+///
+/// # Safety
+///
+/// Uses unsafe assembly operations that are guaranteed correct for the Bandersnatch field.
+#[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+fn add_affine_point(result: &mut EdwardsProjective, p2x: &Fq, p2y: &Fq) {
+    let mut result_x = u64_array_to_u32_array_le(&result.x.0 .0);
+    let mut result_y = u64_array_to_u32_array_le(&result.y.0 .0);
+    let mut result_t = u64_array_to_u32_array_le(&result.t.0 .0);
+    let mut result_z = u64_array_to_u32_array_le(&result.z.0 .0);
+    let p2_x = u64_array_to_u32_array_le(&p2x.0 .0);
+    let p2_y = u64_array_to_u32_array_le(&p2y.0 .0);
+
+    let mut a = [0u32; 8];
+    let mut b = [0u32; 8];
+    let mut c = [0u32; 8];
+    let mut d = [0u32; 8];
+    mod_mul_u32_zkvm(&mut a, &result_x, &p2_x);
+    mod_mul_u32_zkvm(&mut b, &result_y, &p2_y);
+    mod_mul_u32_zkvm(&mut c, &p2_x, &p2_y);
+    mod_mul_u32_zkvm(&mut d, &result_t, &c);
+
+    mod_mul_u32_zkvm(
+        &mut c,
+        &d,
+        &[
+            0x188D58E7, 0xB369F2F5, 0x77E54F92, 0xCB666771, 0x6BE3B6D8, 0xC66E3BF8, 0x33C267CB,
+            0x6389C126,
+        ],
+    );
+    let mut x_add_y = [0u32; 8];
+    let mut p2x_add_p2y = [0u32; 8];
+    mod_add(&result_x, &result_y, &mut x_add_y);
+    mod_add(&p2_x, &p2_y, &mut p2x_add_p2y);
+
+    mod_mul_u32_zkvm(&mut d, &x_add_y, &p2x_add_p2y);
+
+    let mut e1 = [0u32; 8];
+    mod_sub(&d, &a, &mut e1);
+    let mut e = [0u32; 8];
+    mod_sub(&e1, &b, &mut e);
+    let mut f = [0u32; 8];
+    mod_sub(&result_z, &c, &mut f);
+    let mut g = [0u32; 8];
+    mod_add(&result_z, &c, &mut g);
+
+    mod_mul_by5_u32_zkvm(&mut a);
+    let mut h = [0u32; 8];
+    mod_add(&b, &a, &mut h);
+
+    mod_mul_u32_zkvm(&mut result_x, &e, &f);
+    mod_mul_u32_zkvm(&mut result_y, &g, &h);
+    mod_mul_u32_zkvm(&mut result_t, &e, &h);
+    mod_mul_u32_zkvm(&mut result_z, &f, &g);
+
+    u32_array_to_u64_array_le(&result_x, &mut result.x.0 .0);
+    u32_array_to_u64_array_le(&result_y, &mut result.y.0 .0);
+    u32_array_to_u64_array_le(&result_t, &mut result.t.0 .0);
+    u32_array_to_u64_array_le(&result_z, &mut result.z.0 .0);
 }
 
 /// Adds an affine point to a projective point using extended Edwards coordinates.
@@ -551,6 +658,7 @@ impl Element {
     ///
     /// Vector of the same points in affine coordinates.
     #[inline]
+    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
     pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
         let commitments = Element::batch_to_commitments(
             &elements
@@ -566,6 +674,85 @@ impl Element {
                 y: Fq::from_le_bytes_mod_order(&bytes[32..64]),
             })
             .collect()
+    }
+
+    /// Efficiently converts a batch of projective points to affine coordinates.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of points in projective coordinates
+    ///
+    /// # Returns
+    ///
+    /// Vector of the same points in affine coordinates.
+    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+    pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
+        let mut zeroes = vec![false; elements.len()];
+
+        let mut zs_mul = Fq::zero();
+        zs_mul.0 .0[0] = 1;
+
+        // zs_mul = z0 * z1 * ... * zn
+        // result[i] = z0 * z1 * ... * zi-1
+        let mut result: Vec<EdwardsAffine> = (0..elements.len())
+            .into_iter()
+            .map(|i| {
+                if elements[i].z.is_zero() {
+                    zeroes[i] = true;
+                    return EdwardsAffine::default();
+                }
+
+                let r = EdwardsAffine {
+                    x: zs_mul,
+                    y: Fq::default(),
+                };
+
+                let zs_mul_clone = zs_mul.clone();
+                mod_mul_zkvm(&mut zs_mul.0 .0, &zs_mul_clone.0 .0, &elements[i].z.0 .0);
+                r
+            })
+            .collect();
+
+        // zs_inv = 1 / zs_mul
+        let zs_mul_clone = zs_mul.clone();
+        from_bigint_to_mont(&mut zs_mul.0 .0, &zs_mul_clone.0 .0);
+        // println!("zs_mul {:?}",zs_mul);
+        let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
+        let zs_inv_clone = zs_inv.clone();
+        from_mont_to_bigint(&mut zs_inv.0 .0, &zs_inv_clone.0 .0);
+        // println!("zs_inv {:?}",zs_inv.0.0);
+
+        // result[i] = (z0 * z1 * ... * zi-1)/(z0 * z1 * ... * zi) = 1/zi
+        for i in (0..elements.len()).rev() {
+            if zeroes[i] {
+                continue;
+            }
+            // result[i].x = result[i].x * &zs_inv;
+            // zs_inv = zs_inv * &elements[i].z;
+            let temp = result[i].x.0 .0.clone();
+            mod_mul_zkvm(&mut result[i].x.0 .0, &temp, &zs_inv.0 .0);
+            let temp = zs_inv.0 .0.clone();
+            mod_mul_zkvm(&mut zs_inv.0 .0, &temp, &elements[i].z.0 .0);
+        }
+
+        // result[i].x = xi / zi, result[i].y = xi / zi
+        elements
+            .into_iter()
+            .zip(result.iter_mut())
+            .zip(zeroes.iter())
+            .for_each(|((element, res), &is_zero)| {
+                if is_zero {
+                    return;
+                }
+
+                let z_inv = res.x;
+                // res.x = &element.x * &z_inv;
+                mod_mul_zkvm(&mut res.x.0 .0, &element.x.0 .0, &z_inv.0 .0);
+                // res.y = &element.y * &z_inv;
+                mod_mul_zkvm(&mut res.y.0 .0, &element.y.0 .0, &z_inv.0 .0);
+            });
+
+        result
     }
 
     /// Converts multiple elliptic curve points to their 64-byte commitment representations.

@@ -1,9 +1,13 @@
+#[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+use crate::riscv_zkvm_ops::*;
 use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
-use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
-use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
+use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
+use ark_ff::{
+    batch_inversion, serial_batch_inversion_and_mul, BigInteger, Field, One, PrimeField, Zero,
+};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, Eq)]
 pub struct Element(pub EdwardsProjective);
@@ -220,15 +224,313 @@ fn legendre_check_point(x: &Fq) -> bool {
 }
 
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
-    let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
+    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+    {
+        msm_bigint_wnaf_zkvm(bases, scalars)
+    }
 
-    // XXX: Converting all of these to affine hurts performance
-    let bases = EdwardsProjective::batch_convert_to_mul_base(&bases_inner);
+    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+    {
+        let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
 
-    let result = EdwardsProjective::msm(&bases, scalars)
-        .expect("number of bases should equal number of scalars");
+        // XXX: Converting all of these to affine hurts performance
+        let bases = EdwardsProjective::batch_convert_to_mul_base(&bases_inner);
 
-    Element(result)
+        let result = EdwardsProjective::msm(&bases, scalars)
+            .expect("number of bases should equal number of scalars");
+
+        Element(result)
+    }
+}
+
+#[allow(dead_code)]
+pub fn multi_scalar_mul_based_on_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
+    let mut result = Element::zero();
+    for (base, scalar) in bases.iter().zip(scalars.iter()) {
+        result = result + scalar_mul(base, scalar);
+    }
+    result
+}
+
+pub fn scalar_mul(base: &Element, scalar: &Fr) -> Element {
+    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+    {
+        return scalar_mul_zkvm(base, scalar);
+    }
+
+    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+    {
+        scalar_mul_com(base, scalar)
+    }
+}
+
+pub fn scalar_mul_com(base: &Element, scalar: &Fr) -> Element {
+    // 经典的二进制展开算法（从低位到高位扫描）
+    let mut result = Element::zero(); // 初始化为无穷远点
+    let mut temp = base.clone(); // 当前倍点
+
+    // 将标量转换为大整数表示
+    let scalar_bigint = scalar.into_bigint();
+
+    // 获取标量的位数（256位）
+    let scalar_bits = scalar_bigint.to_bytes_le(); // 使用小端字节序
+
+    // 从最低位到最高位逐位处理
+    for (byte_index, &byte) in scalar_bits.iter().enumerate() {
+        for bit_index in 0..8 {
+            // 计算当前位在整个256位中的位置
+            let bit_position = byte_index * 8 + bit_index;
+
+            // 如果已经处理完所有有效位，则退出
+            if bit_position >= 256 {
+                break;
+            }
+
+            // 检查当前位是否为1
+            if (byte >> bit_index) & 1 != 0 {
+                result = result + temp.clone();
+            }
+
+            // 如果不是最高位，则将temp加倍
+            if bit_position < 255 {
+                temp = temp + temp;
+            }
+        }
+    }
+
+    result
+}
+#[allow(dead_code)]
+pub fn test_scalar_mul_large_risc0() {
+    // 测试大数标量乘法
+    let base = Element::prime_subgroup_generator();
+    let scalar = Fr::from(8u64);
+    let result_scalar_mul = scalar_mul(&base, &scalar);
+
+    // 使用 multi_scalar_mul 进行计算
+    let bases = vec![base.clone()];
+    let scalars = vec![scalar];
+    let result_multi_scalar_mul = multi_scalar_mul(&bases, &scalars);
+
+    // 验证两种方法的结果是否相同
+    assert_eq!(
+        result_scalar_mul, result_multi_scalar_mul,
+        "scalar_mul and multi_scalar_mul should produce the same result"
+    );
+
+    let expected_bytes = result_multi_scalar_mul.to_bytes_uncompressed();
+    let expected_hex_string: String = expected_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    println!("expected (hex): {}", expected_hex_string);
+    let result_bytes = result_scalar_mul.to_bytes_uncompressed();
+    let result_hex_string: String = result_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    println!("result (hex): {}", result_hex_string);
+    println!(
+        "scalar_mul and multi_scalar_mul produce the same result: {}",
+        result_scalar_mul == result_multi_scalar_mul
+    );
+}
+#[allow(dead_code)]
+pub fn correctness_for_debug_risc0() {
+    let basis_num = 8;
+    let mut basic_crs = Vec::with_capacity(basis_num);
+    for i in 0..basis_num {
+        basic_crs.push(Element::prime_subgroup_generator() * Fr::from((i + 1) as u64));
+    }
+    let scalar = Fr::from_str(
+        "13108968793781547619861935127046491459309155893440570251786403306729687672800",
+    )
+    .unwrap();
+
+    // 创建测试标量
+    let mut scalars = Vec::with_capacity(basis_num);
+    // for i in 0..basis_num {
+    //     scalars.push(Fr::from((i + 1) as u64));
+    // }
+    for i in 0..basis_num {
+        scalars.push(scalar - Fr::from(i as u64));
+    }
+
+    // 使用 multi_scalar_mul 进行计算
+    let result = multi_scalar_mul(&basic_crs, &scalars);
+    println!("{:?}", result);
+}
+#[allow(dead_code)]
+pub(crate) fn msm_bigint_wnaf(bases: &[Element], scalars: &[Fr]) -> Element {
+    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+    {
+        msm_bigint_wnaf_zkvm(bases, scalars)
+    }
+
+    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+    {
+        msm_bigint_wnaf_com(bases, scalars)
+    }
+}
+#[allow(dead_code)]
+pub(crate) fn msm_bigint_wnaf_com(bases: &[Element], scalars: &[Fr]) -> Element {
+    let size = core::cmp::min(bases.len(), scalars.len());
+    let scalars = &scalars[..size];
+    let bases = &bases[..size];
+
+    // 将 Fr 转为 BigInt，供 make_digits 使用
+    let bigints: Vec<_> = scalars.iter().map(|s| s.into_bigint()).collect();
+
+    // 选择窗口大小 c
+    let c = if size < 32 {
+        3
+    } else {
+        ln_without_floats(size) + 2
+    };
+
+    // 按标量比特宽度切分 wNAF 窗口
+    let num_bits = Fr::MODULUS_BIT_SIZE as usize;
+    let digits_count = num_bits.div_ceil(c);
+
+    // 用 BigInt 展开 wNAF 数位
+    let scalar_digits = bigints
+        .iter()
+        .flat_map(|b| make_digits(b, c, num_bits))
+        .collect::<Vec<_>>();
+
+    let zero = Element::zero();
+
+    // 对每个窗口独立累加对应桶
+    let window_sums: Vec<_> = (0..digits_count)
+        .into_iter()
+        .map(|i| {
+            let mut buckets = vec![zero; 1 << c];
+
+            for (digits, base) in scalar_digits.chunks(digits_count).zip(bases) {
+                let d = digits[i];
+                if d > 0 {
+                    buckets[(d - 1) as usize] += *base;
+                } else if d < 0 {
+                    buckets[(-d - 1) as usize] += -*base;
+                }
+            }
+
+            // 反向前缀和
+            let mut running_sum = Element::zero();
+            let mut res = Element::zero();
+            for b in buckets.into_iter().rev() {
+                running_sum += b;
+                res += running_sum;
+            }
+            res
+        })
+        .collect();
+
+    // 最低窗的和
+    let lowest = *window_sums.first().unwrap();
+
+    // 从高到低窗回代，每窗做 c 次倍点
+    lowest
+        + window_sums[1..]
+            .iter()
+            .rev()
+            .fold(Element::zero(), |mut total, sum_i| {
+                total += *sum_i;
+                for _ in 0..c {
+                    total = Element(total.0 + total.0);
+                }
+                total
+            })
+}
+
+/// floor(log2(n)) 的无浮点实现（n>0）
+#[allow(dead_code)]
+#[inline]
+fn ln_without_floats(n: usize) -> usize {
+    // SAFETY: n>0 时合法；上层已保证 size>0
+    usize::BITS as usize - 1 - n.leading_zeros() as usize
+}
+
+/// 从标量大整数构造 wNAF 数位（来自 gemini 实现，做了内联）
+fn make_digits(a: &impl BigInteger, w: usize, num_bits: usize) -> impl Iterator<Item = i64> + '_ {
+    let scalar = a.as_ref();
+    let radix: u64 = 1 << w;
+    let window_mask: u64 = radix - 1;
+
+    let mut carry = 0u64;
+    let num_bits = if num_bits == 0 {
+        a.num_bits() as usize
+    } else {
+        num_bits
+    };
+    let digits_count = num_bits.div_ceil(w);
+
+    (0..digits_count).map(move |i| {
+        let bit_offset = i * w;
+        let u64_idx = bit_offset / 64;
+        let bit_idx = bit_offset % 64;
+
+        let bit_buf = if bit_idx < 64 - w || u64_idx == scalar.len() - 1 {
+            scalar[u64_idx] >> bit_idx
+        } else {
+            (scalar[u64_idx] >> bit_idx) | (scalar[1 + u64_idx] << (64 - bit_idx))
+        };
+
+        let coef = carry + (bit_buf & window_mask); // [0, 2^w)
+        carry = (coef + radix / 2) >> w;
+
+        let mut digit = (coef as i64) - (carry << w) as i64;
+        if i == digits_count - 1 {
+            digit += (carry << w) as i64;
+        }
+        digit
+    })
+}
+#[allow(dead_code)]
+pub fn test_msm_bigint_wnaf_basic() {
+    // 测试基本的 wNAF MSM 实现
+    let base1 = Element::prime_subgroup_generator();
+    let base2 = base1 + base1;
+    let scalar1 = Fr::from(3u64);
+    let scalar2 = Fr::from(4u64);
+
+    let bases = vec![base1.clone(), base2.clone()];
+    let scalars = vec![scalar1, scalar2];
+
+    let result_wnaf = msm_bigint_wnaf(&bases, &scalars);
+    let result_arkworks = multi_scalar_mul(&bases, &scalars);
+
+    assert_eq!(
+        result_wnaf, result_arkworks,
+        "wNAF MSM should match arkworks MSM"
+    );
+    println!(
+        "test_msm_bigint_wnaf_basic is ok,result is{:?}",
+        result_wnaf
+    );
+}
+
+#[allow(dead_code)]
+pub fn test_msm_bigint_wnaf_multiple_large() {
+    // 测试多个大标量的 wNAF MSM
+    let basis_num = 16;
+    let mut bases = Vec::with_capacity(basis_num);
+    let mut scalars = Vec::with_capacity(basis_num);
+
+    let base_scalar = Fr::from_str(
+        "13108968793781547619861935127046491459309155893440570251786403306729687672800",
+    )
+    .unwrap();
+
+    for i in 0..basis_num {
+        bases.push(Element::prime_subgroup_generator() * Fr::from((i + 1) as u64));
+        scalars.push(base_scalar - Fr::from(i as u64));
+    }
+
+    let _result_wnaf = msm_bigint_wnaf(&bases, &scalars);
+    // let result_arkworks = multi_scalar_mul_com(&bases, &scalars);
+    //
+    // assert_eq!(result_wnaf, result_arkworks);
 }
 
 #[cfg(test)]

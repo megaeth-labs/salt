@@ -22,10 +22,13 @@ use ipa_multipoint::{
     transcript::Transcript,
 };
 use once_cell::sync::Lazy;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
+
+use banderwagon::{num_threads, use_chunks, use_iter, use_sort_unstable};
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
@@ -128,7 +131,7 @@ impl SaltProof {
         let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
 
         if needs_sorting {
-            keys.par_sort_unstable();
+            use_sort_unstable!(keys);
         }
         keys.dedup();
 
@@ -299,9 +302,8 @@ fn create_internal_node_queries(
 ) -> ProofResult<Vec<VerifierQuery>> {
     // Distribute internal nodes across CPU threads for parallel processing
     let in_nodes: Vec<_> = internal_nodes.iter().collect();
-
-    let queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let queries = use_chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             // Step 1: Collect all child commitments needed by this thread's nodes
             // This enables efficient batch conversion to field elements
@@ -434,8 +436,7 @@ fn create_leaf_node_queries(
     kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
 ) -> ProofResult<impl Iterator<Item = VerifierQuery>> {
     // Process leaf nodes in parallel - each represents a data bucket
-    let queries = leaf_nodes
-        .par_iter()
+    let queries = use_iter!(leaf_nodes)
         .map(|(parent_node, evaluation_points)| {
             // Get the polynomial commitment for this bucket
             let commitment =

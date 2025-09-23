@@ -1,4 +1,5 @@
-use banderwagon::{trait_defs::*, Fr};
+use banderwagon::{num_threads, trait_defs::*, use_chunks_mut, Fr};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// Computes the inner product between two scalar vectors
@@ -22,14 +23,13 @@ pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     let mut powers = vec![Fr::zero(); n];
 
     // Compute base powers for each chunk
-    let chunk_size = n.div_ceil(rayon::current_num_threads());
+    let chunk_size = n.div_ceil(num_threads!());
 
     // to handle the case where n is not a multiple of chunk_size
     let len = n.div_ceil(chunk_size);
     let base_powers = powers_of(point.pow([chunk_size as u64]), len);
 
-    powers
-        .par_chunks_mut(chunk_size)
+    use_chunks_mut!(powers, chunk_size)
         .zip(base_powers)
         .for_each(|(chunk, base)| {
             chunk[0] = base;

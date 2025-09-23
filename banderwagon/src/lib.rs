@@ -4,9 +4,17 @@ pub mod trait_impls;
 mod element;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
-pub use element::{multi_scalar_mul, Element, Fr};
+pub use element::{
+    correctness_for_debug_risc0, multi_scalar_mul, test_msm_bigint_wnaf_basic,
+    test_msm_bigint_wnaf_multiple_large, test_scalar_mul_large_risc0, Element, Fr,
+};
 pub mod salt_committer;
 mod scalar_multi_asm;
+
+pub mod config_macro;
+
+#[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+mod riscv_zkvm_ops;
 
 // Re-export arkworks traits that one may need to use in order to use
 // specific methods on field elements and for serialization.
