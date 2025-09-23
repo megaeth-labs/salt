@@ -75,7 +75,7 @@ use std::{
 #[derive(Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
-    store: &'a Store,
+    pub store: &'a Store,
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
@@ -84,7 +84,7 @@ pub struct EphemeralSaltState<'a, Store> {
     ///
     /// Note: This field is `pub(crate)` to enable proof generation modules to
     /// access the set of touched keys for witness construction.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the net change in bucket usage counts relative to the base store.
     ///
     /// Each value represents the delta from the base store's bucket usage count:
@@ -95,9 +95,9 @@ pub struct EphemeralSaltState<'a, Store> {
     /// only the `nonce` and `capacity` fields are preserved - the usage count is dropped.
     /// Without this delta tracking, computing the current bucket occupancy would require
     /// reconciling the base store's usage count with all cached modifications.
-    usage_count_delta: HashMap<BucketId, i64>,
+    pub usage_count_delta: HashMap<BucketId, i64>,
     /// Whether to cache values read from the store for subsequent access
-    cache_read: bool,
+    pub cache_read: bool,
 }
 
 impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
@@ -754,7 +754,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This method handles both the in-memory cache update and the delta tracking
     /// needed for generating [`StateUpdates`]. Changes are only recorded when the
     /// old and new values differ to avoid empty deltas.
-    fn update_value(
+    pub fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,
@@ -765,6 +765,54 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
+    }
+}
+
+/// This structure enables reading EVM account & storage data from a SALT state.
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The SALT state to read data from.
+    pub salt_state: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Create a [`SaltStateProvider`] object.
+    pub const fn new(salt_state: &'a S) -> Self {
+        Self { salt_state }
+    }
+
+    /// Return the SALT value associated with the given plain key.
+    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = hasher::bucket_id(plain_key);
+        self.get_raw_with_bucket(bucket_id, plain_key)
+    }
+
+    /// Returns the SALT value associated with the given plain key using a precomputed Salt key.
+    pub fn get_raw_with_bucket(
+        &self,
+        bucket_id: BucketId,
+        plain_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        let meta = self.salt_state.metadata(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = hasher::hash_with_nonce(plain_key, meta.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..meta.capacity {
+            let slot_id = probe(hashed_id, step, meta.capacity);
+            if let Some(slot_val) = self.salt_state.value((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 }
 

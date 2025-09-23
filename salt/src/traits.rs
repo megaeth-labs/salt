@@ -1,4 +1,5 @@
 //! Core traits for SALT state and trie storage.
+use std::error::Error;
 use crate::trie::node_utils::subtree_root_level;
 use crate::{
     constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
@@ -23,9 +24,10 @@ use std::{
 /// rehashed).
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait StateReader: Debug + Send + Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Debug + Send + Sync + Error + 'static;
 
     /// Retrieves a state value by key.
     ///
@@ -210,9 +212,10 @@ pub trait StateReader: Debug + Send + Sync {
 /// explicitly stored, ensuring the trie behaves as if fully materialized.
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Debug + Send + Sync + Error + 'static;
 
     /// Retrieves the commitment for a specific trie node.
     ///

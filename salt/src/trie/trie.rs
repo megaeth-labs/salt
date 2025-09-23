@@ -158,9 +158,9 @@ where
     /// when processing sequential state updates.
     pub fn update(
         &mut self,
-        state_updates: StateUpdates,
+        state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        for (node_id, (old, new)) in self.update_bucket_subtrees(state_updates)? {
+        for (node_id, (old, new)) in self.update_bucket_subtrees(&state_updates)? {
             self.cache.insert(node_id, new);
             self.updates
                 .entry(node_id)
@@ -191,7 +191,7 @@ where
     /// batch multiple state changes together.
     pub fn update_fin(
         &mut self,
-        state_updates: StateUpdates,
+        state_updates: &StateUpdates,
     ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         self.update(state_updates)?;
         self.finalize()
@@ -272,7 +272,7 @@ where
     /// * `Err` - On store failures or invalid metadata
     fn update_bucket_subtrees(
         &mut self,
-        state_updates: StateUpdates,
+        state_updates: &StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         let mut uncomputed_updates = vec![];
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
@@ -917,7 +917,7 @@ impl StateRoot<'_, EmptySalt> {
                 // `update_bucket_subtrees` detects metadata capacity changes and creates
                 // appropriate subtrie structures without special handling
                 StateRoot::new(&EmptySalt)
-                    .update_bucket_subtrees(StateUpdates {
+                    .update_bucket_subtrees(&StateUpdates {
                         data: chunk_updates,
                     })
                     .map_err(|_| unreachable!("EmptySalt never returns errors"))

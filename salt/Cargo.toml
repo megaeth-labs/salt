@@ -14,6 +14,7 @@ banderwagon = { path = "../banderwagon" }
 ipa-multipoint = { path = "../ipa-multipoint" }
 
 # standard dependencies
+auto_impl = "1"
 blake3 = "1.8"
 derive_more = { version = "2", default-features = false, features = ["full"] }
 hex = "0.4"
