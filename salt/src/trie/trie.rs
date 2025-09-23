@@ -307,7 +307,14 @@ where
                 )
             })
             .collect();
-        // Step 1.2: Identify buckets that need subtree processing
+
+        // Step 1.2: update capacities for next `update_bucket_subtrees` call
+        for (ub_id, change) in &subtree_change_info {
+            self.bucket_capacity_cache
+                .insert(*ub_id, change.new_capacity);
+        }
+
+        // Step 1.3: Identify buckets that need subtree processing
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
 
@@ -317,12 +324,23 @@ where
                 last_bucket_id = bucket_id;
                 // Check if bucket has capacity changes or needs subtree handling
                 if let Some(subtree_change) = subtree_change_info.get(&bucket_id) {
+                    let bucket_root = self.commitment(subtree_change.root_id)?;
+                    // The `old_top_id` commiment of curent subtree is `bucket_root`
+                    self.cache.insert(subtree_change.old_top_id, bucket_root);
                     // Handle capacity changes
                     match subtree_change
                         .new_capacity
                         .cmp(&subtree_change.old_capacity)
                     {
                         std::cmp::Ordering::Greater => {
+                            // Initialize cache for a new top-level subtree with its default commitment.
+                            // because, `new_top_id` commintment not store in storage
+                            if subtree_change.new_top_level != subtree_change.old_top_level {
+                                self.cache.insert(
+                                    subtree_change.new_top_id,
+                                    default_commitment(subtree_change.new_top_id),
+                                );
+                            }
                             // Will be handled in subtree processing
                             let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
@@ -354,19 +372,14 @@ where
                     if bucket_capacity > MIN_BUCKET_SIZE as u64 {
                         // KV changes in expanded bucket (capacity unchanged)
                         need_handle_buckets.insert(bucket_id);
-                        subtree_change_info.insert(
-                            bucket_id,
-                            SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity),
-                        );
+                        let subtree_change =
+                            SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity);
+                        let bucket_root = self.commitment(subtree_change.root_id)?;
+                        self.cache.insert(subtree_change.old_top_id, bucket_root);
+                        subtree_change_info.insert(bucket_id, subtree_change);
                     }
                 }
             }
-        }
-
-        // Step 1.3: update capacities for next `update_bucket_subtrees` call
-        for (ub_id, change) in &subtree_change_info {
-            self.bucket_capacity_cache
-                .insert(*ub_id, change.new_capacity);
         }
 
         // Initialize trigger levels for later processing
@@ -380,10 +393,8 @@ where
             |extra_updates: &mut Vec<Vec<_>>, subtree_change: &SubtrieChangeInfo| {
                 let default_c = default_commitment(subtree_change.old_top_id);
                 let bucket_root = self.commitment(subtree_change.root_id)?;
-                if default_c != bucket_root {
-                    extra_updates[subtree_change.old_top_level]
-                        .push((subtree_change.old_top_id, (default_c, bucket_root)));
-                }
+                extra_updates[subtree_change.old_top_level]
+                    .push((subtree_change.old_top_id, (default_c, bucket_root)));
                 Ok(())
             };
 
@@ -484,14 +495,6 @@ where
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
             // Handle subtree triggers at this level (if any)
             if !trigger_levels[level].is_empty() {
-                // Helper closure for commitment arithmetic
-                let adjust_commitment = |root_commitment, new_commitment, node_id| {
-                    let new_element = Element::from_bytes_unchecked_uncompressed(root_commitment)
-                        + Element::from_bytes_unchecked_uncompressed(new_commitment)
-                        - Element::from_bytes_unchecked_uncompressed(default_commitment(node_id));
-                    new_element.to_bytes_uncompressed()
-                };
-
                 let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = subtree_commitmens
                     .into_par_iter()
                     .map(|(node_id, (old_commitment, new_commitment))| {
@@ -499,17 +502,6 @@ where
 
                         if let Some(subtree_change) = trigger_levels[level].get(&current_bucket_id)
                         {
-                            let new_commitment = if subtree_change.old_top_level == level
-                                && node_id == subtree_change.old_top_id
-                            {
-                                let root_commitment = self
-                                    .commitment(subtree_change.root_id)
-                                    .expect("root node should exist in trie");
-                                adjust_commitment(root_commitment, new_commitment, node_id)
-                            } else {
-                                new_commitment
-                            };
-
                             if subtree_change.new_top_level == level {
                                 // Handle the new top level, subtree update is done
                                 assert_eq!(subtree_change.new_top_id, node_id);
@@ -1798,10 +1790,11 @@ mod tests {
         assert_eq!(root, final_root);
         assert_eq!(total_state_updates, final_state_updates);
 
-        let minified_updates = minify_trie_updates(final_trie_updates);
-        assert_eq!(total_trie_updates.len(), minified_updates.len());
-        total_trie_updates.iter().for_each(|(id, (old, new))| {
-            let update = minified_updates.get(id).unwrap();
+        let minified_final_updates = minify_trie_updates(final_trie_updates);
+        let minified_total_updates = minify_trie_updates(total_trie_updates);
+        assert_eq!(minified_total_updates.len(), minified_final_updates.len());
+        minified_total_updates.iter().for_each(|(id, (old, new))| {
+            let update = minified_final_updates.get(id).unwrap();
             assert!(is_commitment_equal(*old, update.0));
             assert!(is_commitment_equal(*new, update.1));
         });
@@ -2403,18 +2396,12 @@ mod tests {
         let mut result: BTreeMap<_, (CommitmentBytes, CommitmentBytes)> = BTreeMap::new();
         for (id, (old, new)) in updates {
             match result.entry(id) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if is_commitment_equal(entry.get().0, new) {
-                        entry.remove();
-                    } else {
-                        entry.insert((entry.get().0, new));
-                    }
-                }
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     if !is_commitment_equal(old, new) {
                         entry.insert((old, new));
                     }
                 }
+                _ => {}
             }
         }
         result
