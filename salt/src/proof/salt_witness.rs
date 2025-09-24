@@ -375,7 +375,7 @@ mod tests {
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (old_trie_root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (old_trie_root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -387,7 +387,7 @@ mod tests {
         let state_updates = state.update(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        let (new_trie_root, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
@@ -407,7 +407,7 @@ mod tests {
 
         let mut prover_trie = StateRoot::new(&salt_witness);
         let (prover_trie_root, mut prover_trie_updates) =
-            prover_trie.update_fin(prover_updates).unwrap();
+            prover_trie.update_fin(&prover_updates).unwrap();
 
         trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         prover_trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -428,7 +428,7 @@ mod tests {
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -459,7 +459,7 @@ mod tests {
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (_, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (_, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -794,7 +794,7 @@ mod tests {
         let mem_store = MemStore::new();
 
         let mut trie = StateRoot::new(&mem_store);
-        let (root, _) = trie.update_fin(StateUpdates::default()).unwrap();
+        let (root, _) = trie.update_fin(&StateUpdates::default()).unwrap();
 
         let bucket_id: BucketId = 100000;
         let salt_key = bucket_metadata_key(bucket_id);

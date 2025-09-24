@@ -316,7 +316,7 @@ mod tests {
             .collect();
         let updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
         store.update_state(updates.clone());
-        let (root, trie_updates) = StateRoot::new(store).update_fin(updates).unwrap();
+        let (root, trie_updates) = StateRoot::new(store).update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
         root
     }
@@ -403,7 +403,7 @@ mod tests {
         let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (root, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
 
         // Generate a witness for the inserted key
@@ -824,7 +824,7 @@ mod tests {
         let updates = state.update(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
 
         store.update_trie(trie_updates);
 

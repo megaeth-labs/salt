@@ -640,7 +640,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
         mem_store.update_trie(trie_updates);
 
         let salt_key = *updates.data.keys().next().unwrap();
@@ -671,7 +671,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates);
 
@@ -707,7 +707,7 @@ mod tests {
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (trie_root, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
 
         mem_store.update_trie(trie_updates.clone());
 
@@ -772,7 +772,7 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(initialize_state_updates.clone()).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
 
@@ -802,7 +802,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
 
         store.update_trie(trie_updates);
@@ -903,7 +903,7 @@ mod tests {
         };
 
         let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(initialize_state_updates.clone()).unwrap();
+            trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
         let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
@@ -930,7 +930,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = StateRoot::rebuild(&store).unwrap();
@@ -980,7 +980,7 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let (expansion_root, trie_updates) = trie.update_fin(expand_state_updates.clone()).unwrap();
+        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
         let (root, _) = StateRoot::rebuild(&store).unwrap();
@@ -1038,9 +1038,7 @@ mod tests {
         let state_updates = state.update(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
-        let (root_hash, trie_updates) = StateRoot::new(&store)
-            .update_fin(state_updates.clone())
-            .unwrap();
+        let (root_hash, trie_updates) = StateRoot::new(&store).update_fin(&state_updates).unwrap();
         store.update_trie(trie_updates);
 
         // Prepare data for proof verification

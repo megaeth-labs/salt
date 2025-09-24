@@ -1,11 +1,11 @@
 //! Core traits for SALT state and trie storage.
-use std::error::Error;
 use crate::trie::node_utils::subtree_root_level;
 use crate::{
     constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
+use std::error::Error;
 use std::{
     fmt::Debug,
     ops::{Range, RangeInclusive},

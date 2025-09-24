@@ -5,7 +5,7 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates, state::PlainStateProvider};
+pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
@@ -48,7 +48,7 @@ mod tests {
 
         // Incremental state root computation from the SALT-encoded state changes
         let mut state_root = StateRoot::new(&store);
-        let (root_hash, trie_updates) = state_root.update_fin(state_updates)?;
+        let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
         let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
