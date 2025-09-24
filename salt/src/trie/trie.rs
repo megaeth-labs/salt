@@ -160,7 +160,7 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        for (node_id, (old, new)) in self.update_bucket_subtrees(&state_updates)? {
+        for (node_id, (old, new)) in self.update_bucket_subtrees(state_updates)? {
             self.cache.insert(node_id, new);
             self.updates
                 .entry(node_id)
@@ -386,7 +386,7 @@ where
         let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
 
         // Step 2: Update leaf node commitments
-        let mut trie_updates = self.update_leaf_nodes(&state_updates, &subtree_change_info)?;
+        let mut trie_updates = self.update_leaf_nodes(state_updates, &subtree_change_info)?;
 
         // Helper closure for expansion without KV changes
         let add_expansion_update =

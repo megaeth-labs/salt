@@ -103,7 +103,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                 // Measured operation: Single large update with immediate finalization
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -121,7 +121,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             |inputs| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -141,7 +141,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                     let mut trie = StateRoot::new(&EmptySalt);
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
-                        trie.update(state_updates).unwrap();
+                        trie.update(&state_updates).unwrap();
                     }
                     // Single expensive commitment computation at the end
                     trie.finalize().unwrap()
@@ -163,7 +163,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                     // Anti-pattern: Create fresh trie and compute root for each update
                     for state_updates in inputs.into_iter() {
                         StateRoot::new(&EmptySalt)
-                            .update_fin(state_updates)
+                            .update_fin(&state_updates)
                             .unwrap();
                     }
                 }
@@ -183,7 +183,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             |inputs| {
                 black_box({
                     StateRoot::new(&MockExpandedBuckets::new(65536 * 16, 512))
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap()
                 })
             },
