@@ -880,6 +880,54 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     }
 }
 
+/// This structure enables reading EVM account & storage data from a SALT state.
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The SALT state to read data from.
+    pub salt_state: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Create a [`SaltStateProvider`] object.
+    pub const fn new(salt_state: &'a S) -> Self {
+        Self { salt_state }
+    }
+
+    /// Return the SALT value associated with the given plain key.
+    pub fn get_raw(&self, plain_key: &[u8]) -> Result<Option<Vec<u8>>, S::Error> {
+        // Computes the `bucket_id` based on the `key`.
+        let bucket_id = hasher::bucket_id(plain_key);
+        self.get_raw_with_bucket(bucket_id, plain_key)
+    }
+
+    /// Returns the SALT value associated with the given plain key using a precomputed Salt key.
+    pub fn get_raw_with_bucket(
+        &self,
+        bucket_id: BucketId,
+        plain_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        let meta = self.salt_state.metadata(bucket_id)?;
+        // Calculates the `hashed_id`(the initial slot position) based on the `key` and `nonce`.
+        let hashed_id = hasher::hash_with_nonce(plain_key, meta.nonce);
+
+        // Starts from the initial slot position and searches for the slot corresponding to the
+        // `key`.
+        for step in 0..meta.capacity {
+            let slot_id = probe(hashed_id, step, meta.capacity);
+            if let Some(slot_val) = self.salt_state.value((bucket_id, slot_id).into())? {
+                match slot_val.key().cmp(plain_key) {
+                    Ordering::Less => return Ok(None),
+                    Ordering::Equal => return Ok(Some(slot_val.value().to_vec())),
+                    Ordering::Greater => (),
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
 ///
 /// This implements linear probing for collision resolution in the SHI hash table,
