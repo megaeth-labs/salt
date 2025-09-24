@@ -5,7 +5,9 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
+pub use state::{
+    hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,
+};
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
