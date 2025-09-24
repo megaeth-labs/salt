@@ -75,7 +75,7 @@ use std::{
 #[derive(Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
-    store: &'a Store,
+    pub store: &'a Store,
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
@@ -84,7 +84,7 @@ pub struct EphemeralSaltState<'a, Store> {
     ///
     /// Note: This field is `pub(crate)` to enable proof generation modules to
     /// access the set of touched keys for witness construction.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the net change in bucket usage counts relative to the base store.
     ///
     /// Each value represents the delta from the base store's bucket usage count:
@@ -95,9 +95,9 @@ pub struct EphemeralSaltState<'a, Store> {
     /// only the `nonce` and `capacity` fields are preserved - the usage count is dropped.
     /// Without this delta tracking, computing the current bucket occupancy would require
     /// reconciling the base store's usage count with all cached modifications.
-    usage_count_delta: HashMap<BucketId, i64>,
+    pub usage_count_delta: HashMap<BucketId, i64>,
     /// Whether to cache values read from the store for subsequent access
-    cache_read: bool,
+    pub cache_read: bool,
 }
 
 impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
@@ -754,7 +754,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This method handles both the in-memory cache update and the delta tracking
     /// needed for generating [`StateUpdates`]. Changes are only recorded when the
     /// old and new values differ to avoid empty deltas.
-    fn update_value(
+    pub fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,

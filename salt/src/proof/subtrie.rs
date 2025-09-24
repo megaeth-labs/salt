@@ -383,7 +383,7 @@ mod tests {
         store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&store);
-        let (_, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let (_, trie_updates) = trie.update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
 
         (store, *updates.data.keys().next().unwrap())
