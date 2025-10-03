@@ -46,7 +46,7 @@ use std::{
 };
 
 /// The size of the precomputed window.
-const PRECOMP_WINDOW_SIZE: usize = 11;
+const PRECOMP_WINDOW_SIZE: usize = 3;
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> =
