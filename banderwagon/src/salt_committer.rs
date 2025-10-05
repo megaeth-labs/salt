@@ -26,7 +26,7 @@
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
-use ark_ec::AdditiveGroup;
+use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
@@ -116,7 +116,7 @@ impl Committer {
                     }
                     element += element;
                 }
-                Element::batch_proj_to_affine(&table)
+                EdwardsProjective::normalize_batch(&table)
             })
             .collect();
 
@@ -175,7 +175,7 @@ impl Committer {
                     }
                     element += element;
                 }
-                Element::batch_proj_to_affine(&table)
+                EdwardsProjective::normalize_batch(&table)
             })
             .collect();
 
@@ -541,33 +541,6 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
 }
 
 impl Element {
-    /// Efficiently converts a batch of projective points to affine coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `elements` - Slice of points in projective coordinates
-    ///
-    /// # Returns
-    ///
-    /// Vector of the same points in affine coordinates.
-    #[inline]
-    pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
-        let commitments = Element::batch_to_commitments(
-            &elements
-                .iter()
-                .map(|element| Element(*element))
-                .collect::<Vec<Element>>(),
-        );
-        // Convert commitments from CommitmentBytes to EdwardsAffine
-        commitments
-            .iter()
-            .map(|bytes| EdwardsAffine {
-                x: Fq::from_le_bytes_mod_order(&bytes[0..32]),
-                y: Fq::from_le_bytes_mod_order(&bytes[32..64]),
-            })
-            .collect()
-    }
-
     /// Converts multiple elliptic curve points to their 64-byte commitment representations.
     ///
     /// This function efficiently serializes a batch of `Element` points into their
@@ -761,34 +734,6 @@ mod tests {
             let _ = x.serialize_uncompressed(&mut bytes[0..32]);
             let _ = y.serialize_uncompressed(&mut bytes[32..64]);
             assert_eq!(bytes, hash_bytes[i]);
-        }
-    }
-
-    /// Tests the batch conversion from projective to affine coordinates.
-    ///
-    /// This test verifies that `batch_proj_to_affine` correctly converts multiple
-    /// points from projective representation (X:Y:Z) to affine representation (x, y).
-    ///
-    /// # Test Process
-    /// 1. Creates projective points directly (accessing internal .0 field)
-    /// 2. Calls `batch_proj_to_affine` for batch conversion
-    /// 3. Verifies each result by checking x = X/Z and y = Y/Z
-    ///
-    /// # Implementation Detail
-    /// The function internally uses `batch_to_commitments` and deserializes the results,
-    /// leveraging the same Montgomery batch inversion optimization.
-    #[test]
-    fn batch_proj_to_affine() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(1)).0,
-            (Element::prime_subgroup_generator() * Fr::from(2)).0,
-        ];
-
-        let es = Element::batch_proj_to_affine(&a_vec);
-
-        for i in 0..a_vec.len() {
-            assert_eq!(es[i].y, a_vec[i].y / a_vec[i].z);
-            assert_eq!(es[i].x, a_vec[i].x / a_vec[i].z);
         }
     }
 
