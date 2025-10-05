@@ -55,7 +55,7 @@ impl<'de> Deserialize<'de> for SerdeCommitment {
     /// Deserializes from compressed (32-byte) format back to uncompressed (64-byte) storage.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let bytes = <[u8; 32]>::deserialize(deserializer)?;
-        Element::from_bytes(&bytes)
+        Element::from_bytes(bytes)
             .map(|e| Self(e.to_bytes_uncompressed()))
             .ok_or_else(|| serde::de::Error::custom("invalid element bytes"))
     }
