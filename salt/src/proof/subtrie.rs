@@ -117,8 +117,6 @@ where
         all_child_commitments.extend(child_commitments);
     }
 
-    // Convert all Element commitments to scalar field elements in one batch operation
-    // This is more efficient than converting individually
     Ok(Element::serial_batch_map_to_scalar_field(
         all_child_commitments,
     ))

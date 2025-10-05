@@ -1,6 +1,6 @@
 use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
-use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
+use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use std::{
@@ -223,74 +223,69 @@ impl Element {
         Some(EdwardsAffine::new_unchecked(x, y).into())
     }
 
-    fn map_to_field(&self) -> Fq {
-        self.0.x / self.0.y
-    }
-
-    // Note: This is a 2 to 1 map, but the two preimages are identified to be the same
+    /// Maps an elliptic curve point to a scalar field element.
+    ///
+    /// This is a critical operation in verkle trees, enabling commitments (curve points)
+    /// to be used as values in parent node vectors.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Compute `x/y` where `(x, y)` are the point coordinates → yields a base field element (Fq)
+    /// 2. Serialize the Fq element to bytes
+    /// 3. Reinterpret those bytes as a scalar field element (Fr)
+    ///
+    /// # Non-Injectivity Properties
+    ///
+    /// This mapping is **not injective** in two ways:
+    ///
+    /// 1. **Banderwagon quotient group (2-to-1)**: Points `(x, y)` and `(-x, -y)` both map
+    ///    to the same Fr value. This is by design - banderwagon identifies these as the same
+    ///    element, so this property is harmless.
+    ///
+    /// 2. **Field size wrapping (Fq → Fr)**: Since the scalar field Fr is ~4x smaller than
+    ///    the base field Fq, the byte reinterpretation can wrap. This means multiple distinct
+    ///    points could theoretically map to the same Fr value.
+    ///
+    /// # Security Note
+    ///
+    /// While the Fq→Fr non-injectivity means a malicious prover could craft points that
+    /// map to the same scalar, this doesn't compromise security in verkle tree proofs.
+    /// The IPA vector opening forces the prover to know the actual committed vector,
+    /// preventing exploitation of colliding commitments.
+    ///
+    /// **Warning**: If using this mapping in other protocols, ensure you require vector
+    /// openings to prevent commitment substitution attacks.
+    ///
+    /// # References
+    ///
+    /// - [Non-injective mapping between Point→Fr](https://ihagopian.com/posts/anatomy-of-a-verkle-proof)
     pub fn map_to_scalar_field(&self) -> Fr {
-        use ark_ff::PrimeField;
-
-        let base_field = self.map_to_field();
-
-        let mut bytes = [0u8; 32];
-        base_field
-            .serialize_compressed(&mut bytes[..])
-            .expect("could not serialize point into a 32 byte array");
-        Fr::from_le_bytes_mod_order(&bytes)
+        base_to_scalar(self.0.x / self.0.y)
     }
 
-    pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
-        use ark_ff::PrimeField;
-
-        let mut x_div_y = Vec::with_capacity(elements.len());
-        for element in elements {
-            let y = element.0.y;
-            x_div_y.push(y);
-        }
-        batch_inversion(&mut x_div_y);
-
-        for i in 0..elements.len() {
-            x_div_y[i] *= elements[i].0.x;
-        }
-
-        let mut scalars = Vec::with_capacity(elements.len());
-        for element in x_div_y {
-            let mut bytes = [0u8; 32];
-            element
-                .serialize_compressed(&mut bytes[..])
-                .expect("could not serialize point into a 32 byte array");
-            scalars.push(Fr::from_le_bytes_mod_order(&bytes));
-        }
-
-        scalars
-    }
-
-    // serial optimized version
+    /// Batch-optimized version of [`map_to_scalar_field()`](Element::map_to_scalar_field).
+    ///
+    /// Uses batch inversion to amortize the cost of computing `x/y` across all elements.
+    ///
+    /// This is intentionally a single-threaded implementation to avoid parallelization
+    /// overhead on small batches.
+    ///
+    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
+    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
     pub fn serial_batch_map_to_scalar_field(elements: Vec<[u8; 64]>) -> Vec<Fr> {
-        use ark_ff::PrimeField;
-
         let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
             .into_iter()
-            .map(|e| {
-                let e = Element::from_bytes_unchecked_uncompressed(e);
+            .map(|bytes| {
+                let e = Element::from_bytes_unchecked_uncompressed(bytes);
                 (e.0.x, e.0.y)
             })
             .unzip();
 
         serial_batch_inversion_and_mul(&mut ys, &Fq::one());
 
-        ys.iter_mut().zip(xs.iter()).for_each(|(y, x)| {
-            *y *= x;
-        });
-
-        ys.iter()
-            .map(|e| {
-                let mut bytes = [0u8; 32];
-                e.serialize_compressed(&mut bytes[..])
-                    .expect("could not serialize point into a 32 byte array");
-                Fr::from_le_bytes_mod_order(&bytes)
-            })
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y_inv)| base_to_scalar(x * y_inv))
             .collect()
     }
 
@@ -306,6 +301,19 @@ impl Element {
 // The lexographically largest value is defined to be the positive value
 fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
+}
+
+/// Converts a base field element (Fq) to a scalar field element (Fr).
+///
+/// This is used to map banderwagon elements to scalars by serializing the
+/// base field element and reinterpreting the bytes as a scalar field element.
+fn base_to_scalar(base_field: Fq) -> Fr {
+    use ark_ff::PrimeField;
+    let mut bytes = [0u8; 32];
+    base_field
+        .serialize_compressed(&mut bytes[..])
+        .expect("could not serialize point into a 32 byte array");
+    Fr::from_le_bytes_mod_order(&bytes)
 }
 
 /// Checks whether a point is in the banderwagon prime-order subgroup.
@@ -458,21 +466,17 @@ mod tests {
     }
 
     #[test]
-    fn from_batch_map_to_scalar_field() {
-        let mut points = Vec::new();
-        for i in 0..10 {
-            points.push(Element::prime_subgroup_generator() * Fr::from(i));
-        }
+    fn test_serial_batch_map_to_scalar_field() {
+        let points: Vec<_> = (0..10)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i))
+            .collect();
 
-        let got = Element::batch_map_to_scalar_field(&points);
+        let got = Element::serial_batch_map_to_scalar_field(
+            points.iter().map(|p| p.to_bytes_uncompressed()).collect(),
+        );
 
-        for i in 0..10 {
-            let expected_i = points[i].map_to_scalar_field();
-            assert_eq!(expected_i, got[i]);
-        }
-        for i in 0..10 {
-            let expected_i = points[i].map_to_scalar_field();
-            assert_eq!(expected_i, got[i]);
+        for (point, scalar) in points.iter().zip(got) {
+            assert_eq!(point.map_to_scalar_field(), scalar);
         }
     }
 

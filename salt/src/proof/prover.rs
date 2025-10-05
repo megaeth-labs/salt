@@ -309,8 +309,6 @@ fn create_internal_node_queries(
                 children_commitments_to_scalars(nodes, path_commitments)?;
 
             // Step 2: PERFORMANCE CRITICAL - Batch convert commitments to field elements
-            // serial_batch_map_to_scalar_field() requires only ONE field inversion for all commitments
-            // vs individual conversions which would require one inversion per commitment
             let children_frs = Element::serial_batch_map_to_scalar_field(children_commitments);
             let child_map: FxHashMap<NodeId, Fr> =
                 children_ids.into_iter().zip(children_frs).collect();
