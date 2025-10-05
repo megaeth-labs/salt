@@ -242,7 +242,7 @@ impl MultiPointProof {
         let g_x_comm_bytes = &bytes[0..32];
         let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
         let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
-            .ok_or(IOError::from(IOErrorKind::InvalidData))?;
+            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
         let g_x_comm = point;
 
         let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;

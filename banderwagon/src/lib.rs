@@ -46,5 +46,5 @@ pub fn try_reduce_to_element(bytes: &[u8]) -> Option<Element> {
     bytes.reverse();
 
     // Deserialize the x-coordinate to get a valid banderwagon element
-    Element::from_bytes(bytes)
+    Element::from_bytes(bytes).ok()
 }

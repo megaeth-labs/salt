@@ -1,7 +1,7 @@
 use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 
 use std::{
     hash::Hash,
@@ -84,25 +84,25 @@ impl Element {
     ///
     /// # Returns
     ///
-    /// - `Some(Element)` if deserialization succeeds and passes validation
-    /// - `None` if the bytes are invalid, the point doesn't exist, or the subgroup check fails
+    /// - `Ok(Element)` if deserialization succeeds and passes validation
+    /// - `Err(SerializationError)` if the bytes are invalid, the point doesn't exist,
+    ///   or the subgroup check fails
     ///
     /// # Security
     ///
     /// This is the **safe** deserialization path. Always use this for untrusted input.
-    pub fn from_bytes(mut bytes: [u8; 32]) -> Option<Element> {
+    pub fn from_bytes(mut bytes: [u8; 32]) -> Result<Element, SerializationError> {
         // Switch from big endian to little endian for arkworks
         bytes.reverse();
 
         // Construct a point that is on the curve
-        let point = Self::get_point_from_x(Fq::deserialize_compressed(&bytes[..]).ok()?, true)?;
+        let x = Fq::deserialize_compressed(&bytes[..])?;
+        let point = Self::get_point_from_x(x, true).ok_or(SerializationError::InvalidData)?;
 
-        // Check if the point is in the correct subgroup
-        if !subgroup_check(&point) {
-            return None;
-        }
-
-        Some(Element(point))
+        // Verify point is in the correct subgroup
+        subgroup_check(&point)
+            .then_some(Element(point))
+            .ok_or(SerializationError::InvalidData)
     }
 
     /// Serializes this element to a 64-byte uncompressed representation.
@@ -555,16 +555,14 @@ mod tests {
         // the sum of the point at infinity and another point
         let point = points_at_infinity()[0];
         let gen = EdwardsProjective::generator();
-        let gen2 = gen + gen + gen + gen;
 
-        let res = point + gen + gen2;
+        // Points at infinity should fail deserialization due to subgroup check
+        let invalid_element = Element(point + gen + gen.double().double());
 
-        let element1 = Element(res);
-        let bytes1 = element1.to_bytes();
-
-        if Element::from_bytes(bytes1).is_some() {
-            panic!("point contains a point at infinity and should not have passed deserialization")
-        }
+        assert!(
+            Element::from_bytes(invalid_element.to_bytes()).is_err(),
+            "point containing infinity should fail deserialization"
+        );
     }
 
     #[test]

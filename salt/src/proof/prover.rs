@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for SerdeCommitment {
         let bytes = <[u8; 32]>::deserialize(deserializer)?;
         Element::from_bytes(bytes)
             .map(|e| Self(e.to_bytes_uncompressed()))
-            .ok_or_else(|| serde::de::Error::custom("invalid element bytes"))
+            .map_err(|_| serde::de::Error::custom("invalid element bytes"))
     }
 }
 
