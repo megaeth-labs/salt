@@ -26,7 +26,7 @@
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
-use ark_ec::{AdditiveGroup, CurveGroup};
+use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::{Field, Zero};
@@ -566,65 +566,32 @@ impl Element {
             .collect()
     }
 
-    /// Compresses commitment points into 32-byte hashes for storage efficiency.
+    /// Compresses 64-byte commitments to 32-byte hashes.
     ///
-    /// This function converts 64-byte commitment representations (x, y) into
-    /// 32-byte hashes by computing x/y for each point. This compression is
-    /// useful for storage in SALT's trie nodes where full coordinates aren't needed.
-    ///
-    /// # Arguments
-    ///
-    /// * `commitments` - Slice of 64-byte commitment representations
-    ///
-    /// # Returns
-    ///
-    /// Vector of 32-byte arrays containing x/y for each commitment.
-    ///
-    /// # Algorithm
-    ///
-    /// Uses Montgomery's batch inversion trick to compute all y-inverses
-    /// with a single field inversion, then multiplies each x by 1/y.
-    ///
-    /// # Special Cases
-    ///
-    /// - Points with y=0 result in empty (zero) hash bytes
-    #[inline]
+    /// FIXME: strictly speaking this is **NOT** the right way to compute hashes.
+    /// It didn't normalize x/y using Fr::from_le_bytes_mod_order. The entire method
+    /// should be replaced by [`Element::serial_batch_map_to_scalar_field`]
     pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
-        let elements = commitments
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = commitments
             .iter()
-            .map(|commitment| Element::from_bytes_unchecked_uncompressed(*commitment))
-            .collect::<Vec<_>>();
-        let mut hashs = vec![[0u8; 32]; elements.len()];
-        let mut yi_mul = vec![Fq::ZERO; elements.len()];
-        let mut zeroes = vec![false; elements.len()];
-        let mut ys_mul = Fq::ONE;
+            .map(|commitment| {
+                let element = Element::from_bytes_unchecked_uncompressed(*commitment);
+                (element.0.x, element.0.y)
+            })
+            .unzip();
 
-        // Montgomery batch inversion algorithm for y-coordinates:
-        // Phase 1: Forward pass - compute comulative products
-        //   yi_mul[i] = y1 * y2 * ... * y_{i-1}
-        elements.iter().enumerate().for_each(|(i, element)| {
-            if element.0.y.is_zero() {
-                zeroes[i] = true;
-                return;
-            }
-            yi_mul[i] = ys_mul;
-            ys_mul *= &elements[i].0.y;
-        });
+        ark_ff::serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
 
-        // Phase 2: Single inversion - compute 1/(y1 * y2 * ... * yn)
-        let mut ys_inv = ys_mul.inverse().expect("ys_mul is not zero");
-
-        // Phase 3: Backward pass - extract individual inverses
-        // We use the formula: 1/yi = yi_mul[i]* 1/(y1 * ... * yn) * (y_{i+1} * ... * yn)
-        for i in (0..elements.len()).rev().step_by(1) {
-            if zeroes[i] {
-                continue;
-            }
-            let y_inv = yi_mul[i] * ys_inv;
-            ys_inv *= &elements[i].0.y;
-            let _ = (elements[i].0.x * y_inv).serialize_uncompressed(&mut hashs[i][..]);
-        }
-        hashs
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y_inv)| {
+                let mut bytes = [0u8; 32];
+                (x * y_inv)
+                    .serialize_compressed(&mut bytes[..])
+                    .expect("serialization should not fail");
+                bytes
+            })
+            .collect()
     }
 }
 
@@ -639,43 +606,29 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
 
-    /// Tests the batch conversion from 64-byte commitments to 32-byte hash representations.
-    ///
-    /// This test verifies that `hash_commitments` correctly computes x/y for each point,
-    /// which is used to compress elliptic curve points for storage in SALT trie nodes.
-    ///
-    /// # Test Process
-    /// 1. Creates test points as multiples of the generator
-    /// 2. Converts them to 64-byte uncompressed format
-    /// 3. Calls `hash_commitments` to compress to 32 bytes
-    /// 4. Manually computes x/y for verification
-    /// 5. Ensures the batch operation matches individual computations
+    /// Tests that `hash_commitments` correctly converts commitments to 32-byte hash representations.
     #[test]
-    fn batch_elements_to_hash_bytes() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(1111)),
-            (Element::prime_subgroup_generator() * Fr::from(2222)),
-        ];
+    fn test_hash_commitments() {
+        let elements: Vec<_> = (1..16)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
+            .collect();
 
-        let c_vec = a_vec
-            .iter()
-            .map(|e| e.to_bytes_uncompressed())
-            .collect::<Vec<_>>();
+        let commitments: Vec<_> = elements.iter().map(|e| e.to_bytes_uncompressed()).collect();
+        let hash_bytes = Element::hash_commitments(&commitments);
 
-        let hash_bytes = Element::hash_commitments(&c_vec);
-
-        for i in 0..a_vec.len() {
-            let mut bytes = [0_u8; 32];
-            let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
-            let _ = x.serialize_uncompressed(&mut bytes[..]);
-            assert_eq!(bytes, hash_bytes[i]);
+        for (element, hash) in elements.iter().zip(hash_bytes.iter()) {
+            let mut expected = [0u8; 32];
+            (element.0.x * element.0.y.inverse().unwrap())
+                .serialize_compressed(&mut expected[..])
+                .unwrap();
+            assert_eq!(&expected, hash);
         }
     }
 
     /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
     #[test]
     fn test_batch_to_commitments() {
-        let elements: Vec<_> = (1..=15)
+        let elements: Vec<_> = (1..16)
             .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
             .collect();
 
