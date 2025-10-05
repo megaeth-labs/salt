@@ -541,61 +541,29 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
 }
 
 impl Element {
-    /// Converts multiple elliptic curve points to their 64-byte commitment representations.
-    ///
-    /// This function efficiently serializes a batch of `Element` points into their
-    /// uncompressed byte representations. It uses Montgomery's batch inversion trick
-    /// to normalize all Z-coordinates with a single field inversion.
+    /// Converts banderwagon elements to their 64-byte commitment representations.
     ///
     /// # Arguments
     ///
-    /// * `elements` - Slice of elliptic curve points to convert
+    /// * `elements` - Slice of elements to convert
     ///
     /// # Returns
     ///
     /// Vector of 64-byte arrays, each containing:
     /// - Bytes 0-31: X-coordinate (little-endian)
     /// - Bytes 32-63: Y-coordinate (little-endian)
-    ///
-    /// # Special Cases
-    ///
-    /// - Identity elements (Z=0) are encoded as (0, 1)
-    #[inline]
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let mut commitments = vec![[0u8; 64]; elements.len()];
-        let mut zi_mul = vec![Fq::ZERO; elements.len()];
-        let mut zeroes = vec![false; elements.len()];
-        let mut zs_mul = Fq::ONE;
-
-        // Montgomery batch inversion algorithm:
-        // Phase 1: Forward pass - compute accumulative products
-        //   zi_mul[i] = z1 * z2 * ... * z_{i-1}
-        elements.iter().enumerate().for_each(|(i, element)| {
-            if element.0.z.is_zero() {
-                zeroes[i] = true;
-                return;
-            }
-            zi_mul[i] = zs_mul;
-            zs_mul *= &element.0.z;
-        });
-
-        // Phase 2: Single inversion - compute 1/(z1 * z2 * ... * zn)
-        let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
-
-        // Phase 3: Backward pass - extract individual inverses
-        // We use the formula: 1/zi = zs_mul[i] * 1/(z1 * z2 * ... * zn) * (z_{i+1} * ... * zn)
-        for i in (0..elements.len()).rev().step_by(1) {
-            if zeroes[i] {
-                let _ = Fq::ONE.serialize_uncompressed(&mut commitments[i][32..64]);
-                continue;
-            }
-            let z_inv = zi_mul[i] * zs_inv;
-            zs_inv *= &elements[i].0.z;
-
-            let _ = (elements[i].0.x * z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
-            let _ = (elements[i].0.y * z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
-        }
-        commitments
+        let points: Vec<_> = elements.iter().map(|e| e.0).collect();
+        EdwardsProjective::normalize_batch(&points)
+            .iter()
+            .map(|affine_point| {
+                let mut bytes = [0u8; 64];
+                affine_point
+                    .serialize_uncompressed(&mut bytes[..])
+                    .expect("serialization should not fail for valid affine points");
+                bytes
+            })
+            .collect()
     }
 
     /// Compresses commitment points into 32-byte hashes for storage efficiency.
@@ -704,36 +672,17 @@ mod tests {
         }
     }
 
-    /// Tests the batch conversion from projective Elements to 64-byte commitment format.
-    ///
-    /// This test validates that `batch_to_commitments` correctly normalizes projective
-    /// points (X:Y:Z) to affine coordinates (X/Z, Y/Z) and serializes them as 64-byte arrays.
-    ///
-    /// # Test Process
-    /// 1. Creates test points in projective coordinates
-    /// 2. Calls `batch_to_commitments` for batch conversion
-    /// 3. Manually computes affine coordinates (x/z, y/z) for each point
-    /// 4. Serializes manually computed values
-    /// 5. Verifies batch results match individual computations
-    ///
-    /// # Importance
-    /// This ensures the Montgomery batch inversion optimization produces correct results.
+    /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
     #[test]
-    fn batch_elements_to_commitments() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(3333)),
-            (Element::prime_subgroup_generator() * Fr::from(4444)),
-        ];
+    fn test_batch_to_commitments() {
+        let elements: Vec<_> = (1..=15)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
+            .collect();
 
-        let hash_bytes = Element::batch_to_commitments(&a_vec);
+        let batch_result = Element::batch_to_commitments(&elements);
 
-        for i in 0..a_vec.len() {
-            let mut bytes = [0_u8; 64];
-            let x = a_vec[i].0.x * a_vec[i].0.z.inverse().unwrap();
-            let y = a_vec[i].0.y * a_vec[i].0.z.inverse().unwrap();
-            let _ = x.serialize_uncompressed(&mut bytes[0..32]);
-            let _ = y.serialize_uncompressed(&mut bytes[32..64]);
-            assert_eq!(bytes, hash_bytes[i]);
+        for (element, commitment) in elements.iter().zip(batch_result.iter()) {
+            assert_eq!(element.to_bytes_uncompressed(), *commitment);
         }
     }
 
