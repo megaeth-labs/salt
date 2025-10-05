@@ -117,9 +117,7 @@ where
         all_child_commitments.extend(child_commitments);
     }
 
-    Ok(Element::serial_batch_map_to_scalar_field(
-        all_child_commitments,
-    ))
+    Ok(Element::hash_commitments(&all_child_commitments))
 }
 
 /// Creates IPA prover queries for a given commitment and evaluation points.

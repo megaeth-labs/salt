@@ -29,7 +29,7 @@ use crate::element::Element;
 use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
-use ark_ff::{Field, Zero};
+use ark_ff::Zero;
 use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
@@ -207,8 +207,8 @@ impl Committer {
     /// * `old_commitment` - The current commitment value (64 bytes)
     /// * `delta_indices` - Vector of (index, old_value, new_value) tuples where:
     ///   - `index`: Position in the commitment vector
-    ///   - `old_value`: Previous 32-byte value at this position
-    ///   - `new_value`: New 32-byte value at this position
+    ///   - `old_value`: Previous Fr value at this position
+    ///   - `new_value`: New Fr value at this position
     ///
     /// # Returns
     ///
@@ -223,16 +223,12 @@ impl Committer {
     pub fn add_deltas(
         &self,
         old_commitment: [u8; 64],
-        delta_indices: &[(usize, [u8; 32], [u8; 32])],
+        delta_indices: &[(usize, Fr, Fr)],
     ) -> Element {
         let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
         delta_indices
             .iter()
-            .for_each(|(tb_i, old_bytes, new_bytes)| {
-                let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
-                let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
-                old += self.mul_index(&(new_fr - old_fr), *tb_i)
-            });
+            .for_each(|&(tb_i, old_fr, new_fr)| old += self.mul_index(&(new_fr - old_fr), tb_i));
         old
     }
 
@@ -381,26 +377,6 @@ impl Committer {
             .iter()
             .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
-    }
-
-    /// Computes the contribution of a single delta to a commitment update.
-    ///
-    /// This is a convenience method that computes `G[i] * (new - old)`,
-    /// which represents the change in commitment for position i.
-    ///
-    /// # Arguments
-    ///
-    /// * `old_bytes` - Previous 32-byte value at position i
-    /// * `new_bytes` - New 32-byte value at position i
-    /// * `g_i` - Index of the base point
-    ///
-    /// # Returns
-    ///
-    /// The delta contribution as an `Element`.
-    pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
-        let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
-        let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
-        self.mul_index(&(new_fr - old_fr), g_i)
     }
 }
 
@@ -565,34 +541,6 @@ impl Element {
             })
             .collect()
     }
-
-    /// Compresses 64-byte commitments to 32-byte hashes.
-    ///
-    /// FIXME: strictly speaking this is **NOT** the right way to compute hashes.
-    /// It didn't normalize x/y using Fr::from_le_bytes_mod_order. The entire method
-    /// should be replaced by [`Element::serial_batch_map_to_scalar_field`]
-    pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
-        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = commitments
-            .iter()
-            .map(|commitment| {
-                let element = Element::from_bytes_unchecked_uncompressed(*commitment);
-                (element.0.x, element.0.y)
-            })
-            .unzip();
-
-        ark_ff::serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
-
-        xs.into_iter()
-            .zip(ys)
-            .map(|(x, y_inv)| {
-                let mut bytes = [0u8; 32];
-                (x * y_inv)
-                    .serialize_compressed(&mut bytes[..])
-                    .expect("serialization should not fail");
-                bytes
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -605,25 +553,6 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
-
-    /// Tests that `hash_commitments` correctly converts commitments to 32-byte hash representations.
-    #[test]
-    fn test_hash_commitments() {
-        let elements: Vec<_> = (1..16)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
-            .collect();
-
-        let commitments: Vec<_> = elements.iter().map(|e| e.to_bytes_uncompressed()).collect();
-        let hash_bytes = Element::hash_commitments(&commitments);
-
-        for (element, hash) in elements.iter().zip(hash_bytes.iter()) {
-            let mut expected = [0u8; 32];
-            (element.0.x * element.0.y.inverse().unwrap())
-                .serialize_compressed(&mut expected[..])
-                .unwrap();
-            assert_eq!(&expected, hash);
-        }
-    }
 
     /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
     #[test]

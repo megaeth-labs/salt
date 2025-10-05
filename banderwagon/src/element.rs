@@ -272,16 +272,16 @@ impl Element {
     ///
     /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
     /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
-    pub fn serial_batch_map_to_scalar_field(elements: Vec<[u8; 64]>) -> Vec<Fr> {
+    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
         let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
-            .into_iter()
-            .map(|bytes| {
+            .iter()
+            .map(|&bytes| {
                 let e = Element::from_bytes_unchecked_uncompressed(bytes);
                 (e.0.x, e.0.y)
             })
             .unzip();
 
-        serial_batch_inversion_and_mul(&mut ys, &Fq::one());
+        serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
 
         xs.into_iter()
             .zip(ys)
@@ -466,13 +466,16 @@ mod tests {
     }
 
     #[test]
-    fn test_serial_batch_map_to_scalar_field() {
+    fn test_hash_commitments() {
         let points: Vec<_> = (0..10)
             .map(|i| Element::prime_subgroup_generator() * Fr::from(i))
             .collect();
 
-        let got = Element::serial_batch_map_to_scalar_field(
-            points.iter().map(|p| p.to_bytes_uncompressed()).collect(),
+        let got = Element::hash_commitments(
+            &points
+                .iter()
+                .map(|p| p.to_bytes_uncompressed())
+                .collect::<Vec<_>>(),
         );
 
         for (point, scalar) in points.iter().zip(got) {

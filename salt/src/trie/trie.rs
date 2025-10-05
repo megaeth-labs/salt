@@ -31,7 +31,7 @@ use crate::{
     trie::node_utils::*,
     types::*,
 };
-use banderwagon::{salt_committer::Committer, Element};
+use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
@@ -621,9 +621,8 @@ where
                         } else {
                             bucket_root_node_id(bucket_id)
                         },
-                        self.committer.gi_mul_delta(
-                            &kv_hash(old_value),
-                            &kv_hash(new_value),
+                        self.committer.mul_index(
+                            &(kv_hash(new_value) - kv_hash(old_value)),
                             salt_key.slot_id() as usize % TRIE_WIDTH,
                         ),
                     ))
@@ -681,7 +680,7 @@ where
                         (
                             get_parent_node(id),
                             self.committer
-                                .gi_mul_delta(&h[0], &h[1], vc_position_in_parent(id)),
+                                .mul_index(&(h[1] - h[0]), vc_position_in_parent(id)),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -934,17 +933,17 @@ impl StateRoot<'_, EmptySalt> {
     }
 }
 
-/// Generates a 256-bit secure hash from the bucket entry.
-/// Note: as a special case, empty entries are hashed to 0.
+/// Generates a scalar field element from the bucket entry.
+/// Note: as a special case, empty entries are hashed to a fixed value.
 #[inline(always)]
-pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> ScalarBytes {
+pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> Fr {
     entry.as_ref().map_or_else(
-        || EMPTY_SLOT_HASH,
+        || Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
         |salt_value| {
             let mut data = blake3::Hasher::new();
             data.update(salt_value.key());
             data.update(salt_value.value());
-            *data.finalize().as_bytes()
+            Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
         },
     )
 }
@@ -1004,6 +1003,7 @@ mod tests {
         constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
+    use banderwagon::Zero;
     use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
@@ -1069,14 +1069,14 @@ mod tests {
 
         let meta_delta_indices = (0..MIN_BUCKET_SIZE)
             .map(|slot_index| {
-                let old_value = [0u8; 32];
+                let old_value = Fr::zero();
                 let new_value = kv_hash(&Some(BucketMeta::default().into()));
                 (slot_index, old_value, new_value)
             })
             .collect::<Vec<_>>();
         let data_delta_indices = (0..MIN_BUCKET_SIZE)
             .map(|slot_index| {
-                let old_value = [0u8; 32];
+                let old_value = Fr::zero();
                 let new_value = kv_hash(&None);
                 (slot_index, old_value, new_value)
             })
@@ -1174,7 +1174,7 @@ mod tests {
                         .into_iter()
                         .zip(child_slot_indices)
                         .map(|(child_hash, slot_index)| {
-                            let old_value = [0u8; 32];
+                            let old_value = Fr::zero();
                             (slot_index, old_value, child_hash)
                         })
                         .collect::<Vec<_>>();
@@ -2234,11 +2234,11 @@ mod tests {
             let (meta_delta_indices, data_delta_indices) =
                 if i == MAIN_TRIE_LEVELS - 1 {
                     let meta_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, [0u8; 32], kv_hash(&Some(BucketMeta::default().into()))))
-                        .collect::<Vec<_>>();
+                        .map(|i| (i, Fr::zero(), kv_hash(&Some(BucketMeta::default().into()))))
+                        .collect();
                     let data_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, [0u8; 32], kv_hash(&None)))
-                        .collect::<Vec<_>>();
+                        .map(|i| (i, Fr::zero(), kv_hash(&None)))
+                        .collect();
                     (meta_delta_indices, data_delta_indices)
                 } else {
                     if i == 0 {
@@ -2256,7 +2256,7 @@ mod tests {
                         let delta_indices = hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
+                            .map(|(i, e)| (i, Fr::zero(), e))
                             .collect::<Vec<_>>();
                         (delta_indices.clone(), delta_indices)
                     } else {
@@ -2267,8 +2267,8 @@ mod tests {
                         let meta_delta_indices = meta_hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
-                            .collect::<Vec<_>>();
+                            .map(|(i, e)| (i, Fr::zero(), e))
+                            .collect();
                         let data_hash_bytes = Element::hash_commitments(&vec![
                             default_committment_vec[i + 1].1;
                             len_vec[i]
@@ -2276,8 +2276,8 @@ mod tests {
                         let data_delta_indices = data_hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
-                            .collect::<Vec<_>>();
+                            .map(|(i, e)| (i, Fr::zero(), e))
+                            .collect();
                         (meta_delta_indices, data_delta_indices)
                     }
                 };
@@ -2308,16 +2308,16 @@ mod tests {
         for i in (0..MAX_SUBTREE_LEVELS).rev() {
             let data_delta_indices = if i == MAX_SUBTREE_LEVELS - 1 {
                 let data_delta_indices = (0..MIN_BUCKET_SIZE)
-                    .map(|i| (i, [0u8; 32], kv_hash(&None)))
+                    .map(|i| (i, Fr::zero(), kv_hash(&None)))
                     .collect::<Vec<_>>();
                 data_delta_indices
             } else {
                 let data_hash_bytes =
-                    Element::hash_commitments(&vec![default_subtrie_c_vec[i + 1]; MIN_BUCKET_SIZE]);
+                    Element::hash_commitments(&[default_subtrie_c_vec[i + 1]; MIN_BUCKET_SIZE]);
                 let data_delta_indices = data_hash_bytes
                     .into_iter()
                     .enumerate()
-                    .map(|(i, e)| (i, [0u8; 32], e))
+                    .map(|(i, e)| (i, Fr::zero(), e))
                     .collect::<Vec<_>>();
                 data_delta_indices
             };
@@ -2363,7 +2363,7 @@ mod tests {
         (0..l)
             .map(|i| {
                 committer
-                    .gi_mul_delta(&[0u8; 32], &[(i + 1) as u8; 32], 0)
+                    .mul_index(&Fr::from((i + 1) as u8), 0)
                     .to_bytes_uncompressed()
             })
             .collect()
