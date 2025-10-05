@@ -1,4 +1,4 @@
-use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -108,28 +108,20 @@ impl Element {
     /// Serializes this element to a 64-byte uncompressed representation.
     ///
     /// This format stores both x and y coordinates, enabling faster deserialization.
-    /// Unlike [`to_bytes()`](Element::to_bytes), this does **not** canonicalize with
-    /// respect to the banderwagon quotient group. Equivalent elements `(x, y)` and
-    /// `(-x, -y)` will serialize to different byte arrays.
-    ///
-    /// # Warning
-    ///
-    /// **Do not compare outputs directly.** Use [`to_bytes()`](Element::to_bytes) for
-    /// canonical comparison that respects the equivalence class structure.
+    /// This method canonicalizes with respect to the banderwagon quotient group by
+    /// always choosing the point with a positive y-coordinate. Equivalent elements
+    /// `(x, y)` and `(-x, -y)` will serialize to the same byte array.
     ///
     /// # Returns
     ///
-    /// A 64-byte array in little-endian format containing uncompressed point coordinates.
+    /// A 64-byte array in little-endian format containing uncompressed point coordinates,
+    /// normalized to have a positive y-coordinate.
     ///
     /// # Panics
     ///
     /// Panics if serialization fails. This should never occur for valid `Element` instances.
     pub fn to_bytes_uncompressed(&self) -> [u8; 64] {
-        let mut bytes = [0u8; 64];
-        self.0
-            .serialize_uncompressed(&mut bytes[..])
-            .expect("cannot serialize point as an uncompressed byte array");
-        bytes
+        affine_to_canonical_bytes(self.0.into())
     }
 
     /// Deserializes from 64-byte uncompressed format WITHOUT subgroup validation.
@@ -289,6 +281,29 @@ impl Element {
             .collect()
     }
 
+    /// Converts banderwagon elements to their 64-byte commitment representations.
+    ///
+    /// This method canonicalizes with respect to the banderwagon quotient group by
+    /// always choosing the point with a positive y-coordinate. Equivalent elements
+    /// `(x, y)` and `(-x, -y)` will serialize to the same byte array.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of elements to convert
+    ///
+    /// # Returns
+    ///
+    /// Vector of 64-byte arrays, each containing canonicalized uncompressed coordinates:
+    /// - Bytes 0-31: X-coordinate (little-endian)
+    /// - Bytes 32-63: Y-coordinate (little-endian, always positive)
+    pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
+        let points: Vec<_> = elements.iter().map(|e| e.0).collect();
+        EdwardsProjective::normalize_batch(&points)
+            .into_iter()
+            .map(affine_to_canonical_bytes)
+            .collect()
+    }
+
     pub fn zero() -> Element {
         Element(EdwardsProjective::zero())
     }
@@ -301,6 +316,25 @@ impl Element {
 // The lexographically largest value is defined to be the positive value
 fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
+}
+
+/// Canonicalizes an affine point and serializes it to 64 bytes.
+///
+/// Chooses the banderwagon representative with positive y-coordinate,
+/// ensuring that equivalent points `(x, y)` and `(-x, -y)` produce
+/// identical byte arrays.
+fn affine_to_canonical_bytes(affine: EdwardsAffine) -> [u8; 64] {
+    let canonical = if is_positive(affine.y) {
+        affine
+    } else {
+        EdwardsAffine::new_unchecked(-affine.x, -affine.y)
+    };
+
+    let mut bytes = [0u8; 64];
+    canonical
+        .serialize_uncompressed(&mut bytes[..])
+        .expect("serialization should not fail for valid affine points");
+    bytes
 }
 
 /// Converts a base field element (Fq) to a scalar field element (Fr).
@@ -480,6 +514,20 @@ mod tests {
 
         for (point, scalar) in points.iter().zip(got) {
             assert_eq!(point.map_to_scalar_field(), scalar);
+        }
+    }
+
+    /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
+    #[test]
+    fn test_batch_to_commitments() {
+        let elements: Vec<_> = (1..16)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
+            .collect();
+
+        let batch_result = Element::batch_to_commitments(&elements);
+
+        for (element, commitment) in elements.iter().zip(batch_result.iter()) {
+            assert_eq!(element.to_bytes_uncompressed(), *commitment);
         }
     }
 

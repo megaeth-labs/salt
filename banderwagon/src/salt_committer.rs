@@ -30,7 +30,6 @@ use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::Zero;
-use ark_serialize::CanonicalSerialize;
 use rayon::prelude::*;
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
@@ -516,33 +515,6 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     index_vec
 }
 
-impl Element {
-    /// Converts banderwagon elements to their 64-byte commitment representations.
-    ///
-    /// # Arguments
-    ///
-    /// * `elements` - Slice of elements to convert
-    ///
-    /// # Returns
-    ///
-    /// Vector of 64-byte arrays, each containing:
-    /// - Bytes 0-31: X-coordinate (little-endian)
-    /// - Bytes 32-63: Y-coordinate (little-endian)
-    pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let points: Vec<_> = elements.iter().map(|e| e.0).collect();
-        EdwardsProjective::normalize_batch(&points)
-            .iter()
-            .map(|affine_point| {
-                let mut bytes = [0u8; 64];
-                affine_point
-                    .serialize_uncompressed(&mut bytes[..])
-                    .expect("serialization should not fail for valid affine points");
-                bytes
-            })
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,20 +525,6 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
-
-    /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
-    #[test]
-    fn test_batch_to_commitments() {
-        let elements: Vec<_> = (1..16)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
-            .collect();
-
-        let batch_result = Element::batch_to_commitments(&elements);
-
-        for (element, commitment) in elements.iter().zip(batch_result.iter()) {
-            assert_eq!(element.to_bytes_uncompressed(), *commitment);
-        }
-    }
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
     ///

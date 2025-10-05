@@ -1749,17 +1749,11 @@ mod tests {
         assert_eq!(root, cmp_root);
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         cmp_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        trie_updates.iter().zip(cmp_trie_updates.iter()).for_each(
-            |(trie_update, cmp_trie_update)| {
-                assert_eq!(trie_update.0, cmp_trie_update.0);
-                assert!(is_commitment_equal(trie_update.1 .0, cmp_trie_update.1 .0));
-                assert!(is_commitment_equal(trie_update.1 .1, cmp_trie_update.1 .1));
-            },
-        );
+        assert_eq!(trie_updates, cmp_trie_updates);
     }
 
     #[test]
-    fn increment_updates_large() {
+    fn incremental_updates_large() {
         let kvs = create_random_account(10000);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
@@ -1789,12 +1783,7 @@ mod tests {
 
         let minified_final_updates = minify_trie_updates(final_trie_updates);
         let minified_total_updates = minify_trie_updates(total_trie_updates);
-        assert_eq!(minified_total_updates.len(), minified_final_updates.len());
-        minified_total_updates.iter().for_each(|(id, (old, new))| {
-            let update = minified_final_updates.get(id).unwrap();
-            assert!(is_commitment_equal(*old, update.0));
-            assert!(is_commitment_equal(*new, update.1));
-        });
+        assert_eq!(minified_total_updates, minified_final_updates);
     }
 
     #[test]
@@ -1838,10 +1827,7 @@ mod tests {
         let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
         let c = rebuild_subtrie_without_expanded_buckets(node_id, &mock_db);
         mock_db.update_trie(trie_updates);
-        assert_eq!(
-            hash_commitment(c),
-            hash_commitment(mock_db.commitment(node_id).unwrap())
-        );
+        assert_eq!(c, mock_db.commitment(node_id).unwrap());
 
         assert_eq!(root0, root1);
     }
@@ -2380,10 +2366,6 @@ mod tests {
             .collect()
     }
 
-    fn is_commitment_equal(c1: CommitmentBytes, c2: CommitmentBytes) -> bool {
-        hash_commitment(c1) == hash_commitment(c2)
-    }
-
     /// Converts trie updates into a canonical format, removing duplicates and no-ops.
     ///
     /// Merges duplicate node IDs by chaining updates and removes updates where old == new.
@@ -2394,7 +2376,7 @@ mod tests {
         for (id, (old, new)) in updates {
             match result.entry(id) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    if !is_commitment_equal(old, new) {
+                    if old != new {
                         entry.insert((old, new));
                     }
                 }
