@@ -184,18 +184,6 @@ impl Committer {
         }
     }
 
-    /// Returns the 64-byte representation of the identity element (point at infinity).
-    ///
-    /// The identity element is encoded as (0, 1) in affine coordinates,
-    /// which serializes to 32 zero bytes followed by 32 bytes representing 1.
-    pub const fn zero() -> [u8; 64] {
-        [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
-        ]
-    }
-
     /// Efficiently updates a commitment by applying a series of delta changes.
     ///
     /// This method is crucial for SALT's incremental update mechanism. Instead of

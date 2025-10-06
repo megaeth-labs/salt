@@ -1045,7 +1045,7 @@ mod tests {
     ) -> CommitmentBytes {
         let node_level = get_bfs_level(node_id);
         let committer = SHARED_COMMITTER.as_ref();
-        let zero_commitment = Committer::zero();
+        let zero_commitment = Element::zero_commitment();
 
         // ========== Step 1: Calculate descendant bucket range ==========
         // For a node at a given level, calculate all bucket IDs in its subtree.
@@ -2199,7 +2199,7 @@ mod tests {
     /// Checks if the default commitment is correct
     #[test]
     fn trie_level_default_committment() {
-        let zero = Committer::zero();
+        let zero = Element::zero_commitment();
         let mut default_committment_vec = vec![(zero, zero); MAIN_TRIE_LEVELS];
         let len_vec = [1, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE];
 

@@ -308,6 +308,29 @@ impl Element {
         Element(EdwardsProjective::zero())
     }
 
+    /// Returns the canonical 64-byte representation of the banderwagon identity element.
+    ///
+    /// The identity element in the banderwagon quotient group is represented by the
+    /// equivalence class `{(0, 1), (0, -1)}`. This function returns the canonical form
+    /// with coordinates `(0, -1)`, chosen because `-1` is the lexicographically larger
+    /// value in the field ordering.
+    ///
+    /// This is a compile-time constant that produces the same output as
+    /// `Element::zero().to_bytes_uncompressed()`, but without any runtime computation.
+    ///
+    /// # Returns
+    ///
+    /// A 64-byte array in little-endian format containing the uncompressed coordinates:
+    /// - Bytes 0-31: X-coordinate (0)
+    /// - Bytes 32-63: Y-coordinate (-1 in the field)
+    pub const fn zero_commitment() -> [u8; 64] {
+        [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216,
+            161, 9, 8, 216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 115,
+        ]
+    }
+
     pub fn is_zero(&self) -> bool {
         *self == Element::zero()
     }
@@ -630,5 +653,18 @@ mod tests {
 
         assert!(inf1.double().is_zero());
         assert!(inf2.double().is_zero());
+    }
+
+    /// Verifies that the hardcoded constant in `Element::zero_bytes()` matches
+    /// the canonical serialization of the identity element from `Element::zero()`.
+    #[test]
+    fn test_zero_commitment() {
+        let zero_bytes = Element::zero_commitment();
+        let element_zero = Element::zero().to_bytes_uncompressed();
+
+        assert_eq!(
+            zero_bytes, element_zero,
+            "Element::zero_bytes() should equal Element::zero().to_bytes_uncompressed()"
+        );
     }
 }
