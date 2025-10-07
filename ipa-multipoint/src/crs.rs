@@ -129,12 +129,11 @@ impl CRS {
     /// # Returns
     /// Vector of 32-byte arrays representing the CRS points
     pub fn to_bytes(&self) -> Vec<[u8; 32]> {
-        let mut bytes = Vec::with_capacity(self.n + 1);
-        for point in &self.G {
-            bytes.push(point.to_bytes());
-        }
-        bytes.push(self.Q.to_bytes());
-        bytes
+        self.G
+            .iter()
+            .chain(std::iter::once(&self.Q))
+            .map(Element::to_bytes)
+            .collect()
     }
 
     /// Serializes the CRS to hex-encoded strings.
@@ -142,7 +141,7 @@ impl CRS {
     /// # Returns
     /// Vector of hex strings representing the CRS points
     pub fn to_hex(&self) -> Vec<String> {
-        self.to_bytes().iter().map(hex::encode).collect()
+        self.to_bytes().into_iter().map(hex::encode).collect()
     }
 
     /// Asserts that none of the generated points are duplicates.
@@ -151,11 +150,8 @@ impl CRS {
     /// Duplicate points would compromise the binding property of commitments.
     fn assert_dedup(points: &[Element]) {
         use std::collections::HashSet;
-        let mut map = HashSet::new();
-        for point in points {
-            let value_is_new = map.insert(point.to_bytes());
-            assert!(value_is_new, "crs has duplicated points")
-        }
+        let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
+        assert_eq!(set.len(), points.len(), "crs has duplicated points");
     }
 
     /// Commits to a polynomial in Lagrange basis form.
@@ -208,12 +204,11 @@ fn generate_random_elements(num_required_points: usize, seed: &'static [u8]) -> 
     // as we are using banderwagon.
 
     // Hash the seed + index to get a candidate point value
-    let hash_to_x = |index: u64| -> Vec<u8> {
+    let hash_to_x = |index: u64| {
         let mut hasher = Sha256::new();
         hasher.update(seed);
         hasher.update(index.to_be_bytes());
-        let bytes: Vec<u8> = hasher.finalize().to_vec();
-        bytes
+        hasher.finalize().to_vec()
     };
 
     (0u64..)
