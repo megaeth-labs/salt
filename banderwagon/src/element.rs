@@ -32,7 +32,18 @@ impl PartialEq for Element {
     /// - The points lie in the correct prime-order subgroup
     /// - Points at infinity (with `y = 0`) are excluded
     fn eq(&self, other: &Self) -> bool {
-        (self.0.x * other.0.y) == (other.0.x * self.0.y)
+        let (x1, y1) = (self.0.x, self.0.y);
+        let (x2, y2) = (other.0.x, other.0.y);
+
+        // Fail-safe check to reject the invalid but dangerous (0, 0) point.
+        if x1.is_zero() & y1.is_zero() {
+            return false;
+        }
+        if x2.is_zero() & y2.is_zero() {
+            return false;
+        }
+
+        (x1 * y2) == (x2 * y1)
     }
 }
 
@@ -666,5 +677,18 @@ mod tests {
             zero_bytes, element_zero,
             "Element::zero_bytes() should equal Element::zero().to_bytes_uncompressed()"
         );
+    }
+
+    /// Verifies that Element::eq() rejects the invalid, but especially dangerous (0, 0) point
+    /// as a final failsafe mechanism.
+    #[test]
+    fn test_eq_failsafe() {
+        // (0,0) point is very dangerous because it has the following property:
+        // - For all points P in the curve : P + (0, 0) = (0,0) and
+        // - For all scalars k: k * (0, 0) = (0, 0)
+        // So any MSM it participates in will collapse into (0, 0), which also
+        // passes the "x1*y2 == x2*y1" check trivially.
+        let double_zero = EdwardsAffine::new_unchecked(Fq::ZERO, Fq::ZERO);
+        assert!(!Element(double_zero.into()).is_zero());
     }
 }
