@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use std::iter;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
     pub(crate) L_vec: Vec<Element>,
     pub(crate) R_vec: Vec<Element>,

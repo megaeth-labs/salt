@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for SerdeCommitment {
 }
 
 /// Serde wrapper for `MultiPointProof`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SerdeMultiPointProof(pub MultiPointProof);
 
 impl Serialize for SerdeMultiPointProof {
@@ -93,7 +93,7 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
 }
 
 /// Salt proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaltProof {
     /// the node id of nodes in the path => node commitment
     pub parents_commitments: BTreeMap<NodeId, SerdeCommitment>,

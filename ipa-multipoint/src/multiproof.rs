@@ -34,7 +34,7 @@ impl From<ProverQuery> for VerifierQuery {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifierQuery {
     pub commitment: Element,
     pub point: Fr,
@@ -229,7 +229,7 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
         });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MultiPointProof {
     open_proof: IPAProof,
     g_x_comm: Element,
