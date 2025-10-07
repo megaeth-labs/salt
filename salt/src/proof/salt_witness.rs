@@ -295,7 +295,7 @@ impl TrieReader for SaltWitness {
     /// - Returns an error if the node is not included in the witness
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         match self.proof.parents_commitments.get(&node_id) {
-            Some(commitment) => Ok(commitment.0),
+            Some(commitment) => Ok(commitment.as_bytes()),
             None => Err(SaltError::NotInWitness { what: "Trie node" }),
         }
     }
@@ -361,6 +361,7 @@ mod tests {
         state::updates::StateUpdates,
         trie::trie::StateRoot,
     };
+    use banderwagon::{Element, Fr};
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
@@ -761,11 +762,10 @@ mod tests {
     fn test_witness_trie_reader_security() {
         // Build witness with two witnessed nodes
         let mut proof = create_mock_proof();
-        proof.parents_commitments = [
-            (12345, SerdeCommitment([1u8; 64])),
-            (67890, SerdeCommitment([2u8; 64])),
-        ]
-        .into();
+        let gen = Element::prime_subgroup_generator();
+        let c1 = SerdeCommitment(gen * Fr::from(1u64));
+        let c2 = SerdeCommitment(gen * Fr::from(2u64));
+        proof.parents_commitments = [(12345, c1.clone()), (67890, c2.clone())].into();
 
         let witness = SaltWitness {
             kvs: BTreeMap::new(),
@@ -773,8 +773,8 @@ mod tests {
         };
 
         // Witnessed nodes return correct commitments
-        assert_eq!(witness.commitment(12345).unwrap(), [1u8; 64]);
-        assert_eq!(witness.commitment(67890).unwrap(), [2u8; 64]);
+        assert_eq!(witness.commitment(12345).unwrap(), c1.as_bytes());
+        assert_eq!(witness.commitment(67890).unwrap(), c2.as_bytes());
 
         // Unknown nodes must return errors (critical security test)
         assert!(

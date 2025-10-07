@@ -273,16 +273,15 @@ impl Element {
     /// This is intentionally a single-threaded implementation to avoid parallelization
     /// overhead on small batches.
     ///
-    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
-    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
-    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
-        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
-            .iter()
-            .map(|&bytes| {
-                let e = Element::from_bytes_unchecked_uncompressed(bytes);
-                (e.0.x, e.0.y)
-            })
-            .unzip();
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of Elements to convert
+    ///
+    /// # Returns
+    ///
+    /// Vector of scalar field elements, one for each input Element
+    pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
 
         serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
 
@@ -290,6 +289,17 @@ impl Element {
             .zip(ys)
             .map(|(x, y_inv)| base_to_scalar(x * y_inv))
             .collect()
+    }
+
+    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
+    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
+    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
+        let elements: Vec<Element> = elements
+            .iter()
+            .map(|&bytes| Element::from_bytes_unchecked_uncompressed(bytes))
+            .collect();
+
+        Self::batch_map_to_scalar_field(&elements)
     }
 
     /// Converts banderwagon elements to their 64-byte commitment representations.
