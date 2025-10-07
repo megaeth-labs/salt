@@ -12,6 +12,7 @@ itertools = "0.10.1"
 sha2 = "0.9.8"
 rayon = "1.8.0"
 hex = "0.4.3"
+thiserror = "2.0"
 
 rustc-hash = "2.1.0"
 

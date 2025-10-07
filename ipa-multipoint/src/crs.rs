@@ -10,7 +10,24 @@
 //! approach, ensuring reproducibility and verifiability of the setup.
 
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
-use banderwagon::{try_reduce_to_element, Element};
+use banderwagon::{try_reduce_to_element, Element, SerializationError};
+use thiserror::Error;
+
+/// Error type for CRS operations.
+#[derive(Error, Debug)]
+pub enum CrsError {
+    #[error("Empty input: CRS requires at least one point")]
+    EmptyInput,
+
+    #[error("Invalid hex encoding: {0}")]
+    HexDecode(#[from] hex::FromHexError),
+
+    #[error("Invalid byte length: expected 32 bytes, got {0}")]
+    InvalidLength(usize),
+
+    #[error("Point deserialization failed: {0}")]
+    Deserialization(#[from] SerializationError),
+}
 
 /// Common Reference String for the Pedersen commitment scheme.
 #[allow(non_snake_case)]
@@ -27,7 +44,8 @@ pub struct CRS {
 
 impl Default for CRS {
     fn default() -> Self {
-        CRS::from_hex(&default_crs::HEX_ENCODED_CRS)
+        // Safe to unwrap: HEX_ENCODED_CRS is a trusted constant containing valid points
+        CRS::from_hex(&default_crs::HEX_ENCODED_CRS).expect("default CRS should be valid")
     }
 }
 
@@ -64,23 +82,23 @@ impl CRS {
     /// where the last element represents `Q` and all preceding elements represent `G`.
     ///
     /// # Arguments
-    /// * `bytes` - Array of 64-byte uncompressed point representations
+    /// * `bytes` - Array of 32-byte compressed point representations
     ///
     /// # Returns
-    /// A CRS reconstructed from the byte data
+    /// - `Ok(CRS)` if all points deserialize successfully
+    /// - `Err(CrsError::EmptyInput)` if the input array is empty
+    /// - `Err(CrsError::Deserialization(_))` if any point fails to deserialize
     #[allow(non_snake_case)]
-    pub fn from_bytes(bytes: &[[u8; 64]]) -> CRS {
-        let (q_bytes, g_vec_bytes) = bytes
-            .split_last()
-            .expect("bytes vector should not be empty");
+    pub fn from_bytes(bytes: &[[u8; 32]]) -> Result<CRS, CrsError> {
+        let (q_bytes, g_vec_bytes) = bytes.split_last().ok_or(CrsError::EmptyInput)?;
 
-        let Q = Element::from_bytes_unchecked_uncompressed(*q_bytes);
+        let Q = Element::from_bytes(*q_bytes)?;
         let G: Vec<_> = g_vec_bytes
             .iter()
-            .map(|bytes| Element::from_bytes_unchecked_uncompressed(*bytes))
-            .collect();
+            .map(|bytes| Element::from_bytes(*bytes))
+            .collect::<Result<Vec<_>, _>>()?;
         let n = G.len();
-        CRS { G, Q, n }
+        Ok(CRS { G, Q, n })
     }
 
     /// Reconstructs a CRS from hex-encoded string representations.
@@ -89,29 +107,33 @@ impl CRS {
     /// * `hex_encoded_crs` - Array of hex strings representing elliptic curve points
     ///
     /// # Returns
-    /// A CRS reconstructed from the hex-encoded data
-    pub fn from_hex(hex_encoded_crs: &[&str]) -> CRS {
-        let bytes: Vec<[u8; 64]> = hex_encoded_crs
+    /// - `Ok(CRS)` if all hex strings decode successfully and points deserialize
+    /// - `Err(CrsError)` if hex decoding, length conversion, or point deserialization fails
+    pub fn from_hex(hex_encoded_crs: &[&str]) -> Result<CRS, CrsError> {
+        hex_encoded_crs
             .iter()
-            .map(|hex| hex::decode(hex).unwrap())
-            .map(|byte_vector| byte_vector.try_into().unwrap())
-            .collect();
-        CRS::from_bytes(&bytes)
+            .map(|hex| {
+                hex::decode(hex)?
+                    .try_into()
+                    .map_err(|v: Vec<u8>| CrsError::InvalidLength(v.len()))
+            })
+            .collect::<Result<Vec<[u8; 32]>, _>>()
+            .and_then(|bytes| CRS::from_bytes(&bytes))
     }
 
     /// Serializes the CRS to a vector of byte arrays.
     ///
-    /// Each elliptic curve point is serialized to 64 bytes in uncompressed format.
+    /// Each elliptic curve point is serialized to 32 bytes in compressed format.
     /// The `G` points come first, followed by the `Q` point.
     ///
     /// # Returns
-    /// Vector of 64-byte arrays representing the CRS points
-    pub fn to_bytes(&self) -> Vec<[u8; 64]> {
+    /// Vector of 32-byte arrays representing the CRS points
+    pub fn to_bytes(&self) -> Vec<[u8; 32]> {
         let mut bytes = Vec::with_capacity(self.n + 1);
         for point in &self.G {
-            bytes.push(point.to_bytes_uncompressed());
+            bytes.push(point.to_bytes());
         }
-        bytes.push(self.Q.to_bytes_uncompressed());
+        bytes.push(self.Q.to_bytes());
         bytes
     }
 
@@ -185,8 +207,6 @@ fn generate_random_elements(num_required_points: usize, seed: &'static [u8]) -> 
     // However, the point finding strategy is a bit different now
     // as we are using banderwagon.
 
-    let _choose_largest = false;
-
     // Hash the seed + index to get a candidate point value
     let hash_to_x = |index: u64| -> Vec<u8> {
         let mut hasher = Sha256::new();
@@ -251,7 +271,7 @@ mod tests {
     fn load_from_bytes_to_bytes() {
         let crs = CRS::new(256, b"eth_verkle_oct_2021");
         let bytes = crs.to_bytes();
-        let crs2 = CRS::from_bytes(&bytes);
+        let crs2 = CRS::from_bytes(&bytes).unwrap();
         let bytes2 = crs2.to_bytes();
 
         assert_eq!(
