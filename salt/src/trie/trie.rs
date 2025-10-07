@@ -1007,6 +1007,21 @@ mod tests {
     use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
+    /// Test helper: Updates a commitment by applying delta changes.
+    ///
+    /// Computes `old_commitment + Σ (new[i] - old[i]) * G[i]` for each delta.
+    fn add_deltas(
+        committer: &Committer,
+        old_commitment: [u8; 64],
+        delta_indices: &[(usize, Fr, Fr)],
+    ) -> Element {
+        let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
+        delta_indices.iter().for_each(|&(tb_i, old_fr, new_fr)| {
+            old += committer.mul_index(&(new_fr - old_fr), tb_i)
+        });
+        old
+    }
+
     /// Rebuilds a main trie node commitment from storage for testing purposes.
     ///
     /// **WARNING: This method does NOT handle expanded buckets (capacity > 256).**
@@ -1082,12 +1097,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let default_bucket_meta = committer
-            .add_deltas(zero_commitment, &meta_delta_indices)
-            .to_bytes_uncompressed();
-        let default_bucket_data = committer
-            .add_deltas(zero_commitment, &data_delta_indices)
-            .to_bytes_uncompressed();
+        let default_bucket_meta =
+            add_deltas(committer, zero_commitment, &meta_delta_indices).to_bytes_uncompressed();
+        let default_bucket_data =
+            add_deltas(committer, zero_commitment, &data_delta_indices).to_bytes_uncompressed();
 
         // ========== Step 3: Compute bucket commitments in parallel ==========
         // For each bucket in the range: read KV pairs, compute deltas from default
@@ -1134,8 +1147,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 // Apply deltas to get final bucket commitment
-                let bucket_commitment = committer
-                    .add_deltas(default_commitment, &delta_indices)
+                let bucket_commitment = add_deltas(committer, default_commitment, &delta_indices)
                     .to_bytes_uncompressed();
 
                 (bucket_index as usize, bucket_commitment)
@@ -1180,9 +1192,9 @@ mod tests {
                         .collect::<Vec<_>>();
 
                     // Compute parent commitment by applying deltas to zero commitment
-                    let parent_commitment = committer
-                        .add_deltas(zero_commitment, &parent_delta_indices)
-                        .to_bytes_uncompressed();
+                    let parent_commitment =
+                        add_deltas(committer, zero_commitment, &parent_delta_indices)
+                            .to_bytes_uncompressed();
 
                     (parent_index, parent_commitment)
                 })
@@ -1960,30 +1972,28 @@ mod tests {
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
-        let c1 = trie
-            .committer
-            .add_deltas(
-                bottom_meta_c,
-                &[(
-                    1,
-                    kv_hash(&Some(SaltValue::from(BucketMeta::default()))),
-                    kv_hash(&Some(SaltValue::from(bucket_meta(
-                        5,
-                        MIN_BUCKET_SIZE as SlotId,
-                    )))),
-                )],
-            )
-            .to_bytes_uncompressed();
-        let c2 = trie
-            .committer
-            .add_deltas(
-                bottom_data_c,
-                &[
-                    (1, kv_none, kv_hash(&Some(SaltValue::new(&key[0], &value)))),
-                    (2, kv_none, kv_hash(&Some(SaltValue::new(&key[1], &value)))),
-                ],
-            )
-            .to_bytes_uncompressed();
+        let c1 = add_deltas(
+            &trie.committer,
+            bottom_meta_c,
+            &[(
+                1,
+                kv_hash(&Some(SaltValue::from(BucketMeta::default()))),
+                kv_hash(&Some(SaltValue::from(bucket_meta(
+                    5,
+                    MIN_BUCKET_SIZE as SlotId,
+                )))),
+            )],
+        )
+        .to_bytes_uncompressed();
+        let c2 = add_deltas(
+            &trie.committer,
+            bottom_data_c,
+            &[
+                (1, kv_none, kv_hash(&Some(SaltValue::new(&key[0], &value)))),
+                (2, kv_none, kv_hash(&Some(SaltValue::new(&key[1], &value)))),
+            ],
+        )
+        .to_bytes_uncompressed();
 
         assert_eq!(
             salt_updates,
@@ -2029,19 +2039,22 @@ mod tests {
             Element::hash_commitments(&[bottom_data_c, bottom_meta_c, cs[0], cs[1], cs[2]]);
         let l3_meta_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let l3_data_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId + 256);
-        let c1 = committer
-            .add_deltas(l3_meta_c, &[(1, bytes_indices[1], bytes_indices[2])])
-            .to_bytes_uncompressed();
+        let c1 = add_deltas(
+            committer,
+            l3_meta_c,
+            &[(1, bytes_indices[1], bytes_indices[2])],
+        )
+        .to_bytes_uncompressed();
 
-        let c2 = committer
-            .add_deltas(
-                l3_data_c,
-                &[
-                    (1, bytes_indices[0], bytes_indices[3]),
-                    (2, bytes_indices[0], bytes_indices[4]),
-                ],
-            )
-            .to_bytes_uncompressed();
+        let c2 = add_deltas(
+            committer,
+            l3_data_c,
+            &[
+                (1, bytes_indices[0], bytes_indices[3]),
+                (2, bytes_indices[0], bytes_indices[4]),
+            ],
+        )
+        .to_bytes_uncompressed();
 
         assert_eq!(
             unprocess_updates,
@@ -2055,12 +2068,18 @@ mod tests {
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
         let l2_meta_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let l2_data_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId + 1);
-        let c3 = committer
-            .add_deltas(l2_meta_c, &[(0, bytes_indices[1], bytes_indices[2])])
-            .to_bytes_uncompressed();
-        let c4 = committer
-            .add_deltas(l2_data_c, &[(0, bytes_indices[0], bytes_indices[3])])
-            .to_bytes_uncompressed();
+        let c3 = add_deltas(
+            committer,
+            l2_meta_c,
+            &[(0, bytes_indices[1], bytes_indices[2])],
+        )
+        .to_bytes_uncompressed();
+        let c4 = add_deltas(
+            committer,
+            l2_data_c,
+            &[(0, bytes_indices[0], bytes_indices[3])],
+        )
+        .to_bytes_uncompressed();
 
         assert_eq!(
             unprocess_updates,
@@ -2071,15 +2090,15 @@ mod tests {
         let unprocess_updates = trie.update_internal_nodes(unprocess_updates).unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
         let l1_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
-        let c5 = committer
-            .add_deltas(
-                l1_c,
-                &[
-                    (0, bytes_indices[1], bytes_indices[2]),
-                    (1, bytes_indices[0], bytes_indices[3]),
-                ],
-            )
-            .to_bytes_uncompressed();
+        let c5 = add_deltas(
+            committer,
+            l1_c,
+            &[
+                (0, bytes_indices[1], bytes_indices[2]),
+                (1, bytes_indices[0], bytes_indices[3]),
+            ],
+        )
+        .to_bytes_uncompressed();
         assert_eq!(unprocess_updates, vec![(0, (l1_c, c5))]);
     }
 
@@ -2110,12 +2129,14 @@ mod tests {
 
         // Check the commitment updates of the bottom-level node
         let committer = &trie.committer;
-        let c1 = committer
-            .add_deltas(default_bucket_data, &[(9, fr1, fr2)])
-            .to_bytes_uncompressed();
-        let c2 = committer
-            .add_deltas(default_bucket_data, &[(1, kv_none, fr1), (9, kv_none, fr2)])
-            .to_bytes_uncompressed();
+        let c1 =
+            add_deltas(committer, default_bucket_data, &[(9, fr1, fr2)]).to_bytes_uncompressed();
+        let c2 = add_deltas(
+            committer,
+            default_bucket_data,
+            &[(1, kv_none, fr1), (9, kv_none, fr2)],
+        )
+        .to_bytes_uncompressed();
         assert_eq!(
             trie_updates[0..2],
             vec![
@@ -2133,12 +2154,18 @@ mod tests {
         // Check the commitment updates of the TRIE_LEVELS - 2 level node
         let default_l3_c = default_commitment((STARTING_NODE_ID[2] + 256) as NodeId);
         let bytes_indices = Element::hash_commitments(&[default_bucket_data, c1, c2]);
-        let c3 = committer
-            .add_deltas(default_l3_c, &[(0, bytes_indices[0], bytes_indices[1])])
-            .to_bytes_uncompressed();
-        let c4 = committer
-            .add_deltas(default_l3_c, &[(1, bytes_indices[0], bytes_indices[2])])
-            .to_bytes_uncompressed();
+        let c3 = add_deltas(
+            committer,
+            default_l3_c,
+            &[(0, bytes_indices[0], bytes_indices[1])],
+        )
+        .to_bytes_uncompressed();
+        let c4 = add_deltas(
+            committer,
+            default_l3_c,
+            &[(1, bytes_indices[0], bytes_indices[2])],
+        )
+        .to_bytes_uncompressed();
         assert_eq!(
             trie_updates[2..4],
             vec![
@@ -2158,12 +2185,18 @@ mod tests {
         // Check the commitment updates of the TRIE_LEVELS - 3 level node
         let default_l2_c = default_commitment((STARTING_NODE_ID[1] + 1) as NodeId);
         let bytes_indices = Element::hash_commitments(&[default_l3_c, c3, c4]);
-        let c5 = committer
-            .add_deltas(default_l2_c, &[(0, bytes_indices[0], bytes_indices[1])])
-            .to_bytes_uncompressed();
-        let c6 = committer
-            .add_deltas(default_l2_c, &[(1, bytes_indices[0], bytes_indices[2])])
-            .to_bytes_uncompressed();
+        let c5 = add_deltas(
+            committer,
+            default_l2_c,
+            &[(0, bytes_indices[0], bytes_indices[1])],
+        )
+        .to_bytes_uncompressed();
+        let c6 = add_deltas(
+            committer,
+            default_l2_c,
+            &[(1, bytes_indices[0], bytes_indices[2])],
+        )
+        .to_bytes_uncompressed();
         assert_eq!(
             trie_updates[4..6],
             vec![
@@ -2184,15 +2217,15 @@ mod tests {
         let default_l1_c = default_commitment(STARTING_NODE_ID[0] as NodeId);
         assert_eq!(trie_updates[6].0, 0);
         let bytes_indices = Element::hash_commitments(&[default_l2_c, c5, c6]);
-        let c7 = committer
-            .add_deltas(
-                default_l1_c,
-                &[
-                    (2, bytes_indices[0], bytes_indices[1]),
-                    (1, bytes_indices[0], bytes_indices[2]),
-                ],
-            )
-            .to_bytes_uncompressed();
+        let c7 = add_deltas(
+            committer,
+            default_l1_c,
+            &[
+                (2, bytes_indices[0], bytes_indices[1]),
+                (1, bytes_indices[0], bytes_indices[2]),
+            ],
+        )
+        .to_bytes_uncompressed();
         assert_eq!(trie_updates[6], (0, (default_l1_c, c7)));
     }
 
@@ -2268,12 +2301,12 @@ mod tests {
                     }
                 };
 
-            default_committment_vec[i].0 = SHARED_COMMITTER
-                .add_deltas(zero, &meta_delta_indices)
-                .to_bytes_uncompressed();
-            default_committment_vec[i].1 = SHARED_COMMITTER
-                .add_deltas(zero, &data_delta_indices)
-                .to_bytes_uncompressed();
+            default_committment_vec[i].0 =
+                add_deltas(SHARED_COMMITTER.as_ref(), zero, &meta_delta_indices)
+                    .to_bytes_uncompressed();
+            default_committment_vec[i].1 =
+                add_deltas(SHARED_COMMITTER.as_ref(), zero, &data_delta_indices)
+                    .to_bytes_uncompressed();
 
             assert_eq!(
                 default_committment_vec[i].0,
@@ -2308,9 +2341,9 @@ mod tests {
                 data_delta_indices
             };
 
-            default_subtrie_c_vec[i] = SHARED_COMMITTER
-                .add_deltas(zero, &data_delta_indices)
-                .to_bytes_uncompressed();
+            default_subtrie_c_vec[i] =
+                add_deltas(SHARED_COMMITTER.as_ref(), zero, &data_delta_indices)
+                    .to_bytes_uncompressed();
 
             assert_eq!(
                 default_subtrie_c_vec[i],

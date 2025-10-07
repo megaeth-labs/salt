@@ -184,41 +184,6 @@ impl Committer {
         }
     }
 
-    /// Efficiently updates a commitment by applying a series of delta changes.
-    ///
-    /// This method is crucial for SALT's incremental update mechanism. Instead of
-    /// recomputing the entire commitment from scratch, it only computes the changes.
-    ///
-    /// # Arguments
-    ///
-    /// * `old_commitment` - The current commitment value (64 bytes)
-    /// * `delta_indices` - Vector of (index, old_value, new_value) tuples where:
-    ///   - `index`: Position in the commitment vector
-    ///   - `old_value`: Previous Fr value at this position
-    ///   - `new_value`: New Fr value at this position
-    ///
-    /// # Returns
-    ///
-    /// The updated commitment as an `Element`.
-    ///
-    /// # Algorithm
-    ///
-    /// For each delta (i, old, new), computes:
-    /// ```text
-    /// result = old_commitment + Σ (new[i] - old[i]) * G[i]
-    /// ```
-    pub fn add_deltas(
-        &self,
-        old_commitment: [u8; 64],
-        delta_indices: &[(usize, Fr, Fr)],
-    ) -> Element {
-        let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
-        delta_indices
-            .iter()
-            .for_each(|&(tb_i, old_fr, new_fr)| old += self.mul_index(&(new_fr - old_fr), tb_i));
-        old
-    }
-
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This x86_64-optimized version uses CPU prefetching instructions to
