@@ -2,7 +2,7 @@ use banderwagon::{trait_defs::*, Fr};
 
 use std::{
     convert::TryFrom,
-    ops::{Add, Mul, Sub},
+    ops::{Add, Mul, Neg, Sub},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,17 +16,8 @@ pub struct LagrangeBasis {
 impl Add<LagrangeBasis> for LagrangeBasis {
     type Output = LagrangeBasis;
 
-    fn add(mut self, rhs: LagrangeBasis) -> Self::Output {
-        if self.domain == 0 {
-            return rhs;
-        } else if rhs.domain == 0 {
-            return self;
-        }
-        self.values
-            .iter_mut()
-            .zip(rhs.values)
-            .for_each(|(lhs, rhs)| *lhs += rhs);
-        self
+    fn add(self, rhs: LagrangeBasis) -> Self::Output {
+        self + &rhs
     }
 }
 
@@ -39,6 +30,11 @@ impl Add<&LagrangeBasis> for LagrangeBasis {
         } else if rhs.domain == 0 {
             return self;
         }
+        assert_eq!(
+            self.values.len(),
+            rhs.values.len(),
+            "LagrangeBasis addition requires same length"
+        );
         self.values
             .iter_mut()
             .zip(rhs.values.iter())
@@ -47,11 +43,28 @@ impl Add<&LagrangeBasis> for LagrangeBasis {
     }
 }
 
+impl Neg for LagrangeBasis {
+    type Output = LagrangeBasis;
+
+    fn neg(mut self) -> Self::Output {
+        self.values.iter_mut().for_each(|value| *value = -*value);
+        self
+    }
+}
+
+impl Neg for &LagrangeBasis {
+    type Output = LagrangeBasis;
+
+    fn neg(self) -> Self::Output {
+        LagrangeBasis::new(self.values.iter().map(|value| -*value).collect())
+    }
+}
+
 impl Mul<Fr> for LagrangeBasis {
     type Output = LagrangeBasis;
 
     fn mul(mut self, rhs: Fr) -> Self::Output {
-        self.values.iter_mut().for_each(|values| *values *= rhs);
+        self.values.iter_mut().for_each(|value| *value *= rhs);
         self
     }
 }
@@ -60,7 +73,7 @@ impl Mul<&Fr> for LagrangeBasis {
     type Output = LagrangeBasis;
 
     fn mul(mut self, rhs: &Fr) -> Self::Output {
-        self.values.iter_mut().for_each(|values| *values *= rhs);
+        self.values.iter_mut().for_each(|value| *value *= rhs);
         self
     }
 }
@@ -83,13 +96,7 @@ impl Sub<&LagrangeBasis> for &LagrangeBasis {
     type Output = LagrangeBasis;
 
     fn sub(self, rhs: &LagrangeBasis) -> Self::Output {
-        LagrangeBasis::new(
-            self.values
-                .iter()
-                .zip(rhs.values.iter())
-                .map(|(lhs, rhs)| *lhs - rhs)
-                .collect(),
-        )
+        self.clone() + (-rhs)
     }
 }
 
