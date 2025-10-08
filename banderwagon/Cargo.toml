@@ -15,11 +15,11 @@ rayon = {version = "*", optional = true}
 hugepage-rs = { version = "0.1.0", optional = true}
 
 [target.'cfg(target_os = "zkvm")'.dependencies]
-risc0-zkvm-platform= { version = "2.0.2", features = [
+risc0-zkvm-platform= { version = "2.2.0", features = [
     "unstable",
     "getrandom",
 ] }
-risc0-zkvm = { version = "2.3.1", features = [
+risc0-zkvm = { version = "3.0.3", features = [
     "heap-embedded-alloc",
     "unstable",
 ] }
