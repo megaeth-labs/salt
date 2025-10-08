@@ -31,7 +31,7 @@ use crate::{
     trie::node_utils::*,
     types::*,
 };
-use banderwagon::{salt_committer::Committer, Element};
+use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
@@ -621,9 +621,8 @@ where
                         } else {
                             bucket_root_node_id(bucket_id)
                         },
-                        self.committer.gi_mul_delta(
-                            &kv_hash(old_value),
-                            &kv_hash(new_value),
+                        self.committer.mul_index(
+                            &(kv_hash(new_value) - kv_hash(old_value)),
                             salt_key.slot_id() as usize % TRIE_WIDTH,
                         ),
                     ))
@@ -681,7 +680,7 @@ where
                         (
                             get_parent_node(id),
                             self.committer
-                                .gi_mul_delta(&h[0], &h[1], vc_position_in_parent(id)),
+                                .mul_index(&(h[1] - h[0]), vc_position_in_parent(id)),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -934,17 +933,17 @@ impl StateRoot<'_, EmptySalt> {
     }
 }
 
-/// Generates a 256-bit secure hash from the bucket entry.
-/// Note: as a special case, empty entries are hashed to 0.
+/// Generates a scalar field element from the bucket entry.
+/// Note: as a special case, empty entries are hashed to a fixed value.
 #[inline(always)]
-pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> ScalarBytes {
+pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> Fr {
     entry.as_ref().map_or_else(
-        || EMPTY_SLOT_HASH,
+        || Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH),
         |salt_value| {
             let mut data = blake3::Hasher::new();
             data.update(salt_value.key());
             data.update(salt_value.value());
-            *data.finalize().as_bytes()
+            Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
         },
     )
 }
@@ -1004,6 +1003,7 @@ mod tests {
         constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
+    use banderwagon::Zero;
     use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
@@ -1045,7 +1045,7 @@ mod tests {
     ) -> CommitmentBytes {
         let node_level = get_bfs_level(node_id);
         let committer = SHARED_COMMITTER.as_ref();
-        let zero_commitment = Committer::zero();
+        let zero_commitment = Element::zero_commitment();
 
         // ========== Step 1: Calculate descendant bucket range ==========
         // For a node at a given level, calculate all bucket IDs in its subtree.
@@ -1069,14 +1069,14 @@ mod tests {
 
         let meta_delta_indices = (0..MIN_BUCKET_SIZE)
             .map(|slot_index| {
-                let old_value = [0u8; 32];
+                let old_value = Fr::zero();
                 let new_value = kv_hash(&Some(BucketMeta::default().into()));
                 (slot_index, old_value, new_value)
             })
             .collect::<Vec<_>>();
         let data_delta_indices = (0..MIN_BUCKET_SIZE)
             .map(|slot_index| {
-                let old_value = [0u8; 32];
+                let old_value = Fr::zero();
                 let new_value = kv_hash(&None);
                 (slot_index, old_value, new_value)
             })
@@ -1174,7 +1174,7 @@ mod tests {
                         .into_iter()
                         .zip(child_slot_indices)
                         .map(|(child_hash, slot_index)| {
-                            let old_value = [0u8; 32];
+                            let old_value = Fr::zero();
                             (slot_index, old_value, child_hash)
                         })
                         .collect::<Vec<_>>();
@@ -1749,17 +1749,11 @@ mod tests {
         assert_eq!(root, cmp_root);
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         cmp_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        trie_updates.iter().zip(cmp_trie_updates.iter()).for_each(
-            |(trie_update, cmp_trie_update)| {
-                assert_eq!(trie_update.0, cmp_trie_update.0);
-                assert!(is_commitment_equal(trie_update.1 .0, cmp_trie_update.1 .0));
-                assert!(is_commitment_equal(trie_update.1 .1, cmp_trie_update.1 .1));
-            },
-        );
+        assert_eq!(trie_updates, cmp_trie_updates);
     }
 
     #[test]
-    fn increment_updates_large() {
+    fn incremental_updates_large() {
         let kvs = create_random_account(10000);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
@@ -1789,12 +1783,7 @@ mod tests {
 
         let minified_final_updates = minify_trie_updates(final_trie_updates);
         let minified_total_updates = minify_trie_updates(total_trie_updates);
-        assert_eq!(minified_total_updates.len(), minified_final_updates.len());
-        minified_total_updates.iter().for_each(|(id, (old, new))| {
-            let update = minified_final_updates.get(id).unwrap();
-            assert!(is_commitment_equal(*old, update.0));
-            assert!(is_commitment_equal(*new, update.1));
-        });
+        assert_eq!(minified_total_updates, minified_final_updates);
     }
 
     #[test]
@@ -1838,10 +1827,7 @@ mod tests {
         let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
         let c = rebuild_subtrie_without_expanded_buckets(node_id, &mock_db);
         mock_db.update_trie(trie_updates);
-        assert_eq!(
-            hash_commitment(c),
-            hash_commitment(mock_db.commitment(node_id).unwrap())
-        );
+        assert_eq!(c, mock_db.commitment(node_id).unwrap());
 
         assert_eq!(root0, root1);
     }
@@ -2213,7 +2199,7 @@ mod tests {
     /// Checks if the default commitment is correct
     #[test]
     fn trie_level_default_committment() {
-        let zero = Committer::zero();
+        let zero = Element::zero_commitment();
         let mut default_committment_vec = vec![(zero, zero); MAIN_TRIE_LEVELS];
         let len_vec = [1, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE];
 
@@ -2234,11 +2220,11 @@ mod tests {
             let (meta_delta_indices, data_delta_indices) =
                 if i == MAIN_TRIE_LEVELS - 1 {
                     let meta_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, [0u8; 32], kv_hash(&Some(BucketMeta::default().into()))))
-                        .collect::<Vec<_>>();
+                        .map(|i| (i, Fr::zero(), kv_hash(&Some(BucketMeta::default().into()))))
+                        .collect();
                     let data_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, [0u8; 32], kv_hash(&None)))
-                        .collect::<Vec<_>>();
+                        .map(|i| (i, Fr::zero(), kv_hash(&None)))
+                        .collect();
                     (meta_delta_indices, data_delta_indices)
                 } else {
                     if i == 0 {
@@ -2256,7 +2242,7 @@ mod tests {
                         let delta_indices = hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
+                            .map(|(i, e)| (i, Fr::zero(), e))
                             .collect::<Vec<_>>();
                         (delta_indices.clone(), delta_indices)
                     } else {
@@ -2267,8 +2253,8 @@ mod tests {
                         let meta_delta_indices = meta_hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
-                            .collect::<Vec<_>>();
+                            .map(|(i, e)| (i, Fr::zero(), e))
+                            .collect();
                         let data_hash_bytes = Element::hash_commitments(&vec![
                             default_committment_vec[i + 1].1;
                             len_vec[i]
@@ -2276,8 +2262,8 @@ mod tests {
                         let data_delta_indices = data_hash_bytes
                             .into_iter()
                             .enumerate()
-                            .map(|(i, e)| (i, [0u8; 32], e))
-                            .collect::<Vec<_>>();
+                            .map(|(i, e)| (i, Fr::zero(), e))
+                            .collect();
                         (meta_delta_indices, data_delta_indices)
                     }
                 };
@@ -2308,16 +2294,16 @@ mod tests {
         for i in (0..MAX_SUBTREE_LEVELS).rev() {
             let data_delta_indices = if i == MAX_SUBTREE_LEVELS - 1 {
                 let data_delta_indices = (0..MIN_BUCKET_SIZE)
-                    .map(|i| (i, [0u8; 32], kv_hash(&None)))
+                    .map(|i| (i, Fr::zero(), kv_hash(&None)))
                     .collect::<Vec<_>>();
                 data_delta_indices
             } else {
                 let data_hash_bytes =
-                    Element::hash_commitments(&vec![default_subtrie_c_vec[i + 1]; MIN_BUCKET_SIZE]);
+                    Element::hash_commitments(&[default_subtrie_c_vec[i + 1]; MIN_BUCKET_SIZE]);
                 let data_delta_indices = data_hash_bytes
                     .into_iter()
                     .enumerate()
-                    .map(|(i, e)| (i, [0u8; 32], e))
+                    .map(|(i, e)| (i, Fr::zero(), e))
                     .collect::<Vec<_>>();
                 data_delta_indices
             };
@@ -2363,7 +2349,7 @@ mod tests {
         (0..l)
             .map(|i| {
                 committer
-                    .gi_mul_delta(&[0u8; 32], &[(i + 1) as u8; 32], 0)
+                    .mul_index(&Fr::from((i + 1) as u8), 0)
                     .to_bytes_uncompressed()
             })
             .collect()
@@ -2380,10 +2366,6 @@ mod tests {
             .collect()
     }
 
-    fn is_commitment_equal(c1: CommitmentBytes, c2: CommitmentBytes) -> bool {
-        hash_commitment(c1) == hash_commitment(c2)
-    }
-
     /// Converts trie updates into a canonical format, removing duplicates and no-ops.
     ///
     /// Merges duplicate node IDs by chaining updates and removes updates where old == new.
@@ -2394,7 +2376,7 @@ mod tests {
         for (id, (old, new)) in updates {
             match result.entry(id) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    if !is_commitment_equal(old, new) {
+                    if old != new {
                         entry.insert((old, new));
                     }
                 }

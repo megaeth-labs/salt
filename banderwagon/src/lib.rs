@@ -1,5 +1,4 @@
 pub mod msm;
-pub mod trait_impls;
 
 mod element;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
@@ -47,5 +46,5 @@ pub fn try_reduce_to_element(bytes: &[u8]) -> Option<Element> {
     bytes.reverse();
 
     // Deserialize the x-coordinate to get a valid banderwagon element
-    Element::from_bytes(&bytes)
+    Element::from_bytes(bytes).ok()
 }

@@ -1,27 +1,41 @@
-use ark_ec::{twisted_edwards::TECurveConfig, PrimeGroup, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul, VariableBaseMSM};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
-use ark_ff::{batch_inversion, serial_batch_inversion_and_mul, Field, One, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+
+use std::{
+    hash::Hash,
+    iter::Sum,
+    ops::{Add, AddAssign, Mul, Neg, Sub},
+};
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
 #[derive(Debug, Clone, Copy, Eq)]
-pub struct Element(pub EdwardsProjective);
+pub struct Element(pub(crate) EdwardsProjective);
 
 impl PartialEq for Element {
+    /// Checks equality in the banderwagon quotient group.
+    ///
+    /// This implements the banderwagon equality check where points `(x, y)` and `(-x, -y)`
+    /// are considered equivalent. Instead of checking exact point equality, this verifies
+    /// whether `x₁/y₁ == x₂/y₂` by computing `x₁ * y₂ == x₂ * y₁` (avoiding division).
+    ///
+    /// This quotient group construction reduces the Bandersnatch curve to prime order by
+    /// identifying point pairs that differ only in sign, effectively merging `(x, y)` with
+    /// `(-x, -y)` as the same group element.
+    ///
+    /// # Preconditions
+    ///
+    /// Both `self` and `other` must be valid banderwagon elements that have passed the
+    /// subgroup check (verifying that `1 - ax²` is a quadratic residue). This ensures:
+    /// - The points lie in the correct prime-order subgroup
+    /// - Points at infinity (with `y = 0`) are excluded
     fn eq(&self, other: &Self) -> bool {
-        let x1 = self.0.x;
-        let y1 = self.0.y;
+        let (x1, y1) = (self.0.x, self.0.y);
+        let (x2, y2) = (other.0.x, other.0.y);
 
-        let x2 = other.0.x;
-        let y2 = other.0.y;
-
-        // One should not be able to generate this point, unless they have assigned `x` and `y`
-        // to be 0 directly and have bypassed the API.
-        //
-        // This is possible in languages such as C, we will leave this check here
-        // for those who are using this as a reference, or in the case that there is some way to
-        // create an Element and bypass the checks.
+        // Fail-safe check to reject the invalid but dangerous (0, 0) point.
         if x1.is_zero() & y1.is_zero() {
             return false;
         }
@@ -34,10 +48,28 @@ impl PartialEq for Element {
 }
 
 impl Element {
+    /// Serializes this element to a 32-byte compressed representation.
+    ///
+    /// This implements the banderwagon serialization strategy: `sign(y) × x`.
+    /// The serialized form ensures that equivalent points `(x, y)` and `(-x, -y)`
+    /// produce identical byte arrays, maintaining the quotient group structure.
+    ///
+    /// # Serialization Strategy
+    ///
+    /// - If `y` is positive (lexicographically larger): serialize `x`
+    /// - If `y` is negative (lexicographically smaller): serialize `-x`
+    ///
+    /// This works because `sign(-y) × (-x) = sign(y) × x`, ensuring equivalent
+    /// points map to the same representation.
+    ///
+    /// # Returns
+    ///
+    /// A 32-byte array in big-endian format for interoperability.
+    ///
+    /// # Panics
+    ///
+    /// Panics if serialization fails (should never occur for valid elements).
     pub fn to_bytes(&self) -> [u8; 32] {
-        // We assume that internally this point is "correct"
-        //
-        // We serialize a correct point by serializing the x co-ordinate times sign(y)
         let affine = EdwardsAffine::from(self.0);
         let x = if is_positive(affine.y) {
             affine.x
@@ -48,151 +80,238 @@ impl Element {
         x.serialize_compressed(&mut bytes[..])
             .expect("serialization failed");
 
-        // reverse bytes to big endian, for interoperability
+        // arkworks uses little endian, reverse bytes to big endian
+        bytes.reverse();
+        bytes
+    }
+
+    /// Deserializes a banderwagon element from a 32-byte compressed representation.
+    ///
+    /// # Deserialization Process
+    ///
+    /// 1. Interpret the input bytes as the field element `x`
+    /// 2. Reconstruct the curve point from `x` (choosing positive y-coordinate)
+    /// 3. Perform subgroup check
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Element)` if deserialization succeeds and passes validation
+    /// - `Err(SerializationError)` if the bytes are invalid, the point doesn't exist,
+    ///   or the subgroup check fails
+    ///
+    /// # Security
+    ///
+    /// This is the **safe** deserialization path. Always use this for untrusted input.
+    pub fn from_bytes(mut bytes: [u8; 32]) -> Result<Element, SerializationError> {
+        // Switch from big endian to little endian for arkworks
         bytes.reverse();
 
-        bytes
+        // Construct a point that is on the curve
+        let x = Fq::deserialize_compressed(&bytes[..])?;
+        let point = Self::get_point_from_x(x, true).ok_or(SerializationError::InvalidData)?;
+
+        // Verify point is in the correct subgroup
+        subgroup_check(&point)
+            .then_some(Element(point))
+            .ok_or(SerializationError::InvalidData)
     }
 
-    // Do not compare the results of this function.
-    //
-    // This is because if (x, -y) is on the curve, then (x,y) is also on the curve.
-    // This method will return two different byte arrays for each of these.
-    //
-    // TODO: perhaps change this so that it chooses a representative, ie respecting the equivalence class
+    /// Serializes this element to a 64-byte uncompressed representation.
+    ///
+    /// This format stores both x and y coordinates, enabling faster deserialization.
+    /// This method canonicalizes with respect to the banderwagon quotient group by
+    /// always choosing the point with a positive y-coordinate. Equivalent elements
+    /// `(x, y)` and `(-x, -y)` will serialize to the same byte array.
+    ///
+    /// # Returns
+    ///
+    /// A 64-byte array in little-endian format containing uncompressed point coordinates,
+    /// normalized to have a positive y-coordinate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if serialization fails. This should never occur for valid `Element` instances.
     pub fn to_bytes_uncompressed(&self) -> [u8; 64] {
-        let mut bytes = [0u8; 64];
-        self.0
-            .serialize_uncompressed(&mut bytes[..])
-            .expect("cannot serialize point as an uncompressed byte array");
-        bytes
+        affine_to_canonical_bytes(self.0.into())
     }
 
+    /// Deserializes from 64-byte uncompressed format WITHOUT subgroup validation.
+    ///
+    /// This method provides significant performance benefits by skipping both point
+    /// reconstruction from x-coordinate (solving the curve equation) and the subgroup
+    /// check (quadratic residue test). However, it bypasses the validation required
+    /// for valid banderwagon elements.
+    ///
+    /// # Security Warning
+    ///
+    /// Using this on untrusted input can create invalid elements and break cryptographic
+    /// security. The performance optimization is only safe when operating on already-validated
+    /// data.
+    ///
+    /// # Safety Contract
+    ///
+    /// Only use on data that was:
+    /// 1. Previously validated via [`from_bytes()`], or
+    /// 2. Produced by [`to_bytes_uncompressed()`] on a valid `Element`, or
+    /// 3. Retrieved from trusted storage with validation at the entry point
+    ///
+    /// # Usage
+    ///
+    /// **Safe:** Deserializing from your database after validating on insertion, or internal
+    /// operations where validation occurred at the API boundary.
+    ///
+    /// **Unsafe:** User input, network data, or any untrusted source.
+    ///
+    /// # Panics
+    ///
+    /// Panics on invalid bytes, indicating the upper protocol layers (IPA commitment scheme
+    /// and ultimately authenticated key-value store) violated the safety contract.
     pub fn from_bytes_unchecked_uncompressed(bytes: [u8; 64]) -> Self {
         let point = EdwardsProjective::deserialize_uncompressed_unchecked(&bytes[..])
             .expect("could not deserialize byte array into a point");
+
+        // Check element validity in debug builds
+        debug_assert!(
+            EdwardsAffine::from(point).is_on_curve() && subgroup_check(&point),
+            "Receive invalid Banderwagon element"
+        );
+
         Self(point)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Option<Element> {
-        // Switch from big endian to little endian, as arkworks library uses little endian
-        let mut bytes = bytes.to_vec();
-        bytes.reverse();
-
-        let x: Fq = Fq::deserialize_compressed(&bytes[..]).ok()?;
-
-        let return_positive_y = true;
-
-        // Construct a point that is in the group -- this point may or may not be in the prime subgroup
-        let point = Self::get_point_from_x(x, return_positive_y)?;
-
-        let element = Element(EdwardsProjective::new_unchecked(
-            point.x,
-            point.y,
-            point.x * point.y,
-            Fq::one(),
-        ));
-
-        // Check if the point is in the correct subgroup
-        //
-        // Check legendre - checks whether 1 - ax^2 is a QR
-        if !element.subgroup_check() {
-            return None;
-        }
-
-        Some(element)
-    }
-
-    pub const fn compressed_serialized_size() -> usize {
-        32
     }
 
     pub fn prime_subgroup_generator() -> Element {
         Element(EdwardsProjective::generator())
     }
 
-    fn get_point_from_x(x: Fq, choose_largest: bool) -> Option<EdwardsAffine> {
-        let dx_squared_minus_one = BandersnatchConfig::COEFF_D * x.square() - Fq::one();
-        let ax_squared_minus_one = BandersnatchConfig::COEFF_A * x.square() - Fq::one();
-        let y_squared = ax_squared_minus_one / dx_squared_minus_one;
+    /// Reconstructs a twisted Edwards curve point from an x-coordinate.
+    ///
+    /// Given an x-coordinate on the Bandersnatch curve, this computes the corresponding
+    /// y-coordinate using the twisted Edwards curve equation and returns the point.
+    ///
+    /// # Curve Equation
+    ///
+    /// The Bandersnatch curve equation is: `ax² + y² = 1 + dx²y²`
+    ///
+    /// Solving for y² gives: `y² = (1 - ax²) / (1 - dx²)`
+    ///
+    /// where `a` and `d` are the curve parameters from [`BandersnatchConfig`].
+    ///
+    /// # Parameters
+    ///
+    /// - `x`: The x-coordinate of the point
+    /// - `choose_largest`: If `true`, selects the lexicographically larger (positive) y-coordinate;
+    ///   if `false`, selects the smaller (negative) y-coordinate
+    ///
+    /// # Returns
+    ///
+    /// - `Some(EdwardsProjective)` if a valid curve point exists for the given x
+    /// - `None` if `y²` has no square root (x-coordinate not on the curve)
+    ///
+    /// # Note
+    ///
+    /// This function does **not** perform subgroup validation. The caller is responsible
+    /// for ensuring the resulting point is in the correct subgroup if needed.
+    fn get_point_from_x(x: Fq, choose_largest: bool) -> Option<EdwardsProjective> {
+        let x_sq = x.square();
+        let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one())
+            / (BandersnatchConfig::COEFF_D * x_sq - Fq::one());
 
         let y = y_squared.sqrt()?;
+        let y = if is_positive(y) == choose_largest {
+            y
+        } else {
+            -y
+        };
 
-        let is_largest = is_positive(y);
-
-        let y = if is_largest && choose_largest { y } else { -y };
-
-        Some(EdwardsAffine::new_unchecked(x, y))
+        Some(EdwardsAffine::new_unchecked(x, y).into())
     }
 
-    fn map_to_field(&self) -> Fq {
-        self.0.x / self.0.y
-    }
-
-    // Note: This is a 2 to 1 map, but the two preimages are identified to be the same
+    /// Maps an elliptic curve point to a scalar field element.
+    ///
+    /// This is a critical operation in verkle trees, enabling commitments (curve points)
+    /// to be used as values in parent node vectors.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Compute `x/y` where `(x, y)` are the point coordinates → yields a base field element (Fq)
+    /// 2. Serialize the Fq element to bytes
+    /// 3. Reinterpret those bytes as a scalar field element (Fr)
+    ///
+    /// # Non-Injectivity Properties
+    ///
+    /// This mapping is **not injective** in two ways:
+    ///
+    /// 1. **Banderwagon quotient group (2-to-1)**: Points `(x, y)` and `(-x, -y)` both map
+    ///    to the same Fr value. This is by design - banderwagon identifies these as the same
+    ///    element, so this property is harmless.
+    ///
+    /// 2. **Field size wrapping (Fq → Fr)**: Since the scalar field Fr is ~4x smaller than
+    ///    the base field Fq, the byte reinterpretation can wrap. This means multiple distinct
+    ///    points could theoretically map to the same Fr value.
+    ///
+    /// # Security Note
+    ///
+    /// While the Fq→Fr non-injectivity means a malicious prover could craft points that
+    /// map to the same scalar, this doesn't compromise security in verkle tree proofs.
+    /// The IPA vector opening forces the prover to know the actual committed vector,
+    /// preventing exploitation of colliding commitments.
+    ///
+    /// **Warning**: If using this mapping in other protocols, ensure you require vector
+    /// openings to prevent commitment substitution attacks.
+    ///
+    /// # References
+    ///
+    /// - [Non-injective mapping between Point→Fr](https://ihagopian.com/posts/anatomy-of-a-verkle-proof)
     pub fn map_to_scalar_field(&self) -> Fr {
-        use ark_ff::PrimeField;
-
-        let base_field = self.map_to_field();
-
-        let mut bytes = [0u8; 32];
-        base_field
-            .serialize_compressed(&mut bytes[..])
-            .expect("could not serialize point into a 32 byte array");
-        Fr::from_le_bytes_mod_order(&bytes)
+        base_to_scalar(self.0.x / self.0.y)
     }
 
-    pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
-        use ark_ff::PrimeField;
-
-        let mut x_div_y = Vec::with_capacity(elements.len());
-        for element in elements {
-            let y = element.0.y;
-            x_div_y.push(y);
-        }
-        batch_inversion(&mut x_div_y);
-
-        for i in 0..elements.len() {
-            x_div_y[i] *= elements[i].0.x;
-        }
-
-        let mut scalars = Vec::with_capacity(elements.len());
-        for element in x_div_y {
-            let mut bytes = [0u8; 32];
-            element
-                .serialize_compressed(&mut bytes[..])
-                .expect("could not serialize point into a 32 byte array");
-            scalars.push(Fr::from_le_bytes_mod_order(&bytes));
-        }
-
-        scalars
-    }
-
-    // serial optimized version
-    pub fn serial_batch_map_to_scalar_field(elements: Vec<[u8; 64]>) -> Vec<Fr> {
-        use ark_ff::PrimeField;
-
+    /// Batch-optimized version of [`map_to_scalar_field()`](Element::map_to_scalar_field).
+    ///
+    /// Uses batch inversion to amortize the cost of computing `x/y` across all elements.
+    ///
+    /// This is intentionally a single-threaded implementation to avoid parallelization
+    /// overhead on small batches.
+    ///
+    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
+    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
+    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
         let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
-            .into_iter()
-            .map(|e| {
-                let e = Element::from_bytes_unchecked_uncompressed(e);
+            .iter()
+            .map(|&bytes| {
+                let e = Element::from_bytes_unchecked_uncompressed(bytes);
                 (e.0.x, e.0.y)
             })
             .unzip();
 
-        serial_batch_inversion_and_mul(&mut ys, &Fq::one());
+        serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
 
-        ys.iter_mut().zip(xs.iter()).for_each(|(y, x)| {
-            *y *= x;
-        });
+        xs.into_iter()
+            .zip(ys)
+            .map(|(x, y_inv)| base_to_scalar(x * y_inv))
+            .collect()
+    }
 
-        ys.iter()
-            .map(|e| {
-                let mut bytes = [0u8; 32];
-                e.serialize_compressed(&mut bytes[..])
-                    .expect("could not serialize point into a 32 byte array");
-                Fr::from_le_bytes_mod_order(&bytes)
-            })
+    /// Converts banderwagon elements to their 64-byte commitment representations.
+    ///
+    /// This method canonicalizes with respect to the banderwagon quotient group by
+    /// always choosing the point with a positive y-coordinate. Equivalent elements
+    /// `(x, y)` and `(-x, -y)` will serialize to the same byte array.
+    ///
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of elements to convert
+    ///
+    /// # Returns
+    ///
+    /// Vector of 64-byte arrays, each containing canonicalized uncompressed coordinates:
+    /// - Bytes 0-31: X-coordinate (little-endian)
+    /// - Bytes 32-63: Y-coordinate (little-endian, always positive)
+    pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
+        let points: Vec<_> = elements.iter().map(|e| e.0).collect();
+        EdwardsProjective::normalize_batch(&points)
+            .into_iter()
+            .map(affine_to_canonical_bytes)
             .collect()
     }
 
@@ -200,12 +319,31 @@ impl Element {
         Element(EdwardsProjective::zero())
     }
 
-    pub fn is_zero(&self) -> bool {
-        *self == Element::zero()
+    /// Returns the canonical 64-byte representation of the banderwagon identity element.
+    ///
+    /// The identity element in the banderwagon quotient group is represented by the
+    /// equivalence class `{(0, 1), (0, -1)}`. This function returns the canonical form
+    /// with coordinates `(0, -1)`, chosen because `-1` is the lexicographically larger
+    /// value in the field ordering.
+    ///
+    /// This is a compile-time constant that produces the same output as
+    /// `Element::zero().to_bytes_uncompressed()`, but without any runtime computation.
+    ///
+    /// # Returns
+    ///
+    /// A 64-byte array in little-endian format containing the uncompressed coordinates:
+    /// - Bytes 0-31: X-coordinate (0)
+    /// - Bytes 32-63: Y-coordinate (-1 in the field)
+    pub const fn zero_commitment() -> [u8; 64] {
+        [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216,
+            161, 9, 8, 216, 57, 51, 72, 125, 157, 41, 83, 167, 237, 115,
+        ]
     }
 
-    pub(crate) fn subgroup_check(&self) -> bool {
-        legendre_check_point(&self.0.x)
+    pub fn is_zero(&self) -> bool {
+        *self == Element::zero()
     }
 }
 
@@ -214,9 +352,55 @@ fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
 }
 
-fn legendre_check_point(x: &Fq) -> bool {
-    let res = Fq::one() - (BandersnatchConfig::COEFF_A * x.square());
-    res.legendre().is_qr()
+/// Canonicalizes an affine point and serializes it to 64 bytes.
+///
+/// Chooses the banderwagon representative with positive y-coordinate,
+/// ensuring that equivalent points `(x, y)` and `(-x, -y)` produce
+/// identical byte arrays.
+fn affine_to_canonical_bytes(affine: EdwardsAffine) -> [u8; 64] {
+    let canonical = if is_positive(affine.y) {
+        affine
+    } else {
+        EdwardsAffine::new_unchecked(-affine.x, -affine.y)
+    };
+
+    let mut bytes = [0u8; 64];
+    canonical
+        .serialize_uncompressed(&mut bytes[..])
+        .expect("serialization should not fail for valid affine points");
+    bytes
+}
+
+/// Converts a base field element (Fq) to a scalar field element (Fr).
+///
+/// This is used to map banderwagon elements to scalars by serializing the
+/// base field element and reinterpreting the bytes as a scalar field element.
+fn base_to_scalar(base_field: Fq) -> Fr {
+    use ark_ff::PrimeField;
+    let mut bytes = [0u8; 32];
+    base_field
+        .serialize_compressed(&mut bytes[..])
+        .expect("could not serialize point into a 32 byte array");
+    Fr::from_le_bytes_mod_order(&bytes)
+}
+
+/// Checks whether a point is in the banderwagon prime-order subgroup.
+///
+/// # Precondition
+///
+/// Assumes the input point is on the Bandersnatch curve. This only checks subgroup
+/// membership by verifying that `1 - ax²` is a quadratic residue.
+///
+/// # Warning
+///
+/// Invalid points not on the curve may pass this check. For example, (0, 0) passes
+/// because `1 - a·0² = 1` is a QR, despite not being on the curve.
+///
+/// Used during deserialization to ensure valid banderwagon elements.
+fn subgroup_check(point: &EdwardsProjective) -> bool {
+    (Fq::one() - BandersnatchConfig::COEFF_A * point.x.square())
+        .legendre()
+        .is_qr()
 }
 
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
@@ -231,9 +415,98 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
     Element(result)
 }
 
+/// Multiplies an `Element` by a scalar field element.
+///
+/// This performs scalar multiplication in the banderwagon group: `k * P` where
+/// `k` is a scalar (Fr) and `P` is a group element. This operation is fundamental
+/// to elliptic curve cryptography and is used in commitment schemes and signatures.
+impl Mul<Fr> for Element {
+    type Output = Element;
+
+    fn mul(self, rhs: Fr) -> Self::Output {
+        Element(self.0.mul(rhs))
+    }
+}
+
+/// Multiplies an `Element` reference by a scalar field element reference.
+///
+/// This is the borrowed version of scalar multiplication, avoiding clones when
+/// both operands are references.
+impl Mul<&Fr> for &Element {
+    type Output = Element;
+
+    fn mul(self, rhs: &Fr) -> Self::Output {
+        Element(self.0.mul(rhs))
+    }
+}
+
+/// Adds two `Element`s together using banderwagon group addition.
+///
+/// This implements the group operation for the banderwagon elliptic curve group.
+/// Addition is commutative and associative: `P + Q == Q + P` and `(P + Q) + R == P + (Q + R)`.
+impl Add<Element> for Element {
+    type Output = Element;
+
+    fn add(self, rhs: Element) -> Self::Output {
+        Element(self.0 + rhs.0)
+    }
+}
+
+/// Adds another `Element` to this element in-place.
+///
+/// Mutates `self` to hold the sum, avoiding allocation of a new `Element`.
+impl AddAssign<Element> for Element {
+    fn add_assign(&mut self, rhs: Element) {
+        self.0 += rhs.0
+    }
+}
+
+/// Subtracts one `Element` from another using banderwagon group subtraction.
+///
+/// Equivalent to `self + (-rhs)`, where `-rhs` is the group inverse of `rhs`.
+impl Sub<Element> for Element {
+    type Output = Element;
+
+    fn sub(self, rhs: Element) -> Self::Output {
+        Element(self.0 - rhs.0)
+    }
+}
+
+/// Returns the additive inverse (negation) of an `Element`.
+///
+/// For any element `P`, `-P` satisfies `P + (-P) = identity`.
+impl Neg for Element {
+    type Output = Element;
+
+    fn neg(self) -> Self::Output {
+        Element(-self.0)
+    }
+}
+
+/// Sums an iterator of `Element`s into a single element.
+///
+/// Enables using `.sum()` on iterators: `elements.iter().copied().sum()`.
+/// Returns the group identity element for an empty iterator.
+impl Sum for Element {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Element(iter.map(|element| element.0).sum())
+    }
+}
+
+/// Hashes an `Element` by serializing it to bytes first.
+///
+/// Uses the canonical byte representation via `to_bytes()` to ensure consistent
+/// hashing. This allows `Element` to be used as a key in `HashMap` and `HashSet`.
+impl Hash for Element {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.to_bytes().hash(state)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ff::AdditiveGroup;
     use ark_serialize::CanonicalSerialize;
 
     #[test]
@@ -261,34 +534,42 @@ mod tests {
     }
 
     #[test]
-    fn from_batch_map_to_scalar_field() {
-        let mut points = Vec::new();
-        for i in 0..10 {
-            points.push(Element::prime_subgroup_generator() * Fr::from(i));
-        }
+    fn test_hash_commitments() {
+        let points: Vec<_> = (0..10)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i))
+            .collect();
 
-        let got = Element::batch_map_to_scalar_field(&points);
+        let got = Element::hash_commitments(
+            &points
+                .iter()
+                .map(|p| p.to_bytes_uncompressed())
+                .collect::<Vec<_>>(),
+        );
 
-        for i in 0..10 {
-            let expected_i = points[i].map_to_scalar_field();
-            assert_eq!(expected_i, got[i]);
-        }
-        for i in 0..10 {
-            let expected_i = points[i].map_to_scalar_field();
-            assert_eq!(expected_i, got[i]);
+        for (point, scalar) in points.iter().zip(got) {
+            assert_eq!(point.map_to_scalar_field(), scalar);
         }
     }
-}
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use ark_ff::AdditiveGroup;
+    /// Tests that `batch_to_commitments` correctly converts elements to 64-byte uncompressed format.
+    #[test]
+    fn test_batch_to_commitments() {
+        let elements: Vec<_> = (1..16)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from(i * 1111))
+            .collect();
+
+        let batch_result = Element::batch_to_commitments(&elements);
+
+        for (element, commitment) in elements.iter().zip(batch_result.iter()) {
+            assert_eq!(element.to_bytes_uncompressed(), *commitment);
+        }
+    }
 
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
     fn two_torsion() -> EdwardsProjective {
         EdwardsProjective::new_unchecked(Fq::zero(), -Fq::one(), Fq::zero(), Fq::one())
     }
+
     fn points_at_infinity() -> [EdwardsProjective; 2] {
         let d = BandersnatchConfig::COEFF_D;
         let a = BandersnatchConfig::COEFF_A;
@@ -346,7 +627,7 @@ mod test {
 
         assert_eq!(bytes1, bytes2);
 
-        let got = Element::from_bytes(&bytes1).expect("points are in the valid subgroup");
+        let got = Element::from_bytes(bytes1).expect("points are in the valid subgroup");
 
         assert!(got == element1);
         assert!(got == element2);
@@ -359,16 +640,14 @@ mod test {
         // the sum of the point at infinity and another point
         let point = points_at_infinity()[0];
         let gen = EdwardsProjective::generator();
-        let gen2 = gen + gen + gen + gen;
 
-        let res = point + gen + gen2;
+        // Points at infinity should fail deserialization due to subgroup check
+        let invalid_element = Element(point + gen + gen.double().double());
 
-        let element1 = Element(res);
-        let bytes1 = element1.to_bytes();
-
-        if Element::from_bytes(&bytes1).is_some() {
-            panic!("point contains a point at infinity and should not have passed deserialization")
-        }
+        assert!(
+            Element::from_bytes(invalid_element.to_bytes()).is_err(),
+            "point containing infinity should fail deserialization"
+        );
     }
 
     #[test]
@@ -385,5 +664,31 @@ mod test {
 
         assert!(inf1.double().is_zero());
         assert!(inf2.double().is_zero());
+    }
+
+    /// Verifies that the hardcoded constant in `Element::zero_bytes()` matches
+    /// the canonical serialization of the identity element from `Element::zero()`.
+    #[test]
+    fn test_zero_commitment() {
+        let zero_bytes = Element::zero_commitment();
+        let element_zero = Element::zero().to_bytes_uncompressed();
+
+        assert_eq!(
+            zero_bytes, element_zero,
+            "Element::zero_bytes() should equal Element::zero().to_bytes_uncompressed()"
+        );
+    }
+
+    /// Verifies that Element::eq() rejects the invalid, but especially dangerous (0, 0) point
+    /// as a final failsafe mechanism.
+    #[test]
+    fn test_eq_failsafe() {
+        // (0,0) point is very dangerous because it has the following property:
+        // - For all points P in the curve : P + (0, 0) = (0,0) and
+        // - For all scalars k: k * (0, 0) = (0, 0)
+        // So any MSM it participates in will collapse into (0, 0), which also
+        // passes the "x1*y2 == x2*y1" check trivially.
+        let double_zero = EdwardsAffine::new_unchecked(Fq::ZERO, Fq::ZERO);
+        assert!(!Element(double_zero.into()).is_zero());
     }
 }

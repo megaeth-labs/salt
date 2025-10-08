@@ -35,15 +35,15 @@ impl IPAProof {
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let point: Element =
-                Element::from_bytes(chunk).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
+                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
             L_vec.push(point)
         }
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let point: Element =
-                Element::from_bytes(chunk).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
+                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
             R_vec.push(point)
         }
 

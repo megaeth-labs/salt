@@ -14,7 +14,7 @@ use crate::{
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
-use banderwagon::{Element, Fr, PrimeField};
+use banderwagon::{Element, Fr};
 use ipa_multipoint::{
     crs::CRS,
     lagrange_basis::PrecomputedWeights,
@@ -55,9 +55,9 @@ impl<'de> Deserialize<'de> for SerdeCommitment {
     /// Deserializes from compressed (32-byte) format back to uncompressed (64-byte) storage.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let bytes = <[u8; 32]>::deserialize(deserializer)?;
-        Element::from_bytes(&bytes)
+        Element::from_bytes(bytes)
             .map(|e| Self(e.to_bytes_uncompressed()))
-            .ok_or_else(|| serde::de::Error::custom("invalid element bytes"))
+            .map_err(|_| serde::de::Error::custom("invalid element bytes"))
     }
 }
 
@@ -112,7 +112,7 @@ pub struct SaltProof {
 /// commitment schemes.
 #[inline(always)]
 pub(crate) fn slot_to_field(entry: &Option<SaltValue>) -> Fr {
-    Fr::from_le_bytes_mod_order(&kv_hash(entry))
+    kv_hash(entry)
 }
 
 impl SaltProof {
@@ -309,9 +309,7 @@ fn create_internal_node_queries(
                 children_commitments_to_scalars(nodes, path_commitments)?;
 
             // Step 2: PERFORMANCE CRITICAL - Batch convert commitments to field elements
-            // serial_batch_map_to_scalar_field() requires only ONE field inversion for all commitments
-            // vs individual conversions which would require one inversion per commitment
-            let children_frs = Element::serial_batch_map_to_scalar_field(children_commitments);
+            let children_frs = Element::hash_commitments(&children_commitments);
             let child_map: FxHashMap<NodeId, Fr> =
                 children_ids.into_iter().zip(children_frs).collect();
 
@@ -500,7 +498,7 @@ mod tests {
         types::SlotId,
         BucketMeta,
     };
-    use banderwagon::CanonicalSerialize;
+    use banderwagon::{CanonicalSerialize, PrimeField};
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;

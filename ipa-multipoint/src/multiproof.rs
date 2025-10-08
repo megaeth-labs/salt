@@ -212,9 +212,7 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
         .for_each(|(chunk_res, p)| {
             // Commitment
             chunk_res[0] = b'C';
-            p.commitment()
-                .serialize_compressed(&mut chunk_res[1..33])
-                .expect("Failed to serialize commitment");
+            chunk_res[1..33].copy_from_slice(&p.commitment().to_bytes());
 
             // Point
             chunk_res[33] = b'z';
@@ -243,8 +241,8 @@ impl MultiPointProof {
 
         let g_x_comm_bytes = &bytes[0..32];
         let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
-        let point: Element =
-            Element::from_bytes(g_x_comm_bytes).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+        let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
+            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
         let g_x_comm = point;
 
         let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;
