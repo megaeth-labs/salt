@@ -31,38 +31,45 @@ use std::collections::{BTreeMap, BTreeSet};
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
 
-/// Serde wrapper for `CommitmentBytes`.
-#[derive(Clone, Debug, Eq)]
-pub struct SerdeCommitment(pub CommitmentBytes);
+/// Serde wrapper for banderwagon `Element` with validation and compression.
+///
+/// This type ensures security by validating elements during deserialization
+/// via `Element::from_bytes()`. Once validated, the `Element` is stored directly,
+/// enabling efficient operations without repeated validation.
+///
+/// Serialization compresses the 64-byte uncompressed format to 32 bytes for
+/// storage/transmission.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SerdeCommitment(pub(crate) Element);
 
-impl PartialEq for SerdeCommitment {
-    fn eq(&self, other: &Self) -> bool {
-        Element::from_bytes_unchecked_uncompressed(self.0)
-            == Element::from_bytes_unchecked_uncompressed(other.0)
+impl SerdeCommitment {
+    /// Returns the commitment as a 64-byte uncompressed representation.
+    ///
+    /// This is used when interfacing with code that expects `CommitmentBytes`.
+    pub fn as_bytes(&self) -> CommitmentBytes {
+        self.0.to_bytes_uncompressed()
     }
 }
 
 impl Serialize for SerdeCommitment {
     /// Serializes the commitment from uncompressed (64-byte) to compressed (32-byte) format.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Element::from_bytes_unchecked_uncompressed(self.0)
-            .to_bytes()
-            .serialize(serializer)
+        self.0.to_bytes().serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for SerdeCommitment {
-    /// Deserializes from compressed (32-byte) format back to uncompressed (64-byte) storage.
+    /// Deserializes from compressed (32-byte) format and validates the element.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let bytes = <[u8; 32]>::deserialize(deserializer)?;
         Element::from_bytes(bytes)
-            .map(|e| Self(e.to_bytes_uncompressed()))
+            .map(Self)
             .map_err(|_| serde::de::Error::custom("invalid element bytes"))
     }
 }
 
 /// Serde wrapper for `MultiPointProof`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SerdeMultiPointProof(pub MultiPointProof);
 
 impl Serialize for SerdeMultiPointProof {
@@ -86,7 +93,7 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
 }
 
 /// Salt proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaltProof {
     /// the node id of nodes in the path => node commitment
     pub parents_commitments: BTreeMap<NodeId, SerdeCommitment>,
@@ -160,7 +167,7 @@ impl SaltProof {
             .get(&0)
             .ok_or(ProofError::MissingRootCommitment)?;
 
-        let trie_root = hash_commitment(root.0);
+        let trie_root = hash_commitment(root.as_bytes());
 
         if state_root != trie_root {
             return Err(ProofError::RootMismatch {
@@ -267,16 +274,12 @@ fn get_commitment_safe(
     path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
     node_id: NodeId,
 ) -> ProofResult<Element> {
-    let commitment_bytes =
-        path_commitments
-            .get(&node_id)
-            .ok_or_else(|| ProofError::StateReadError {
-                reason: format!("Missing commitment for node ID {node_id}"),
-            })?;
-
-    Ok(Element::from_bytes_unchecked_uncompressed(
-        commitment_bytes.0,
-    ))
+    path_commitments
+        .get(&node_id)
+        .map(|c| c.0)
+        .ok_or_else(|| ProofError::StateReadError {
+            reason: format!("Missing commitment for node ID {node_id}"),
+        })
 }
 
 /// Creates verification queries for internal trie nodes using parallel processing.
@@ -309,7 +312,7 @@ fn create_internal_node_queries(
                 children_commitments_to_scalars(nodes, path_commitments)?;
 
             // Step 2: PERFORMANCE CRITICAL - Batch convert commitments to field elements
-            let children_frs = Element::hash_commitments(&children_commitments);
+            let children_frs = Element::batch_map_to_scalar_field(&children_commitments);
             let child_map: FxHashMap<NodeId, Fr> =
                 children_ids.into_iter().zip(children_frs).collect();
 
@@ -364,12 +367,12 @@ fn create_internal_node_queries(
 ///
 /// # Returns
 ///
-/// Tuple of (child_node_ids, child_commitment_bytes) ready for batch field conversion
+/// Tuple of (child_node_ids, child_commitments) ready for batch field conversion
 fn children_commitments_to_scalars(
     nodes: &[(&NodeId, &BTreeSet<usize>)],
     path_commitments: &BTreeMap<NodeId, SerdeCommitment>,
-) -> ProofResult<(Vec<NodeId>, Vec<[u8; 64]>)> {
-    // Flatten nested structure: parent_nodes → child_indices → (child_id, commitment_bytes)
+) -> ProofResult<(Vec<NodeId>, Vec<Element>)> {
+    // Flatten nested structure: parent_nodes → child_indices → (child_id, commitment)
     let (children_ids, children_commitments): (Vec<_>, Vec<_>) = nodes
         .iter()
         .map(|(&encode_node, points)| {
@@ -380,7 +383,7 @@ fn children_commitments_to_scalars(
                     let child_id = get_child_node(&logic_parent_id(encode_node), point);
                     Ok((
                         child_id,
-                        // Extract raw commitment bytes for batch field conversion
+                        // Extract Element from SerdeCommitment
                         path_commitments
                             .get(&child_id)
                             .ok_or_else(|| ProofError::StateReadError {

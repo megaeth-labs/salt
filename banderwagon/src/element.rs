@@ -11,7 +11,7 @@ use std::{
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
-#[derive(Debug, Clone, Copy, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Element(pub(crate) EdwardsProjective);
 
 impl PartialEq for Element {
@@ -273,16 +273,15 @@ impl Element {
     /// This is intentionally a single-threaded implementation to avoid parallelization
     /// overhead on small batches.
     ///
-    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
-    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
-    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
-        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements
-            .iter()
-            .map(|&bytes| {
-                let e = Element::from_bytes_unchecked_uncompressed(bytes);
-                (e.0.x, e.0.y)
-            })
-            .unzip();
+    /// # Arguments
+    ///
+    /// * `elements` - Slice of Elements to convert
+    ///
+    /// # Returns
+    ///
+    /// Vector of scalar field elements, one for each input Element
+    pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
+        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
 
         serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
 
@@ -290,6 +289,17 @@ impl Element {
             .zip(ys)
             .map(|(x, y_inv)| base_to_scalar(x * y_inv))
             .collect()
+    }
+
+    /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
+    /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
+    pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
+        let elements: Vec<Element> = elements
+            .iter()
+            .map(|&bytes| Element::from_bytes_unchecked_uncompressed(bytes))
+            .collect();
+
+        Self::batch_map_to_scalar_field(&elements)
     }
 
     /// Converts banderwagon elements to their 64-byte commitment representations.
@@ -679,16 +689,28 @@ mod tests {
         );
     }
 
-    /// Verifies that Element::eq() rejects the invalid, but especially dangerous (0, 0) point
-    /// as a final failsafe mechanism.
+    /// Verifies that Element::eq() rejects the invalid (0, 0) point as a failsafe.
+    ///
+    /// The point (0, 0) is not on the Bandersnatch curve, but is especially dangerous
+    /// because it acts as an annihilator in group operations:
+    /// - (0, 0) + P = (0, 0) for any point P
+    /// - k × (0, 0) = (0, 0) for any scalar k
+    ///
+    /// This test ensures that our PartialEq implementation correctly rejects (0, 0),
+    /// preventing it from trivially satisfying equality checks. This rejection violates
+    /// reflexivity (x ≠ x), which is why Element only implements PartialEq, not Eq.
     #[test]
     fn test_eq_failsafe() {
-        // (0,0) point is very dangerous because it has the following property:
-        // - For all points P in the curve : P + (0, 0) = (0,0) and
-        // - For all scalars k: k * (0, 0) = (0, 0)
-        // So any MSM it participates in will collapse into (0, 0), which also
-        // passes the "x1*y2 == x2*y1" check trivially.
+        // Construct the invalid (0, 0) point (bypassing validation via new_unchecked)
         let double_zero = EdwardsAffine::new_unchecked(Fq::ZERO, Fq::ZERO);
-        assert!(!Element(double_zero.into()).is_zero());
+        let invalid_element = Element(double_zero.into());
+
+        // Verify (0, 0) is rejected by is_zero() check
+        assert!(!invalid_element.is_zero());
+
+        // Verify PartialEq rejects (0, 0), even when compared to itself.
+        // This breaks reflexivity (violating Eq trait requirements), but prevents
+        // the dangerous (0, 0) point from participating in any equality-based logic.
+        assert_ne!(invalid_element, invalid_element);
     }
 }

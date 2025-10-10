@@ -28,7 +28,7 @@ pub(crate) fn mock_data(rng: &mut StdRng, len: usize) -> Vec<u8> {
 ///
 /// Used in proof verification tests where actual commitment content doesn't matter.
 pub(crate) fn mock_commitment() -> SerdeCommitment {
-    SerdeCommitment((Element::prime_subgroup_generator() * Fr::from(42)).to_bytes_uncompressed())
+    SerdeCommitment(Element::prime_subgroup_generator() * Fr::from(42))
 }
 
 /// Creates a mock SaltValue for testing.

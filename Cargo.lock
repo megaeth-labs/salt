@@ -802,6 +802,7 @@ dependencies = [
  "rayon",
  "rustc-hash",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
