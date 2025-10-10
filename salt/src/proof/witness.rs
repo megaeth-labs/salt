@@ -37,7 +37,7 @@ pub struct Witness {
     /// - All salt keys needed for inclusion/exclusion proofs
     /// - Their values (or None for empty slots)
     /// - Cryptographic commitments proving authenticity
-    pub(crate) salt_witness: SaltWitness,
+    pub salt_witness: SaltWitness,
 }
 
 impl From<SaltWitness> for Witness {
