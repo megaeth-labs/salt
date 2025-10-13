@@ -17,6 +17,8 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
+use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
+
 /// A cryptographic witness enabling stateless validation and execution.
 ///
 /// The `Witness` allows stateless validators to:
@@ -145,9 +147,26 @@ impl Witness {
                 .into_iter()
                 .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
                 .collect();
-            recorder.update(filtered_updates)?;
+            let state_updates = recorder.update(filtered_updates)?;
 
-            witnessed_keys.extend(recorder.cache.into_keys());
+            // Extract old capacities from buckets that had capacity changes
+            let old_capacities: HashMap<_, _> = state_updates
+                .data
+                .range(METADATA_KEYS_RANGE)
+                .filter_map(|(key, (old_val, _))| {
+                    old_val
+                        .as_ref()
+                        .and_then(|v| BucketMeta::try_from(v).ok())
+                        .map(|meta| (bucket_id_from_metadata_key(*key), meta.capacity))
+                })
+                .collect();
+
+            // Filter out keys that exceed old capacities (this can happen after bucket expansion)
+            witnessed_keys.extend(recorder.cache.into_keys().filter(|key| {
+                old_capacities
+                    .get(&key.bucket_id())
+                    .is_none_or(|&old_cap| key.slot_id() < old_cap)
+            }));
 
             Ok(())
         })()
