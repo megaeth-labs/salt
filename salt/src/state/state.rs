@@ -971,12 +971,12 @@ mod tests {
             );
 
             // Verify all keys are accessible with correct values and locations
-            for i in 0..keys.len() {
+            for (i, key) in keys.iter().enumerate() {
                 let ref_find = ref_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, key)
                     .unwrap();
                 let test_find = test_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, key)
                     .unwrap();
                 assert_eq!(
                     ref_find, test_find,
@@ -1424,7 +1424,7 @@ mod tests {
             .iter()
             .map(|(k, _)| (k.clone(), None))
             .collect();
-        for (k, _) in &delete_batch {
+        for k in delete_batch.keys() {
             expected.remove(k);
         }
         apply_updates(&mut state, delete_batch);
@@ -1721,19 +1721,19 @@ mod tests {
             .unwrap();
         for (k, v) in &initial_data {
             ref_state
-                .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut ref_updates)
                 .unwrap();
         }
         for op in &operations {
             match op {
                 Op::Delete(k) => {
                     ref_state
-                        .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut ref_updates)
+                        .shi_delete(TEST_BUCKET, &[*k; 32], &mut ref_updates)
                         .unwrap();
                 }
                 Op::Update(k, v) | Op::Insert(k, v) => {
                     ref_state
-                        .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                        .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut ref_updates)
                         .unwrap();
                 }
             }
@@ -1782,24 +1782,19 @@ mod tests {
                 .unwrap();
             for (k, v) in &initial_data {
                 test_state
-                    .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut test_updates)
+                    .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut test_updates)
                     .unwrap();
             }
             for op in &shuffled {
                 match op {
                     Op::Delete(k) => {
                         test_state
-                            .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut test_updates)
+                            .shi_delete(TEST_BUCKET, &[*k; 32], &mut test_updates)
                             .unwrap();
                     }
                     Op::Update(k, v) | Op::Insert(k, v) => {
                         test_state
-                            .shi_upsert(
-                                TEST_BUCKET,
-                                &vec![*k; 32],
-                                &vec![*v; 32],
-                                &mut test_updates,
-                            )
+                            .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut test_updates)
                             .unwrap();
                     }
                 }
@@ -2041,7 +2036,7 @@ mod tests {
             let (_, found) = state
                 .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
                 .unwrap()
-                .expect(&format!("Key {} missing", i));
+                .unwrap_or_else(|| panic!("Key {} missing", i));
             assert_eq!(found.key(), k);
             assert_eq!(found.value(), v);
         }
@@ -2066,7 +2061,7 @@ mod tests {
                 let (_, found) = state
                     .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
                     .unwrap()
-                    .expect(&format!("Key {} missing after deletion", i));
+                    .unwrap_or_else(|| panic!("Key {} missing after deletion", i));
                 assert_eq!(found.key(), k);
                 assert_eq!(found.value(), v);
             }
@@ -2154,9 +2149,9 @@ mod tests {
             &mut state,
             TEST_BUCKET,
             vec![
-                (0, Some(SaltValue::new(&key_a, &vec![0x01; 32]))),
+                (0, Some(SaltValue::new(&key_a, &[0x01; 32]))),
                 (1, None), // empty slot
-                (3, Some(SaltValue::new(&key_b, &vec![0x02; 32]))),
+                (3, Some(SaltValue::new(&key_b, &[0x02; 32]))),
             ],
         );
 
@@ -2220,8 +2215,8 @@ mod tests {
     /// **Setup**:
     /// - Slot 2: Entry with ideal position 2 (already optimal, rank=0)
     /// - Slot 3: Entry with ideal position 0 (displaced by 3, rank=3)
-    /// **Action**: Delete slot 1 (probe sequence: 2 → 3 → 0...)
-    /// **Expected**: Skips slot 2 (no rank improvement: 0 vs 3) and returns slot 3 (rank improves: 3 → 1)
+    ///   **Action**: Delete slot 1 (probe sequence: 2 → 3 → 0...)
+    ///   **Expected**: Skips slot 2 (no rank improvement: 0 vs 3) and returns slot 3 (rank improves: 3 → 1)
     #[test]
     fn test_shi_next_skips_non_suitable_entries() {
         let mut state = EphemeralSaltState::new(&EmptySalt);
@@ -2239,8 +2234,8 @@ mod tests {
             &mut state,
             TEST_BUCKET,
             vec![
-                (2, Some(SaltValue::new(&key_optimal, &vec![0x02; 32]))),
-                (3, Some(SaltValue::new(&key_displaced, &vec![0x03; 32]))),
+                (2, Some(SaltValue::new(&key_optimal, &[0x02; 32]))),
+                (3, Some(SaltValue::new(&key_displaced, &[0x03; 32]))),
             ],
         );
 
@@ -2290,12 +2285,7 @@ mod tests {
         let layout: Vec<_> = keys
             .iter()
             .enumerate()
-            .map(|(slot, key)| {
-                (
-                    slot as SlotId,
-                    Some(SaltValue::new(key, &vec![slot as u8; 32])),
-                )
-            })
+            .map(|(slot, key)| (slot as SlotId, Some(SaltValue::new(key, &[slot as u8; 32]))))
             .collect();
 
         setup_bucket_layout(&mut state, TEST_BUCKET, layout);

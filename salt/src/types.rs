@@ -611,8 +611,7 @@ mod tests {
         assert_eq!(bytes.len(), 12);
 
         // Serialize using bincode (which will use our custom serde implementation)
-        let bincode_bytes =
-            bincode::serde::encode_to_vec(&meta, bincode::config::legacy()).unwrap();
+        let bincode_bytes = bincode::serde::encode_to_vec(meta, bincode::config::legacy()).unwrap();
 
         assert_eq!(bincode_bytes, bytes);
 
@@ -791,7 +790,7 @@ mod tests {
         assert!(is_subtree_node(bucket_max));
 
         // Even bucket root addressing for data buckets should return true
-        let bucket_root_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0;
+        let bucket_root_65536 = 65536u64 << BUCKET_SLOT_BITS;
         assert!(is_subtree_node(bucket_root_65536));
     }
 

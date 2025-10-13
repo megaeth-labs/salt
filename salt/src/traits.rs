@@ -297,7 +297,7 @@ mod tests {
             // Create state updates to store the metadata
             let mut updates = StateUpdates::default();
             let meta_key = bucket_metadata_key(bucket_id);
-            let meta_value = SaltValue::try_from(meta).unwrap();
+            let meta_value = SaltValue::from(meta);
             updates.add(meta_key, None, Some(meta_value));
 
             // Update the store with this metadata
