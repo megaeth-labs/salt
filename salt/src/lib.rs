@@ -59,8 +59,7 @@ mod tests {
 
         // Alice creates a witness for plain key-value pairs
         let lookups = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let updates = BTreeMap::new();
-        let witness = Witness::create(&lookups, updates, &store)?;
+        let witness = Witness::create(&lookups, BTreeMap::new(), &store)?;
 
         // Bob verifies the witness against its local state root.
         assert_eq!(root_hash, witness.state_root().unwrap());
