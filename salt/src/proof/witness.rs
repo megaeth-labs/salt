@@ -17,6 +17,8 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
+use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
+
 /// A cryptographic witness enabling stateless validation and execution.
 ///
 /// The `Witness` allows stateless validators to:
@@ -76,21 +78,19 @@ impl Witness {
     /// existing keys and exclusion proofs for non-existing keys.
     ///
     /// # Arguments
-    /// * `lookups` - The read-set of plain keys needed to execute transactions.
-    ///   These are keys that need to be read during transaction execution.
-    /// * `updates` - The write-set of state updates resulting from transaction execution.
-    ///   Each item is a tuple of (plain_key, optional_value) where None indicates deletion.
-    ///   Updates that duplicate lookup keys are filtered out (except deletions which are
-    ///   always processed to maintain correct state transitions).
+    /// * `lookups_or_updates` - Plain keys to be read or updated during execution
+    /// * `inserts_or_deletes` - Plain keys to be inserted or deleted during execution
+    ///   Each item is a tuple of (plain_key, optional_value) where:
+    ///   - Some(value) indicates an insert or update
+    ///   - None indicates deletion
     /// * `store` - The storage backend providing access to both state data
     ///   (key-value pairs) and trie data (cryptographic commitments).
     ///
     /// # Returns
     /// A `Witness` containing:
-    /// - A mapping from each lookup key to its corresponding salt key (if it exists)
-    /// - All state data needed for transaction execution (from lookups)
-    /// - All state changes needed to update the root (from filtered updates)
-    /// - Cryptographic proofs (SaltWitness) for verification
+    /// - The minimal set of SALT key-value pairs needed for transaction execution
+    /// - A minimal SALT subtrie needed for updating the state root post-execution
+    /// - A cryptographic proof that proves the authenticity of these data
     ///
     /// # Errors
     /// Returns `ProofError::StateReadError` if:
@@ -99,8 +99,8 @@ impl Witness {
     /// - Unable to access required state data
     /// - Witness creation fails
     pub fn create<'b, Store>(
-        lookups: &[Vec<u8>],
-        updates: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+        lookups_or_updates: impl IntoIterator<Item = &'b Vec<u8>>,
+        inserts_or_deletes: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
         store: &Store,
     ) -> Result<Witness, ProofError>
     where
@@ -113,11 +113,11 @@ impl Witness {
             // We use two separate state instances to collect witness data:
             // - 'state': For performing lookups to determine if keys exist
             // - 'recorder': For recording slot accesses during non-existence
-            //   proofs and state updates
+            //   proofs and key insertion/deletion
             let mut state = EphemeralSaltState::new(store);
             let mut recorder = EphemeralSaltState::new(store).cache_read();
 
-            for plain_key in lookups {
+            for plain_key in lookups_or_updates {
                 let bucket_id = hasher::bucket_id(plain_key);
                 let metadata = store.metadata(bucket_id)?;
 
@@ -137,17 +137,26 @@ impl Witness {
                 }
             }
 
-            // Filter out plain keys from updates that are already in direct_lookup_tbl,
-            // but only if the update is not a deletion (None value indicates deletion).
-            // Since most updates are in-place, this optimization reduces the number of
-            // slots that need to be tracked in the witness significantly.
-            let filtered_updates: Vec<_> = updates
-                .into_iter()
-                .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
-                .collect();
-            recorder.update(filtered_updates)?;
+            let state_updates = recorder.update(inserts_or_deletes)?;
 
-            witnessed_keys.extend(recorder.cache.into_keys());
+            // Extract old capacities from buckets that had capacity changes
+            let old_capacities: HashMap<_, _> = state_updates
+                .data
+                .range(METADATA_KEYS_RANGE)
+                .filter_map(|(key, (old_val, _))| {
+                    old_val
+                        .as_ref()
+                        .and_then(|v| BucketMeta::try_from(v).ok())
+                        .map(|meta| (bucket_id_from_metadata_key(*key), meta.capacity))
+                })
+                .collect();
+
+            // Filter out keys that exceed old capacities (this can happen after bucket expansion)
+            witnessed_keys.extend(recorder.cache.into_keys().filter(|key| {
+                old_capacities
+                    .get(&key.bucket_id())
+                    .is_none_or(|&old_cap| key.slot_id() < old_cap)
+            }));
 
             Ok(())
         })()
@@ -407,12 +416,7 @@ mod tests {
         store.update_trie(trie_updates);
 
         // Generate a witness for the inserted key
-        let witness = Witness::create(
-            &kvs.keys().cloned().collect::<Vec<_>>(),
-            std::iter::empty(),
-            &store,
-        )
-        .unwrap();
+        let witness = Witness::create(kvs.keys(), std::iter::empty(), &store).unwrap();
 
         // Test serialization round-trip of the underlying SaltWitness
         let serialized =
@@ -828,12 +832,7 @@ mod tests {
 
         store.update_trie(trie_updates);
 
-        let witness = Witness::create(
-            &kvs.keys().cloned().collect::<Vec<_>>(),
-            std::iter::empty(),
-            &store,
-        )
-        .unwrap();
+        let witness = Witness::create(kvs.keys(), std::iter::empty(), &store).unwrap();
 
         for key in witness.salt_witness.kvs.keys() {
             let proof_value = witness.value(*key).unwrap();

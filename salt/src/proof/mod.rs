@@ -65,6 +65,8 @@
 
 use thiserror::Error;
 
+use crate::types::SaltKey;
+
 pub mod prover;
 pub mod salt_witness;
 pub mod shape;
@@ -103,6 +105,11 @@ pub enum ProofError {
     /// Direct lookup table verification failed during proof validation
     #[error("invalid lookup table: {reason}")]
     InvalidLookupTable { reason: String },
+
+    /// Invalid salt key (slot_id exceeds bucket capacity)
+    #[error("invalid salt key {key:?}: slot_id {} exceeds {} for bucket {}",
+            key.slot_id(), capacity, key.bucket_id())]
+    InvalidSaltKey { key: SaltKey, capacity: u64 },
 }
 
 /// Result type for operations that can fail during subtrie creation

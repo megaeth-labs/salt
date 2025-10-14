@@ -16,7 +16,7 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS,
-        NUM_META_BUCKETS, POLY_DEGREE, STARTING_NODE_ID,
+        META_BUCKET_SIZE, NUM_META_BUCKETS, POLY_DEGREE, STARTING_NODE_ID,
     },
     proof::{
         prover::slot_to_field,
@@ -178,6 +178,7 @@ fn create_prover_queries(
 /// # Errors
 ///
 /// Returns `ProofError::StateReadError` if unable to read bucket metadata or trie commitments.
+/// Returns `ProofError::InvalidSaltKey` if any salt key has a slot_id that exceeds its bucket's capacity.
 pub(crate) fn create_sub_trie<Store>(
     store: &Store,
     salt_keys: &[SaltKey],
@@ -190,6 +191,30 @@ where
             reason: "empty key set".to_string(),
         });
     }
+
+    // Validate salt keys
+    salt_keys.iter().try_for_each(|key| {
+        let capacity = if key.is_in_meta_bucket() {
+            META_BUCKET_SIZE as u64
+        } else {
+            store
+                .metadata(key.bucket_id())
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!(
+                        "Failed to read metadata for bucket {}: {e:?}",
+                        key.bucket_id()
+                    ),
+                })?
+                .capacity
+        };
+
+        (key.slot_id() < capacity)
+            .then_some(())
+            .ok_or(ProofError::InvalidSaltKey {
+                key: *key,
+                capacity,
+            })
+    })?;
 
     // Step 1: Extract and deduplicate bucket IDs from the input keys
     let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
@@ -361,6 +386,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::META_BUCKET_SIZE;
     use crate::proof::test_utils::*;
     use crate::{
         mem_store::MemStore, proof::prover::PRECOMPUTED_WEIGHTS, state::state::EphemeralSaltState,
@@ -509,5 +535,26 @@ mod tests {
         let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
         let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
         assert_eq!(scalars.len(), POLY_DEGREE);
+    }
+
+    #[test]
+    fn validate_salt_keys() {
+        let (store, _) = setup_test_store();
+
+        // Invalid meta bucket key (slot_id >= META_BUCKET_SIZE)
+        let invalid_meta_key = SaltKey::from((0u32, META_BUCKET_SIZE as u64));
+        let result = create_sub_trie(&store, &[invalid_meta_key]);
+        assert!(matches!(result, Err(ProofError::InvalidSaltKey { .. })));
+
+        // Invalid data bucket key (slot_id >= capacity)
+        let data_bucket_id = NUM_META_BUCKETS as u32;
+        let invalid_data_key = SaltKey::from((data_bucket_id, 1000u64));
+        let result = create_sub_trie(&store, &[invalid_data_key]);
+        assert!(matches!(result, Err(ProofError::InvalidSaltKey { .. })));
+
+        // Valid keys should work
+        let valid_meta_key = SaltKey::from((0u32, 0u64));
+        let result = create_sub_trie(&store, &[valid_meta_key]);
+        assert!(result.is_ok());
     }
 }
