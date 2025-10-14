@@ -612,12 +612,12 @@ mod tests {
         let test_cases = [
             (
                 (0, 0),
-                (0u64 << BUCKET_SLOT_BITS) + 0 + starting_l4_node,
+                (0u64 << BUCKET_SLOT_BITS) + starting_l4_node,
                 "Bucket 0, slot 0",
             ),
             (
                 (0, 255),
-                (0u64 << BUCKET_SLOT_BITS) + 0 + starting_l4_node,
+                (0u64 << BUCKET_SLOT_BITS) + starting_l4_node,
                 "Bucket 0, slots 0-255 same leaf",
             ),
             (

@@ -513,9 +513,11 @@ mod tests {
         let bucket3 = NUM_META_BUCKETS as u32 + 2;
 
         // Test Case 1: Explicit metadata present (Some(Some(meta)))
-        let mut explicit_meta = BucketMeta::default();
-        explicit_meta.nonce = 42;
-        explicit_meta.capacity = 512;
+        let explicit_meta = BucketMeta {
+            nonce: 42,
+            capacity: 512,
+            ..Default::default()
+        };
 
         let mut kvs = BTreeMap::new();
         let metadata_key = bucket_metadata_key(bucket1);
@@ -745,7 +747,7 @@ mod tests {
             kvs,
             proof: create_mock_proof(),
         };
-        let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
+        let expected = (MIN_BUCKET_SIZE as u64).div_ceil(3);
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
     }
 

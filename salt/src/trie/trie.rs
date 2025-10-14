@@ -2250,56 +2250,46 @@ mod tests {
         //  C3_0_META ... C3_65535_META C3_65536_KV...
 
         for i in (0..MAIN_TRIE_LEVELS).rev() {
-            let (meta_delta_indices, data_delta_indices) =
-                if i == MAIN_TRIE_LEVELS - 1 {
-                    let meta_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, Fr::zero(), kv_hash(&Some(BucketMeta::default().into()))))
-                        .collect();
-                    let data_delta_indices = (0..len_vec[i])
-                        .map(|i| (i, Fr::zero(), kv_hash(&None)))
-                        .collect();
-                    (meta_delta_indices, data_delta_indices)
-                } else {
-                    if i == 0 {
-                        let mut hash_bytes = Element::hash_commitments(&vec![
-                            default_committment_vec[i + 1].0;
-                            len_vec[i]
-                        ]);
-                        hash_bytes.extend(Element::hash_commitments(&vec![
-                            default_committment_vec
-                                [i + 1]
-                                .1;
-                            MIN_BUCKET_SIZE
-                                - len_vec[i]
-                        ]));
-                        let delta_indices = hash_bytes
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, e)| (i, Fr::zero(), e))
-                            .collect::<Vec<_>>();
-                        (delta_indices.clone(), delta_indices)
-                    } else {
-                        let meta_hash_bytes = Element::hash_commitments(&vec![
-                            default_committment_vec[i + 1].0;
-                            len_vec[i]
-                        ]);
-                        let meta_delta_indices = meta_hash_bytes
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, e)| (i, Fr::zero(), e))
-                            .collect();
-                        let data_hash_bytes = Element::hash_commitments(&vec![
-                            default_committment_vec[i + 1].1;
-                            len_vec[i]
-                        ]);
-                        let data_delta_indices = data_hash_bytes
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, e)| (i, Fr::zero(), e))
-                            .collect();
-                        (meta_delta_indices, data_delta_indices)
-                    }
-                };
+            let (meta_delta_indices, data_delta_indices) = if i == MAIN_TRIE_LEVELS - 1 {
+                let meta_delta_indices = (0..len_vec[i])
+                    .map(|i| (i, Fr::zero(), kv_hash(&Some(BucketMeta::default().into()))))
+                    .collect();
+                let data_delta_indices = (0..len_vec[i])
+                    .map(|i| (i, Fr::zero(), kv_hash(&None)))
+                    .collect();
+                (meta_delta_indices, data_delta_indices)
+            } else if i == 0 {
+                let mut hash_bytes =
+                    Element::hash_commitments(&vec![default_committment_vec[i + 1].0; len_vec[i]]);
+                hash_bytes.extend(Element::hash_commitments(&vec![
+                    default_committment_vec
+                        [i + 1]
+                        .1;
+                    MIN_BUCKET_SIZE - len_vec[i]
+                ]));
+                let delta_indices = hash_bytes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (i, Fr::zero(), e))
+                    .collect::<Vec<_>>();
+                (delta_indices.clone(), delta_indices)
+            } else {
+                let meta_hash_bytes =
+                    Element::hash_commitments(&vec![default_committment_vec[i + 1].0; len_vec[i]]);
+                let meta_delta_indices = meta_hash_bytes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (i, Fr::zero(), e))
+                    .collect();
+                let data_hash_bytes =
+                    Element::hash_commitments(&vec![default_committment_vec[i + 1].1; len_vec[i]]);
+                let data_delta_indices = data_hash_bytes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (i, Fr::zero(), e))
+                    .collect();
+                (meta_delta_indices, data_delta_indices)
+            };
 
             default_committment_vec[i].0 =
                 add_deltas(SHARED_COMMITTER.as_ref(), zero, &meta_delta_indices)
@@ -2326,19 +2316,18 @@ mod tests {
         let bucket_id = (65536 as NodeId) << BUCKET_SLOT_BITS as NodeId;
         for i in (0..MAX_SUBTREE_LEVELS).rev() {
             let data_delta_indices = if i == MAX_SUBTREE_LEVELS - 1 {
-                let data_delta_indices = (0..MIN_BUCKET_SIZE)
+                (0..MIN_BUCKET_SIZE)
                     .map(|i| (i, Fr::zero(), kv_hash(&None)))
-                    .collect::<Vec<_>>();
-                data_delta_indices
+                    .collect::<Vec<_>>()
             } else {
                 let data_hash_bytes =
                     Element::hash_commitments(&[default_subtrie_c_vec[i + 1]; MIN_BUCKET_SIZE]);
-                let data_delta_indices = data_hash_bytes
+
+                data_hash_bytes
                     .into_iter()
                     .enumerate()
                     .map(|(i, e)| (i, Fr::zero(), e))
-                    .collect::<Vec<_>>();
-                data_delta_indices
+                    .collect::<Vec<_>>()
             };
 
             default_subtrie_c_vec[i] =
@@ -2407,13 +2396,10 @@ mod tests {
     ) -> BTreeMap<NodeId, (CommitmentBytes, CommitmentBytes)> {
         let mut result: BTreeMap<_, (CommitmentBytes, CommitmentBytes)> = BTreeMap::new();
         for (id, (old, new)) in updates {
-            match result.entry(id) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    if old != new {
-                        entry.insert((old, new));
-                    }
+            if let std::collections::btree_map::Entry::Vacant(entry) = result.entry(id) {
+                if old != new {
+                    entry.insert((old, new));
                 }
-                _ => {}
             }
         }
         result
