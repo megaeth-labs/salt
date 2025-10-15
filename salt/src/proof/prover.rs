@@ -1,6 +1,6 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, POLY_DEGREE, STARTING_NODE_ID},
+    constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, STARTING_NODE_ID},
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
         subtrie::create_sub_trie,
@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
-    Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
+    Lazy::new(|| PrecomputedWeights::new(DOMAIN_SIZE));
 
 /// Serde wrapper for banderwagon `Element` with validation and compression.
 ///
@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
     /// Deserializes from bytes back to MultiPointProof with the configured polynomial degree.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
-        MultiPointProof::from_bytes(&bytes, POLY_DEGREE)
+        MultiPointProof::from_bytes(&bytes, DOMAIN_SIZE)
             .map(SerdeMultiPointProof)
             .map_err(|e| serde::de::Error::custom(e.to_string()))
     }

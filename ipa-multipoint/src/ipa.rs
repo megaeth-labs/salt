@@ -179,73 +179,6 @@ fn log2(n: usize) -> u32 {
 }
 
 impl IPAProof {
-    pub fn verify(
-        &self,
-        transcript: &mut Transcript,
-        mut crs: CRS,
-        mut b: Vec<Fr>,
-        a_comm: Element,
-        input_point: Fr,
-        output_point: Fr,
-    ) -> bool {
-        transcript.domain_sep(b"ipa");
-
-        let mut G = &mut crs.G[..];
-        let mut b = &mut b[..];
-
-        let num_rounds = self.L_vec.len();
-
-        // Check that the prover computed an inner proof
-        // over a vector of size n
-        if crs.n != 1 << num_rounds {
-            return false;
-        }
-
-        // transcript.append_u64(b"n", n as u64);
-        transcript.append_point(b"C", &a_comm);
-        transcript.append_scalar(b"input point", &input_point);
-        transcript.append_scalar(b"output point", &output_point);
-
-        let w = transcript.challenge_scalar(b"w");
-        let Q = crs.Q * w;
-
-        let num_rounds = self.L_vec.len();
-
-        let mut a_comm = a_comm + (Q * output_point);
-
-        let challenges = generate_challenges(self, transcript);
-        let mut challenges_inv = challenges.clone();
-        batch_inversion(&mut challenges_inv);
-
-        // Compute the expected commitment
-        // TODO use a multizip from itertools
-        for i in 0..num_rounds {
-            let x = challenges[i];
-            let x_inv = challenges_inv[i];
-            let L = self.L_vec[i];
-            let R = self.R_vec[i];
-
-            a_comm = a_comm + (L * x) + (R * x_inv);
-        }
-
-        for x_inv in challenges_inv.iter() {
-            let (G_L, G_R) = halve(G);
-            let (b_L, b_R) = halve(b);
-
-            for i in 0..G_L.len() {
-                G_L[i] += G_R[i] * *x_inv;
-                b_L[i] += b_R[i] * x_inv;
-            }
-            G = G_L;
-            b = b_L;
-        }
-        assert_eq!(G.len(), 1);
-        assert_eq!(b.len(), 1);
-
-        let exp_P = (G[0] * self.a) + Q * (self.a * b[0]);
-
-        exp_P == a_comm
-    }
     pub fn verify_multiexp(
         &self,
         transcript: &mut Transcript,
@@ -392,9 +325,9 @@ mod tests {
         );
 
         let mut verifier_transcript = Transcript::new(b"ip_no_zk");
-        assert!(proof.verify(
+        assert!(proof.verify_multiexp(
             &mut verifier_transcript,
-            crs,
+            &crs,
             b,
             P,
             input_point,

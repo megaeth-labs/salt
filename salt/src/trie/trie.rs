@@ -576,10 +576,7 @@ where
     /// # Arguments
     /// * `state_updates` - Key-value changes in the underlying state. These K-V pairs
     ///   are not part of the trie itself but are committed to by the trie's leaf nodes.
-    ///   The method consumes this input.
-    /// * `is_subtree` - Determines which leaf nodes to update:
-    ///   - `false`: Updates main trie leaf nodes
-    ///   - `true`: Updates subtree leaf nodes
+    /// * `subtree_change_info` - TODO: define this argument precisely
     ///
     /// # Returns
     /// * `TrieUpdates` - Commitment updates for the affected leaf nodes

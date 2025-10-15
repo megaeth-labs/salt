@@ -154,9 +154,9 @@ pub const BUCKET_RESIZE_MULTIPLIER: u64 = 2;
 // Cryptographic Constants
 // ============================================================================
 
-/// The degree of the polynomial used in the IPA (Inner Product Argument) proof.
-/// 256 matches our trie branching factor for efficient proof generation.
-pub const POLY_DEGREE: usize = 256;
+/// Size of the evaluation domain for polynomial commitments. 256 matches our trie
+/// branching factor for efficient proof generation.
+pub const DOMAIN_SIZE: usize = 256;
 
 /// Macro to convert a 128-character hex string into a [u8; 64] array at compile time.
 /// Used for embedding precomputed cryptographic commitments.

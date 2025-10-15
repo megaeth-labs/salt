@@ -108,7 +108,7 @@ impl Element {
 
         // Construct a point that is on the curve
         let x = Fq::deserialize_compressed(&bytes[..])?;
-        let point = Self::get_point_from_x(x, true).ok_or(SerializationError::InvalidData)?;
+        let point = Self::get_point_from_x(x).ok_or(SerializationError::InvalidData)?;
 
         // Verify point is in the correct subgroup
         subgroup_check(&point)
@@ -186,7 +186,8 @@ impl Element {
     /// Reconstructs a twisted Edwards curve point from an x-coordinate.
     ///
     /// Given an x-coordinate on the Bandersnatch curve, this computes the corresponding
-    /// y-coordinate using the twisted Edwards curve equation and returns the point.
+    /// y-coordinate using the twisted Edwards curve equation and returns the point with
+    /// the positive (lexicographically larger) y-coordinate.
     ///
     /// # Curve Equation
     ///
@@ -199,29 +200,26 @@ impl Element {
     /// # Parameters
     ///
     /// - `x`: The x-coordinate of the point
-    /// - `choose_largest`: If `true`, selects the lexicographically larger (positive) y-coordinate;
-    ///   if `false`, selects the smaller (negative) y-coordinate
     ///
     /// # Returns
     ///
-    /// - `Some(EdwardsProjective)` if a valid curve point exists for the given x
+    /// - `Some(EdwardsProjective)` if a valid curve point exists for the given x,
+    ///   with the positive y-coordinate
     /// - `None` if `y²` has no square root (x-coordinate not on the curve)
     ///
     /// # Note
     ///
     /// This function does **not** perform subgroup validation. The caller is responsible
     /// for ensuring the resulting point is in the correct subgroup if needed.
-    fn get_point_from_x(x: Fq, choose_largest: bool) -> Option<EdwardsProjective> {
+    fn get_point_from_x(x: Fq) -> Option<EdwardsProjective> {
         let x_sq = x.square();
         let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one())
             / (BandersnatchConfig::COEFF_D * x_sq - Fq::one());
 
-        let y = y_squared.sqrt()?;
-        let y = if is_positive(y) == choose_largest {
-            y
-        } else {
-            -y
-        };
+        let mut y = y_squared.sqrt()?;
+        if !is_positive(y) {
+            y = -y;
+        }
 
         Some(EdwardsAffine::new_unchecked(x, y).into())
     }

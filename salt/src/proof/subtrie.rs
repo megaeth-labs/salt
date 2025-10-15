@@ -15,8 +15,8 @@
 //! 5. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS,
-        META_BUCKET_SIZE, NUM_META_BUCKETS, POLY_DEGREE, STARTING_NODE_ID,
+        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS,
+        META_BUCKET_SIZE, NUM_META_BUCKETS, STARTING_NODE_ID,
     },
     proof::{
         prover::slot_to_field,
@@ -84,7 +84,7 @@ where
     let to_element = |bytes| Element::from_bytes_unchecked_uncompressed(bytes);
     let default_element = |node_id| to_element(default_commitment(node_id));
 
-    let total_capacity = nodes.len() * POLY_DEGREE;
+    let total_capacity = nodes.len() * DOMAIN_SIZE;
     let mut all_child_commitments = Vec::with_capacity(total_capacity);
 
     // Load child commitments for each internal node
@@ -94,7 +94,7 @@ where
 
         // Load existing child commitments from storage
         let children = store
-            .node_entries(child_idx..child_idx + POLY_DEGREE as NodeId)
+            .node_entries(child_idx..child_idx + DOMAIN_SIZE as NodeId)
             .map_err(|e| ProofError::StateReadError {
                 reason: format!("Failed to load child nodes for parent {node_id}: {e:?}"),
             })?;
@@ -105,7 +105,7 @@ where
         } else {
             child_idx // Non-root levels: all use child_idx as default
         };
-        let mut child_commitments = vec![default_element(default_idx); POLY_DEGREE];
+        let mut child_commitments = vec![default_element(default_idx); DOMAIN_SIZE];
 
         // Special case: root level first child uses different default
         if child_idx == ROOT_LEVEL_CHILD_START {
@@ -273,7 +273,7 @@ where
 
             let res = nodes
                 .iter()
-                .zip(children_scalars.chunks(POLY_DEGREE))
+                .zip(children_scalars.chunks(DOMAIN_SIZE))
                 .map(|((parent, points), children_scalars)| {
                     let commitment = store
                         .commitment(connect_parent_id(*parent))
@@ -348,13 +348,13 @@ where
     };
 
     let start_key = SaltKey::from((bucket_id, slot_start));
-    let end_key = SaltKey::from((bucket_id, slot_start + POLY_DEGREE as SlotId - 1));
+    let end_key = SaltKey::from((bucket_id, slot_start + DOMAIN_SIZE as SlotId - 1));
 
     let entries = store.entries(start_key..=end_key).map_err(|e| {
         ProofError::StateReadError {
             reason: format!(
                 "Failed to load bucket entries for bucket {bucket_id}, slots {slot_start}-{}: {e:?}",
-                slot_start + POLY_DEGREE as SlotId - 1
+                slot_start + DOMAIN_SIZE as SlotId - 1
             ),
         }
     })?;
@@ -362,10 +362,10 @@ where
     // Initialize polynomial coefficients with appropriate default values
     let mut default_coefficients = if bucket_id < NUM_META_BUCKETS as BucketId {
         // Metadata buckets: initialize with default metadata hash
-        vec![slot_to_field(&Some(BucketMeta::default().into())); POLY_DEGREE]
+        vec![slot_to_field(&Some(BucketMeta::default().into())); DOMAIN_SIZE]
     } else {
         // Data buckets: initialize with empty slot hash
-        vec![slot_to_field(&None); POLY_DEGREE]
+        vec![slot_to_field(&None); DOMAIN_SIZE]
     };
 
     // Replace default values with actual key-value hashes where data exists
@@ -534,7 +534,7 @@ mod tests {
         // Single internal node
         let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
         let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
-        assert_eq!(scalars.len(), POLY_DEGREE);
+        assert_eq!(scalars.len(), DOMAIN_SIZE);
     }
 
     #[test]
