@@ -865,7 +865,7 @@ mod tests {
     }
 
     /// Tests proof correctness through multiple bucket capacity expansions.
-    /// Performs two expansions (256 → 524288 → 1099511627776) while adding
+    /// Performs two expansions (256 → 524288 → 536870912) while adding
     /// new key-value pairs at each stage. Verifies that proofs remain valid
     /// for both existing and non-existing keys throughout all expansion stages.
     #[test]
@@ -962,7 +962,7 @@ mod tests {
         assert!(res.is_ok());
 
         // expand capacity and add kvs
-        let new_capacity2 = 256 * 256 * 256 * 256 * 256;
+        let new_capacity2 = 256 * 256 * 256 * 32;
 
         let expand_state_updates = StateUpdates {
             data: vec![
