@@ -634,8 +634,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         let old_capacity = old_metadata.capacity;
         for slot in 0..old_capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
-            let old_value = (slot < old_capacity).then(|| old_bucket.get(&salt_key)).flatten();
-            let new_value = (slot < new_capacity).then(|| new_bucket.get(&salt_key)).flatten();
+            let old_value = (slot < old_capacity)
+                .then(|| old_bucket.get(&salt_key))
+                .flatten();
+            let new_value = (slot < new_capacity)
+                .then(|| new_bucket.get(&salt_key))
+                .flatten();
 
             // Cache updates: overlapping range only when changed, expansion range always
             if old_value != new_value || slot >= old_capacity {

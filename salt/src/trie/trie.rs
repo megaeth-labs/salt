@@ -329,8 +329,10 @@ where
                         std::cmp::Ordering::Greater => {
                             // When bucket expands, cache default commitments for new leaf segments
                             // and their ancestors. The underlying store doesn't have these yet.
-                            let old_segments = subtree_change.old_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
-                            let new_segments = subtree_change.new_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
+                            let old_segments =
+                                subtree_change.old_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
+                            let new_segments =
+                                subtree_change.new_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
 
                             // Track visited nodes to avoid redundant work when segments share ancestors
                             let mut visited = HashSet::new();
