@@ -924,4 +924,37 @@ mod tests {
 
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), used_slots);
     }
+
+    /// Verifies that witnesses contain sufficient data to correctly compute new
+    /// state roots, which is essential for stateless validation.
+    #[test]
+    fn test_witness_state_root_update() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Generate `n` random key-value pairs
+        let n = 230;
+        let kvs: HashMap<_, _> = (0..n)
+            .map(|_| (mock_data(&mut rng, 32), Some(mock_data(&mut rng, 32))))
+            .collect();
+
+        // Both paths share the same starting point (empty MemStore in this case)
+        let store = MemStore::new();
+
+        // Create witness from initial state BEFORE any mutations
+        let witness = Witness::create(std::iter::empty(), kvs.iter(), &store).unwrap();
+
+        // Pass 1: MemStore-based insertion (mutates store)
+        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (store_root, _) = StateRoot::new(&store).update_fin(&updates).unwrap();
+
+        // Pass 2: Witness-based insertion (using witness created from initial state)
+        let witness_updates = EphemeralSaltState::new(&witness).update(&kvs).unwrap();
+        let (witness_root, _) = StateRoot::new(&witness)
+            .update_fin(&witness_updates)
+            .unwrap();
+
+        // Both passes should produce identical roots
+        assert_eq!(store_root, witness_root);
+    }
 }
