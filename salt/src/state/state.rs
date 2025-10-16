@@ -631,16 +631,21 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
 
         // Step 5: Record state changes by comparing slot-by-slot differences
-        for slot in 0..old_metadata.capacity.max(new_capacity) {
+        let old_capacity = old_metadata.capacity;
+        for slot in 0..old_capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
-            let old_value = old_bucket.get(&salt_key);
-            let new_value = new_bucket.get(&salt_key);
-            self.update_value(
-                out_updates,
-                salt_key,
-                old_value.cloned(),
-                new_value.cloned(),
-            );
+            let old_value = (slot < old_capacity).then(|| old_bucket.get(&salt_key)).flatten();
+            let new_value = (slot < new_capacity).then(|| new_bucket.get(&salt_key)).flatten();
+
+            // Cache updates: overlapping range only when changed, expansion range always
+            if old_value != new_value || slot >= old_capacity {
+                self.cache.insert(salt_key, new_value.cloned());
+            }
+
+            // StateUpdates: only when there's actual data to record
+            if old_value != new_value && (old_value.is_some() || new_value.is_some()) {
+                out_updates.add(salt_key, old_value.cloned(), new_value.cloned());
+            }
         }
 
         // Update bucket metadata
