@@ -280,13 +280,7 @@ where
         // Step 1.1: Extract metadata changes from state updates
         let mut subtree_change_info: BTreeMap<BucketId, SubtrieChangeInfo> = state_updates
             .data
-            .range(
-                SaltKey::from((0, 0))
-                    ..SaltKey::from((
-                        (NUM_META_BUCKETS - 1) as BucketId,
-                        MIN_BUCKET_SIZE as SlotId,
-                    )),
-            )
+            .range(METADATA_KEYS_RANGE)
             .map(|(key, meta_change)| {
                 let bucket_id = bucket_id_from_metadata_key(*key);
                 let old_meta: BucketMeta = meta_change
@@ -333,14 +327,32 @@ where
                         .cmp(&subtree_change.old_capacity)
                     {
                         std::cmp::Ordering::Greater => {
-                            // Initialize cache for a new top-level subtree with its default commitment.
-                            // because, `new_top_id` commintment not store in storage
-                            if subtree_change.new_top_level != subtree_change.old_top_level {
-                                self.cache.insert(
-                                    subtree_change.new_top_id,
-                                    default_commitment(subtree_change.new_top_id),
-                                );
+                            // When bucket expands, cache default commitments for new leaf segments
+                            // and their ancestors. The underlying store doesn't have these yet.
+                            let old_segments =
+                                subtree_change.old_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
+                            let new_segments =
+                                subtree_change.new_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
+
+                            // Track visited nodes to avoid redundant work when segments share ancestors
+                            let mut visited = HashSet::new();
+
+                            for segment_id in old_segments..new_segments {
+                                let mut node = ((bucket_id as NodeId) << BUCKET_SLOT_BITS)
+                                    + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId
+                                    + segment_id;
+
+                                // Walk up from leaf, stopping at existing commitments or new_top_id
+                                while !visited.contains(&node) && self.commitment(node).is_err() {
+                                    visited.insert(node);
+                                    self.cache.insert(node, default_commitment(node));
+                                    if node == subtree_change.new_top_id {
+                                        break;
+                                    }
+                                    node = get_parent_node(&node);
+                                }
                             }
+
                             // Will be handled in subtree processing
                             let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
