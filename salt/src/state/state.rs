@@ -48,7 +48,7 @@ use crate::{
 use hex;
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
 };
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
@@ -96,6 +96,8 @@ pub struct EphemeralSaltState<'a, Store> {
     /// Without this delta tracking, computing the current bucket occupancy would require
     /// reconciling the base store's usage count with all cached modifications.
     pub usage_count_delta: HashMap<BucketId, i64>,
+    /// Tracks which buckets have had their metadata changed (rehashed) during this session.
+    pub rehashed_buckets: HashSet<BucketId>,
     /// Whether to cache values read from the store for subsequent access
     pub cache_read: bool,
 }
@@ -182,6 +184,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             store,
             cache: HashMap::new(),
             usage_count_delta: HashMap::new(),
+            rehashed_buckets: HashSet::new(),
             cache_read: false,
         }
     }
@@ -283,6 +286,61 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
         Ok(state_updates)
+    }
+
+    /// Prevents automatic, pre-mature bucket expansions caused by incremental updates.
+    ///
+    /// During incremental operations, buckets may expand to accommodate insertions
+    /// but remain inflated even after subsequent deletions. This method replays all
+    /// entries in rehashed buckets to apply more conservative expansion logic based
+    /// on the final key-value changes.
+    ///
+    /// **Warning**: This method clears the effect of manual invocations of
+    /// [`set_nonce`] or [`shi_rehash`]. If you need to modify bucket metadata
+    /// manually, do so after calling `canonicalize()`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(StateUpdates)` - State changes to revert premature bucket expansions
+    /// * `Err(error)` - If store access fails
+    pub fn canonicalize(&mut self) -> Result<StateUpdates, Store::Error> {
+        let mut updates = StateUpdates::default();
+
+        for bucket_id in std::mem::take(&mut self.rehashed_buckets) {
+            let old_metadata = self.metadata(bucket_id, false)?;
+
+            // Collect plain kv pairs and clear the bucket slots
+            let mut kv_pairs = Vec::new();
+            for slot in 0..old_metadata.capacity {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                if let Some(value) = self.value(salt_key)? {
+                    kv_pairs.push(value.clone());
+                    updates.add(salt_key, Some(value), None);
+                }
+                self.cache.remove(&salt_key);
+            }
+
+            // Clear metadata and usage count delta from cache
+            let metadata_key = bucket_metadata_key(bucket_id);
+            self.cache.remove(&metadata_key);
+            self.usage_count_delta.remove(&bucket_id);
+
+            // Re-insert plain kv pairs into the bucket based on the nonce and capacity
+            // before any `update()`.
+            for value in &kv_pairs {
+                self.shi_upsert(bucket_id, value.key(), value.value(), &mut updates)?;
+            }
+
+            // Record metadata transition
+            let new_metadata = self.metadata(bucket_id, false)?;
+            updates.add(
+                metadata_key,
+                Some(SaltValue::from(old_metadata)),
+                Some(SaltValue::from(new_metadata)),
+            );
+        }
+
+        Ok(updates)
     }
 
     /// Sets a new nonce for the specified bucket, triggering a manual rehash.
@@ -665,6 +723,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             Some(new_metadata.into()),
         );
 
+        // Track this bucket as rehashed for canonicalization
+        self.rehashed_buckets.insert(bucket_id);
+
         Ok(())
     }
 
@@ -867,8 +928,8 @@ mod tests {
     // ============================
 
     /// Helper function to verify all key-value pairs are present with correct values.
-    fn verify_all_keys_present(
-        state: &mut EphemeralSaltState<EmptySalt>,
+    fn verify_all_keys_present<S: StateReader>(
+        state: &mut EphemeralSaltState<S>,
         bucket_id: BucketId,
         nonce: u32,
         capacity: u64,
@@ -1449,6 +1510,50 @@ mod tests {
         verify_state(&expected);
     }
 
+    /// Verifies that canonicalize() reverts premature bucket expansions
+    /// that occur during incremental updates.
+    #[test]
+    fn test_canonicalize() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let n = 210;
+        let keys: Vec<Vec<u8>> = (1..=n).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (1..=n).map(|i| vec![(i + 99) as u8; 32]).collect();
+
+        let mut updates = StateUpdates::default();
+
+        // Phase 1: Insert `n` keys to force bucket expansion beyond MIN_BUCKET_SIZE
+        for i in 0..keys.len() {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+        let expanded_capacity = state.metadata(TEST_BUCKET, false).unwrap().capacity;
+        assert!(expanded_capacity > MIN_BUCKET_SIZE as u64);
+
+        // Phase 2: Delete all keys (but capacity remains expanded unfortunately)
+        for key in &keys {
+            state.shi_delete(TEST_BUCKET, key, &mut updates).unwrap();
+        }
+        assert_eq!(
+            state.metadata(TEST_BUCKET, false).unwrap().capacity,
+            expanded_capacity
+        );
+        assert!(updates.len() == 1, "Bucket remained expanded");
+
+        // Phase 3: Canonicalize reverts the premature expansion
+        // - Pending updates from insert/delete cancel out (merge to empty)
+        // - Bucket capacity resets to MIN_BUCKET_SIZE
+        // - Rehashed buckets cleared
+        updates.merge(state.canonicalize().unwrap());
+        assert!(updates.is_empty());
+        assert_eq!(
+            state.metadata(TEST_BUCKET, false).unwrap().capacity,
+            MIN_BUCKET_SIZE as u64
+        );
+        assert!(state.rehashed_buckets.is_empty());
+    }
+
     /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
     ///
     /// Verifies that changing nonce values causes slot reassignments but maintains
@@ -1655,7 +1760,7 @@ mod tests {
     /// of the order in which mixed operations (insert, update, delete) are performed.
     ///
     /// ## Initial State
-    /// - Bucket capacity: 12 slots (smaller capacity to create more collisions)
+    /// - Bucket capacity: 10 slots (smaller capacity to create more collisions)
     /// - Pre-populated with 6 key-value pairs:
     ///   - Key 1 → Value 11
     ///   - Key 2 → Value 12
@@ -1686,7 +1791,7 @@ mod tests {
     ///
     /// ## Verification Strategy
     /// 1. Apply operations in reference order to create baseline state
-    /// 2. For 10 iterations, shuffle operations randomly and apply to fresh state
+    /// 2. For 100 iterations, shuffle operations randomly and apply to fresh state
     /// 3. Verify that each key exists in same slot with same value across all orderings
     /// 4. Verify that deleted keys are absent in all states
     ///
@@ -1697,7 +1802,7 @@ mod tests {
         use rand::seq::SliceRandom;
         use rand::thread_rng;
 
-        const BUCKET_CAPACITY: u64 = 12;
+        const BUCKET_CAPACITY: u64 = 10;
 
         #[derive(Clone, Debug)]
         enum Op {
@@ -1720,14 +1825,18 @@ mod tests {
             Op::Insert(9, 19),
         ];
 
-        // Create reference state
-        let reader = EmptySalt;
-        let mut ref_state = EphemeralSaltState::new(&reader);
-        let mut ref_updates = StateUpdates::default();
-
-        ref_state
-            .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut ref_updates)
+        // Create a MemStore with custom bucket capacity
+        let store = MemStore::new();
+        let mut setup_state = EphemeralSaltState::new(&store);
+        let mut setup_updates = StateUpdates::default();
+        setup_state
+            .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut setup_updates)
             .unwrap();
+        store.update_state(setup_updates);
+
+        // Create reference state
+        let mut ref_state = EphemeralSaltState::new(&store);
+        let mut ref_updates = StateUpdates::default();
         for (k, v) in &initial_data {
             ref_state
                 .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut ref_updates)
@@ -1748,6 +1857,7 @@ mod tests {
             }
         }
         let ref_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
+        let _ = ref_state.canonicalize().unwrap();
 
         // Verify reference state has all expected final key-value pairs
         let expected_keys: Vec<Vec<u8>> = vec![
@@ -1777,18 +1887,13 @@ mod tests {
             &expected_values,
         );
 
-        // Test 10 random operation orders
-        for iteration in 0..10 {
+        // Test 100 random operation orders
+        for iteration in 0..100 {
             let mut shuffled = operations.clone();
             shuffled.shuffle(&mut thread_rng());
 
-            let test_reader = EmptySalt;
-            let mut test_state = EphemeralSaltState::new(&test_reader);
+            let mut test_state = EphemeralSaltState::new(&store);
             let mut test_updates = StateUpdates::default();
-
-            test_state
-                .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut test_updates)
-                .unwrap();
             for (k, v) in &initial_data {
                 test_state
                     .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut test_updates)
@@ -1808,18 +1913,7 @@ mod tests {
                     }
                 }
             }
-
-            // Bucket capacity can vary based on delete timing during insertion sequence.
-            // Normalize capacity to avoid flaky test failures.
-            let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
-            if test_meta.capacity != ref_meta.capacity {
-                let _ = test_state.shi_rehash(
-                    TEST_BUCKET,
-                    test_meta.nonce,
-                    ref_meta.capacity,
-                    &mut test_updates,
-                );
-            }
+            let _ = test_state.canonicalize().unwrap();
 
             // Expected final keys: 1(100), 2(12), 4(200), 5(15), 7(17), 8(18), 9(19)
             for (k, _) in [
