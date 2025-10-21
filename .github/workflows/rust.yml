@@ -56,7 +56,6 @@ jobs:
           args: --features test-bucket-resize
         env:
           NUM_DATA_BUCKETS: 2
-          BUCKET_RESIZE_LOAD_FACTOR_PCT: 1
 
   lints:
     name: Lints
