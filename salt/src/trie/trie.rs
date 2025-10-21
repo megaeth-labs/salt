@@ -1797,6 +1797,9 @@ mod tests {
             trie.update(&state_updates).unwrap();
             final_state_updates.merge(state_updates);
         }
+        let state_updates = state.canonicalize().unwrap();
+        trie.update(&state_updates).unwrap();
+        final_state_updates.merge(state_updates);
         let (final_root, final_trie_updates) = trie.finalize().unwrap();
 
         assert_eq!(root, final_root);
