@@ -40,16 +40,40 @@
 //! DOI: [10.5555/1333875.1334201](https://dl.acm.org/doi/10.5555/1333875.1334201)
 
 use super::{hasher, updates::StateUpdates};
-use crate::{
-    constant::{BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
-    traits::StateReader,
-    types::*,
-};
+use crate::{constant::BUCKET_SLOT_ID_MASK, traits::StateReader, types::*};
 use hex;
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
 };
+
+/// Configuration for bucket resizing and rehashing behavior.
+#[derive(Clone, Debug)]
+pub struct BucketConfig {
+    /// Percentage of bucket capacity used as threshold for probing distance.
+    pub rehash_probing_distance_pct: u64,
+    /// Minimum probing distance threshold to trigger bucket rehash.
+    pub rehash_min_probing_distance: u64,
+    /// Load factor threshold (as percentage) that triggers bucket resizing.
+    pub resize_load_factor_pct: u64,
+    /// Multiplier used when expanding bucket capacity during resize operations.
+    pub resize_multiplier: u64,
+}
+
+impl Default for BucketConfig {
+    fn default() -> Self {
+        use crate::constant::{
+            BUCKET_REHASH_MIN_PROBING_DISTANCE, BUCKET_REHASH_PROBING_DISTANCE_PCT,
+            BUCKET_RESIZE_LOAD_FACTOR_PCT, BUCKET_RESIZE_MULTIPLIER,
+        };
+        Self {
+            rehash_probing_distance_pct: BUCKET_REHASH_PROBING_DISTANCE_PCT,
+            rehash_min_probing_distance: BUCKET_REHASH_MIN_PROBING_DISTANCE,
+            resize_load_factor_pct: BUCKET_RESIZE_LOAD_FACTOR_PCT,
+            resize_multiplier: BUCKET_RESIZE_MULTIPLIER,
+        }
+    }
+}
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -98,6 +122,8 @@ pub struct EphemeralSaltState<'a, Store> {
     pub usage_count_delta: HashMap<BucketId, i64>,
     /// Tracks which buckets have had their metadata changed (rehashed) during this session.
     pub rehashed_buckets: HashSet<BucketId>,
+    /// Configuration for bucket resizing and rehashing behavior.
+    pub bucket_config: BucketConfig,
     /// Whether to cache values read from the store for subsequent access
     pub cache_read: bool,
 }
@@ -126,10 +152,11 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                 key.bucket_id(),
                 key.slot_id()
             );
+
             match value {
                 Some(val) => {
-                    write!(f, "{}", key_info)?;
                     if key.is_in_meta_bucket() {
+                        write!(f, "{}", key_info)?;
                         match BucketMeta::try_from(val) {
                             Ok(meta) => writeln!(
                                 f,
@@ -143,9 +170,26 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                             )?,
                         }
                     } else {
+                        // Compute rank from cached metadata
+                        let rank_str = self
+                            .cache
+                            .get(&bucket_metadata_key(key.bucket_id()))
+                            .and_then(|opt| opt.as_ref())
+                            .and_then(|v| BucketMeta::try_from(v).ok())
+                            .map(|meta| {
+                                rank(
+                                    hasher::hash_with_nonce(val.key(), meta.nonce),
+                                    key.slot_id(),
+                                    meta.capacity,
+                                )
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| "N/A".to_string());
+
                         writeln!(
                             f,
-                            "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
+                            "  Key: {} (bucket: {}, slot: {}, rank: {})\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
+                            key.0, key.bucket_id(), key.slot_id(), rank_str,
                             hex::encode(val.data),
                             String::from_utf8_lossy(val.key()),
                             String::from_utf8_lossy(val.value())
@@ -186,6 +230,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             usage_count_delta: HashMap::new(),
             rehashed_buckets: HashSet::new(),
             cache_read: false,
+            bucket_config: BucketConfig::default(),
         }
     }
 
@@ -193,6 +238,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     pub fn cache_read(self) -> Self {
         Self {
             cache_read: true,
+            ..self
+        }
+    }
+
+    /// Sets a custom bucket configuration for resizing and rehashing behavior.
+    pub fn config(self, bucket_config: BucketConfig) -> Self {
+        Self {
+            bucket_config,
             ..self
         }
     }
@@ -288,20 +341,20 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         Ok(state_updates)
     }
 
-    /// Prevents automatic, pre-mature bucket expansions caused by incremental updates.
+    /// Prevents automatic, premature bucket maintenance caused by incremental updates.
     ///
-    /// During incremental operations, buckets may expand to accommodate insertions
-    /// but remain inflated even after subsequent deletions. This method replays all
-    /// entries in rehashed buckets to apply more conservative expansion logic based
-    /// on the final key-value changes.
+    /// During incremental operations, buckets may be rehashed or expanded to accommodate
+    /// insertions but remain shuffled or inflated even after subsequent deletions. This
+    /// method replays all entries in modified buckets in a canonical order to apply more
+    /// conservative maintenance logic based on the final key-value changes.
     ///
-    /// **Warning**: This method clears the effect of manual invocations of
-    /// [`set_nonce`] or [`shi_rehash`]. If you need to modify bucket metadata
-    /// manually, do so after calling `canonicalize()`.
+    /// **Warning**: This method clears the effect of manual invocations of [`set_nonce`]
+    /// or [`shi_rehash`]. If you need to modify bucket metadata manually, do so after
+    /// calling `canonicalize()`.
     ///
     /// # Returns
     ///
-    /// * `Ok(StateUpdates)` - State changes to revert premature bucket expansions
+    /// * `Ok(StateUpdates)` - State changes to revert premature bucket maintenance
     /// * `Err(error)` - If store access fails
     pub fn canonicalize(&mut self) -> Result<StateUpdates, Store::Error> {
         let mut updates = StateUpdates::default();
@@ -320,24 +373,28 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 self.cache.remove(&salt_key);
             }
 
-            // Clear metadata and usage count delta from cache
+            // Clear metadata from cache
             let metadata_key = bucket_metadata_key(bucket_id);
             self.cache.remove(&metadata_key);
-            self.usage_count_delta.remove(&bucket_id);
-
-            // Re-insert plain kv pairs into the bucket based on the nonce and capacity
-            // before any `update()`.
-            for value in &kv_pairs {
-                self.shi_upsert(bucket_id, value.key(), value.value(), &mut updates)?;
-            }
-
-            // Record metadata transition
             let new_metadata = self.metadata(bucket_id, false)?;
             updates.add(
                 metadata_key,
                 Some(SaltValue::from(old_metadata)),
                 Some(SaltValue::from(new_metadata)),
             );
+
+            // Clear usage count delta from cache
+            self.usage_count_delta.remove(&bucket_id);
+
+            // Choose a canonical order for the subsequent upserts so the bucket always
+            // ends up at the same nonce and capacity
+            kv_pairs.sort_by(|a, b| a.key().cmp(b.key()));
+
+            // Re-insert plain kv pairs into the bucket based on the nonce and capacity
+            // before any `update()`.
+            for value in &kv_pairs {
+                self.shi_upsert(bucket_id, value.key(), value.value(), &mut updates)?;
+            }
         }
 
         Ok(updates)
@@ -473,10 +530,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         // Step 2: Fall through to standard SHI upsert algorithm
         let metadata = self.metadata(bucket_id, false)?;
         let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
+        let mut max_rank = 0u64;
+        let mut ideal_pos = hashed_key;
 
         // Linear probe through the bucket, creating a displacement chain
         for step in 0..metadata.capacity {
-            let salt_key = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
+            let salt_key: SaltKey = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
+            let slot_id = salt_key.slot_id();
             if let Some(old_salt_val) = self.value(salt_key)? {
                 match old_salt_val.key().cmp(new_salt_val.key()) {
                     Ordering::Equal => {
@@ -493,12 +553,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         // Key displacement: the existing key is smaller, so it gets displaced.
                         // Place our key here and continue inserting the displaced key.
                         // This creates a displacement chain that shi_delete will later retrace.
+                        max_rank = max_rank.max(rank(ideal_pos, slot_id, metadata.capacity));
                         self.update_value(
                             out_updates,
                             salt_key,
                             Some(old_salt_val.clone()),
                             Some(new_salt_val),
                         );
+                        ideal_pos = hasher::hash_with_nonce(old_salt_val.key(), metadata.nonce);
                         new_salt_val = old_salt_val; // Continue inserting the displaced key
                     }
                     _ => (), // Existing key is larger, continue probing
@@ -510,50 +572,33 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 // Update the usage count delta for this insertion
                 *self.usage_count_delta.entry(bucket_id).or_insert(0) += 1;
 
-                if let Ok(used) = self.usage_count(bucket_id) {
-                    // Resize the bucket if load factor threshold exceeded
-                    if used > metadata.capacity * get_bucket_resize_threshold() / 100 {
-                        let new_capacity = compute_resize_capacity(metadata.capacity, used);
-                        self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
-                    }
-                } else {
-                    // Bucket usage count is unavailable (metadata.used is None).
-                    //
-                    // This can only occur during stateless validation when replaying blocks
-                    // with execution witnesses. The witness may omit the bucket usage count
-                    // to optimize witness size.
-                    //
-                    // ## Witness Size Trade-off
-                    // Including the usage count would require revealing ALL slots in the
-                    // bucket (to prove the count is correct), significantly increasing
-                    // witness size for every insertion operation.
-                    //
-                    // ## Security Model
-                    // We accept this optimization because:
-                    // 1. Omitting usage count cannot create invalid key-value pairs
-                    // 2. It can only delay bucket resizing (temporary deviation from the
-                    //    canonical state)
-                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal load factor, degrading performance but not correctness
-                    //
-                    // ## Self-Healing Mechanism
-                    // When a legitimate sequencer performs the next insertion, it will:
-                    // 1. Compute the actual usage count from the full state
-                    // 2. Trigger resize if needed (restoring optimal bucket structure)
-                    // 3. Continue normal operations with proper load factor tracking
-                    // Even a malicious sequencer will be forced to resize the bucket when
-                    // no empty slot can be found for insertion because it has no choice
-                    // but to reveal all slots at this point.
-                    //
-                    // This approach prioritizes witness compactness while maintaining
-                    // eventual consistency of bucket structure.
+                // Conservative expansion: only check load factor if clustering detected
+                // Otherwise must reveal the entire bucket in the witness for every insert
+                max_rank = max_rank.max(rank(ideal_pos, slot_id, metadata.capacity));
+                if max_rank > self.get_bucket_rehash_threshold(metadata.capacity) {
+                    let used = self.usage_count(bucket_id)?;
+                    let new_capacity = if used * 100
+                        <= metadata.capacity * self.get_bucket_resize_threshold()
+                    {
+                        metadata.capacity // Below threshold: same capacity, redistributes keys
+                    } else {
+                        self.compute_resize_capacity(metadata.capacity, used) // At/above: expand
+                    };
+
+                    // Note: We do not verify that rehashing reduced the max probing distance
+                    // below the threshold. This is intentional - maintaining such an invariant
+                    // would require retry mechanisms (rehash-until-success) everywhere, making
+                    // the code complex and brittle. The rehash threshold serves as a heuristic
+                    // trigger, not a hard invariant.
+                    self.shi_rehash(bucket_id, metadata.nonce + 1, new_capacity, out_updates)?;
                 }
+
                 return Ok(());
             }
         }
 
         // Recovery mechanism: forced bucket expansion if no empty slot found.
-        let new_capacity = compute_resize_capacity(metadata.capacity, metadata.capacity);
+        let new_capacity = self.compute_resize_capacity(metadata.capacity, metadata.capacity);
         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
         self.shi_upsert(bucket_id, plain_key, plain_val, out_updates)
     }
@@ -836,6 +881,28 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             self.cache.insert(key, new_value);
         }
     }
+
+    /// Returns the bucket resize load factor threshold (as percentage).
+    #[inline(always)]
+    fn get_bucket_resize_threshold(&self) -> u64 {
+        self.bucket_config.resize_load_factor_pct
+    }
+
+    /// Returns the bucket rehash probing distance threshold.
+    #[inline(always)]
+    fn get_bucket_rehash_threshold(&self, capacity: u64) -> u64 {
+        (capacity * self.bucket_config.rehash_probing_distance_pct / 100)
+            .max(self.bucket_config.rehash_min_probing_distance)
+    }
+
+    /// Computes the minimum bucket capacity needed to satisfy the load factor constraint.
+    fn compute_resize_capacity(&self, capacity: u64, used: u64) -> u64 {
+        let mut new_capacity = capacity;
+        while used * 100 > new_capacity * self.get_bucket_resize_threshold() {
+            new_capacity *= self.bucket_config.resize_multiplier;
+        }
+        new_capacity
+    }
 }
 
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
@@ -866,42 +933,6 @@ fn rank(hashed_key: u64, slot_id: SlotId, capacity: u64) -> SlotId {
     } else {
         slot_id + capacity - first
     }
-}
-
-/// Returns the bucket resize load factor threshold (as percentage).
-#[cfg(not(feature = "test-bucket-resize"))]
-#[inline(always)]
-fn get_bucket_resize_threshold() -> u64 {
-    use crate::constant::BUCKET_RESIZE_LOAD_FACTOR_PCT;
-    BUCKET_RESIZE_LOAD_FACTOR_PCT
-}
-
-/// Returns the bucket resize load factor threshold (as percentage).
-/// When the test feature is enabled, reads from environment variable with default of 1%.
-#[cfg(feature = "test-bucket-resize")]
-#[inline(always)]
-fn get_bucket_resize_threshold() -> u64 {
-    std::env::var("BUCKET_RESIZE_LOAD_FACTOR_PCT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
-}
-
-/// Computes the minimum bucket capacity needed to satisfy the load factor constraint.
-///
-/// # Arguments
-/// * `capacity` - The current bucket capacity
-/// * `used` - The number of occupied slots in the bucket
-///
-/// # Returns
-/// The minimum capacity where `used/capacity` is at or below the threshold.
-/// ```
-fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
-    let mut new_capacity = capacity;
-    while used * 100 > new_capacity * get_bucket_resize_threshold() {
-        new_capacity *= BUCKET_RESIZE_MULTIPLIER;
-    }
-    new_capacity
 }
 
 #[cfg(test)]
@@ -957,20 +988,30 @@ mod tests {
     /// insertion order. Supports testing both with and without bucket resizing.
     ///
     /// # Arguments
+    /// * `bucket_config` - Bucket configuration for resize/rehash behavior
     /// * `initial_capacity` - Starting bucket capacity
     /// * `num_keys` - Number of key-value pairs to insert
     /// * `num_iterations` - Number of different insertion orders to test
     fn test_insertion_order_independence(
+        bucket_config: BucketConfig,
         initial_capacity: u64,
         num_keys: usize,
         num_iterations: usize,
     ) {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        // Create a MemStore with custom bucket capacity
+        let store = MemStore::new();
+        let mut setup_state = EphemeralSaltState::new(&store).config(bucket_config.clone());
+        let mut setup_updates = StateUpdates::default();
+        setup_state
+            .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut setup_updates)
+            .unwrap();
+        store.update_state(setup_updates);
 
         // Create reference state
-        let reader = EmptySalt;
-        let mut ref_state = EphemeralSaltState::new(&reader);
+        let mut ref_state = EphemeralSaltState::new(&store).config(bucket_config.clone());
         let mut ref_updates = StateUpdates::default();
 
         // Set up bucket with specified capacity
@@ -980,9 +1021,7 @@ mod tests {
 
         // Create test key-value pairs
         let keys: Vec<Vec<u8>> = (1..=num_keys).map(|i| vec![i as u8; 32]).collect();
-        let vals: Vec<Vec<u8>> = (11..=11 + num_keys - 1)
-            .map(|i| vec![i as u8; 32])
-            .collect();
+        let vals = keys.clone();
 
         // Insert in original order to create reference state
         for i in 0..keys.len() {
@@ -990,10 +1029,11 @@ mod tests {
                 .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut ref_updates)
                 .unwrap();
         }
+        let _ = ref_state.canonicalize().unwrap();
 
         // Verify the final capacity matches expectation
         let final_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
-        let final_capacity = compute_resize_capacity(initial_capacity, num_keys as u64);
+        let final_capacity = ref_state.compute_resize_capacity(initial_capacity, num_keys as u64);
         assert_eq!(
             final_meta.capacity, final_capacity,
             "Expected capacity {} after inserting {} keys into bucket with initial capacity {}",
@@ -1004,7 +1044,7 @@ mod tests {
         verify_all_keys_present(
             &mut ref_state,
             TEST_BUCKET,
-            0,
+            final_meta.nonce,
             final_meta.capacity,
             &keys,
             &vals,
@@ -1012,8 +1052,7 @@ mod tests {
 
         // Test multiple different random insertion orders
         for iteration in 0..num_iterations {
-            let reader = EmptySalt;
-            let mut test_state = EphemeralSaltState::new(&reader);
+            let mut test_state = EphemeralSaltState::new(&store).config(bucket_config.clone());
             let mut test_updates = StateUpdates::default();
 
             // Set up bucket with same initial capacity
@@ -1023,7 +1062,8 @@ mod tests {
 
             // Create shuffled order of indices
             let mut indices: Vec<usize> = (0..keys.len()).collect();
-            indices.shuffle(&mut thread_rng());
+            let mut rng = StdRng::seed_from_u64(iteration as u64);
+            indices.shuffle(&mut rng);
 
             // Insert in shuffled order
             for &i in &indices {
@@ -1031,6 +1071,7 @@ mod tests {
                     .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut test_updates)
                     .unwrap();
             }
+            let _ = test_state.canonicalize().unwrap();
 
             // Verify final metadata matches reference state exactly
             let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
@@ -1276,10 +1317,10 @@ mod tests {
         }
     }
 
-    /// Tests the `compute_resize_capacity` function.
+    /// Tests the `compute_resize_capacity` method.
     #[test]
-    #[cfg(not(feature = "test-bucket-resize"))]
     fn test_compute_resize_capacity() {
+        let state = EphemeralSaltState::new(&EmptySalt);
         let test_cases = [
             (100, 81, 200),  // Single multiplication
             (100, 80, 100),  // Exactly at threshold
@@ -1287,7 +1328,7 @@ mod tests {
         ];
 
         for (capacity, used, expected) in test_cases {
-            assert_eq!(compute_resize_capacity(capacity, used), expected);
+            assert_eq!(state.compute_resize_capacity(capacity, used), expected);
         }
     }
 
@@ -1739,7 +1780,7 @@ mod tests {
     /// different random insertion orders.
     #[test]
     fn test_insertion_order_independence_small_bucket() {
-        test_insertion_order_independence(8, 5, 10);
+        test_insertion_order_independence(BucketConfig::default(), 8, 5, 10);
     }
 
     /// Test insertion order independence when bucket resize is triggered.
@@ -1750,7 +1791,25 @@ mod tests {
     /// to capacity=16. Tests 10 different random insertion orders.
     #[test]
     fn test_insertion_order_independence_with_resize() {
-        test_insertion_order_independence(8, 10, 10);
+        test_insertion_order_independence(BucketConfig::default(), 8, 10, 10);
+    }
+
+    /// Test that canonicalize() requires sorting keys before reinsertion.
+    ///
+    /// If the sorting step in canonicalize() is removed, this test will fail.
+    /// Uses `rehash_min_probing_distance: 2` (vs default 64) to increase sensitivity
+    /// to insertion order. With 100,000 iterations, this config reliably exposes
+    /// counterexamples proving that sorting is essential to preventing bucket state
+    /// divergence.
+    #[test]
+    fn test_insertion_order_independence_canonicalize_need_sorting() {
+        let config = BucketConfig {
+            rehash_probing_distance_pct: 10,
+            rehash_min_probing_distance: 2,
+            resize_load_factor_pct: 80,
+            ..BucketConfig::default()
+        };
+        test_insertion_order_independence(config, 16, 10, 100000);
     }
 
     /// Test history independence with mixed insert, update, and delete operations.
@@ -1800,7 +1859,7 @@ mod tests {
     #[test]
     fn test_history_independence_with_mixed_operations() {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
+        use rand::{rngs::StdRng, SeedableRng};
 
         const BUCKET_CAPACITY: u64 = 10;
 
@@ -1890,7 +1949,8 @@ mod tests {
         // Test 100 random operation orders
         for iteration in 0..100 {
             let mut shuffled = operations.clone();
-            shuffled.shuffle(&mut thread_rng());
+            let mut rng = StdRng::seed_from_u64(iteration as u64);
+            shuffled.shuffle(&mut rng);
 
             let mut test_state = EphemeralSaltState::new(&store);
             let mut test_updates = StateUpdates::default();
@@ -2124,7 +2184,8 @@ mod tests {
             .unwrap();
 
         // Insert 203 keys (79% of 256) to avoid triggering resize
-        let num_keys = (MIN_BUCKET_SIZE as u64 * get_bucket_resize_threshold() / 100 - 1) as usize;
+        let num_keys =
+            (MIN_BUCKET_SIZE as u64 * state.get_bucket_resize_threshold() / 100 - 1) as usize;
         let test_data: Vec<(Vec<u8>, Vec<u8>)> = (1..=num_keys)
             .map(|i| (vec![i as u8; 32], vec![(i + 99) as u8; 32]))
             .collect();
@@ -2135,9 +2196,10 @@ mod tests {
         }
 
         // Verify all keys can be found
+        let nonce = state.metadata(TEST_BUCKET, false).unwrap().nonce;
         for (i, (k, v)) in test_data.iter().enumerate() {
             let (_, found) = state
-                .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
+                .shi_find(TEST_BUCKET, nonce, MIN_BUCKET_SIZE as u64, k)
                 .unwrap()
                 .unwrap_or_else(|| panic!("Key {} missing", i));
             assert_eq!(found.key(), k);
@@ -2152,7 +2214,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 state
-                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, &test_data[i].0)
+                    .shi_find(TEST_BUCKET, nonce, MIN_BUCKET_SIZE as u64, &test_data[i].0)
                     .unwrap(),
                 None
             );
@@ -2162,7 +2224,7 @@ mod tests {
         for (i, (k, v)) in test_data.iter().enumerate() {
             if !deleted.contains(&i) {
                 let (_, found) = state
-                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
+                    .shi_find(TEST_BUCKET, nonce, MIN_BUCKET_SIZE as u64, k)
                     .unwrap()
                     .unwrap_or_else(|| panic!("Key {} missing after deletion", i));
                 assert_eq!(found.key(), k);
@@ -2174,7 +2236,7 @@ mod tests {
         for key in [vec![0u8; 32], vec![255u8; 32], vec![50; 4]] {
             assert_eq!(
                 state
-                    .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, &key)
+                    .shi_find(TEST_BUCKET, nonce, MIN_BUCKET_SIZE as u64, &key)
                     .unwrap(),
                 None
             );
