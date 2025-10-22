@@ -555,7 +555,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         // Recovery mechanism: forced bucket expansion if no empty slot found.
         let new_capacity = compute_resize_capacity(metadata.capacity, metadata.capacity);
         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
-        self.shi_upsert(bucket_id, plain_key, plain_val, out_updates)
+        self.shi_upsert(
+            bucket_id,
+            new_salt_val.key(),
+            new_salt_val.value(),
+            out_updates,
+        )
     }
 
     /// Deletes a plain key using the SHI hash table deletion algorithm.
@@ -1998,52 +2003,40 @@ mod tests {
         assert_eq!(state.metadata(TEST_BUCKET, false).unwrap().capacity, 4);
     }
 
-    /// Tests shi_upsert recovery mechanism when bucket is completely full.
+    /// Tests that shi_upsert recovery correctly handles displaced keys when bucket is full.
     #[test]
     fn test_shi_upsert_recovery_when_bucket_full() {
-        use crate::proof::salt_witness::create_witness;
-
-        // Create a completely full bucket (capacity 4, all slots occupied)
-        let key_to_insert = [1u8; 32];
-        let hashed = hasher::hash_with_nonce(&key_to_insert, 0);
-
-        // Fill all 4 slots with different keys so no empty slot exists
-        let occupied_slots = (0..4)
-            .map(|i| {
-                let slot = probe(hashed, i, 4);
-                let dummy_key = [i as u8; 32]; // Different key for each slot
-                (slot, Some(SaltValue::new(&dummy_key, &[i as u8; 32])))
-            })
-            .collect();
-
-        let witness = create_witness(
-            TEST_BUCKET,
-            Some(BucketMeta {
-                nonce: 0,
-                capacity: 4,
-                used: Some(4),
-            }),
-            occupied_slots,
-        );
-
-        let mut state = EphemeralSaltState::new(&witness);
+        let mut state = EphemeralSaltState::new(&EmptySalt);
         let mut updates = StateUpdates::default();
+        let keys = [100u8, 101, 102, 103, 104];
 
-        // This should trigger recovery mechanism since all probe slots are full
-        let result = state.shi_upsert(TEST_BUCKET, &key_to_insert, &[99u8; 32], &mut updates);
-        assert!(result.is_ok());
+        // Insert first 4 keys, then set capacity to 4 to ensure bucket is full
+        for &key in &keys[..4] {
+            state
+                .shi_upsert(TEST_BUCKET, &[key; 32], &[], &mut updates)
+                .unwrap();
+        }
+        state.shi_rehash(TEST_BUCKET, 0, 4, &mut updates).unwrap();
 
-        // Verify that rehash was triggered by checking if capacity increased
-        let new_metadata = state.metadata(TEST_BUCKET, true).unwrap();
+        // Insert 5th key (largest value) - triggers displacement, then bucket-full recovery
+        state
+            .shi_upsert(TEST_BUCKET, &[keys[4]; 32], &[], &mut updates)
+            .unwrap();
+
+        // Verify capacity increased and all keys are retrievable
+        let metadata = state.metadata(TEST_BUCKET, false).unwrap();
         assert!(
-            new_metadata.capacity > 4,
+            metadata.capacity > 4,
             "Bucket should have been expanded during recovery"
         );
 
-        // Verify the new key-value pair is retrievable from state
-        let salt_key = SaltKey::from((TEST_BUCKET, probe(hashed, 0, new_metadata.capacity)));
-        let retrieved = state.value(salt_key).unwrap().unwrap();
-        assert_eq!(retrieved.value(), [99u8; 32].as_slice());
+        for &key in &keys {
+            let (_, found) = state
+                .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &[key; 32])
+                .unwrap()
+                .unwrap_or_else(|| panic!("Key {} missing", key));
+            assert_eq!(found.value(), &[]);
+        }
     }
 
     /// Tests shi_delete when the bucket usage count is unknown (incomplete witness).
