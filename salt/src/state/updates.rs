@@ -39,7 +39,12 @@ impl StateUpdates {
     ) {
         match self.data.entry(salt_key) {
             Entry::Occupied(mut change) => {
-                assert_eq!(old_value, change.get().1, "Invalid state transition");
+                assert!(
+                    old_value == change.get().1,
+                    "{}",
+                    Self::format_transition_error(&salt_key, &change.get().1, &old_value)
+                );
+
                 if change.get().0 == new_value {
                     change.remove();
                 } else {
@@ -78,6 +83,51 @@ impl StateUpdates {
             .values_mut()
             .for_each(|(old, new)| std::mem::swap(old, new));
         self
+    }
+
+    /// Formats a detailed panic message for invalid state transitions.
+    fn format_transition_error(
+        salt_key: &SaltKey,
+        expected: &Option<SaltValue>,
+        actual: &Option<SaltValue>,
+    ) -> String {
+        let format_value = |val_opt: &Option<SaltValue>| match val_opt {
+            Some(val) if salt_key.is_in_meta_bucket() => BucketMeta::try_from(val)
+                .map(|m| {
+                    format!(
+                        "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
+                        m.nonce, m.capacity, m.used
+                    )
+                })
+                .unwrap_or_else(|_| {
+                    format!("[METADATA - DECODE ERROR] Raw: {}", hex::encode(val.data))
+                }),
+            Some(val) => format!(
+                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
+                hex::encode(val.data),
+                String::from_utf8_lossy(val.key()),
+                String::from_utf8_lossy(val.value())
+            ),
+            None => "None".to_string(),
+        };
+
+        format!(
+            "\n=== Invalid State Transition ===\n\
+             Key: {} (bucket: {}, slot: {}, type: {})\n\
+             EXPECTED (existing entry's new_value): {}\n\
+             ACTUAL (incoming old_value): {}\n\
+             ================================\n",
+            salt_key.0,
+            salt_key.bucket_id(),
+            salt_key.slot_id(),
+            if salt_key.is_in_meta_bucket() {
+                "METADATA"
+            } else {
+                "DATA"
+            },
+            format_value(expected),
+            format_value(actual)
+        )
     }
 }
 
@@ -208,7 +258,7 @@ mod tests {
     /// - Attempting to add v3 → v1 when current state is v2 (should panic)
     /// - Validates assertion error for non-matching transition chains
     #[test]
-    #[should_panic(expected = "Invalid state transition")]
+    #[should_panic(expected = "Invalid State Transition")]
     fn test_add_panics_on_non_chaining() {
         let mut updates = StateUpdates::default();
         let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];

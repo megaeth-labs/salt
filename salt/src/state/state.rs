@@ -320,9 +320,17 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 self.cache.remove(&salt_key);
             }
 
-            // Clear metadata and usage count delta from cache
+            // Clear metadata from cache
             let metadata_key = bucket_metadata_key(bucket_id);
             self.cache.remove(&metadata_key);
+            let new_metadata = self.metadata(bucket_id, false)?;
+            updates.add(
+                metadata_key,
+                Some(SaltValue::from(old_metadata)),
+                Some(SaltValue::from(new_metadata)),
+            );
+
+            // Clear usage count delta from cache
             self.usage_count_delta.remove(&bucket_id);
 
             // Re-insert plain kv pairs into the bucket based on the nonce and capacity
@@ -330,15 +338,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             for value in &kv_pairs {
                 self.shi_upsert(bucket_id, value.key(), value.value(), &mut updates)?;
             }
-
-            // Record metadata transition
-            let new_metadata = self.metadata(bucket_id, false)?;
-            updates.add(
-                metadata_key,
-                Some(SaltValue::from(old_metadata)),
-                Some(SaltValue::from(new_metadata)),
-            );
         }
+
+        self.rehashed_buckets.clear();
 
         Ok(updates)
     }
@@ -1515,10 +1517,50 @@ mod tests {
         verify_state(&expected);
     }
 
+    /// Verifies that canonicalize() works properly when no shrinking is needed.
+    #[test]
+    fn test_canonicalize_no_shrink() {
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let n = 210;
+        let keys: Vec<Vec<u8>> = (1..=n).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (1..=n).map(|i| vec![(i + 99) as u8; 32]).collect();
+
+        let mut updates = StateUpdates::default();
+
+        // Phase 1: Insert `n` keys to force bucket expansion beyond MIN_BUCKET_SIZE
+        for i in 0..keys.len() {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+        let expanded_capacity = state.metadata(TEST_BUCKET, false).unwrap().capacity;
+        assert!(expanded_capacity > MIN_BUCKET_SIZE as u64);
+
+        // Phase 2: Canonicalize maintains expanded capacity since keys are present
+        updates.merge(state.canonicalize().unwrap());
+        let metadata = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(
+            metadata.capacity, expanded_capacity,
+            "Canonicalize should maintain expanded capacity when keys are present"
+        );
+
+        // Verify all keys remain accessible
+        for i in 0..keys.len() {
+            let found = state
+                .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &keys[i])
+                .unwrap();
+            let (_, salt_value) = found.unwrap();
+            assert_eq!(salt_value.value(), &vals[i]);
+        }
+
+        assert!(state.rehashed_buckets.is_empty());
+    }
+
     /// Verifies that canonicalize() reverts premature bucket expansions
     /// that occur during incremental updates.
     #[test]
-    fn test_canonicalize() {
+    fn test_canonicalize_shrink_capacity() {
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
         let n = 210;
