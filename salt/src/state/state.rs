@@ -315,9 +315,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 let salt_key = SaltKey::from((bucket_id, slot));
                 if let Some(value) = self.value(salt_key)? {
                     kv_pairs.push(value.clone());
+                    self.cache.insert(salt_key, None);
                     updates.add(salt_key, Some(value), None);
                 }
-                self.cache.remove(&salt_key);
             }
 
             // Clear metadata from cache
@@ -1599,6 +1599,66 @@ mod tests {
             MIN_BUCKET_SIZE as u64
         );
         assert!(state.rehashed_buckets.is_empty());
+    }
+
+    /// Verifies that canonicalize() correctly maintains the bucket state
+    /// after multiple rounds of random key-value updates.
+    #[test]
+    fn test_canonicalize_random_kvs() {
+        use rand::rngs::StdRng;
+        use rand::seq::SliceRandom;
+        use rand::SeedableRng;
+
+        const N: usize = 100; // Total number of keys
+        const M: usize = 10; // Number of rounds
+        const K: usize = 20; // Keys to update per round
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Pre-generate all keys with human-readable format
+        let all_keys: Vec<Vec<u8>> = (0..N)
+            .map(|i| format!("key_{:04}", i).into_bytes())
+            .collect();
+
+        // Track expected plain key -> plain value mappings
+        let mut expected: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+        let store = MemStore::new();
+        for round in 0..M {
+            let mut state = EphemeralSaltState::new(&store);
+
+            // Randomly select k keys and generate values for this round
+            let batch: BTreeMap<_, _> = (0..N)
+                .collect::<Vec<_>>()
+                .choose_multiple(&mut rng, K)
+                .map(|&idx| {
+                    let key = all_keys[idx].clone();
+                    let value = format!("value_r{:02}_k{:04}", round, idx).into_bytes();
+                    expected.insert(key.clone(), value.clone());
+                    (key, Some(value))
+                })
+                .collect();
+
+            // Apply updates and canonicalize
+            let mut updates = state.update(&batch).unwrap();
+            updates.merge(state.canonicalize().unwrap());
+            store.update_state(updates);
+
+            // Verify all expected keys are present with correct values
+            let mut verify_state = EphemeralSaltState::new(&store);
+            for (key, expected_value) in &expected {
+                let actual_value = verify_state.plain_value(key).unwrap();
+                assert_eq!(
+                    actual_value,
+                    Some(expected_value.clone()),
+                    "Round {}: Key '{}' should have value '{}', got {:?}",
+                    round,
+                    String::from_utf8_lossy(key),
+                    String::from_utf8_lossy(expected_value),
+                    actual_value.as_ref().map(|v| String::from_utf8_lossy(v))
+                );
+            }
+        }
     }
 
     /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
