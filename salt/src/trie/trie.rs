@@ -370,7 +370,11 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Equal => {}
+                        std::cmp::Ordering::Equal => {
+                            if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
+                                need_handle_buckets.insert(bucket_id);
+                            }
+                        }
                     }
                 } else {
                     let bucket_capacity =
@@ -1005,15 +1009,13 @@ mod tests {
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::{kv_hash, StateRoot},
     };
-    use iter_tools::Itertools;
-    use rand::Rng;
+    use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
     use crate::{
         constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
     use banderwagon::Zero;
-    use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
     /// Test helper: Updates a commitment by applying delta changes.
@@ -1775,25 +1777,20 @@ mod tests {
 
     #[test]
     fn incremental_updates_large() {
-        let kvs = create_random_account(10000);
+        let kvs = create_random_kvs(10000);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
-        let total_state_updates = state.update_fin(&kvs).unwrap();
+        let total_state_updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         let (root, total_trie_updates) = trie.update_fin(&total_state_updates).unwrap();
 
-        let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
-            .into_iter()
-            .chunks(1000)
-            .into_iter()
-            .map(|chunk| chunk.collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>())
-            .collect();
+        let sub_kvs = kvs.chunks(1000).collect::<Vec<_>>();
 
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
         let mut final_state_updates = StateUpdates::default();
         for kvs in &sub_kvs {
-            let state_updates = state.update_fin(kvs).unwrap();
+            let state_updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
             trie.update(&state_updates).unwrap();
             final_state_updates.merge(state_updates);
         }
@@ -1805,6 +1802,42 @@ mod tests {
         let minified_final_updates = minify_trie_updates(final_trie_updates);
         let minified_total_updates = minify_trie_updates(total_trie_updates);
         assert_eq!(minified_total_updates, minified_final_updates);
+    }
+
+    /// Tests `update_bucket_subtrees` correctly handles bucket rehashing by inserting
+    /// `n` keys into a single bucket, rehashing it, and verifying root consistency.
+    #[test]
+    fn test_update_bucket_subtrees_bucket_rehash() {
+        let n = 800;
+        let kvs = create_random_kvs(n);
+        let store = MemStore::new();
+        let bucket = (NUM_META_BUCKETS + 1) as BucketId;
+
+        // Helper: Apply state and trie updates, return root
+        let apply = |updates: StateUpdates| {
+            let (root, trie) = StateRoot::new(&store).update_fin(&updates).unwrap();
+            store.update_state(updates);
+            store.update_trie(trie);
+            root
+        };
+
+        // Insert n keys into the bucket
+        let mut state = EphemeralSaltState::new(&store);
+        let mut updates = StateUpdates::default();
+        for (key, val) in &kvs {
+            state
+                .shi_upsert(bucket, key, val.as_ref().unwrap(), &mut updates)
+                .unwrap();
+        }
+        apply(updates);
+
+        // Rehash bucket and verify root consistency with rebuild
+        let root = apply(
+            EphemeralSaltState::new(&store)
+                .set_nonce(bucket, 42)
+                .unwrap(),
+        );
+        assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
     }
 
     #[test]
@@ -2386,15 +2419,20 @@ mod tests {
             .collect()
     }
 
-    fn create_random_account(l: usize) -> HashMap<Vec<u8>, Option<Vec<u8>>> {
-        let mut rng = rand::thread_rng();
-        (0..l)
-            .map(|_i| {
-                let k: [u8; 32] = rng.gen();
-                let v: [u8; 32] = rng.gen();
-                (k.to_vec(), Some(v.to_vec()))
+    fn create_random_kvs(l: usize) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut kvs: Vec<_> = (0..l)
+            .map(|i| {
+                (
+                    format!("key_{}", i).into_bytes(),
+                    Some(format!("value_{}", i).into_bytes()),
+                )
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .collect();
+        kvs.shuffle(&mut rng);
+        kvs
     }
 
     /// Converts trie updates into a canonical format, removing duplicates and no-ops.

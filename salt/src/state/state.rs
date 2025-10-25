@@ -486,7 +486,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// - **Slot access**: Ability to read/write individual slots within the bucket
     /// - **Usage count**: Only needed for bucket resizing decisions when inserting
     ///   new keys. Updating existing keys does not require usage count information.
-    fn shi_upsert(
+    pub(crate) fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
         plain_key: &[u8],
