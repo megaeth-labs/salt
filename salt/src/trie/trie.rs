@@ -161,7 +161,10 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        println!("StateRoot::update() - state_updates.len = {}", state_updates.data.len());
+        println!(
+            "StateRoot::update() - state_updates.len = {}",
+            state_updates.data.len()
+        );
 
         for (node_id, (old, new)) in self.update_bucket_subtrees(state_updates)? {
             println!(
@@ -380,7 +383,9 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Equal => {}
+                        std::cmp::Ordering::Equal => {
+                            need_handle_buckets.insert(bucket_id);
+                        }
                     }
                 } else {
                     let bucket_capacity =
@@ -2477,11 +2482,7 @@ mod tests {
     }
 
     fn format_value_pair(v: &(Option<SaltValue>, Option<SaltValue>)) -> String {
-        format!(
-            "{} -> {}",
-            format_opt_value(&v.0),
-            format_opt_value(&v.1)
-        )
+        format!("{} -> {}", format_opt_value(&v.0), format_opt_value(&v.1))
     }
 
     fn format_opt_value(v: &Option<SaltValue>) -> String {
