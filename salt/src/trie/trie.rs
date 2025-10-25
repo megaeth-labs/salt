@@ -1775,7 +1775,7 @@ mod tests {
 
     #[test]
     fn incremental_updates_large() {
-        let kvs = create_random_account(10000);
+        let kvs = create_random_account(800);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
@@ -1784,7 +1784,7 @@ mod tests {
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
             .into_iter()
-            .chunks(1000)
+            .chunks(10)
             .into_iter()
             .map(|chunk| chunk.collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>())
             .collect();
@@ -1802,7 +1802,7 @@ mod tests {
         final_state_updates.merge(state_updates);
         let (final_root, final_trie_updates) = trie.finalize().unwrap();
 
-        // assert_eq!(root, final_root);
+        assert_eq!(root, final_root);
         assert_eq!(total_state_updates, final_state_updates);
 
         let minified_final_updates = minify_trie_updates(final_trie_updates);

@@ -419,7 +419,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             );
 
             // Clear usage count delta from cache
-            self.usage_count_delta.remove(&bucket_id);
+            *self.usage_count_delta.entry(bucket_id).or_insert(0) -= kv_pairs.len() as i64;
+            assert_eq!(self.usage_count(bucket_id).unwrap(), 0);
 
             // Choose a canonical order for the subsequent upserts so the bucket always
             // ends up at the same nonce and capacity
