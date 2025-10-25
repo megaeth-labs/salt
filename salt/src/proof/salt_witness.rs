@@ -372,7 +372,9 @@ mod tests {
         let mem_store = MemStore::new();
 
         // 1. Initialize the state & trie to represent the origin state.
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
@@ -385,7 +387,7 @@ mod tests {
         let new_kvs = create_random_kv_pairs(100);
 
         let mut state = EphemeralSaltState::new(&mem_store).cache_read();
-        let state_updates = state.update(&new_kvs).unwrap();
+        let state_updates = state.update_fin(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
         let (new_trie_root, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
@@ -402,7 +404,7 @@ mod tests {
         let mut prover_state = EphemeralSaltState::new(&salt_witness);
 
         // 3.3 prover client execute the same blocks, and get the same new_kvs
-        let prover_updates = prover_state.update(&new_kvs).unwrap();
+        let prover_updates = prover_state.update_fin(&new_kvs).unwrap();
 
         assert_eq!(state_updates, prover_updates);
 
@@ -425,7 +427,9 @@ mod tests {
         // 1. Initialize the state & trie to represent the origin state.
         let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
@@ -440,7 +444,7 @@ mod tests {
         let pv = Some(mock_data(&mut rng, 32));
 
         let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(vec![(&pk, &pv)]).unwrap();
+        state.update_fin(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness_res = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
@@ -456,7 +460,9 @@ mod tests {
         // 1. Initialize the state & trie to represent the origin state.
         let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
@@ -468,7 +474,7 @@ mod tests {
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
         let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(&new_kvs).unwrap();
+        state.update_fin(&new_kvs).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 

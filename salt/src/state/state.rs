@@ -81,9 +81,6 @@ pub struct EphemeralSaltState<'a, Store> {
     /// Always caches writes to track modifications and provide read consistency.
     /// Optionally caches reads when [`cache_reads`] is enabled. Each entry maps
     /// a [`SaltKey`] to its current value (`Some(value)`) or deletion marker (`None`).
-    ///
-    /// Note: This field is `pub(crate)` to enable proof generation modules to
-    /// access the set of touched keys for witness construction.
     pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the net change in bucket usage counts relative to the base store.
     ///
@@ -266,6 +263,32 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// Empty values (`None`) indicate deletions. Returns the resulting changes
     /// as [`StateUpdates`] that can be applied to persistent storage.
+    ///
+    /// ## Usage Pattern
+    ///
+    /// **CRITICAL**: For correctness, you must always complete the update sequence
+    /// by calling either [`canonicalize()`] or [`update_fin()`]. Failing to do so
+    /// may result in non-canonical bucket layouts.
+    ///
+    /// - **Single batch updates**: Use [`update_fin()`] for convenience (combines
+    ///   `update()` + `canonicalize()` in one call)
+    /// - **Incremental updates**: Call `update()` multiple times for different batches,
+    ///   then call [`canonicalize()`] once at the end
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Incremental updates
+    /// let mut state = EphemeralSaltState::new(&store);
+    /// let updates1 = state.update(&batch1)?;
+    /// let updates2 = state.update(&batch2)?;
+    /// let updates3 = state.update(&batch3)?;
+    /// let final_updates = state.canonicalize()?;  // Must call this!
+    ///
+    /// // Single batch (simpler)
+    /// let mut state = EphemeralSaltState::new(&store);
+    /// let updates = state.update_fin(&batch)?;  // Automatically canonicalized
+    /// ```
     pub fn update<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
@@ -286,6 +309,18 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
         Ok(state_updates)
+    }
+
+    /// Updates the SALT state and canonicalizes bucket layouts in one operation.
+    ///
+    /// This is a convenience method that combines [`update()`] and [`canonicalize()`].
+    pub fn update_fin<'b>(
+        &mut self,
+        kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+    ) -> Result<StateUpdates, Store::Error> {
+        let mut updates = self.update(kvs)?;
+        updates.merge(self.canonicalize()?);
+        Ok(updates)
     }
 
     /// Prevents automatic, pre-mature bucket expansions caused by incremental updates.
@@ -1311,7 +1346,7 @@ mod tests {
 
         // Setup test data with collision-prone keys
         let kvs = create_same_bucket_test_data(3);
-        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         store.update_state(updates);
 
         // Test successful retrieval (validates collision handling)
@@ -1458,12 +1493,12 @@ mod tests {
         // Helper to apply updates and store them
         let apply_updates =
             |state: &mut EphemeralSaltState<_>, batch: BTreeMap<Vec<u8>, Option<Vec<u8>>>| {
-                let updates = state.update(&batch).unwrap();
+                let updates = state.update_fin(&batch).unwrap();
                 store.update_state(updates);
             };
 
         // Phase 1: Empty batch handling
-        assert!(state.update(&BTreeMap::new()).unwrap().data.is_empty());
+        assert!(state.update_fin(&BTreeMap::new()).unwrap().data.is_empty());
         verify_state(&expected);
 
         // Phase 2: Batch insertion of new keys
@@ -1640,8 +1675,7 @@ mod tests {
                 .collect();
 
             // Apply updates and canonicalize
-            let mut updates = state.update(&batch).unwrap();
-            updates.merge(state.canonicalize().unwrap());
+            let updates = state.update_fin(&batch).unwrap();
             store.update_state(updates);
 
             // Verify all expected keys are present with correct values
@@ -1672,7 +1706,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&store);
         let kvs = create_same_bucket_test_data(5);
         let bucket_id = hasher::bucket_id(&kvs[0].0);
-        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         store.update_state(updates);
 
         // Take a snapshot of the original bucket layout

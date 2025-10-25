@@ -637,7 +637,7 @@ mod tests {
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
-        let updates = state.update(&initial_key_values).unwrap();
+        let updates = state.update_fin(&initial_key_values).unwrap();
         mem_store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
@@ -667,7 +667,7 @@ mod tests {
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
-        let updates = state.update(&initial_key_values).unwrap();
+        let updates = state.update_fin(&initial_key_values).unwrap();
 
         mem_store.update_state(updates.clone());
 
@@ -703,7 +703,7 @@ mod tests {
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
-        let updates = state.update(&initial_kvs).unwrap();
+        let updates = state.update_fin(&initial_kvs).unwrap();
 
         mem_store.update_state(updates.clone());
 
@@ -1036,7 +1036,7 @@ mod tests {
             .collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>();
 
         // Update state and trie with expanded bucket
-        let state_updates = state.update(&kvs).unwrap();
+        let state_updates = state.update_fin(&kvs).unwrap();
         store.update_state(state_updates.clone());
 
         let (root_hash, trie_updates) = StateRoot::new(&store).update_fin(&state_updates).unwrap();

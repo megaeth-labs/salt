@@ -38,7 +38,7 @@ mod tests {
         ]);
 
         // Apply kv updates and get SALT-encoded state changes
-        let state_updates = state.update(&kvs)?;
+        let state_updates = state.update_fin(&kvs)?;
         // "Persist" the state updates to storage (the "trie" remains unchanged)
         store.update_state(state_updates.clone());
 

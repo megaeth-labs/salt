@@ -406,7 +406,7 @@ mod tests {
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&kvs).unwrap();
+        let updates = state.update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&store);
