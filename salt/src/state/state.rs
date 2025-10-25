@@ -366,7 +366,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             );
 
             // Clear usage count delta from cache
-            self.usage_count_delta.remove(&bucket_id);
+            *self.usage_count_delta.entry(bucket_id).or_insert(0) -= kv_pairs.len() as i64;
 
             // Re-insert plain kv pairs into the bucket based on the nonce and capacity
             // before any `update()`.
@@ -1590,6 +1590,7 @@ mod tests {
         }
 
         assert!(state.rehashed_buckets.is_empty());
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), keys.len() as u64);
     }
 
     /// Verifies that canonicalize() reverts premature bucket expansions
@@ -1634,6 +1635,7 @@ mod tests {
             MIN_BUCKET_SIZE as u64
         );
         assert!(state.rehashed_buckets.is_empty());
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
     }
 
     /// Verifies that canonicalize() correctly maintains the bucket state
@@ -1692,7 +1694,59 @@ mod tests {
                     actual_value.as_ref().map(|v| String::from_utf8_lossy(v))
                 );
             }
+
+            // Verify sum of bucket usage counts equals total number of keys
+            assert_eq!(
+                expected
+                    .keys()
+                    .map(|k| hasher::bucket_id(k))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .map(|id| verify_state.usage_count(id).unwrap())
+                    .sum::<u64>(),
+                expected.len() as u64,
+                "Round {}: sum of bucket usage counts should equal key count",
+                round
+            );
         }
+    }
+
+    /// Tests that canonicalize() correctly maintains bucket usage counts.
+    ///
+    /// Verifies that after canonicalization, the bucket usage count accurately
+    /// reflects the number of keys stored in the bucket, even when the bucket
+    /// has been marked as rehashed and has undergone replay of all entries.
+    #[test]
+    fn test_canonicalize_bucket_usage_count() {
+        let store = MemStore::new();
+
+        // Set up store with one kv in TEST_BUCKET
+        let mut state = EphemeralSaltState::new(&store);
+        let key1 = b"key1";
+        let val1 = b"value1";
+        let mut updates = StateUpdates::default();
+        state
+            .shi_upsert(TEST_BUCKET, key1, val1, &mut updates)
+            .unwrap();
+        store.update_state(updates);
+
+        //Insert one more kv and manually add to rehashed_buckets
+        let mut state = EphemeralSaltState::new(&store);
+        let key2 = b"key2";
+        let val2 = b"value2";
+        let mut updates = StateUpdates::default();
+        state
+            .shi_upsert(TEST_BUCKET, key2, val2, &mut updates)
+            .unwrap();
+        state.rehashed_buckets.insert(TEST_BUCKET);
+
+        // Canonicalize and verify usage count equals 2
+        updates.merge(state.canonicalize().unwrap());
+        assert_eq!(
+            state.usage_count(TEST_BUCKET).unwrap(),
+            2,
+            "Bucket usage count should reflect actual number of keys after canonicalize"
+        );
     }
 
     /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
