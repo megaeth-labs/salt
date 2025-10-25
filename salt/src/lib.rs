@@ -75,4 +75,17 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn fuzz_test_1() {
+        fuzzcheck::fuzz_test(process_string)
+            .default_options()
+            .launch();
+    }
+}
+
+pub fn process_string(s: &str) {
+    if s.contains("bug") {
+        panic!("Found the bug!");
+    }
 }

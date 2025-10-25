@@ -2225,7 +2225,7 @@ mod tests {
                 .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &[key; 32])
                 .unwrap()
                 .unwrap_or_else(|| panic!("Key {} missing", key));
-            assert_eq!(found.value(), &[]);
+            assert_eq!(found.value(), &[] as &[u8]);
         }
     }
 
