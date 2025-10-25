@@ -1779,8 +1779,8 @@ mod tests {
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
-        let total_state_updates = state.update_fin(&kvs).unwrap();
-        let (root, total_trie_updates) = trie.update_fin(&total_state_updates).unwrap();
+        let batch_updates = state.update_fin(&kvs).unwrap();
+        let (root, total_trie_updates) = trie.update_fin(&batch_updates).unwrap();
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
             .into_iter()
@@ -1791,19 +1791,19 @@ mod tests {
 
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
-        let mut final_state_updates = StateUpdates::default();
+        let mut incre_updates = StateUpdates::default();
         for kvs in &sub_kvs {
-            let state_updates = state.update_fin(kvs).unwrap();
+            let state_updates = state.update(kvs).unwrap();
             trie.update(&state_updates).unwrap();
-            final_state_updates.merge(state_updates);
+            incre_updates.merge(state_updates);
         }
         let state_updates = state.canonicalize().unwrap();
         trie.update(&state_updates).unwrap();
-        final_state_updates.merge(state_updates);
+        incre_updates.merge(state_updates);
         let (final_root, final_trie_updates) = trie.finalize().unwrap();
 
         assert_eq!(root, final_root);
-        assert_eq!(total_state_updates, final_state_updates);
+        assert_eq!(batch_updates, incre_updates);
 
         let minified_final_updates = minify_trie_updates(final_trie_updates);
         let minified_total_updates = minify_trie_updates(total_trie_updates);
