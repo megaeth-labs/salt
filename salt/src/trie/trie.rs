@@ -1779,7 +1779,7 @@ mod tests {
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
-        let total_state_updates = state.update(&kvs).unwrap();
+        let total_state_updates = state.update_fin(&kvs).unwrap();
         let (root, total_trie_updates) = trie.update_fin(&total_state_updates).unwrap();
 
         let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
@@ -1793,7 +1793,7 @@ mod tests {
         let mut trie = StateRoot::new(&mock_db);
         let mut final_state_updates = StateUpdates::default();
         for kvs in &sub_kvs {
-            let state_updates = state.update(kvs).unwrap();
+            let state_updates = state.update_fin(kvs).unwrap();
             trie.update(&state_updates).unwrap();
             final_state_updates.merge(state_updates);
         }

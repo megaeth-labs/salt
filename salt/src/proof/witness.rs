@@ -290,9 +290,12 @@ mod tests {
     use super::*;
     use crate::{
         constant::*,
+        empty_salt::EmptySalt,
         mem_store::MemStore,
-        proof::salt_witness::{create_mock_proof, SaltWitness},
-        proof::test_utils::*,
+        proof::{
+            salt_witness::{create_mock_proof, SaltWitness},
+            test_utils::*,
+        },
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
@@ -324,7 +327,7 @@ mod tests {
             .iter()
             .map(|k| (k.clone(), Some(k[0..20].to_vec())))
             .collect();
-        let updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
+        let updates = EphemeralSaltState::new(store).update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
         let (root, trie_updates) = StateRoot::new(store).update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
@@ -410,7 +413,7 @@ mod tests {
 
         // Insert into Salt storage and update the trie
         let store = MemStore::new();
-        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
         let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
@@ -826,7 +829,7 @@ mod tests {
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&kvs).unwrap();
+        let updates = state.update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
         let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
@@ -944,17 +947,48 @@ mod tests {
         let witness = Witness::create(std::iter::empty(), kvs.iter(), &store).unwrap();
 
         // Pass 1: MemStore-based insertion (mutates store)
-        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
         let (store_root, _) = StateRoot::new(&store).update_fin(&updates).unwrap();
 
         // Pass 2: Witness-based insertion (using witness created from initial state)
-        let witness_updates = EphemeralSaltState::new(&witness).update(&kvs).unwrap();
+        let witness_updates = EphemeralSaltState::new(&witness).update_fin(&kvs).unwrap();
         let (witness_root, _) = StateRoot::new(&witness)
             .update_fin(&witness_updates)
             .unwrap();
 
         // Both passes should produce identical roots
         assert_eq!(store_root, witness_root);
+    }
+
+    /// Verifie that Witness::create() should not canonicalize the bucket layouts before
+    /// filtering out invalid keys.
+    #[test]
+    fn test_witness_create_should_not_canonicalize() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Inserts then deletes `n` random key-value pairs
+        let n = 230;
+        let inserts: HashMap<_, _> = (0..n)
+            .map(|_| (mock_data(&mut rng, 32), Some(mock_data(&mut rng, 32))))
+            .collect();
+
+        let deletes: HashMap<_, _> = inserts.keys().map(|k| (k.clone(), None)).collect();
+
+        let combined = inserts.iter().chain(deletes.iter());
+
+        // Salt proof creation should fail with an InvalidSaltKey error if Witness::create()
+        // incorrectly uses update_fin() to eliminate the bucket capacity changes too early
+        let witness = Witness::create(std::iter::empty(), combined, &EmptySalt).unwrap();
+
+        // Verify no keys should exist in witness
+        let mut witness_state = EphemeralSaltState::new(&witness);
+        for key in inserts.keys() {
+            assert_eq!(
+                witness_state.plain_value(key).unwrap(),
+                None,
+                "Key should be deleted in witness after insert+delete"
+            );
+        }
     }
 }
