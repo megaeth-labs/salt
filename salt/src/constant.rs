@@ -138,8 +138,16 @@ pub const BUCKET_SLOT_BITS: usize = 40;
 pub const BUCKET_SLOT_ID_MASK: u64 = (1 << BUCKET_SLOT_BITS) - 1;
 
 // ============================================================================
-// Resizing Parameters
+// Bucket Resizing Parameters
 // ============================================================================
+
+/// Percentage of bucket capacity used as threshold for probing distance.
+/// When max probing distance exceeds this percentage of capacity, rehash may be triggered.
+pub const BUCKET_REHASH_PROBING_DISTANCE_PCT: u64 = 10;
+
+/// Minimum probing distance threshold to trigger bucket rehash.
+/// Prevents unnecessary rehash when bucket capacity is small.
+pub const BUCKET_REHASH_MIN_PROBING_DISTANCE: u64 = 64;
 
 /// Load factor threshold (as percentage) that triggers bucket resizing.
 /// When a bucket's usage exceeds this percentage of its capacity, it will be resized.
