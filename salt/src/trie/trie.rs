@@ -1005,15 +1005,13 @@ mod tests {
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::{kv_hash, StateRoot},
     };
-    use iter_tools::Itertools;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
     use crate::{
         constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
     use banderwagon::Zero;
-    use std::collections::HashMap;
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
     /// Test helper: Updates a commitment by applying delta changes.
@@ -1775,25 +1773,20 @@ mod tests {
 
     #[test]
     fn incremental_updates_large() {
-        let kvs = create_random_account(800);
+        let kvs = create_random_kvs(800);
         let mock_db = MemStore::new();
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
-        let batch_updates = state.update_fin(&kvs).unwrap();
+        let batch_updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         let (root, total_trie_updates) = trie.update_fin(&batch_updates).unwrap();
 
-        let sub_kvs: Vec<HashMap<Vec<u8>, Option<Vec<u8>>>> = kvs
-            .into_iter()
-            .chunks(10)
-            .into_iter()
-            .map(|chunk| chunk.collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>())
-            .collect();
+        let sub_kvs = kvs.chunks(10).collect::<Vec<_>>();
 
         let mut state = EphemeralSaltState::new(&mock_db);
         let mut trie = StateRoot::new(&mock_db);
         let mut incre_updates = StateUpdates::default();
         for kvs in &sub_kvs {
-            let state_updates = state.update(kvs).unwrap();
+            let state_updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
             trie.update(&state_updates).unwrap();
             incre_updates.merge(state_updates);
         }
@@ -2389,15 +2382,20 @@ mod tests {
             .collect()
     }
 
-    fn create_random_account(l: usize) -> HashMap<Vec<u8>, Option<Vec<u8>>> {
+    fn create_random_kvs(l: usize) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let mut rng = StdRng::seed_from_u64(42);
-        (0..l)
-            .map(|_i| {
-                let k: [u8; 32] = rng.gen();
-                let v: [u8; 32] = rng.gen();
-                (k.to_vec(), Some(v.to_vec()))
+        let mut kvs: Vec<_> = (0..l)
+            .map(|i| {
+                (
+                    format!("key_{}", i).into_bytes(),
+                    Some(format!("value_{}", i).into_bytes()),
+                )
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .collect();
+        kvs.shuffle(&mut rng);
+        kvs
     }
 
     /// Converts trie updates into a canonical format, removing duplicates and no-ops.
