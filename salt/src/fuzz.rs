@@ -117,6 +117,7 @@ pub fn e2e_fuzz_test(blocks: &Vec<Block>) {
         let mut lookups_or_updates: Vec<_> =
             lookup_results.iter().map(|(k, _)| k.clone()).collect();
         let mut inserts_or_deletes = Vec::new();
+        let mut all_modifications = Vec::new();
 
         // Block producer: Apply state modifications incrementally (simulates pipelined execution)
         for mini_block in &block.mini_blocks {
@@ -124,6 +125,7 @@ pub fn e2e_fuzz_test(blocks: &Vec<Block>) {
 
             // Update reference oracle and categorize operations for witness
             for (key, value) in &plain_kvs {
+                all_modifications.push((key.clone(), value.clone()));
                 match value {
                     Some(val) => {
                         // Update to existing key → lookup; Insert of new key → modification
@@ -201,7 +203,7 @@ pub fn e2e_fuzz_test(blocks: &Vec<Block>) {
 
         // Stateless validator: Re-execute modifications and verify final state root matches
         let state_updates = witness_state
-            .update_fin(inserts_or_deletes.iter().map(|(k, v)| (k, v)))
+            .update_fin(all_modifications.iter().map(|(k, v)| (k, v)))
             .expect("Failed to update witness state");
         let (computed_root, _) = StateRoot::new(&witness)
             .update_fin(&state_updates)
@@ -292,6 +294,77 @@ mod tests {
             lookups: vec![0],
         }];
         e2e_fuzz_test(&blocks);
+    }
+
+    /// Stress test e2e_fuzz_test with deterministic random inputs.
+    ///
+    /// Runs multiple iterations with different random seeds to explore diverse
+    /// operation sequences while maintaining reproducibility. Each iteration:
+    /// - Generates 10 blocks with 100 mini-blocks each (100 ops per mini-block)
+    /// - Biases toward inserts (70%) to build state, with deletes (30%) for churn
+    /// - Uses iteration number as RNG seed for deterministic reproduction
+    #[test]
+    fn test_deterministic_random_loop() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        // Helper to parse env vars with defaults
+        let env = |key, default| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+
+        let iterations = env("FUZZ_ITERATIONS", 100);
+        let blocks_per_iter = env("FUZZ_BLOCKS", 3);
+        let mini_blocks_per_block = env("FUZZ_MINI_BLOCKS", 10);
+        let ops_per_mini_block = env("FUZZ_OPS", 100);
+        let lookups_per_block = env("FUZZ_LOOKUPS", 50);
+
+        println!("\nStarting deterministic random loop test:");
+        println!(
+            "  {} iterations × {} blocks × {} mini-blocks × {} ops",
+            iterations, blocks_per_iter, mini_blocks_per_block, ops_per_mini_block
+        );
+        println!(
+            "  Total operations: {}\n",
+            iterations * blocks_per_iter * mini_blocks_per_block * ops_per_mini_block
+        );
+
+        for iteration in 0..iterations {
+            println!(
+                "Iteration {}/{} (seed: {})...",
+                iteration + 1,
+                iterations,
+                iteration
+            );
+
+            let mut rng = StdRng::seed_from_u64(iteration as u64);
+
+            let blocks: Vec<Block> = (0..blocks_per_iter)
+                .map(|_| Block {
+                    mini_blocks: (0..mini_blocks_per_block)
+                        .map(|_| {
+                            (0..ops_per_mini_block)
+                                .map(|_| {
+                                    if rng.gen_bool(0.7) {
+                                        Operation::Insert(rng.gen(), rng.gen())
+                                    } else {
+                                        Operation::Delete(rng.gen())
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                    lookups: (0..lookups_per_block).map(|_| rng.gen()).collect(),
+                })
+                .collect();
+
+            e2e_fuzz_test(&blocks);
+        }
+
+        println!("\n✓ All {} iterations passed!", iterations);
     }
 
     // salt/salt$ cargo-fuzzcheck fuzz::tests::fuzz_test
