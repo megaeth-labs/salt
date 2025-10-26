@@ -370,7 +370,11 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Equal => {}
+                        std::cmp::Ordering::Equal => {
+                            if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
+                                need_handle_buckets.insert(bucket_id);
+                            }
+                        }
                     }
                 } else {
                     let bucket_capacity =
