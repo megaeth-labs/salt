@@ -2,3 +2,5 @@
 .vscode
 Cargo.lock
 .DS_Store
+salt/fuzz
+salt/target

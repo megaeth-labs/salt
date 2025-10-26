@@ -38,7 +38,7 @@ proptest-derive = "0.6"
 rand = "0.8.5"
 serde_json = "1.0.94"
 test-fuzz = "7.2"
-fuzzcheck = { git = "https://github.com/loiclec/fuzzcheck-rs.git", rev = "b9ffecdb7dbd822d39673f836e5b337120648188" }
+# fuzzcheck = { git = "https://github.com/loiclec/fuzzcheck-rs.git", rev = "b9ffecdb7dbd822d39673f836e5b337120648188" }
 
 [[bench]]
 name = "salt_trie"

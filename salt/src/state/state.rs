@@ -136,14 +136,14 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                             Err(_) => writeln!(
                                 f,
                                 " [METADATA - DECODE ERROR]\n    Raw Value: {}",
-                                hex::encode(val.data)
+                                hex::encode(&val.data[..val.data_len()])
                             )?,
                         }
                     } else {
                         writeln!(
                             f,
                             "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
-                            hex::encode(val.data),
+                            hex::encode(&val.data[..val.data_len()]),
                             String::from_utf8_lossy(val.key()),
                             String::from_utf8_lossy(val.value())
                         )?

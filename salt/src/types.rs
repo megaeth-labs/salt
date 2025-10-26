@@ -308,6 +308,18 @@ impl SaltValue {
         let value_len = self.data[1] as usize;
         &self.data[2 + key_len..2 + key_len + value_len]
     }
+
+    /// Returns the total length of the encoded data (header + key + value).
+    ///
+    /// This is the sum of:
+    /// - 2 bytes for the length headers (key_len and value_len)
+    /// - key length
+    /// - value length
+    pub fn data_len(&self) -> usize {
+        let key_len = self.data[0] as usize;
+        let value_len = self.data[1] as usize;
+        2 + key_len + value_len
+    }
 }
 
 impl From<BucketMeta> for SaltValue {

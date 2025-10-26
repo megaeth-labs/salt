@@ -17,6 +17,8 @@ pub mod types;
 pub use types::*;
 pub mod mem_store;
 pub use mem_store::MemStore;
+#[cfg(test)]
+pub mod fuzz;
 
 #[cfg(test)]
 mod tests {
@@ -74,18 +76,5 @@ mod tests {
         assert_eq!(bob_state.plain_value(b"non_existent_key")?, None);
 
         Ok(())
-    }
-
-    #[test]
-    fn fuzz_test_1() {
-        fuzzcheck::fuzz_test(process_string)
-            .default_options()
-            .launch();
-    }
-}
-
-pub fn process_string(s: &str) {
-    if s.contains("bug") {
-        panic!("Found the bug!");
     }
 }
