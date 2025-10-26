@@ -21,13 +21,15 @@ use crate::constant::{NUM_BUCKETS, NUM_META_BUCKETS};
 use crate::traits::StateReader;
 use crate::types::{BucketId, SaltKey};
 use crate::{EphemeralSaltState, MemStore, SaltWitness, StateRoot, StateUpdates, Witness};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// A state modification resulting from transaction execution.
 ///
 /// Operations reference keys via indices into a pre-generated KV pool,
 /// allowing the fuzzer to focus on operation sequences rather than key generation.
-#[derive(Debug, Clone)]
+#[cfg_attr(fuzzing, derive(fuzzcheck::DefaultMutator))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Operation {
     /// Inserts or updates the key at pool index with a new single-byte value.
     ///
@@ -47,7 +49,8 @@ pub enum Operation {
 /// After transaction execution produces state modifications, these changes are
 /// applied to the state trie in small batches to enable pipelining of operations
 /// like state trie updates and block propagation.
-#[derive(Debug, Clone)]
+#[cfg_attr(fuzzing, derive(fuzzcheck::DefaultMutator))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     /// Small batches of state modifications to apply incrementally.
     ///
@@ -289,5 +292,14 @@ mod tests {
             lookups: vec![0],
         }];
         e2e_fuzz_test(&blocks);
+    }
+
+    // salt/salt$ cargo-fuzzcheck fuzz::tests::fuzz_test
+    #[cfg(all(fuzzing, test))]
+    #[test]
+    fn fuzz_test() {
+        fuzzcheck::fuzz_test(e2e_fuzz_test)
+            .default_options()
+            .launch();
     }
 }

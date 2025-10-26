@@ -69,11 +69,11 @@ jobs:
         with:
           github_pat: ${{ secrets.PAT_CI  }}
 
-      - name: Install stable toolchain
+      - name: Install nightly toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: nightly
           override: true
           components: rustfmt, clippy
 

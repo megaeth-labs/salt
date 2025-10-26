@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(fuzzing, feature(coverage_attribute))]
 
 pub mod constant;
 pub mod empty_salt;
