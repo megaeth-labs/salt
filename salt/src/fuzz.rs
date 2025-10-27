@@ -300,48 +300,37 @@ mod tests {
     ///
     /// Runs multiple iterations with different random seeds to explore diverse
     /// operation sequences while maintaining reproducibility. Each iteration:
-    /// - Generates 10 blocks with 100 mini-blocks each (100 ops per mini-block)
-    /// - Biases toward inserts (70%) to build state, with deletes (30%) for churn
+    /// - Generates blocks with random operations (70% Insert, 30% Delete)
     /// - Uses iteration number as RNG seed for deterministic reproduction
+    /// - On failure, saves input to `fuzz_failure_seed_N.json` for replay
+    ///
+    /// Configuration via environment variables (with defaults):
+    /// - `FUZZ_ITERATIONS=100` - Number of test iterations
+    /// - `FUZZ_BLOCKS=3` - Blocks per iteration
+    /// - `FUZZ_MINI_BLOCKS=10` - Mini-blocks per block
+    /// - `FUZZ_OPS=100` - Operations per mini-block
+    /// - `FUZZ_LOOKUPS=50` - Lookups per block
     #[test]
     fn test_deterministic_random_loop() {
         use rand::rngs::StdRng;
         use rand::{Rng, SeedableRng};
+        use std::panic;
 
-        // Helper to parse env vars with defaults
-        let env = |key, default| {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
-
-        let iterations = env("FUZZ_ITERATIONS", 100);
-        let blocks_per_iter = env("FUZZ_BLOCKS", 3);
-        let mini_blocks_per_block = env("FUZZ_MINI_BLOCKS", 10);
-        let ops_per_mini_block = env("FUZZ_OPS", 100);
-        let lookups_per_block = env("FUZZ_LOOKUPS", 50);
+        let env = |key, default| std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let (iterations, blocks_per_iter, mini_blocks_per_block, ops_per_mini_block, lookups_per_block) =
+            (env("FUZZ_ITERATIONS", 100), env("FUZZ_BLOCKS", 3), env("FUZZ_MINI_BLOCKS", 10),
+             env("FUZZ_OPS", 100), env("FUZZ_LOOKUPS", 50));
 
         println!("\nStarting deterministic random loop test:");
-        println!(
-            "  {} iterations × {} blocks × {} mini-blocks × {} ops",
-            iterations, blocks_per_iter, mini_blocks_per_block, ops_per_mini_block
-        );
-        println!(
-            "  Total operations: {}\n",
-            iterations * blocks_per_iter * mini_blocks_per_block * ops_per_mini_block
-        );
+        println!("  {} iterations x {} blocks x {} mini-blocks x {} ops",
+                 iterations, blocks_per_iter, mini_blocks_per_block, ops_per_mini_block);
+        println!("  Total operations: {}\n",
+                 iterations * blocks_per_iter * mini_blocks_per_block * ops_per_mini_block);
 
         for iteration in 0..iterations {
-            println!(
-                "Iteration {}/{} (seed: {})...",
-                iteration + 1,
-                iterations,
-                iteration
-            );
+            println!("Iteration {}/{} (seed: {})...", iteration + 1, iterations, iteration);
 
             let mut rng = StdRng::seed_from_u64(iteration as u64);
-
             let blocks: Vec<Block> = (0..blocks_per_iter)
                 .map(|_| Block {
                     mini_blocks: (0..mini_blocks_per_block)
@@ -361,10 +350,40 @@ mod tests {
                 })
                 .collect();
 
-            e2e_fuzz_test(&blocks);
+            if let Err(err) = panic::catch_unwind(panic::AssertUnwindSafe(|| e2e_fuzz_test(&blocks))) {
+                let filename = format!("fuzz_failure_seed_{}.json", iteration);
+                if let Ok(json) = serde_json::to_string_pretty(&blocks) {
+                    let _ = std::fs::write(&filename, json);
+                    eprintln!("\nTest failed at iteration {} (seed: {})", iteration, iteration);
+                    eprintln!("Failing input saved to: {}", filename);
+                    eprintln!("Replay with: FUZZ_INPUT_FILE={} cargo test test_replay_from_file -- --ignored", filename);
+                }
+                panic::resume_unwind(err);
+            }
         }
 
-        println!("\n✓ All {} iterations passed!", iterations);
+        println!("\nAll {} iterations passed!", iterations);
+    }
+
+    /// Replay a saved fuzz test failure from a JSON file.
+    ///
+    /// Usage:
+    /// ```bash
+    /// FUZZ_INPUT_FILE=fuzz_failure_seed_42.json cargo test test_replay_from_file -- --nocapture --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_replay_from_file() {
+        let filename = std::env::var("FUZZ_INPUT_FILE")
+            .expect("FUZZ_INPUT_FILE environment variable must be set");
+        let json = std::fs::read_to_string(&filename)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", filename, e));
+        let blocks: Vec<Block> = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", filename, e));
+
+        println!("Replaying from {} ({} blocks)", filename, blocks.len());
+        e2e_fuzz_test(&blocks);
+        println!("Replay passed!");
     }
 
     // salt/salt$ cargo-fuzzcheck fuzz::tests::fuzz_test
