@@ -18,8 +18,6 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 #[cfg(target_os = "zkvm")]
-use alloc::format;
-#[cfg(target_os = "zkvm")]
 use risc0_zkvm::guest::env;
 pub struct MultiPoint;
 
@@ -345,7 +343,7 @@ impl MultiPointProof {
         let start12 = env::cycle_count();
         #[cfg(target_os = "zkvm")]
         {
-            env::log(&format!(
+            println!(
                 "Multiproof timings (in cycles):\n\
             record_query_transcript: {},\n\
             powers_of_r: {},\n\
@@ -359,8 +357,8 @@ impl MultiPointProof {
             start7 - start6,
             start9 - start8,
             start12 - start11,
-            ));
-            env::log(&format!("check CYCLES: {},{},{},{},{},{},{},{},{},{},{},{}", start1,start2,start3,start4,start5,start6,start7,start8,start9,start10,start11,start12));
+            );
+            println!("check CYCLES: {},{},{},{},{},{},{},{},{},{},{},{}", start1,start2,start3,start4,start5,start6,start7,start8,start9,start10,start11,start12);
 
         }
         res

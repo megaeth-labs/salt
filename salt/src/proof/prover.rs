@@ -30,8 +30,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use banderwagon::{num_threads, use_chunks, use_iter, use_sort_unstable};
 #[cfg(target_os = "zkvm")]
-use alloc::format;
-#[cfg(target_os = "zkvm")]
 use risc0_zkvm::guest::env;
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
@@ -192,12 +190,12 @@ impl SaltProof {
             #[cfg(target_os = "zkvm")]
             {
                 let end = env::cycle_count();
-                env::log(format!(
+                println!(
                     "create_verifier_queries cycles: {},CRS:{}, MultiPointProof::check cycles: {}",
                     start2 - start1,                
                     start4 - start2,
                     end - start4
-                ));
+                );
             }
             Ok(())
         } else {
