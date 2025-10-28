@@ -14,7 +14,15 @@ rayon = {version = "*", optional = true}
 hex = "0.4.3"
 
 rustc-hash = "2.1.0"
-
+[target.'cfg(target_os = "zkvm")'.dependencies]
+risc0-zkvm-platform= { version = "2.2.0", features = [
+    "unstable",
+    "getrandom",
+] }
+risc0-zkvm = { version = "3.0.3", features = [
+    "heap-embedded-alloc",
+    "unstable",
+] }
 [dev-dependencies]
 criterion = "0.5.1"
 rand_chacha = { version = "0.3.0", default-features = false }

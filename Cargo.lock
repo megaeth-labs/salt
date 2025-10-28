@@ -1749,6 +1749,8 @@ dependencies = [
  "itertools 0.10.5",
  "rand_chacha 0.3.1",
  "rayon",
+ "risc0-zkvm",
+ "risc0-zkvm-platform",
  "rustc-hash",
  "sha2 0.9.9",
 ]
@@ -3046,6 +3048,8 @@ dependencies = [
  "proptest-derive",
  "rand 0.8.5",
  "rayon",
+ "risc0-zkvm",
+ "risc0-zkvm-platform",
  "rustc-hash",
  "serde",
  "serde_arrays",
