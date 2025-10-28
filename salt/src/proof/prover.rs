@@ -29,7 +29,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 
 use banderwagon::{num_threads, use_chunks, use_iter, use_sort_unstable};
-
+#[cfg(target_os = "zkvm")]
+use alloc::format;
+#[cfg(target_os = "zkvm")]
+use kona_log::{debug, log};
+#[cfg(target_os = "zkvm")]
+use risc0_zkvm::guest::env;
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(POLY_DEGREE));
@@ -156,8 +161,11 @@ impl SaltProof {
         data: &BTreeMap<SaltKey, Option<SaltValue>>,
         state_root: ScalarBytes,
     ) -> Result<(), ProofError> {
+        #[cfg(target_os = "zkvm")]
+        let start1 = env::cycle_count();
         let queries = self.create_verifier_queries(data)?;
-
+        #[cfg(target_os = "zkvm")]
+        let start2 = env::cycle_count();
         let root = self
             .parents_commitments
             .get(&0)
@@ -173,15 +181,26 @@ impl SaltProof {
         }
 
         let mut transcript = Transcript::new(b"st");
-
+       
         let crs = CRS::default();
-
+        #[cfg(target_os = "zkvm")]
+        let start4 = env::cycle_count();
         // call MultiPointProof::check to verify the proof
         if self
             .proof
             .0
             .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
         {
+            #[cfg(target_os = "zkvm")]
+            {
+                let end = env::cycle_count();
+                env::log(format!(
+                    "create_verifier_queries cycles: {},CRS:{}, MultiPointProof::check cycles: {}",
+                    start2 - start1,                
+                    start4 - start2,
+                    end - start4
+                ));
+            }
             Ok(())
         } else {
             Err(ProofError::MultiPointProofFailed)
