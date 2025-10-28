@@ -32,8 +32,6 @@ use banderwagon::{num_threads, use_chunks, use_iter, use_sort_unstable};
 #[cfg(target_os = "zkvm")]
 use alloc::format;
 #[cfg(target_os = "zkvm")]
-use kona_log::{debug, log};
-#[cfg(target_os = "zkvm")]
 use risc0_zkvm::guest::env;
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =

@@ -20,8 +20,6 @@ use rustc_hash::FxHashMap;
 #[cfg(target_os = "zkvm")]
 use alloc::format;
 #[cfg(target_os = "zkvm")]
-use kona_log::{debug, log};
-#[cfg(target_os = "zkvm")]
 use risc0_zkvm::guest::env;
 pub struct MultiPoint;
 
