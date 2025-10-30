@@ -77,10 +77,16 @@ impl Witness {
     /// afterwards (using the state updates). It generates inclusion proofs for
     /// existing keys and exclusion proofs for non-existing keys.
     ///
+    /// # Deterministic Ordering
+    ///
+    /// The `updates` parameter uses `BTreeMap` to enforece deterministic key ordering.
+    /// When producer and validator process keys in the same order, correctness becomes
+    /// straightforward to verify.
+    ///
     /// # Arguments
     /// * `lookups` - Plain keys to be read during execution
-    /// * `updates` - Plain keys to be inserted, deleted, or updated during execution
-    ///   Each item is a tuple of (plain_key, optional_value) where:
+    /// * `updates` - Plain keys to be inserted, deleted, or updated during execution.
+    ///   Each entry is (plain_key, optional_value) where:
     ///   - Some(value) indicates an insert or update
     ///   - None indicates deletion
     /// * `store` - The storage backend providing access to both state data
