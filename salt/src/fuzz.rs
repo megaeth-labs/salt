@@ -115,34 +115,23 @@ fn e2e_test(blocks: &Vec<Block>) {
             lookup_results.push((key.clone(), actual));
         }
 
-        // Categorize keys for witness creation:
-        // - lookups_or_updates: keys that exist pre-block (reads + updates)
-        // - inserts_or_deletes: keys created or removed during block (inserts + deletes)
-        let mut lookups_or_updates: Vec<_> =
-            lookup_results.iter().map(|(k, _)| k.clone()).collect();
-        let mut inserts_or_deletes = Vec::new();
-        let mut all_modifications = Vec::new();
+        // Keys to lookup during block execution
+        let lookups: Vec<_> = lookup_results.iter().map(|(k, _)| k.clone()).collect();
+        let mut all_modifications = BTreeMap::new();
 
-        // Block producer: Apply state modifications incrementally (simulates pipelined execution)
+        // Block producer: Apply state modifications incrementally
         for mini_block in &block.mini_blocks {
             let plain_kvs = get_plain_kv_updates(mini_block, &kv_pool);
 
-            // Update reference oracle and categorize operations for witness
+            // Update reference oracle and collect all modifications
             for (key, value) in &plain_kvs {
-                all_modifications.push((key.clone(), value.clone()));
+                all_modifications.insert(key.clone(), value.clone());
                 match value {
                     Some(val) => {
-                        // Update to existing key → lookup; Insert of new key → modification
-                        if ref_state.insert(key.clone(), val.clone()).is_some() {
-                            lookups_or_updates.push(key.clone());
-                        } else {
-                            inserts_or_deletes.push((key.clone(), Some(val.clone())));
-                        }
+                        ref_state.insert(key.clone(), val.clone());
                     }
                     None => {
-                        // Delete always goes to modifications
                         ref_state.remove(key);
-                        inserts_or_deletes.push((key.clone(), None));
                     }
                 }
             }
@@ -162,12 +151,10 @@ fn e2e_test(blocks: &Vec<Block>) {
         state_updates.merge(canon_updates);
 
         // Block producer: Generate witness containing all data needed for stateless validation
-        let inserts_or_deletes: BTreeMap<_, _> = inserts_or_deletes.into_iter().collect();
-        let witness = Witness::create(&lookups_or_updates, inserts_or_deletes.iter(), &db)
-            .expect("Failed to create witness");
+        let witness =
+            Witness::create(&lookups, &all_modifications, &db).expect("Failed to create witness");
 
         // Block producer: persist to database
-        // println!("{state_updates:?}");
         db.update_state(state_updates);
         db.update_trie(trie_updates);
 
@@ -194,19 +181,17 @@ fn e2e_test(blocks: &Vec<Block>) {
 
         // Stateless validator: Re-execute lookups using only witness data
         let mut witness_state = EphemeralSaltState::new(&witness);
-        for (key, expected_value) in &lookup_results {
+        for (key, expected) in &lookup_results {
             assert_eq!(
                 &witness_state.plain_value(key).expect("Lookup failed"),
-                expected_value,
-                "Witness lookup mismatch for key {:?}",
-                key
+                expected,
+                "Witness lookup mismatch for key {key:?}",
             );
         }
 
         // Stateless validator: Re-execute modifications and verify final state root matches
-        let all_modifications: BTreeMap<_, _> = all_modifications.into_iter().collect();
         let state_updates = witness_state
-            .update_fin(all_modifications.iter())
+            .update_fin(&all_modifications)
             .expect("Failed to update witness state");
         let (computed_root, _) = StateRoot::new(&witness)
             .update_fin(&state_updates)
