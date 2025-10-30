@@ -3,7 +3,9 @@
 use crate::constant::{NUM_BUCKETS, NUM_META_BUCKETS};
 use crate::traits::StateReader;
 use crate::types::{BucketId, SaltKey};
-use crate::{EphemeralSaltState, MemStore, SaltWitness, StateRoot, StateUpdates, Witness};
+use crate::{
+    EphemeralSaltState, MemStore, SaltValue, SaltWitness, StateRoot, StateUpdates, Witness,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -190,9 +192,33 @@ fn e2e_test(blocks: &Vec<Block>) {
         }
 
         // Stateless validator: Re-execute modifications and verify final state root matches
-        let state_updates = witness_state
-            .update_fin(&all_modifications)
-            .expect("Failed to update witness state");
+        //
+        // Apply updates first, then inserts/deletes in deterministic key order (same as
+        // Witness::create). This ordering is critical: inserts/deletes may trigger key
+        // displacement or bucket expansion, invalidating the witness's direct lookup table.
+        let mut state_updates = StateUpdates::default();
+        let mut inserts_or_deletes = BTreeMap::new();
+
+        for (plain_key, opt_plain_value) in all_modifications {
+            if let (Ok(Some((salt_key, old_value))), Some(new_value)) =
+                (witness_state.find(&plain_key), &opt_plain_value)
+            {
+                // Update operation: key exists and new value is not None
+                witness_state.update_value(
+                    &mut state_updates,
+                    salt_key,
+                    Some(old_value),
+                    Some(SaltValue::new(&plain_key, new_value)),
+                );
+            } else {
+                inserts_or_deletes.insert(plain_key, opt_plain_value);
+            }
+        }
+        state_updates.merge(
+            witness_state
+                .update_fin(&inserts_or_deletes)
+                .expect("Failed to apply inserts/deletes"),
+        );
         let (computed_root, _) = StateRoot::new(&witness)
             .update_fin(&state_updates)
             .expect("Failed to compute state root");
