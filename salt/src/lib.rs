@@ -17,6 +17,8 @@ pub mod types;
 pub use types::*;
 pub mod mem_store;
 pub use mem_store::MemStore;
+#[cfg(test)]
+pub mod fuzz;
 
 #[cfg(test)]
 mod tests {
