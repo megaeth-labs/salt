@@ -19,7 +19,6 @@ debug = true
 debug-assertions = true
 incremental = true
 
-
 [profile.test]
 opt-level = 3
 debug-assertions = true
