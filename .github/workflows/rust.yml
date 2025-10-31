@@ -58,6 +58,21 @@ jobs:
           NUM_DATA_BUCKETS: 2
           BUCKET_RESIZE_LOAD_FACTOR_PCT: 1
 
+      - name: Run random stress test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p salt --features test-bucket-resize test_e2e_random_stress -- --ignored --nocapture
+        env:
+          NUM_DATA_BUCKETS: 2
+          BUCKET_RESIZE_LOAD_FACTOR_PCT: 80
+          RANDOM_KV_POOL_SIZE: 4096
+          RANDOM_ITERATIONS: 100
+          RANDOM_BLOCKS: 3
+          RANDOM_MINI_BLOCKS: 10
+          RANDOM_OPS: 100
+          RANDOM_LOOKUPS: 50
+
   lints:
     name: Lints
     runs-on: ubuntu-latest
@@ -69,11 +84,11 @@ jobs:
         with:
           github_pat: ${{ secrets.PAT_CI  }}
 
-      - name: Install stable toolchain
+      - name: Install nightly toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: nightly
           override: true
           components: rustfmt, clippy
 

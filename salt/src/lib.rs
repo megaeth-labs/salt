@@ -17,6 +17,8 @@ pub mod types;
 pub use types::*;
 pub mod mem_store;
 pub use mem_store::MemStore;
+#[cfg(test)]
+pub mod fuzz;
 
 #[cfg(test)]
 mod tests {
@@ -59,7 +61,7 @@ mod tests {
 
         // Alice creates a witness for plain key-value pairs
         let lookups = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let witness = Witness::create(&lookups, BTreeMap::new(), &store)?;
+        let witness = Witness::create(&lookups, &BTreeMap::new(), &store)?;
 
         // Bob verifies the witness against its local state root.
         assert_eq!(root_hash, witness.state_root().unwrap());

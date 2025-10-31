@@ -136,14 +136,14 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                             Err(_) => writeln!(
                                 f,
                                 " [METADATA - DECODE ERROR]\n    Raw Value: {}",
-                                hex::encode(val.data)
+                                hex::encode(&val.data[..val.data_len()])
                             )?,
                         }
                     } else {
                         writeln!(
                             f,
                             "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
-                            hex::encode(val.data),
+                            hex::encode(&val.data[..val.data_len()]),
                             String::from_utf8_lossy(val.key()),
                             String::from_utf8_lossy(val.value())
                         )?
@@ -2225,7 +2225,7 @@ mod tests {
                 .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &[key; 32])
                 .unwrap()
                 .unwrap_or_else(|| panic!("Key {} missing", key));
-            assert_eq!(found.value(), &[]);
+            assert_eq!(found.value(), &[] as &[u8]);
         }
     }
 
