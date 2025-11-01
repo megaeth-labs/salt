@@ -1,0 +1,76 @@
+name: coverage
+on: [push, pull_request]
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nightly toolchain + llvm-tools (needed by cargo-llvm-cov)
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      # Speed up builds by caching Cargo registry/git/target
+      - uses: Swatinem/rust-cache@v2
+
+      # Fast install of cargo-llvm-cov (prebuilt) instead of building from source
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Run instrumented tests once (produces .profraw data)
+      - name: Run instrumented tests
+        run: cargo llvm-cov --workspace --branch --doctests --no-report
+
+      # Generate LCOV report for Codecov
+      - name: Generate LCOV report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      # Generate HTML report for GitHub Pages
+      - name: Generate HTML report
+        run: cargo llvm-cov report --html
+
+      # Make the browsable HTML available as a build artifact (useful for PRs)
+      - name: Upload HTML report (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+
+      # Upload LCOV to Codecov
+      - name: Upload LCOV to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+  # Publish the HTML report to GitHub Pages only from main
+  deploy-pages:
+    if: github.ref == 'refs/heads/main'
+    needs: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-html
+          path: ./public
+
+      # Upload the downloaded HTML folder as a Pages artifact
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+      # Deploy to Pages
+      - id: deployment
+        uses: actions/deploy-pages@v4

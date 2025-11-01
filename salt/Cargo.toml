@@ -9,7 +9,7 @@ test-bucket-resize = []
 
 [dependencies]
 # megaeth dependencies
-ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
+ark-ff = "0.5.0"
 banderwagon = { path = "../banderwagon" }
 ipa-multipoint = { path = "../ipa-multipoint" }
 
