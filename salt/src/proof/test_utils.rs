@@ -21,7 +21,7 @@ use rand::{rngs::StdRng, Rng};
 /// let data = mock_data(&mut rng, 52);
 /// ```
 pub(crate) fn mock_data(rng: &mut StdRng, len: usize) -> Vec<u8> {
-    (0..len).map(|_| rng.gen()).collect()
+    (0..len).map(|_| rng.random()).collect()
 }
 
 /// Creates a dummy 64-byte cryptographic commitment for testing.
