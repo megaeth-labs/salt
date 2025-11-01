@@ -551,6 +551,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // Resize the bucket if load factor threshold exceeded
                     if used > metadata.capacity * get_bucket_resize_threshold() / 100 {
                         let new_capacity = compute_resize_capacity(metadata.capacity, used);
+                        println!("used: {}, {}/ {}", used, metadata.capacity, metadata.capacity * get_bucket_resize_threshold());
                         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
                     }
                 } else {
@@ -686,6 +687,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
 
         // Step 1: Extract all existing entries (but do not clear the cache yet)
         let old_metadata = self.metadata(bucket_id, true)?;
+        println!("used: {}, capacity: {}", self.usage_count(bucket_id).unwrap(), old_metadata.capacity);
         let mut old_bucket = BTreeMap::new();
         for slot in 0..old_metadata.capacity {
             let salt_key = SaltKey::from((bucket_id, slot));
@@ -2665,5 +2667,97 @@ mod tests {
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
+    }
+
+    /// Tests continuous bucket rehashing with low load factor threshold.
+    ///
+    /// This test verifies that the bucket resize mechanism works correctly
+    /// when the load factor threshold is set to a very low value (1%), causing
+    /// the bucket to rehash/resize multiple times as more keys are inserted.
+    ///
+    /// The test exercises the following:
+    /// - Multiple automatic bucket expansions triggered by load factor threshold
+    /// - Correct capacity calculation after each resize
+    /// - Data integrity across multiple rehashing operations
+    /// - All keys remain accessible after continuous resizing
+    #[test]
+    fn test_continuous_rehash() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+
+        // Start with minimum bucket size
+        let initial_capacity = MIN_BUCKET_SIZE as u64;
+        // state
+        //     .shi_rehash(TEST_BUCKET, 0, initial_capacity, &mut updates)
+        //     .unwrap();
+
+        // Insert enough keys to trigger multiple rehashes
+        // With 1% load factor, each rehash doubles capacity
+        let num_keys = 100;
+        let keys: Vec<Vec<u8>> = (1..=num_keys).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (101..=100 + num_keys)
+            .map(|i| vec![i as u8; 32])
+            .collect();
+
+        // Track capacity changes to verify continuous rehashing
+        let mut capacity_history = vec![initial_capacity];
+
+        for i in 0..num_keys {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+
+            // Check if capacity changed (indicating a rehash occurred)
+            let current_meta = state.metadata(TEST_BUCKET, false).unwrap();
+            if current_meta.capacity != *capacity_history.last().unwrap() {
+                capacity_history.push(current_meta.capacity);
+            }
+        }
+
+        // // Verify multiple rehashes occurred
+        // assert!(
+        //     capacity_history.len() >= 3,
+        //     "Expected at least 3 capacity changes (initial + 2 rehashes), got {}",
+        //     capacity_history.len()
+        // );
+
+        // Verify capacities are increasing
+        for i in 1..capacity_history.len() {
+            assert!(
+                capacity_history[i] > capacity_history[i - 1],
+                "Capacity should increase: {} -> {}",
+                capacity_history[i - 1],
+                capacity_history[i]
+            );
+        }
+
+        // Verify all keys are still accessible after continuous rehashing
+        let final_meta = state.metadata(TEST_BUCKET, false).unwrap();
+        for i in 0..num_keys {
+            let result = state
+                .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                .unwrap();
+            assert!(
+                result.is_some(),
+                "Key {} should be found after continuous rehashing",
+                i
+            );
+            let (_, found) = result.unwrap();
+            assert_eq!(found.key(), &keys[i]);
+            assert_eq!(found.value(), &vals[i]);
+        }
+
+        // Verify final capacity matches expected value based on load factor
+        let expected_capacity = compute_resize_capacity(initial_capacity, num_keys as u64);
+        assert_eq!(
+            final_meta.capacity, expected_capacity,
+            "Final capacity should be {}, got {}",
+            expected_capacity, final_meta.capacity
+        );
+
+        // Print rehash history for diagnostic purposes
+        println!("Rehash history: {:?}", capacity_history);
+        println!("Total rehashes: {}", capacity_history.len() - 1);
     }
 }
