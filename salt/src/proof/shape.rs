@@ -326,7 +326,7 @@ mod tests {
                 (0..2).map({
                     let mut value = rng.clone();
                     move |_| {
-                        let slot_id = value.gen::<u64>() & slot_mask;
+                        let slot_id = value.random::<u64>() & slot_mask;
                         (SaltKey::from((bucket_id, slot_id)), (bucket_id, level))
                     }
                 })

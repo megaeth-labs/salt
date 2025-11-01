@@ -59,8 +59,9 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                 let mut salt_key;
                 // Retry until we find a unique key
                 loop {
-                    let bid = rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId);
-                    let slot_id = rng.gen_range(0..MIN_BUCKET_SIZE as SlotId);
+                    let bid =
+                        rng.random_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId);
+                    let slot_id = rng.random_range(0..MIN_BUCKET_SIZE as SlotId);
                     salt_key = SaltKey::from((bid, slot_id));
                     if used_keys.insert(salt_key) {
                         break; // Found a unique key
@@ -72,8 +73,8 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                     salt_key,
                     None, // old_value: None indicates this is an insertion
                     Some(SaltValue::new(
-                        &rng.gen::<[u8; 20]>(), // 20-byte random key
-                        &rng.gen::<[u8; 32]>(), // 32-byte random value
+                        &rng.random::<[u8; 20]>(), // 20-byte random key
+                        &rng.random::<[u8; 32]>(), // 32-byte random value
                     )),
                 );
             }

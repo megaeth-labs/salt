@@ -1,10 +1,6 @@
 [workspace]
 
-members = [
-    "ipa-multipoint",
-    "banderwagon",
-    "salt",
-]
+members = ["ipa-multipoint", "banderwagon", "salt"]
 resolver = "2"
 
 [profile.bench]

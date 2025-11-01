@@ -6,13 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ark-ed-on-bls12-381-bandersnatch = "0.5.0"
-ark-ff = { version = "0.5.0", features = ["parallel"] }
-ark-ec = "0.5.0"
-ark-serialize = "0.5.0"
+ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-ff = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-ec = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-serialize = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
 
 rayon = "*"
-hugepage-rs = { version = "0.1.0"}
+hugepage-rs = { version = "0.1.0" }
 [dev-dependencies]
 hex = "0.4.3"
 rand_chacha = "0.3.1"

@@ -354,16 +354,16 @@ mod tests {
                         .map(|_| {
                             (0..ops_per_mini_block)
                                 .map(|_| {
-                                    if rng.gen_bool(0.7) {
-                                        Operation::Insert(rng.gen(), rng.gen())
+                                    if rng.random_bool(0.7) {
+                                        Operation::Insert(rng.random(), rng.random())
                                     } else {
-                                        Operation::Delete(rng.gen())
+                                        Operation::Delete(rng.random())
                                     }
                                 })
                                 .collect()
                         })
                         .collect(),
-                    lookups: (0..lookups_per_block).map(|_| rng.gen()).collect(),
+                    lookups: (0..lookups_per_block).map(|_| rng.random()).collect(),
                 })
                 .collect();
 

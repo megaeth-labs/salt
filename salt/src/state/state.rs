@@ -1008,7 +1008,6 @@ mod tests {
         num_iterations: usize,
     ) {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
         // Create reference state
         let reader = EmptySalt;
@@ -1065,7 +1064,7 @@ mod tests {
 
             // Create shuffled order of indices
             let mut indices: Vec<usize> = (0..keys.len()).collect();
-            indices.shuffle(&mut thread_rng());
+            indices.shuffle(&mut rand::rng());
 
             // Insert in shuffled order
             for &i in &indices {
@@ -1643,7 +1642,7 @@ mod tests {
     #[test]
     fn test_canonicalize_random_kvs() {
         use rand::rngs::StdRng;
-        use rand::seq::SliceRandom;
+        use rand::seq::IndexedRandom;
         use rand::SeedableRng;
 
         const N: usize = 100; // Total number of keys
@@ -1995,7 +1994,6 @@ mod tests {
     #[test]
     fn test_history_independence_with_mixed_operations() {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
         const BUCKET_CAPACITY: u64 = 10;
 
@@ -2085,7 +2083,7 @@ mod tests {
         // Test 100 random operation orders
         for iteration in 0..100 {
             let mut shuffled = operations.clone();
-            shuffled.shuffle(&mut thread_rng());
+            shuffled.shuffle(&mut rand::rng());
 
             let mut test_state = EphemeralSaltState::new(&store);
             let mut test_updates = StateUpdates::default();
