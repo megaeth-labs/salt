@@ -544,9 +544,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 // Found empty slot - insert the key and complete
                 self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
-                // Update the usage count delta for this insertion
-                *self.usage_count_delta.entry(bucket_id).or_insert(0) += 1;
-
                 if let Ok(used) = self.usage_count(bucket_id) {
                     // Resize the bucket if load factor threshold exceeded
                     if used > metadata.capacity * get_bucket_resize_threshold() / 100 {
@@ -623,9 +620,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         if let Some((slot, salt_val)) =
             self.shi_find(bucket_id, metadata.nonce, metadata.capacity, key)?
         {
-            // Update the usage count delta for this deletion
-            *self.usage_count_delta.entry(bucket_id).or_insert(0) -= 1;
-
             // Slot compaction: retrace the displacement chain created by shi_upsert.
             // When shi_upsert displaced keys to make room, deletion must undo this
             // by moving entries back toward their ideal positions to fill the gap.
@@ -874,6 +868,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         new_value: Option<SaltValue>,
     ) {
         if old_value != new_value {
+            // Update usage_count_delta: +1 for insert, -1 for delete, 0 for update
+            let delta = new_value.is_some() as i64 - old_value.is_some() as i64;
+            if delta != 0 {
+                *self.usage_count_delta.entry(key.bucket_id()).or_insert(0) += delta;
+            }
+
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
@@ -2603,19 +2603,23 @@ mod tests {
         // None → Some (insert)
         state.update_value(&mut updates, key, None, val1.clone());
         assert_eq!(updates.data.get(&key), Some(&(None, val1.clone())));
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&1));
 
         // Some → Some different (update)
         state.update_value(&mut updates, key, val1.clone(), val2.clone());
         assert_eq!(updates.data.get(&key), Some(&(None, val2.clone())));
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&1));
 
         // Some → None (delete)
         state.update_value(&mut updates, key, val2, None);
         assert_eq!(updates.data.get(&key), None); // Full roundtrip
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&0));
 
         // No-op cases (no updates recorded)
         let prev_len = updates.data.len();
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&0));
     }
 }
