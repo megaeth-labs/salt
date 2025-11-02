@@ -1926,6 +1926,108 @@ mod tests {
         assert_eq!(root0, root1);
     }
 
+    /// Tests bucket capacity expansion and complete state reversibility.
+    ///
+    /// **Note**: This test is most effective when run with `NUM_DATA_BUCKETS=1` and
+    /// `BUCKET_RESIZE_LOAD_FACTOR_PCT=1`. These settings make bucket expansion occur
+    /// with a few insertions, allowing the test to verify expansion and reversion behavior.
+    ///
+    /// This test verifies that:
+    /// 1. Inserting keys triggers automatic bucket capacity expansion
+    /// 2. All capacity changes are properly tracked in StateUpdates metadata
+    /// 3. State can be completely reverted by deleting keys and reversing capacity changes
+    ///
+    /// # Test Phases
+    ///
+    /// **Phase 1**: Insert n keys to establish baseline state with root₁
+    ///
+    /// **Phase 2**: Insert n more keys, triggering bucket expansions. Records which
+    /// buckets were resized (bucket_id, old_nonce, old_capacity) for later reversal.
+    ///
+    /// **Phase 3**: Delete the n keys from Phase 2 and reverse all bucket capacity
+    /// changes by calling `shi_rehash` with original parameters. Proves complete
+    /// reversibility by verifying root₃ == root₁.
+    #[test]
+    fn test_bucket_huge_expansion() {
+        let n = 1000;
+        let kvs = create_random_kvs(2 * n);
+        let store = MemStore::new();
+
+        // Phase 1: Insert first n kvs
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state
+            .update_fin(kvs[..n].iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        let (root1, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 1 root: {:?}", hex::encode(root1));
+        assert_eq!(
+            root1,
+            StateRoot::rebuild(&store).unwrap().0,
+            "Phase 1 mismatch"
+        );
+
+        // Phase 2: Insert second n kvs and detect resizes
+        let updates = state
+            .update_fin(kvs[n..].iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        let resizes: Vec<_> = updates
+            .data
+            .range(METADATA_KEYS_RANGE)
+            .filter_map(|(key, (old, new))| {
+                let old_meta = BucketMeta::try_from(old.as_ref()?).ok()?;
+                let new_meta = BucketMeta::try_from(new.as_ref()?).ok()?;
+                (old_meta.capacity != new_meta.capacity).then(|| {
+                    let bid = bucket_id_from_metadata_key(*key);
+                    println!(
+                        "  Bucket {}: {} -> {}",
+                        bid, old_meta.capacity, new_meta.capacity
+                    );
+                    (bid, old_meta.nonce, old_meta.capacity)
+                })
+            })
+            .collect();
+
+        let (root2, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 2 root: {:?}", hex::encode(root2));
+        assert_eq!(
+            root2,
+            StateRoot::rebuild(&store).unwrap().0,
+            "Phase 2 mismatch"
+        );
+
+        // Phase 3: Delete last n kvs and reverse resizes
+        let none: Option<Vec<u8>> = None;
+        let mut updates = state
+            .update_fin(kvs[n..].iter().map(|(k, _)| (k, &none)))
+            .unwrap();
+        for (bid, nonce, cap) in resizes {
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(bid, nonce, cap, &mut rehash_updates)
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+
+        let (root3, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 3 root: {:?}", hex::encode(root3));
+        assert_eq!(
+            hex::encode(root3),
+            hex::encode(StateRoot::rebuild(&store).unwrap().0),
+            "Phase 3 mismatch"
+        );
+        assert_eq!(
+            hex::encode(root1),
+            hex::encode(root3),
+            "Reversion failed: Phase 3 ≠ Phase 1"
+        );
+    }
+
     #[test]
     fn test_add_commitment_deltas() {
         let store = EmptySalt;
