@@ -1926,6 +1926,153 @@ mod tests {
         assert_eq!(root0, root1);
     }
 
+    /// Tests bucket capacity expansion and complete state reversibility.
+    ///
+    /// This test verifies that:
+    /// 1. Inserting keys triggers automatic bucket capacity expansion
+    /// 2. All capacity changes are properly tracked in StateUpdates metadata
+    /// 3. State can be completely reverted by deleting keys and reversing capacity changes
+    ///
+    /// # Test Phases
+    ///
+    /// **Phase 1**: Insert n keys to establish baseline state with root₁
+    ///
+    /// **Phase 2**: Insert n more keys, triggering bucket expansions. Records which
+    /// buckets were resized (bucket_id, old_nonce, old_capacity) for later reversal.
+    ///
+    /// **Phase 3**: Delete the n keys from Phase 2 and reverse all bucket capacity
+    /// changes by calling `shi_rehash` with original parameters. Proves complete
+    /// reversibility by verifying root₃ == root₁.
+    fn test_bucket_huge_expansion(n: usize) {
+        let kvs = create_random_kvs(2 * n);
+        let store = MemStore::new();
+
+        // Phase 1: Insert first n kvs
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state
+            .update_fin(kvs[..n].iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        let (root1, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 1 root: {:?}", hex::encode(root1));
+        assert_eq!(
+            root1,
+            StateRoot::rebuild(&store).unwrap().0,
+            "Phase 1 mismatch"
+        );
+
+        // Phase 2: Insert second n kvs and detect resizes
+        let updates = state
+            .update_fin(kvs[n..].iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        let resizes: Vec<_> = updates
+            .data
+            .range(METADATA_KEYS_RANGE)
+            .filter_map(|(key, (old, new))| {
+                let old_meta = BucketMeta::try_from(old.as_ref()?).ok()?;
+                let new_meta = BucketMeta::try_from(new.as_ref()?).ok()?;
+                (old_meta.capacity != new_meta.capacity).then(|| {
+                    let bid = bucket_id_from_metadata_key(*key);
+                    println!(
+                        "  Bucket {}: {} -> {}",
+                        bid, old_meta.capacity, new_meta.capacity
+                    );
+                    (bid, old_meta.nonce, old_meta.capacity)
+                })
+            })
+            .collect();
+
+        let (root2, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 2 root: {:?}", hex::encode(root2));
+        assert_eq!(
+            root2,
+            StateRoot::rebuild(&store).unwrap().0,
+            "Phase 2 mismatch"
+        );
+
+        // Phase 3: Delete last n kvs and reverse resizes
+        let none: Option<Vec<u8>> = None;
+        let mut updates = state
+            .update_fin(kvs[n..].iter().map(|(k, _)| (k, &none)))
+            .unwrap();
+        for (bid, nonce, cap) in resizes {
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(bid, nonce, cap, &mut rehash_updates)
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+
+        let (root3, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_state(updates);
+        store.update_trie(trie_updates);
+        println!("Phase 3 root: {:?}", hex::encode(root3));
+        assert_eq!(
+            hex::encode(root3),
+            hex::encode(StateRoot::rebuild(&store).unwrap().0),
+            "Phase 3 mismatch"
+        );
+        assert_eq!(
+            hex::encode(root1),
+            hex::encode(root3),
+            "Reversion failed: Phase 3 ≠ Phase 1"
+        );
+    }
+
+    #[test]
+    fn test_bucket_huge_expansion_crash1() {
+        // NUM_DATA_BUCKETS=1 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 \
+        //   cargo test --package salt --features test-bucket-resize huge_expansion_crash1 -- --nocapture
+        // running 1 test
+        // Phase 1 root: "ebccd915fe003d0738a092b20947c5c9e8fb170b93df3b53ccb4289c49c2300a"
+        // Bucket 65536: 65536 -> 262144
+        // Phase 2 root: "8ab693a741a249cd7412616a94973819d17c9d01bb812c78e3214de7bdf35a15"
+
+        // thread '<unnamed>' (2757064) panicked at salt/src/trie/trie.rs:523:33:
+        // assertion `left == right` failed
+        // left: 72057594037993729
+        // right: 72057594037993730
+        // note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        // test trie::trie::tests::test_bucket_huge_expansion_crash1 ... FAILED
+
+        // failures:
+
+        // failures:
+        //     trie::trie::tests::test_bucket_huge_expansion_crash1
+
+        // test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.76s
+        test_bucket_huge_expansion(600);
+    }
+
+    #[test]
+    fn test_bucket_huge_expansion_crash2() {
+        // NUM_DATA_BUCKETS=1 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo test --package salt --features test-bucket-resize huge_expansion_crash2 -- --nocapture
+
+        // running 1 test
+        // Phase 1 root: "d9e5f08939906695f5d09e506b1cfcae3f583ce26df53b9c40cc3eb79db4860e"
+        //   Bucket 65536: 131072 -> 262144
+        // Phase 2 root: "7b58f128aa0cedeee71d6b5b85a1a8c910a408ba7634af3f03e1a10ceac41919"
+        // Phase 3 root: "da9c464cc9f7245c304430c5907587b57df81929af2d058d85d47c7414b21002"
+
+        // thread 'trie::trie::tests::test_bucket_huge_expansion_crash2' (2758428) panicked at salt/src/trie/trie.rs:1975:9:
+        // assertion `left == right` failed: Phase 3 mismatch
+        //   left: [218, 156, 70, 76, 201, 247, 36, 92, 48, 68, 48, 197, 144, 117, 135, 181, 125, 248, 25, 41, 175, 45, 5, 141, 133, 212, 124, 116, 20, 178, 16, 2]
+        //  right: [217, 229, 240, 137, 57, 144, 102, 149, 245, 208, 158, 80, 107, 28, 252, 174, 63, 88, 60, 226, 109, 245, 59, 156, 64, 204, 62, 183, 157, 180, 134, 14]
+        // note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        // test trie::trie::tests::test_bucket_huge_expansion_crash2 ... FAILED
+
+        // failures:
+
+        // failures:
+        //     trie::trie::tests::test_bucket_huge_expansion_crash2
+
+        // test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.83s
+        test_bucket_huge_expansion(800);
+    }
+
     #[test]
     fn test_add_commitment_deltas() {
         let store = EmptySalt;
