@@ -777,20 +777,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         capacity: u64,
         plain_key: &[u8],
     ) -> Result<Option<(SlotId, SaltValue)>, Store::Error> {
-        let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
-        for step in 0..capacity {
-            let slot = probe(hashed_key, step, capacity);
-            if let Some(salt_val) = self.value((bucket_id, slot).into())? {
-                match salt_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    Ordering::Equal => return Ok(Some((slot, salt_val))),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-        Ok(None)
+        shi_search(bucket_id, nonce, capacity, plain_key, |key| self.value(key))
     }
 
     /// Attempts to find a plain key via direct lookup.
@@ -878,6 +865,95 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             self.cache.insert(key, new_value);
         }
     }
+}
+
+/// A read-only, lightweight wrapper for retrieving plain values by plain keys.
+///
+/// `PlainStateProvider` is a simplified version of [`EphemeralSaltState`] designed for
+/// direct value lookups. It is read-only with zero allocation overhead, no caching, and
+/// requires complete state storage (not compatible with partial backends like witnesses).
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The state storage to read data from.
+    pub store: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Creates a new [`PlainStateProvider`] wrapping the given state reader.
+    ///
+    /// This is a zero-cost operation with no allocations.
+    pub const fn new(store: &'a S) -> Self {
+        Self { store }
+    }
+
+    /// Retrieves a plain value by plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    /// * `hint` - Optional bucket_id hint for performance optimization. If provided, only
+    ///   that bucket will be searched. Otherwise, the bucket_id will be computed from the key.
+    ///
+    /// # Returns
+    /// * `Ok(Some(value))` - The plain value if the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    pub fn plain_value(
+        &self,
+        plain_key: &[u8],
+        hint: Option<BucketId>,
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        // Use the hint if provided, otherwise compute the bucket_id
+        let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
+        let meta = self.store.metadata(bucket_id)?;
+
+        match shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
+            self.store.value(key)
+        })? {
+            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Core SHI linear probing search algorithm.
+///
+/// This function implements the canonical SHI hash table lookup that searches for a key
+/// within a single bucket using linear probing. It terminates early when encountering:
+/// - An empty slot (key doesn't exist)
+/// - A key with lower lexicographic order (key cannot exist due to SHI ordering)
+/// - An exact match (key found)
+///
+/// # Arguments
+/// * `bucket_id` - The bucket to search in
+/// * `nonce` - The nonce used for hashing
+/// * `capacity` - The capacity of the bucket
+/// * `plain_key` - The plain key to search for
+/// * `get_value` - Closure that retrieves a value given a SaltKey
+///
+/// # Returns
+/// Returns `Ok(Some((slot_id, salt_value)))` if the key is found, `Ok(None)` if not found,
+/// or an error if the underlying storage operation fails.
+fn shi_search<E>(
+    bucket_id: BucketId,
+    nonce: u32,
+    capacity: u64,
+    plain_key: &[u8],
+    mut get_value: impl FnMut(SaltKey) -> Result<Option<SaltValue>, E>,
+) -> Result<Option<(SlotId, SaltValue)>, E> {
+    let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
+    for step in 0..capacity {
+        let slot = probe(hashed_key, step, capacity);
+        if let Some(salt_val) = get_value((bucket_id, slot).into())? {
+            match salt_val.key().cmp(plain_key) {
+                Ordering::Less => return Ok(None),
+                Ordering::Equal => return Ok(Some((slot, salt_val))),
+                Ordering::Greater => (),
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
 }
 
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
@@ -1374,6 +1450,38 @@ mod tests {
             cache_state.usage_count_delta.is_empty(),
             "Usage count delta should remain empty"
         );
+    }
+
+    #[test]
+    fn test_plain_state_provider_plain_value() {
+        let store = MemStore::new();
+        let kvs = create_same_bucket_test_data(2);
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let provider = PlainStateProvider::new(&store);
+        let (key, value) = &kvs[0];
+        let bucket_id = hasher::bucket_id(key);
+
+        // Test successful retrieval
+        assert_eq!(provider.plain_value(key, None).unwrap(), value.clone());
+
+        // Test with correct hint
+        assert_eq!(
+            provider.plain_value(key, Some(bucket_id)).unwrap(),
+            value.clone()
+        );
+
+        // Test with wrong hint
+        assert_eq!(
+            provider.plain_value(key, Some(bucket_id + 1)).unwrap(),
+            None
+        );
+
+        // Test non-existent key
+        assert_eq!(provider.plain_value(b"missing", None).unwrap(), None);
     }
 
     /// Tests cache hit and miss behavior in the value() method.
