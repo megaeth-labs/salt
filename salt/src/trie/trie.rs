@@ -437,10 +437,18 @@ where
             let mut capacity_end_index =
                 subtree_change.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
             let bucket_id = (*bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId;
+            let min_bucket_size = MIN_BUCKET_SIZE as u64;
 
             for level in (subtree_change.old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
-                let extrat_end = ((capacity_start_index + MIN_BUCKET_SIZE as NodeId)
-                    & (NodeId::MAX - (MIN_BUCKET_SIZE as NodeId - 1)))
+                // Calculate the boundary for extracting nodes that need parent recomputation.
+                // We align the extract range to MIN_BUCKET_SIZE boundaries to ensure all
+                // siblings under the same parent are processed together.
+                //
+                // Range breakdown:
+                // [already computed]...[extract_start]...[needs computation]...[extract_end]
+                // where extract_start >= capacity_start_index
+                let extract_end = ((capacity_start_index.saturating_sub(1) / min_bucket_size + 1)
+                    * min_bucket_size)
                     .min(capacity_end_index)
                     + bucket_id
                     + STARTING_NODE_ID[level] as NodeId;
@@ -455,7 +463,7 @@ where
                     })
                     .collect::<Vec<_>>();
 
-                let split_point = updates.partition_point(|node| node.0 < extrat_end);
+                let split_point = updates.partition_point(|node| node.0 < extract_end);
                 uncomputed_updates.extend(updates[split_point..].iter());
                 extra_updates[level].extend(updates[0..split_point].iter());
 
