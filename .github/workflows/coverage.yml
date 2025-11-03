@@ -23,7 +23,7 @@ jobs:
 
       # Run instrumented tests once (produces .profraw data)
       - name: Run instrumented tests
-        run: cargo llvm-cov --workspace --branch --doctests --no-report
+        run: cargo llvm-cov --features test-bucket-resize --workspace --branch --doctests --no-report
 
       # Generate LCOV report for Codecov
       - name: Generate LCOV report
