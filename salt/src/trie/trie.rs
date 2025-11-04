@@ -31,9 +31,13 @@ use crate::{
     trie::node_utils::*,
     types::*,
 };
-use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
+use banderwagon::{
+    num_threads, salt_committer::Committer, use_chunks, use_into_iter, use_iter,
+    use_sort_unstable_by, use_sort_unstable_by_key, Element, Fr, PrimeField,
+};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::sync::Arc;
 use std::{
@@ -42,7 +46,7 @@ use std::{
 };
 
 /// The size of the precomputed window.
-const PRECOMP_WINDOW_SIZE: usize = 11;
+const PRECOMP_WINDOW_SIZE: usize = 3;
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> =
@@ -453,8 +457,7 @@ where
                     + bucket_id
                     + STARTING_NODE_ID[level] as NodeId;
 
-                let updates = (capacity_start_index..capacity_end_index)
-                    .into_par_iter()
+                let updates = use_into_iter!((capacity_start_index..capacity_end_index))
                     .filter_map(|i| {
                         let node_id = bucket_id + i + STARTING_NODE_ID[level] as NodeId;
                         let old_c = self.commitment(node_id).expect("node should exist in trie");
@@ -519,44 +522,46 @@ where
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
             // Handle subtree triggers at this level (if any)
             if !trigger_levels[level].is_empty() {
-                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) = subtree_commitmens
-                    .into_par_iter()
-                    .map(|(node_id, (old_commitment, new_commitment))| {
-                        let current_bucket_id = (node_id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
+                let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) =
+                    use_into_iter!(subtree_commitmens)
+                        .map(|(node_id, (old_commitment, new_commitment))| {
+                            let current_bucket_id =
+                                (node_id >> BUCKET_SLOT_BITS as NodeId) as BucketId;
 
-                        if let Some(subtree_change) = trigger_levels[level].get(&current_bucket_id)
-                        {
-                            if subtree_change.new_top_level == level {
-                                // Handle the new top level, subtree update is done
-                                assert_eq!(subtree_change.new_top_id, node_id);
-                                let root_commitment = self
-                                    .commitment(subtree_change.root_id)
-                                    .expect("root node should exist in trie");
-                                return (
-                                    vec![],
+                            if let Some(subtree_change) =
+                                trigger_levels[level].get(&current_bucket_id)
+                            {
+                                if subtree_change.new_top_level == level {
+                                    // Handle the new top level, subtree update is done
+                                    assert_eq!(subtree_change.new_top_id, node_id);
+                                    let root_commitment = self
+                                        .commitment(subtree_change.root_id)
+                                        .expect("root node should exist in trie");
+                                    return (
+                                        vec![],
+                                        vec![(
+                                            subtree_change.root_id,
+                                            (root_commitment, new_commitment),
+                                        )],
+                                    );
+                                }
+
+                                // Expansion - new level going up, need to compute
+                                (
                                     vec![(
-                                        subtree_change.root_id,
-                                        (root_commitment, new_commitment),
+                                        node_id,
+                                        (
+                                            default_commitment(subtree_change.old_top_id),
+                                            new_commitment,
+                                        ),
                                     )],
-                                );
+                                    vec![],
+                                )
+                            } else {
+                                (vec![(node_id, (old_commitment, new_commitment))], vec![])
                             }
-
-                            // Expansion - new level going up, need to compute
-                            (
-                                vec![(
-                                    node_id,
-                                    (
-                                        default_commitment(subtree_change.old_top_id),
-                                        new_commitment,
-                                    ),
-                                )],
-                                vec![],
-                            )
-                        } else {
-                            (vec![(node_id, (old_commitment, new_commitment))], vec![])
-                        }
-                    })
-                    .unzip();
+                        })
+                        .unzip();
 
                 // Add the new subtree root updates to the main trie updates
                 trie_updates.extend(subtrie_roots.into_iter().flatten());
@@ -611,15 +616,18 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort the state updates by slot IDs
         let mut state_updates = state_updates.data.iter().collect::<Vec<_>>();
-        state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+        use_sort_unstable_by!(state_updates, |(a, _), (b, _)| {
             (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let batch_size = self.par_batch_size(state_updates.len());
-        let c_deltas: DeltaList = state_updates
-            .par_iter()
-            .with_min_len(batch_size)
+        #[cfg(feature = "parallel")]
+        let delta_iter = use_iter!(state_updates).with_min_len(batch_size);
+        #[cfg(not(feature = "parallel"))]
+        let delta_iter = use_iter!(state_updates);
+
+        let c_deltas: DeltaList = delta_iter
             .filter_map(|(salt_key, (old_value, new_value))| {
                 let bucket_id = salt_key.bucket_id();
                 let (capacity, is_subtree) =
@@ -678,13 +686,12 @@ where
         mut child_updates: TrieUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort by position within parent vector commitments for cache locality
-        child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
+        use_sort_unstable_by!(child_updates, |(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
 
         let batch_size = self.par_batch_size(child_updates.len());
-        let delta_list = child_updates
-            .par_chunks(batch_size)
+        let delta_list = use_chunks!(child_updates, batch_size)
             .flat_map(|c_updates| {
                 // Interleave old and new commitments for efficient batch hashing
                 let hashes = Element::hash_commitments(
@@ -725,7 +732,7 @@ where
     /// The batch size to use for parallel chunks, guaranteed to be at least `min_par_batch_size`
     fn par_batch_size(&self, num_tasks: usize) -> usize {
         // Factor of 10 provides a sweet spot for most workloads
-        let num_batches = 10 * rayon::current_num_threads();
+        let num_batches = 10 * num_threads!();
         self.min_par_batch_size.max(num_tasks.div_ceil(num_batches))
     }
 
@@ -763,14 +770,13 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         // Sort deltas by NodeId to group changes for the same node together
         // This enables efficient accumulation and ensures deterministic ordering
-        commitment_deltas.par_sort_unstable_by_key(|&(node_id, _)| node_id);
+        use_sort_unstable_by_key!(commitment_deltas, |&(node_id, _)| node_id);
 
         // Create node-aligned chunks for parallel processing
         let chunks = self.create_node_aligned_chunks(&commitment_deltas, task_size);
 
         // Process each chunk in parallel and collect results
-        let results: Result<Vec<_>, _> = chunks
-            .par_iter()
+        let results: Result<Vec<_>, _> = use_iter!(chunks)
             .map(|chunk_range| self.accumulate_chunk_deltas(&commitment_deltas, chunk_range))
             .collect();
 
@@ -900,8 +906,7 @@ impl StateRoot<'_, EmptySalt> {
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
 
-        let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
-            .into_par_iter()
+        let all_trie_updates = use_into_iter!((NUM_META_BUCKETS..NUM_BUCKETS))
             .step_by(CHUNK_SIZE)
             .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
                 let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
@@ -1125,8 +1130,7 @@ mod tests {
         // For each bucket in the range: read KV pairs, compute deltas from default
         // state, and generate the final bucket commitment.
 
-        let mut level_commitments = (bucket_range_start..bucket_range_end)
-            .into_par_iter()
+        let mut level_commitments = use_into_iter!((bucket_range_start..bucket_range_end))
             .map(|bucket_index| {
                 let bucket_id = bucket_index as BucketId;
 
@@ -1194,8 +1198,7 @@ mod tests {
             }
 
             // Compute parent commitments from their children
-            level_commitments = parent_to_children
-                .into_par_iter()
+            level_commitments = use_into_iter!(parent_to_children)
                 .map(|(parent_index, (child_slot_indices, child_commitments))| {
                     // Hash the child commitments to get elements for delta computation
                     let hashed_children = Element::hash_commitments(&child_commitments);

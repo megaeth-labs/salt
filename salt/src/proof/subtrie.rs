@@ -28,8 +28,9 @@ use crate::{
     types::{BucketId, BucketMeta, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr};
+use banderwagon::{num_threads, use_chunks, use_into_iter, Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -266,8 +267,8 @@ where
 
     // Step 5: Generate IPA prover queries for each node in internal nodes
     let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let mut queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let mut queries = use_chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             let children_scalars = multi_commitments_to_scalars(store, nodes)?;
 
@@ -301,8 +302,7 @@ where
         .collect::<Vec<_>>();
 
     // Step 6: Generate IPA prover queries for each node in leaf nodes
-    let leaf_queries = leaf_nodes
-        .into_par_iter()
+    let leaf_queries = use_into_iter!(leaf_nodes)
         .map(|(parent, points)| {
             let physical_parent = connect_parent_id(parent);
             let parent_commitment = store
