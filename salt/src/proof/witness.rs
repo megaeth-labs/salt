@@ -106,6 +106,7 @@ impl Witness {
     /// - Witness creation fails
     pub fn create<'b, Store>(
         lookups: impl IntoIterator<Item = &'b Vec<u8>>,
+        bucket_ids: impl IntoIterator<Item = BucketId>,
         updates: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
         store: &Store,
     ) -> Result<Witness, ProofError>
@@ -142,6 +143,8 @@ impl Witness {
                     recorder.plain_value(plain_key)?;
                 }
             }
+
+            witnessed_keys.extend(bucket_ids.into_iter().map(bucket_metadata_key));
 
             // Separate update operations from insert/delete operations
             let inserts_or_deletes: Vec<_> = updates
@@ -325,6 +328,7 @@ mod tests {
             salt_witness::{create_mock_proof, SaltWitness},
             test_utils::*,
         },
+        state::updates::StateUpdates,
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
@@ -449,7 +453,7 @@ mod tests {
         store.update_trie(trie_updates);
 
         // Generate a witness for the inserted key
-        let witness = Witness::create(kvs.keys(), &BTreeMap::new(), &store).unwrap();
+        let witness = Witness::create(kvs.keys(), [], &BTreeMap::new(), &store).unwrap();
 
         // Test serialization round-trip of the underlying SaltWitness
         let serialized =
@@ -489,7 +493,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -512,7 +516,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -565,7 +569,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -617,7 +621,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0, 2]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -670,7 +674,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -711,7 +715,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[plain_key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -777,7 +781,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[7].clone();
 
-        let proof = Witness::create(&[key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -819,7 +823,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[8].clone();
 
-        let proof = Witness::create(&[key.clone()], &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&[key.clone()], [], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -865,7 +869,7 @@ mod tests {
 
         store.update_trie(trie_updates);
 
-        let witness = Witness::create(kvs.keys(), &BTreeMap::new(), &store).unwrap();
+        let witness = Witness::create(kvs.keys(), [], &BTreeMap::new(), &store).unwrap();
 
         for key in witness.salt_witness.kvs.keys() {
             let proof_value = witness.value(*key).unwrap();
@@ -893,7 +897,7 @@ mod tests {
 
         // Create a witness for the same 3 keys that were inserted
         let keys = select_test_keys(vec![7, 8, 9]);
-        let proof = Witness::create(&keys, &BTreeMap::new(), &store).unwrap();
+        let proof = Witness::create(&keys, [], &BTreeMap::new(), &store).unwrap();
 
         // Verify the witness is valid against the state root
         assert_eq!(root, proof.state_root().unwrap());
@@ -974,7 +978,7 @@ mod tests {
 
         // Create witness from initial state BEFORE any mutations
         let updates: BTreeMap<_, _> = kvs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let witness = Witness::create(std::iter::empty(), &updates, &store).unwrap();
+        let witness = Witness::create(std::iter::empty(), [], &updates, &store).unwrap();
 
         // Pass 1: MemStore-based insertion (mutates store)
         let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
@@ -1012,7 +1016,7 @@ mod tests {
             .chain(deletes.iter())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let witness = Witness::create(std::iter::empty(), &combined, &EmptySalt).unwrap();
+        let witness = Witness::create(std::iter::empty(), [], &combined, &EmptySalt).unwrap();
 
         // Verify no keys should exist in witness
         let mut witness_state = EphemeralSaltState::new(&witness);
@@ -1023,5 +1027,55 @@ mod tests {
                 "Key should be deleted in witness after insert+delete"
             );
         }
+    }
+
+    /// Verifies that witnesses can include bucket metadata for explicitly requested bucket IDs.
+    ///
+    /// Tests bucket IDs beyond the metadata bucket range (65536-16777215) to verify witnesses can
+    /// handle arbitrary bucket IDs across the full 24-bit bucket ID space.
+    #[test]
+    fn test_witness_bucket_ids_metadata() {
+        let store = MemStore::new();
+        // Test with bucket IDs beyond the metadata bucket range
+        let bucket_ids: Vec<BucketId> = vec![65536, 100_000, 1_000_000, 5_000_000, 16_777_215];
+        let expected_meta = BucketMeta {
+            capacity: (8 * MIN_BUCKET_SIZE) as u64,
+            ..BucketMeta::default()
+        };
+
+        // Update buckets from default to expanded capacity
+        let updates = StateUpdates {
+            data: bucket_ids
+                .iter()
+                .map(|&id| {
+                    (
+                        bucket_metadata_key(id),
+                        (
+                            Some(BucketMeta::default().into()),
+                            Some(expected_meta.into()),
+                        ),
+                    )
+                })
+                .collect(),
+        };
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        // Create witness with explicit bucket IDs (no plain keys)
+        let witness = Witness::create(
+            std::iter::empty(),
+            bucket_ids.iter().copied(),
+            &BTreeMap::new(),
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(witness.state_root().unwrap(), root);
+        assert!(witness.verify().is_ok());
+        // Verify all bucket metadata is accessible through the witness
+        bucket_ids.iter().for_each(|&id| {
+            assert_eq!(witness.metadata(id).unwrap(), expected_meta);
+        });
     }
 }
