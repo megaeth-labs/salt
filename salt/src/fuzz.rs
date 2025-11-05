@@ -153,8 +153,8 @@ fn e2e_test(blocks: &Vec<Block>) {
         state_updates.merge(canon_updates);
 
         // Block producer: Generate witness containing all data needed for stateless validation
-        let witness =
-            Witness::create(&lookups, &all_modifications, &db).expect("Failed to create witness");
+        let witness = Witness::create([], &lookups, &all_modifications, &db)
+            .expect("Failed to create witness");
 
         // Block producer: persist to database
         db.update_state(state_updates);
