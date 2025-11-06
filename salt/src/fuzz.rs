@@ -4,7 +4,8 @@ use crate::constant::{NUM_BUCKETS, NUM_META_BUCKETS};
 use crate::traits::StateReader;
 use crate::types::{BucketId, SaltKey};
 use crate::{
-    EphemeralSaltState, MemStore, SaltValue, SaltWitness, StateRoot, StateUpdates, Witness,
+    EphemeralSaltState, MemStore, SaltValue, SaltWitness, ScalarBytes, StateRoot, StateUpdates,
+    Witness,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -92,6 +93,7 @@ fn e2e_test(blocks: &Vec<Block>) {
     let mut pre_state_root = StateRoot::rebuild(&db)
         .expect("Failed to get initial state root")
         .0;
+    let mut revert_state_updates = vec![];
 
     for block in blocks {
         let mut state = EphemeralSaltState::new(&db);
@@ -155,6 +157,11 @@ fn e2e_test(blocks: &Vec<Block>) {
         // Block producer: Generate witness containing all data needed for stateless validation
         let witness = Witness::create([], &lookups, &all_modifications, &db)
             .expect("Failed to create witness");
+
+        // Save revert information for post-test verification: stores the pre-state root
+        // and inverse updates to enable rolling back all blocks to initial state later.
+        // This validates that state updates are correctly invertible.
+        revert_state_updates.push((pre_state_root, state_updates.clone().inverse()));
 
         // Block producer: persist to database
         db.update_state(state_updates);
@@ -257,6 +264,55 @@ fn e2e_test(blocks: &Vec<Block>) {
         ))
         .expect("Failed to enumerate entries");
     assert_eq!(entries.len(), ref_state.len(), "Entry count mismatch");
+
+    // Post-test verification: Revert blocks back to initial state to validate state reconstruction.
+    //
+    // This section tests the system's ability to correctly undo state changes by applying
+    // inverse state updates in reverse order. This validates that:
+    // 1. State updates are correctly invertible (can be undone)
+    // 2. The trie correctly computes intermediate state roots during reversion
+    // 3. The database can handle bidirectional state transitions
+    //
+    // The reversion is performed in configurable batch sizes to test both single-block
+    // and multi-block reversion scenarios.
+    let revert_step = env("BLOCK_REVERT_STEP", 1);
+    assert!(revert_step > 0, "Revert step must be positive");
+
+    // Process revert updates in reverse chronological order (newest to oldest)
+    revert_state_updates.reverse();
+
+    for chunk in revert_state_updates.chunks(revert_step) {
+        let mut accumulated_state_updates = StateUpdates::default();
+        let mut expected_state_root = ScalarBytes::default();
+        let mut trie = StateRoot::new(&db);
+
+        // Apply each revert update in the current batch
+        for (target_state_root, inverse_updates) in chunk {
+            // Accumulate all state changes for this batch
+            accumulated_state_updates.merge(inverse_updates.clone());
+
+            // Update trie incrementally with inverse state changes
+            trie.update(inverse_updates)
+                .expect("Failed to update trie during reversion");
+
+            // Track the target state root (the earliest in this batch becomes our target)
+            expected_state_root = *target_state_root;
+        }
+
+        // Finalize trie and verify we reached the expected historical state root
+        let (computed_state_root, trie_updates) = trie
+            .finalize()
+            .expect("Failed to finalize trie during reversion");
+
+        assert_eq!(
+            computed_state_root, expected_state_root,
+            "State root mismatch during reversion"
+        );
+
+        // Persist the reverted state to the database
+        db.update_state(accumulated_state_updates);
+        db.update_trie(trie_updates);
+    }
 }
 
 /// Converts test operations into plain key-value updates.
