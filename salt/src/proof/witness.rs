@@ -5,6 +5,7 @@
 //! full state. It acts as an abstraction layer over the lower-level `SaltWitness`
 //! proof system.
 
+use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
 use crate::{
     proof::salt_witness::SaltWitness,
     proof::ProofError,
@@ -12,12 +13,9 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    ops::{Range, RangeInclusive},
-};
-
-use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
+use core::ops::{Range, RangeInclusive};
+use hashbrown::HashMap;
+use std::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 /// A cryptographic witness enabling stateless validation and execution.
 ///

@@ -6,10 +6,12 @@ use ark_ed_on_bls12_381_bandersnatch::{EdwardsProjective, Fq, Fr};
 use ark_ff::BigInteger;
 use ark_ff::Zero;
 use ark_ff::{BigInt, PrimeField};
+use core::{cmp, ops::Neg};
 use risc0_zkvm::guest::env;
 use risc0_zkvm::guest::env::log;
 use risc0_zkvm_platform::syscall::bigint::OP_MULTIPLY;
 use risc0_zkvm_platform::syscall::sys_bigint;
+use std::{vec, vec::Vec};
 
 /// TODO
 pub(crate) fn add_projective(result: &mut EdwardsProjective, other: &EdwardsProjective) {
@@ -238,8 +240,7 @@ pub fn scalar_mul_zkvm(base: &Element, scalar: &Fr) -> Element {
 
 /// TODO
 pub(crate) fn msm_bigint_wnaf_zkvm(bases: &[Element], scalars: &[Fr]) -> Element {
-    use std::ops::Neg;
-    let size = core::cmp::min(bases.len(), scalars.len());
+    let size = cmp::min(bases.len(), scalars.len());
     let scalars = &scalars[..size];
     let bases = &bases[..size];
 

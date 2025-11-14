@@ -29,11 +29,16 @@ use crate::{
     SlotId,
 };
 use banderwagon::{num_threads, use_chunks, use_into_iter, Element, Fr};
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap as FxHashMap;
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::vec;
+use std::{format, string::ToString, vec::Vec};
 
 // Constants for improved code readability
 const METADATA_BUCKET_LEVEL: u8 = 1;

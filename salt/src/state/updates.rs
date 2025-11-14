@@ -4,6 +4,11 @@ use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::{btree_map::Entry, BTreeMap};
+use std::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 /// Tracks state changes as (old, new) value pairs for atomic updates and rollbacks.
 ///
@@ -81,7 +86,7 @@ impl StateUpdates {
     pub fn inverse(mut self) -> Self {
         self.data
             .values_mut()
-            .for_each(|(old, new)| std::mem::swap(old, new));
+            .for_each(|(old, new)| core::mem::swap(old, new));
         self
     }
 

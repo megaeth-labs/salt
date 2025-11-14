@@ -2,6 +2,7 @@
 use crate::crs::CRS;
 use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
+use std::vec::Vec;
 
 use crate::{IOError, IOErrorKind, IOResult};
 use banderwagon::{multi_scalar_mul, num_threads, trait_defs::*, use_chunks, Element, Fr};
@@ -9,7 +10,7 @@ use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use std::iter;
+use core::iter;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {

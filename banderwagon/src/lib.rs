@@ -1,12 +1,13 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc as std;
 pub mod msm;
 
 mod element;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
-pub use element::{
-    correctness_for_debug_risc0, multi_scalar_mul, test_msm_bigint_wnaf_basic,
-    test_msm_bigint_wnaf_multiple_large, test_scalar_mul_large_risc0, Element, Fr,
-};
+pub use element::{make_digits, multi_scalar_mul, scalar_mul, Element, Fr};
 pub mod salt_committer;
 mod scalar_multi_asm;
 

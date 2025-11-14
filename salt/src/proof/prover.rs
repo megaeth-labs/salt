@@ -15,18 +15,22 @@ use crate::{
     BucketId, ScalarBytes,
 };
 use banderwagon::{Element, Fr};
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap as FxHashMap;
 use ipa_multipoint::{
     crs::CRS,
     lagrange_basis::PrecomputedWeights,
     multiproof::{MultiPoint, MultiPointProof, VerifierQuery},
     transcript::Transcript,
 };
-use once_cell::sync::Lazy;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};
+use std::{format, string::ToString, vec::Vec};
 
 use banderwagon::{num_threads, use_chunks, use_iter, use_sort_unstable};
 

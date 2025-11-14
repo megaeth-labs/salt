@@ -8,13 +8,13 @@ edition = "2021"
 
 [dependencies]
 banderwagon = { path = "../banderwagon", default-features = false}
-itertools = "0.10.1"
-sha2 = "0.9.8"
+itertools = { version = "0.10.1", default-features = false, features = ["use_alloc"] }
+sha2 = { version = "0.9.8", default-features = false }
 rayon = {version = "*", optional = true}
-hex = "0.4.3"
-thiserror = "2.0"
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0", default-features = false }
 
-rustc-hash = "2.1.0"
+rustc-hash = { version = "2.1.0", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -23,11 +23,23 @@ ark-poly = { version = "0.5.0", default-features = false }
 ark-std = { version = "0.5.0", default-features = false }
 
 
+[[bin]]
+name = "ipa-multipoint"
+path = "src/main.rs"
+required-features = ["std"]
+
 [[bench]]
 name = "benchmark_main"
 harness = false
 
 [features]
-default = ["parallel"]
+default = ["std", "parallel"]
 parallel = ["rayon", "banderwagon/parallel"]
-std = ["banderwagon/std"]
+std = [
+    "banderwagon/std",
+    "itertools/use_std",
+    "sha2/std",
+    "hex/std",
+    "thiserror/std",
+    "rustc-hash/std"
+]

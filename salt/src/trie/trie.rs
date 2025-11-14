@@ -35,15 +35,17 @@ use banderwagon::{
     num_threads, salt_committer::Committer, use_chunks, use_into_iter, use_iter,
     use_sort_unstable_by, use_sort_unstable_by_key, Element, Fr, PrimeField,
 };
+use core::{cmp::Ordering, ops::Range};
+use hashbrown::HashMap;
 use ipa_multipoint::crs::CRS;
-use once_cell::sync::Lazy;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::sync::Arc;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    ops::Range,
-};
+use spin::Lazy;
+#[cfg(not(feature = "std"))]
+use std::collections::BTreeSet as HashSet;
+#[cfg(feature = "std")]
+use std::collections::HashSet;
+use std::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 3;
@@ -180,7 +182,7 @@ where
     /// changes from the `updates` cache through the upper main trie levels (L2-L0)
     /// to compute the final state root commitment.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
-        let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
+        let mut trie_updates = core::mem::take(&mut self.updates).into_iter().collect();
         let root_hash = self.update_main_trie(&mut trie_updates)?;
         for (node_id, (_, new)) in &trie_updates {
             self.cache.insert(*node_id, *new);
@@ -330,7 +332,7 @@ where
                         .new_capacity
                         .cmp(&subtree_change.old_capacity)
                     {
-                        std::cmp::Ordering::Greater => {
+                        Ordering::Greater => {
                             // When bucket expands, cache default commitments for new leaf segments
                             // and their ancestors. The underlying store doesn't have these yet.
                             let old_segments =
@@ -365,7 +367,7 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Less => {
+                        Ordering::Less => {
                             // Will be handled in subtree processing
                             let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
@@ -374,7 +376,7 @@ where
                                 continue;
                             }
                         }
-                        std::cmp::Ordering::Equal => {
+                        Ordering::Equal => {
                             if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
                                 need_handle_buckets.insert(bucket_id);
                             }
@@ -490,7 +492,7 @@ where
                     .old_top_level
                     .cmp(&subtree_change.new_top_level)
                 {
-                    std::cmp::Ordering::Greater => {
+                    core::cmp::Ordering::Greater => {
                         // Expansion: update old subtree root
                         add_expansion_update(&mut extra_updates, subtree_change)?;
                         need_handle_buckets.insert(*bucket_id);
@@ -500,11 +502,11 @@ where
                         trigger_levels[subtree_change.new_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                     }
-                    std::cmp::Ordering::Less => {
+                    core::cmp::Ordering::Less => {
                         // Contraction: new root equals bucket commitment
                         add_contraction_update(&mut uncomputed_updates, subtree_change)?;
                     }
-                    std::cmp::Ordering::Equal => {}
+                    core::cmp::Ordering::Equal => {}
                 }
             }
         }
@@ -790,7 +792,7 @@ where
         &self,
         deltas: &DeltaList,
         task_size: usize,
-    ) -> Vec<std::ops::Range<usize>> {
+    ) -> Vec<Range<usize>> {
         let mut chunk_boundaries = Vec::with_capacity(deltas.len() / task_size + 2);
         chunk_boundaries.push(0);
 

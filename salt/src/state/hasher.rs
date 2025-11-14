@@ -9,7 +9,7 @@
 use super::ahash::fallback::RandomState;
 use crate::constant::NUM_META_BUCKETS;
 use crate::types::BucketId;
-use std::hash::{BuildHasher, Hasher};
+use core::hash::{BuildHasher, Hasher};
 
 /// Fixed seeds derived from the lower 32 bytes of keccak256("Make Ethereum Great Again").
 const HASHER_SEEDS: [u64; 4] = [0x921321f4, 0x2ccb667e, 0x60d68842, 0x077ada9d];

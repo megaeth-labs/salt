@@ -5,14 +5,14 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError
 
 #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
 use crate::riscv_zkvm_ops::*;
-use std::{
-    hash::Hash,
+use core::{
+    hash::{Hash, Hasher},
     iter::Sum,
     ops::{Add, AddAssign, Mul, Neg, Sub},
 };
+use std::vec::Vec;
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Element(pub(crate) EdwardsProjective);
@@ -328,6 +328,8 @@ impl Element {
 
     #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
     pub(crate) fn normalize_batch_riscv32(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
+        #[cfg(not(feature = "std"))]
+        use std::vec;
         let mut zeroes = vec![false; elements.len()];
 
         let mut zs_mul = Fq::zero();
@@ -502,15 +504,6 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
     }
 }
 
-#[allow(dead_code)]
-pub fn multi_scalar_mul_based_on_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
-    let mut result = Element::zero();
-    for (base, scalar) in bases.iter().zip(scalars.iter()) {
-        result += scalar_mul(base, scalar);
-    }
-    result
-}
-
 pub fn scalar_mul(base: &Element, scalar: &Fr) -> Element {
     #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
     {
@@ -559,147 +552,6 @@ pub fn scalar_mul_com(base: &Element, scalar: &Fr) -> Element {
 
     result
 }
-#[allow(dead_code)]
-pub fn test_scalar_mul_large_risc0() {
-    // 测试大数标量乘法
-    let base = Element::prime_subgroup_generator();
-    let scalar = Fr::from(8u64);
-    let result_scalar_mul = scalar_mul(&base, &scalar);
-
-    // 使用 multi_scalar_mul 进行计算
-    let bases = vec![base];
-    let scalars = vec![scalar];
-    let result_multi_scalar_mul = multi_scalar_mul(&bases, &scalars);
-
-    // 验证两种方法的结果是否相同
-    assert_eq!(
-        result_scalar_mul, result_multi_scalar_mul,
-        "scalar_mul and multi_scalar_mul should produce the same result"
-    );
-
-    let expected_bytes = result_multi_scalar_mul.to_bytes_uncompressed();
-    let expected_hex_string: String = expected_bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-    println!("expected (hex): {}", expected_hex_string);
-    let result_bytes = result_scalar_mul.to_bytes_uncompressed();
-    let result_hex_string: String = result_bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
-    println!("result (hex): {}", result_hex_string);
-    println!(
-        "scalar_mul and multi_scalar_mul produce the same result: {}",
-        result_scalar_mul == result_multi_scalar_mul
-    );
-}
-#[allow(dead_code)]
-pub fn correctness_for_debug_risc0() {
-    let basis_num = 8;
-    let mut basic_crs = Vec::with_capacity(basis_num);
-    for i in 0..basis_num {
-        basic_crs.push(Element::prime_subgroup_generator() * Fr::from((i + 1) as u64));
-    }
-    let scalar = Fr::from_str(
-        "13108968793781547619861935127046491459309155893440570251786403306729687672800",
-    )
-    .unwrap();
-
-    // 创建测试标量
-    let mut scalars = Vec::with_capacity(basis_num);
-    // for i in 0..basis_num {
-    //     scalars.push(Fr::from((i + 1) as u64));
-    // }
-    for i in 0..basis_num {
-        scalars.push(scalar - Fr::from(i as u64));
-    }
-
-    // 使用 multi_scalar_mul 进行计算
-    let result = multi_scalar_mul(&basic_crs, &scalars);
-    println!("{:?}", result);
-}
-#[allow(dead_code)]
-pub(crate) fn msm_bigint_wnaf(bases: &[Element], scalars: &[Fr]) -> Element {
-    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
-    {
-        msm_bigint_wnaf_zkvm(bases, scalars)
-    }
-
-    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
-    {
-        msm_bigint_wnaf_com(bases, scalars)
-    }
-}
-#[allow(dead_code)]
-pub(crate) fn msm_bigint_wnaf_com(bases: &[Element], scalars: &[Fr]) -> Element {
-    let size = core::cmp::min(bases.len(), scalars.len());
-    let scalars = &scalars[..size];
-    let bases = &bases[..size];
-
-    // 将 Fr 转为 BigInt，供 make_digits 使用
-    let bigints: Vec<_> = scalars.iter().map(|s| s.into_bigint()).collect();
-
-    // 选择窗口大小 c
-    let c = if size < 32 {
-        3
-    } else {
-        ln_without_floats(size) + 2
-    };
-
-    // 按标量比特宽度切分 wNAF 窗口
-    let num_bits = Fr::MODULUS_BIT_SIZE as usize;
-    let digits_count = num_bits.div_ceil(c);
-
-    // 用 BigInt 展开 wNAF 数位
-    let scalar_digits = bigints
-        .iter()
-        .flat_map(|b| make_digits(b, c, num_bits))
-        .collect::<Vec<_>>();
-
-    let zero = Element::zero();
-
-    // 对每个窗口独立累加对应桶
-    let window_sums: Vec<_> = (0..digits_count)
-        .map(|i| {
-            let mut buckets = vec![zero; 1 << c];
-
-            for (digits, base) in scalar_digits.chunks(digits_count).zip(bases) {
-                let d = digits[i];
-                if d > 0 {
-                    buckets[(d - 1) as usize] += *base;
-                } else if d < 0 {
-                    buckets[(-d - 1) as usize] += -*base;
-                }
-            }
-
-            // 反向前缀和
-            let mut running_sum = Element::zero();
-            let mut res = Element::zero();
-            for b in buckets.into_iter().rev() {
-                running_sum += b;
-                res += running_sum;
-            }
-            res
-        })
-        .collect();
-
-    // 最低窗的和
-    let lowest = *window_sums.first().unwrap();
-
-    // 从高到低窗回代，每窗做 c 次倍点
-    lowest
-        + window_sums[1..]
-            .iter()
-            .rev()
-            .fold(Element::zero(), |mut total, sum_i| {
-                total += *sum_i;
-                for _ in 0..c {
-                    total = Element(total.0 + total.0);
-                }
-                total
-            })
-}
 
 /// floor(log2(n)) 的无浮点实现（n>0）
 #[allow(dead_code)]
@@ -710,7 +562,11 @@ fn ln_without_floats(n: usize) -> usize {
 }
 
 /// 从标量大整数构造 wNAF 数位（来自 gemini 实现，做了内联）
-fn make_digits(a: &impl BigInteger, w: usize, num_bits: usize) -> impl Iterator<Item = i64> + '_ {
+pub fn make_digits(
+    a: &impl BigInteger,
+    w: usize,
+    num_bits: usize,
+) -> impl Iterator<Item = i64> + '_ {
     let scalar = a.as_ref();
     let radix: u64 = 1 << w;
     let window_mask: u64 = radix - 1;
@@ -743,52 +599,6 @@ fn make_digits(a: &impl BigInteger, w: usize, num_bits: usize) -> impl Iterator<
         }
         digit
     })
-}
-#[allow(dead_code)]
-pub fn test_msm_bigint_wnaf_basic() {
-    // 测试基本的 wNAF MSM 实现
-    let base1 = Element::prime_subgroup_generator();
-    let base2 = base1 + base1;
-    let scalar1 = Fr::from(3u64);
-    let scalar2 = Fr::from(4u64);
-
-    let bases = vec![base1, base2];
-    let scalars = vec![scalar1, scalar2];
-
-    let result_wnaf = msm_bigint_wnaf(&bases, &scalars);
-    let result_arkworks = multi_scalar_mul(&bases, &scalars);
-
-    assert_eq!(
-        result_wnaf, result_arkworks,
-        "wNAF MSM should match arkworks MSM"
-    );
-    println!(
-        "test_msm_bigint_wnaf_basic is ok,result is{:?}",
-        result_wnaf
-    );
-}
-
-#[allow(dead_code)]
-pub fn test_msm_bigint_wnaf_multiple_large() {
-    // 测试多个大标量的 wNAF MSM
-    let basis_num = 16;
-    let mut bases = Vec::with_capacity(basis_num);
-    let mut scalars = Vec::with_capacity(basis_num);
-
-    let base_scalar = Fr::from_str(
-        "13108968793781547619861935127046491459309155893440570251786403306729687672800",
-    )
-    .unwrap();
-
-    for i in 0..basis_num {
-        bases.push(Element::prime_subgroup_generator() * Fr::from((i + 1) as u64));
-        scalars.push(base_scalar - Fr::from(i as u64));
-    }
-
-    let _result_wnaf = msm_bigint_wnaf(&bases, &scalars);
-    // let result_arkworks = multi_scalar_mul_com(&bases, &scalars);
-    //
-    // assert_eq!(result_wnaf, result_arkworks);
 }
 
 /// Multiplies an `Element` by a scalar field element.
@@ -874,7 +684,7 @@ impl Sum for Element {
 /// Uses the canonical byte representation via `to_bytes()` to ensure consistent
 /// hashing. This allows `Element` to be used as a key in `HashMap` and `HashSet`.
 impl Hash for Element {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.to_bytes().hash(state)
     }
 }

@@ -8,6 +8,7 @@ use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
+use std::vec::Vec;
 
 use banderwagon::{
     num_threads, trait_defs::*, use_chunks, use_chunks_mut, use_into_iter, use_iter, use_reduce,
@@ -15,7 +16,10 @@ use banderwagon::{
 };
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
+#[cfg(not(feature = "std"))]
+use std::collections::BTreeMap as FxHashMap;
 
 pub struct MultiPoint;
 

@@ -1,6 +1,7 @@
 use banderwagon::{num_threads, trait_defs::*, use_chunks_mut, Fr};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::{vec, vec::Vec};
 
 /// Computes the inner product between two scalar vectors
 pub fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {

@@ -24,12 +24,10 @@
 //!
 //! All operations are thread-safe through the use of [`RwLock`] for interior mutability.
 use crate::{constant::*, traits::*, types::*, StateUpdates, TrieUpdates};
+use core::ops::{Range, RangeInclusive};
 use hex;
-use std::{
-    collections::BTreeMap,
-    ops::{Range, RangeInclusive},
-    sync::RwLock,
-};
+use spin::RwLock;
+use std::{collections::BTreeMap, string::String, vec::Vec};
 
 /// Groups blockchain state storage and bucket usage cache together to ensure
 /// atomic consistency between the two related data structures.
@@ -103,17 +101,17 @@ pub struct MemStore {
 impl Clone for MemStore {
     fn clone(&self) -> Self {
         Self {
-            state: RwLock::new(self.state.read().expect("state lock poisoned").clone()),
-            trie: RwLock::new(self.trie.read().expect("trie lock poisoned").clone()),
+            state: RwLock::new(self.state.read().clone()),
+            trie: RwLock::new(self.trie.read().clone()),
         }
     }
 }
 
-impl std::fmt::Debug for MemStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for MemStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         writeln!(f, "=== MemStore Contents ===\n--- State Storage ---")?;
 
-        let state_guard = self.state.read().expect("state lock poisoned");
+        let state_guard = self.state.read();
         writeln!(
             f,
             "Key-Value pairs in state storage ({} entries):",
@@ -137,7 +135,7 @@ impl std::fmt::Debug for MemStore {
             writeln!(f, "  Bucket {}: {} used slots", bucket_id, used_slots)?;
         }
 
-        let trie_guard = self.trie.read().expect("trie lock poisoned");
+        let trie_guard = self.trie.read();
         writeln!(
             f,
             "\n--- Trie Storage ---\nNode commitments in trie storage ({} entries):",
@@ -176,7 +174,7 @@ impl MemStore {
     ///
     /// * `updates` - Batch of state changes to apply
     pub fn update_state(&self, updates: StateUpdates) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
 
         for (key, (old_value, new_value)) in updates.data {
             // Update used_slot information for data buckets only
@@ -211,7 +209,7 @@ impl MemStore {
     ///
     /// * `updates` - Batch of trie node commitment changes to apply
     pub fn update_trie(&self, updates: TrieUpdates) {
-        let mut trie = self.trie.write().unwrap();
+        let mut trie = self.trie.write();
         for (node_id, (_, new_val)) in updates {
             trie.insert(node_id, new_val);
         }
@@ -223,7 +221,7 @@ impl StateReader for MemStore {
     type Error = SaltError;
 
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-        let val = self.state.read().unwrap().kvs.get(&key).cloned();
+        let val = self.state.read().kvs.get(&key).cloned();
         Ok(val)
     }
 
@@ -234,7 +232,6 @@ impl StateReader for MemStore {
         Ok(self
             .state
             .read()
-            .unwrap()
             .kvs
             .range(range)
             .map(|(k, v)| (*k, v.clone()))
@@ -243,7 +240,7 @@ impl StateReader for MemStore {
 
     fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
         let key = bucket_metadata_key(bucket_id);
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
 
         let mut meta = match state.kvs.get(&key) {
             Some(v) => v.try_into()?,
@@ -258,7 +255,7 @@ impl StateReader for MemStore {
             return Ok(0);
         }
 
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         Ok(*state.used_slots.get(&bucket_id).unwrap_or(&0))
     }
 
@@ -277,7 +274,6 @@ impl TrieReader for MemStore {
         Ok(self
             .trie
             .read()
-            .unwrap()
             .get(&node_id)
             .copied()
             .unwrap_or_else(|| default_commitment(node_id)))
@@ -290,7 +286,6 @@ impl TrieReader for MemStore {
         Ok(self
             .trie
             .read()
-            .unwrap()
             .range(range)
             .map(|(k, v)| (*k, *v))
             .collect())

@@ -7,7 +7,7 @@
 //! - [`NodeId`]: 64-bit identifiers for trie nodes
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
-use std::ops::RangeInclusive;
+use core::ops::RangeInclusive;
 
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,

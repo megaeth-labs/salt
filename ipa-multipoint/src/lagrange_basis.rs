@@ -1,9 +1,10 @@
 use banderwagon::{trait_defs::*, Fr};
 
-use std::{
+use core::{
     convert::TryFrom,
     ops::{Add, Mul, Neg, Sub},
 };
+use std::{vec, vec::Vec};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LagrangeBasis {

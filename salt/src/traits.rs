@@ -5,11 +5,13 @@ use crate::{
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
-use std::error::Error;
-use std::{
+use core::{
     fmt::Debug,
     ops::{Range, RangeInclusive},
 };
+#[cfg(feature = "std")]
+use std::error::Error;
+use std::vec::Vec;
 
 /// Provides read-only access to SALT state storage.
 ///
@@ -27,7 +29,11 @@ use std::{
 #[auto_impl::auto_impl(&, Arc)]
 pub trait StateReader: Debug + Send + Sync {
     /// Custom trait's error type.
+    #[cfg(feature = "std")]
     type Error: Debug + Send + Sync + Error + 'static;
+
+    #[cfg(not(feature = "std"))]
+    type Error: Debug + Send + Sync + 'static;
 
     /// Retrieves a state value by key.
     ///
@@ -215,7 +221,11 @@ pub trait StateReader: Debug + Send + Sync {
 #[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
+    #[cfg(feature = "std")]
     type Error: Debug + Send + Sync + Error + 'static;
+
+    #[cfg(not(feature = "std"))]
+    type Error: Debug + Send + Sync + 'static;
 
     /// Retrieves the commitment for a specific trie node.
     ///

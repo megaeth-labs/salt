@@ -28,7 +28,7 @@
 //! All functions use `unsafe` blocks as they contain inline assembly. The assembly
 //! code assumes x86_64 architecture and may not work on other platforms.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 use std::arch::asm;
 
 /// Multiplies a field element by 5 in Montgomery form using optimized assembly.
@@ -55,7 +55,7 @@ use std::arch::asm;
 ///
 /// This function is only available on x86_64 targets and uses inline assembly.
 /// The caller must ensure the input is a valid Montgomery form field element.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[inline(always)]
 pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
     unsafe {
@@ -226,7 +226,7 @@ pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
 /// mont_mul_asm(&mut result, &x, &y);
 /// // result now contains Montgomery form of (1 * 2 * R^-1) mod p
 /// ```
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 #[inline(always)]
 pub(crate) fn mont_mul_asm(result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]) {
     unsafe {

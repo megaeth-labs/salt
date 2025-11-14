@@ -11,6 +11,7 @@
 
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
 use banderwagon::{try_reduce_to_element, Element, SerializationError};
+use std::{string::String, vec::Vec};
 use thiserror::Error;
 
 /// Error type for CRS operations.
@@ -19,14 +20,26 @@ pub enum CrsError {
     #[error("Empty input: CRS requires at least one point")]
     EmptyInput,
 
-    #[error("Invalid hex encoding: {0}")]
-    HexDecode(#[from] hex::FromHexError),
+    #[error("Invalid hex encoding")]
+    HexDecode,
 
     #[error("Invalid byte length: expected 32 bytes, got {0}")]
     InvalidLength(usize),
 
-    #[error("Point deserialization failed: {0}")]
-    Deserialization(#[from] SerializationError),
+    #[error("Point deserialization failed")]
+    Deserialization,
+}
+
+impl From<hex::FromHexError> for CrsError {
+    fn from(_: hex::FromHexError) -> Self {
+        CrsError::HexDecode
+    }
+}
+
+impl From<SerializationError> for CrsError {
+    fn from(_: SerializationError) -> Self {
+        CrsError::Deserialization
+    }
 }
 
 /// Common Reference String for the Pedersen commitment scheme.
@@ -131,7 +144,7 @@ impl CRS {
     pub fn to_bytes(&self) -> Vec<[u8; 32]> {
         self.G
             .iter()
-            .chain(std::iter::once(&self.Q))
+            .chain(core::iter::once(&self.Q))
             .map(Element::to_bytes)
             .collect()
     }
@@ -149,8 +162,11 @@ impl CRS {
     /// This is a critical security check to ensure the CRS has full rank.
     /// Duplicate points would compromise the binding property of commitments.
     fn assert_dedup(points: &[Element]) {
-        use std::collections::HashSet;
-        let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
+        use std::collections::BTreeSet;
+        let set = points
+            .iter()
+            .map(Element::to_bytes)
+            .collect::<BTreeSet<_>>();
         assert_eq!(set.len(), points.len(), "crs has duplicated points");
     }
 
@@ -169,7 +185,7 @@ impl CRS {
     }
 }
 
-impl std::ops::Index<usize> for CRS {
+impl core::ops::Index<usize> for CRS {
     type Output = Element;
 
     fn index(&self, index: usize) -> &Self::Output {

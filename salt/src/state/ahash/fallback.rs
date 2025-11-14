@@ -98,7 +98,7 @@ impl DeterministicHasher {
     }
 }
 
-impl std::hash::Hasher for DeterministicHasher {
+impl core::hash::Hasher for DeterministicHasher {
     #[inline]
     fn write_u8(&mut self, i: u8) {
         self.update(i as u64);
@@ -165,7 +165,7 @@ impl std::hash::Hasher for DeterministicHasher {
     }
 }
 
-impl std::hash::BuildHasher for RandomState {
+impl core::hash::BuildHasher for RandomState {
     type Hasher = DeterministicHasher;
 
     #[inline]

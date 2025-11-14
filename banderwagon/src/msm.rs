@@ -3,6 +3,7 @@ use ark_ed_on_bls12_381_bandersnatch::{EdwardsProjective, Fr};
 use ark_ff::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::vec::Vec;
 
 use crate::use_iter;
 

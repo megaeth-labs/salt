@@ -24,7 +24,6 @@
 //! - Window size affects the trade-off between memory usage and computation speed
 //! - Typical window size of 11 provides good balance for 256 base points
 //! - Hugepage support can reduce TLB misses for large precomputed tables
-
 use crate::element::Element;
 #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
 use crate::riscv_zkvm_ops::*;
@@ -36,6 +35,7 @@ use ark_ff::PrimeField;
 use ark_ff::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::{vec, vec::Vec};
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
 /// The `Committer` precomputes and stores windowed multiples of a set of base points
@@ -232,7 +232,7 @@ impl Committer {
     /// # Returns
     ///
     /// The result of `scalar * G[g_i]` as an `Element`.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
@@ -328,7 +328,7 @@ impl Committer {
     /// # Returns
     ///
     /// The result of `scalar * G[g_i]` as an `Element`.
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
@@ -384,10 +384,10 @@ impl Committer {
 /// * `result` - The projective point to update (in-place)
 /// * `p2_x` - X-coordinate of the affine point to add
 /// * `p2_y` - Y-coordinate of the affine point to add
-#[cfg(not(any(
-    target_arch = "x86_64",
-    all(target_os = "zkvm", target_arch = "riscv32")
-)))]
+#[cfg(all(
+    any(not(target_arch = "x86_64"), not(feature = "std")),
+    any(not(target_os = "zkvm"), not(target_arch = "riscv32")),
+))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
 
@@ -503,7 +503,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2x: &Fq, p2y: &Fq) {
 /// # Safety
 ///
 /// Uses unsafe assembly operations that are guaranteed correct for the Bandersnatch field.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use crate::scalar_multi_asm::*;
 

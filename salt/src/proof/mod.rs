@@ -63,6 +63,7 @@
 //! - [`subtrie`]: Constructs minimal subtries and generates IPA proofs by building
 //!   authentication paths from specified keys to the state root.
 
+use std::string::String;
 use thiserror::Error;
 
 use crate::types::SaltKey;

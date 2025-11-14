@@ -1,4 +1,5 @@
 use banderwagon::{trait_defs::*, Element, Fr};
+use std::vec::Vec;
 pub trait TranscriptProtocol {
     /// Compute a `label`ed challenge variable.
     fn challenge_scalar(&mut self, label: &'static [u8]) -> Fr;
