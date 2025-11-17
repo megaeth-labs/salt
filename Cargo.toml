@@ -3,17 +3,14 @@
 members = ["ipa-multipoint", "banderwagon", "salt"]
 resolver = "2"
 
-[profile.bench]
-debug = true
-opt-level = 3
-debug-assertions = true
-incremental = true
-
 [profile.release]
 opt-level = 3
-debug = true
-debug-assertions = true
-incremental = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+overflow-checks = false
+debug = 0
 
 [profile.test]
 opt-level = 3
