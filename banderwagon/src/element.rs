@@ -517,33 +517,33 @@ pub fn scalar_mul(base: &Element, scalar: &Fr) -> Element {
 }
 
 pub fn scalar_mul_com(base: &Element, scalar: &Fr) -> Element {
-    // 经典的二进制展开算法（从低位到高位扫描）
-    let mut result = Element::zero(); // 初始化为无穷远点
-    let mut temp = *base; // 当前倍点
+    // Classic binary expansion algorithm (scanning from low to high bits)
+    let mut result = Element::zero(); // Initialize to point at infinity
+    let mut temp = *base; // Current point being doubled
 
-    // 将标量转换为大整数表示
+    // Convert scalar to big integer representation
     let scalar_bigint = scalar.into_bigint();
 
-    // 获取标量的位数（256位）
-    let scalar_bits = scalar_bigint.to_bytes_le(); // 使用小端字节序
+    // Get scalar bits (256 bits)
+    let scalar_bits = scalar_bigint.to_bytes_le(); // Using little-endian byte order
 
-    // 从最低位到最高位逐位处理
+    // Process bit by bit from lowest to highest
     for (byte_index, &byte) in scalar_bits.iter().enumerate() {
         for bit_index in 0..8 {
-            // 计算当前位在整个256位中的位置
+            // Calculate the position of current bit in the 256-bit representation
             let bit_position = byte_index * 8 + bit_index;
 
-            // 如果已经处理完所有有效位，则退出
+            // Exit if all valid bits have been processed
             if bit_position >= 256 {
                 break;
             }
 
-            // 检查当前位是否为1
+            // Check if current bit is 1
             if (byte >> bit_index) & 1 != 0 {
                 result += temp;
             }
 
-            // 如果不是最高位，则将temp加倍
+            // If not the highest bit, double temp
             if bit_position < 255 {
                 temp = temp + temp;
             }
@@ -553,15 +553,7 @@ pub fn scalar_mul_com(base: &Element, scalar: &Fr) -> Element {
     result
 }
 
-/// floor(log2(n)) 的无浮点实现（n>0）
-#[allow(dead_code)]
-#[inline]
-fn ln_without_floats(n: usize) -> usize {
-    // SAFETY: n>0 时合法；上层已保证 size>0
-    usize::BITS as usize - 1 - n.leading_zeros() as usize
-}
-
-/// 从标量大整数构造 wNAF 数位（来自 gemini 实现，做了内联）
+/// Construct wNAF digits from scalar big integer (from Gemini implementation, inlined)
 pub fn make_digits(
     a: &impl BigInteger,
     w: usize,

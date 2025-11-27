@@ -62,6 +62,8 @@ pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
 
+type ContractBundleInfo = (usize, (u64, u64), u64);
+
 /// Manages computation and incremental updates of SALT trie commitments.
 ///
 /// `StateRoot` provides an efficient two-phase commit mechanism for updating the
@@ -438,7 +440,27 @@ where
             if subtree_change.new_capacity >= subtree_change.old_capacity {
                 continue;
             }
-            let mut capacity_start_index =
+
+            let bucket_id = (*bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId;
+            for (level,(updates_start, updates_end), extract_end) in contract_bundles(subtree_change.old_capacity, subtree_change.new_capacity) {
+                let extract_end = extract_end + bucket_id + STARTING_NODE_ID[level] as NodeId;
+                println!("{} {}-{} {}", level,updates_start, updates_end, extract_end);
+                let updates = use_into_iter!((updates_start..updates_end))
+                    .filter_map(|i| {
+                        let node_id = bucket_id + i + STARTING_NODE_ID[level] as NodeId;
+                        let old_c = self.commitment(node_id).expect("node should exist in trie");
+                        let new_c = default_commitment(node_id);
+                        (new_c != old_c).then_some((node_id, (old_c, new_c)))
+                    })
+                    .collect::<Vec<_>>();
+
+                let split_point = updates.partition_point(|node| node.0 < extract_end);
+                uncomputed_updates.extend(updates[split_point..].iter());
+                
+                extra_updates[level].extend(updates[0..split_point].iter());
+            }
+
+            /*let mut capacity_start_index =
                 subtree_change.new_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
             let mut capacity_end_index =
                 subtree_change.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
@@ -472,9 +494,11 @@ where
                 uncomputed_updates.extend(updates[split_point..].iter());
                 extra_updates[level].extend(updates[0..split_point].iter());
 
+                println!("{} {}-{} {}", level,capacity_start_index, capacity_end_index, extract_end);
+
                 capacity_start_index >>= MIN_BUCKET_SIZE_BITS as NodeId;
                 capacity_end_index >>= MIN_BUCKET_SIZE_BITS as NodeId;
-            }
+            }*/
         }
         // Step 4: Set up triggers and handle capacity-only changes
         for (bucket_id, subtree_change) in &subtree_change_info {
@@ -583,6 +607,11 @@ where
             if total_remaining_triggers == 0 || level == 0 {
                 break;
             }
+
+            if level == 3 {
+                show_bucket_c(&subtree_commitmens, 8020398);
+            }
+            
 
             // Propagate updates to next level up
             subtree_commitmens = self
@@ -2574,4 +2603,116 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn test_bucket_rehash_with_new_capacity() {
+        use crate::Witness;
+        let expansion_multiplier = 512;
+        let contraction_multiplier = 257;
+        let n = 2;
+        let kvs = create_random_kvs(n);
+        let store = MemStore::new();
+        // Step 1: insert all kvs and mock expansion
+        let mut state = EphemeralSaltState::new(&store);
+        let mut updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+
+        //println!("updates:{:?}", updates);
+        let mut bids = HashSet::new();
+        for (key, _) in &kvs {
+            bids.insert(crate::hasher::bucket_id(key));
+        }
+        for bid in &bids {
+            let meta = store.metadata(*bid).unwrap();
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(
+                    *bid,
+                    meta.nonce,
+                    MIN_BUCKET_SIZE as u64 * expansion_multiplier,
+                    &mut rehash_updates,
+                )
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+        println!("updates2:{:?}", updates);
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        show_bucket_c(&trie_updates, 8020398);
+        println!("------------------");
+        store.update_trie(trie_updates);
+        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
+        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
+        assert_eq!(root, witness.state_root().unwrap());
+        assert!(witness.verify().is_ok());
+        // Step 2: mock contraction
+        let mut updates = StateUpdates::default();
+        for bid in &bids {
+            let meta = store.metadata(*bid).unwrap();
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(
+                    *bid,
+                    meta.nonce,
+                    MIN_BUCKET_SIZE as u64 * contraction_multiplier,
+                    &mut rehash_updates,
+                )
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+        println!("updates3:{:?}", updates);
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        println!("------------------");
+        show_bucket_c(&trie_updates, 8020398);
+        println!("------------------");
+        store.update_trie(trie_updates);
+
+
+        contract_bundles(131072,65792);
+
+        
+        //let (rebuild, trie_updates) = StateRoot::rebuild(&store).unwrap(); show_bucket_c(&trie_updates, 8020398); assert_eq!(rebuild, root);
+        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
+        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
+        assert_eq!(root, witness.state_root().unwrap());
+        assert!(witness.verify().is_ok());
+    }
+
+    
+}
+
+fn show_bucket_c(trie_updates: &TrieUpdates, bucket_id: BucketId) {
+
+        for n in trie_updates {
+            if !is_subtree_node(n.0) && n.0 > STARTING_NODE_ID[3] as u64 && (n.0 - STARTING_NODE_ID[3] as u64) == bucket_id as u64 {
+                println!("{} old:{:?}", n.0 - STARTING_NODE_ID[3] as u64, hash_commitment(n.1.0));
+                println!("{} new:{:?}", n.0 - STARTING_NODE_ID[3] as u64, hash_commitment(n.1.1));
+            } else if (n.0 >> 40) == bucket_id as u64 {
+                println!("{} old:{:?}", n.0, hash_commitment(n.1.0));
+                println!("{} new:{:?}", n.0, hash_commitment(n.1.1));
+            }
+        }
+
+    }
+
+fn contract_bundles(old_capacity: u64, new_capacity: u64) -> Vec<ContractBundleInfo> {
+    assert!(old_capacity > new_capacity, "");
+    let old_top_level = subtree_root_level(old_capacity);
+    let min_bucket_size = MIN_BUCKET_SIZE as u64;
+   
+    let mut capacity_start_index = new_capacity.saturating_sub(1) / min_bucket_size + 1;
+
+    let mut capacity_end_index = old_capacity.saturating_sub(1) / min_bucket_size + 1;
+
+    
+    let mut bundles = vec![];
+    for level in (old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
+        let extract_end = ((capacity_start_index.saturating_sub(1) / min_bucket_size + 1)
+                    * min_bucket_size)
+                    .min(capacity_end_index);
+        bundles.push((level,(capacity_start_index, capacity_end_index), extract_end));
+        capacity_start_index = capacity_start_index.saturating_sub(1) / min_bucket_size + 1;
+        capacity_end_index = capacity_end_index.saturating_sub(1) / min_bucket_size + 1;
+    }
+    bundles
 }
