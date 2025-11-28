@@ -22,8 +22,8 @@
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS,
-        MAX_SUBTREE_LEVELS, META_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-        NUM_META_BUCKETS, STARTING_NODE_ID, TRIE_WIDTH,
+        MAX_SUBTREE_LEVELS, META_BUCKET_SIZE, MIN_BUCKET_SIZE, NUM_BUCKETS, NUM_META_BUCKETS,
+        STARTING_NODE_ID, TRIE_WIDTH,
     },
     empty_salt::EmptySalt,
     state::updates::StateUpdates,
@@ -55,6 +55,9 @@ pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
+
+// Type alias for contract bundle information: (level, (start_index, end_index), extract_end)
+type ContractionLevel = (usize, (u64, u64), u64);
 
 /// Manages computation and incremental updates of SALT trie commitments.
 ///
@@ -432,28 +435,14 @@ where
             if subtree_change.new_capacity >= subtree_change.old_capacity {
                 continue;
             }
-            let mut capacity_start_index =
-                subtree_change.new_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
-            let mut capacity_end_index =
-                subtree_change.old_capacity >> MIN_BUCKET_SIZE_BITS as NodeId;
             let bucket_id = (*bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId;
-            let min_bucket_size = MIN_BUCKET_SIZE as u64;
-
-            for level in (subtree_change.old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
-                // Calculate the boundary for extracting nodes that need parent recomputation.
-                // We align the extract range to MIN_BUCKET_SIZE boundaries to ensure all
-                // siblings under the same parent are processed together.
-                //
-                // Range breakdown:
-                // [already computed]...[extract_start]...[needs computation]...[extract_end]
-                // where extract_start >= capacity_start_index
-                let extract_end = ((capacity_start_index.saturating_sub(1) / min_bucket_size + 1)
-                    * min_bucket_size)
-                    .min(capacity_end_index)
-                    + bucket_id
-                    + STARTING_NODE_ID[level] as NodeId;
-
-                let updates = (capacity_start_index..capacity_end_index)
+            // Iterate through each contraction level with its update range and extraction endpoint
+            for (level, (updates_start, updates_end), extract_end) in compute_contraction_bundles(
+                subtree_change.old_capacity,
+                subtree_change.new_capacity,
+            ) {
+                let extract_end = extract_end + bucket_id + STARTING_NODE_ID[level] as NodeId;
+                let updates = (updates_start..updates_end)
                     .into_par_iter()
                     .filter_map(|i| {
                         let node_id = bucket_id + i + STARTING_NODE_ID[level] as NodeId;
@@ -465,10 +454,8 @@ where
 
                 let split_point = updates.partition_point(|node| node.0 < extract_end);
                 uncomputed_updates.extend(updates[split_point..].iter());
-                extra_updates[level].extend(updates[0..split_point].iter());
 
-                capacity_start_index >>= MIN_BUCKET_SIZE_BITS as NodeId;
-                capacity_end_index >>= MIN_BUCKET_SIZE_BITS as NodeId;
+                extra_updates[level].extend(updates[0..split_point].iter());
             }
         }
         // Step 4: Set up triggers and handle capacity-only changes
@@ -969,6 +956,53 @@ pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> Fr {
     )
 }
 
+// Calculate the bundles needed when contracting (reducing) trie capacity
+fn compute_contraction_bundles(old_capacity: u64, new_capacity: u64) -> Vec<ContractionLevel> {
+    // Ensure we're actually contracting (reducing capacity)
+    assert!(
+        old_capacity > new_capacity,
+        "old_capacity must be greater than new_capacity for contraction"
+    );
+
+    // Helper function to calculate bucket index from capacity
+    #[inline]
+    fn bucket_index(capacity: u64, min_bucket_size: u64) -> u64 {
+        capacity.saturating_sub(1) / min_bucket_size + 1
+    }
+
+    // Determine the top level of the subtree for the old capacity
+    let old_top_level = subtree_root_level(old_capacity);
+    let new_top_level = subtree_root_level(new_capacity);
+    let min_bucket_size = MIN_BUCKET_SIZE as u64;
+
+    // Calculate the starting and ending bucket indices
+    let mut start_index = new_capacity;
+    let mut end_index = old_capacity;
+
+    // Pre-allocate with exact capacity needed
+    let num_levels = MAX_SUBTREE_LEVELS - old_top_level - 1;
+    let mut bundles = Vec::with_capacity(num_levels);
+
+    // Iterate through levels from MAX_SUBTREE_LEVELS down to old_top_level+1
+    for level in (old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
+        // Move up one level: adjust indices by dividing by min_bucket_size
+        end_index = bucket_index(end_index, min_bucket_size);
+        let extract_end = if level > new_top_level {
+            start_index = bucket_index(start_index, min_bucket_size);
+            let extract_end =
+                bucket_index(start_index.saturating_sub(1), min_bucket_size) * min_bucket_size;
+            extract_end.min(end_index)
+        } else {
+            start_index = 0;
+            0
+        };
+        // Store bundle information: (level, (start, end), extract_end)
+        bundles.push((level, (start_index, end_index), extract_end));
+    }
+
+    bundles
+}
+
 /// The information of subtrie change.
 #[derive(Debug, Clone)]
 struct SubtrieChangeInfo {
@@ -1020,7 +1054,7 @@ mod tests {
     use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
     use crate::{
-        constant::{default_commitment, MAIN_TRIE_LEVELS, STARTING_NODE_ID},
+        constant::{default_commitment, MAIN_TRIE_LEVELS, MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID},
         empty_salt::EmptySalt,
     };
     use banderwagon::Zero;
@@ -2492,6 +2526,112 @@ mod tests {
                 "The subtrie default commitment of the level {i} should be equal to the constant value"
             );
         }
+    }
+
+    #[test]
+    fn test_compute_contraction_bundles() {
+        // Old: Subtree level[3, 4] with bottom level node IDs [0,256),
+        // New: Subtree level[4] only
+        // Expect: level 4, updates[0, 256), extract end at 0
+        let bundles = compute_contraction_bundles(65536, 256);
+        assert_eq!(bundles, vec![(4, (0, 256), 0)]);
+
+        // Old: Subtree level[3, 4] with bottom level node IDs [0, 256),
+        // New: Subtree level[3, 4] with bottom level node IDs [0, 2)
+        // Old and New Subtree root at Level 3, no need to update
+        // Expect: level 4, updates[2, 256), extract end at 256
+        let bundles = compute_contraction_bundles(65535, 512);
+        assert_eq!(bundles, vec![(4, (2, 256), 256)]);
+
+        // Old: Subtree level[2, 4] with bottom level node IDs [0..257),
+        // New: Subtree level[3, 4] with bottom level node IDs [0,3)
+        // Expect:
+        //   - level 4: updates[3, 257), extract end at 256
+        //   - level 3: updates[0, 2), extract end at 0
+        let bundles = compute_contraction_bundles(65537, 513);
+        assert_eq!(bundles, vec![(4, (3, 257), 256), (3, (0, 2), 0)]);
+
+        // Old: Subtree level[2, 4] with bottom level node IDs [0, 65536),
+        // New: Subtree level[3, 4] with bottom level node IDs [0, 2)
+        // Expect:
+        //   - level 4: updates[2, 65536), extract end at 256
+        //   - level 3: updates[0, 256), extract end at 0
+        let bundles = compute_contraction_bundles(16777216, 257);
+        assert_eq!(bundles, vec![(4, (2, 65536), 256), (3, (0, 256), 0)]);
+
+        // Old: Subtree level[1, 4] with bottom level node IDs [0, 65537),
+        // New: Subtree level[3, 4] with bottom level node IDs[0, 2)
+        // Expect:
+        //   - level 4: updates[2, 65537), extract end at 256
+        //   - level 3: updates[0, 257), extract end at 0
+        //   - level 2: updates[0, 2], extract end at 0
+        let bundles = compute_contraction_bundles(16777217, 512);
+        assert_eq!(
+            bundles,
+            vec![(4, (2, 65537), 256), (3, (0, 257), 0), (2, (0, 2), 0)]
+        );
+    }
+
+    #[test]
+    fn test_bucket_rehash_with_new_capacity() {
+        use crate::Witness;
+        let expansion_multiplier = 512;
+        let contraction_multiplier = 257;
+        let n = 2;
+        let kvs = create_random_kvs(n);
+        let store = MemStore::new();
+        // Step 1: insert all kvs and mock expansion
+        let mut state = EphemeralSaltState::new(&store);
+        let mut updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+
+        let mut bids = HashSet::new();
+        for (key, _) in &kvs {
+            bids.insert(crate::hasher::bucket_id(key));
+        }
+        for bid in &bids {
+            let meta = store.metadata(*bid).unwrap();
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(
+                    *bid,
+                    meta.nonce,
+                    MIN_BUCKET_SIZE as u64 * expansion_multiplier,
+                    &mut rehash_updates,
+                )
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
+        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
+        assert_eq!(root, witness.state_root().unwrap());
+        assert!(witness.verify().is_ok());
+        // Step 2: mock contraction
+        let mut updates = StateUpdates::default();
+        for bid in &bids {
+            let meta = store.metadata(*bid).unwrap();
+            let mut rehash_updates = StateUpdates::default();
+            state
+                .shi_rehash(
+                    *bid,
+                    meta.nonce,
+                    MIN_BUCKET_SIZE as u64 * contraction_multiplier,
+                    &mut rehash_updates,
+                )
+                .unwrap();
+            updates.merge(rehash_updates);
+        }
+
+        store.update_state(updates.clone());
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
+        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
+        assert_eq!(root, witness.state_root().unwrap());
+        assert!(witness.verify().is_ok());
     }
 
     fn get_delta_ranges(c_deltas: &[(NodeId, Element)], task_size: usize) -> Vec<(usize, usize)> {
