@@ -56,8 +56,23 @@ pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
 
-// Type alias for contract bundle information: (level, (start_index, end_index), extract_end)
-type ContractionLevel = (usize, (u64, u64), u64);
+/// Describes a shrink operation for a single trie level during bucket contraction.
+///
+/// When bucket capacity shrinks, this specifies which nodes at a particular level
+/// need their commitments reset to defaults, and how to process them efficiently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LevelContractionOp {
+    /// The trie level being updated (0=root, 4=leaf)
+    level: usize,
+
+    /// Half-open range [start, end) of node indices requiring updates
+    update_range: (u64, u64),
+
+    /// Boundary separating nodes with complete children (below) from nodes with
+    /// incomplete children (at/above). Nodes below are processed immediately
+    /// during bottom-up traversal; nodes at/above are deferred to the end.
+    immediate_boundary: u64,
+}
 
 /// Manages computation and incremental updates of SALT trie commitments.
 ///
@@ -437,15 +452,16 @@ where
             }
             let bucket_id = (*bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId;
             // Iterate through each contraction level with its update range and extraction endpoint
-            for (level, (updates_start, updates_end), extract_end) in compute_contraction_bundles(
-                subtree_change.old_capacity,
-                subtree_change.new_capacity,
-            ) {
-                let extract_end = extract_end + bucket_id + STARTING_NODE_ID[level] as NodeId;
+            for op in
+                compute_contraction_ops(subtree_change.old_capacity, subtree_change.new_capacity)
+            {
+                let (updates_start, updates_end) = op.update_range;
+                let extract_end =
+                    op.immediate_boundary + bucket_id + STARTING_NODE_ID[op.level] as NodeId;
                 let updates = (updates_start..updates_end)
                     .into_par_iter()
                     .filter_map(|i| {
-                        let node_id = bucket_id + i + STARTING_NODE_ID[level] as NodeId;
+                        let node_id = bucket_id + i + STARTING_NODE_ID[op.level] as NodeId;
                         let old_c = self.commitment(node_id).expect("node should exist in trie");
                         let new_c = default_commitment(node_id);
                         (new_c != old_c).then_some((node_id, (old_c, new_c)))
@@ -455,7 +471,7 @@ where
                 let split_point = updates.partition_point(|node| node.0 < extract_end);
                 uncomputed_updates.extend(updates[split_point..].iter());
 
-                extra_updates[level].extend(updates[0..split_point].iter());
+                extra_updates[op.level].extend(updates[0..split_point].iter());
             }
         }
         // Step 4: Set up triggers and handle capacity-only changes
@@ -957,47 +973,32 @@ pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> Fr {
 }
 
 // Calculate the bundles needed when contracting (reducing) trie capacity
-fn compute_contraction_bundles(old_capacity: u64, new_capacity: u64) -> Vec<ContractionLevel> {
-    // Ensure we're actually contracting (reducing capacity)
-    assert!(
-        old_capacity > new_capacity,
-        "old_capacity must be greater than new_capacity for contraction"
-    );
+fn compute_contraction_ops(old_capacity: u64, new_capacity: u64) -> Vec<LevelContractionOp> {
+    debug_assert!(old_capacity > new_capacity);
 
-    // Helper function to calculate bucket index from capacity
-    #[inline]
-    fn bucket_index(capacity: u64, min_bucket_size: u64) -> u64 {
-        capacity.saturating_sub(1) / min_bucket_size + 1
-    }
-
-    // Determine the top level of the subtree for the old capacity
     let old_top_level = subtree_root_level(old_capacity);
     let new_top_level = subtree_root_level(new_capacity);
     let min_bucket_size = MIN_BUCKET_SIZE as u64;
 
-    // Calculate the starting and ending bucket indices
-    let mut start_index = new_capacity;
-    let mut end_index = old_capacity;
+    let mut start = new_capacity;
+    let mut end = old_capacity;
+    let mut bundles = Vec::with_capacity(MAX_SUBTREE_LEVELS - old_top_level - 1);
 
-    // Pre-allocate with exact capacity needed
-    let num_levels = MAX_SUBTREE_LEVELS - old_top_level - 1;
-    let mut bundles = Vec::with_capacity(num_levels);
-
-    // Iterate through levels from MAX_SUBTREE_LEVELS down to old_top_level+1
+    // Process each level from bottom to top, computing update ranges
     for level in (old_top_level + 1..MAX_SUBTREE_LEVELS).rev() {
-        // Move up one level: adjust indices by dividing by min_bucket_size
-        end_index = bucket_index(end_index, min_bucket_size);
+        end = end.div_ceil(min_bucket_size);
         let extract_end = if level > new_top_level {
-            start_index = bucket_index(start_index, min_bucket_size);
-            let extract_end =
-                bucket_index(start_index.saturating_sub(1), min_bucket_size) * min_bucket_size;
-            extract_end.min(end_index)
+            start = start.div_ceil(min_bucket_size);
+            (start.saturating_sub(1).div_ceil(min_bucket_size) * min_bucket_size).min(end)
         } else {
-            start_index = 0;
+            start = 0;
             0
         };
-        // Store bundle information: (level, (start, end), extract_end)
-        bundles.push((level, (start_index, end_index), extract_end));
+        bundles.push(LevelContractionOp {
+            level,
+            update_range: (start, end),
+            immediate_boundary: extract_end,
+        });
     }
 
     bundles
@@ -2584,35 +2585,77 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_contraction_bundles() {
+    fn test_compute_contraction_ops() {
         // Old: Subtree level[3, 4] with bottom level node IDs [0,256),
         // New: Subtree level[4] only
         // Expect: level 4, updates[0, 256), extract end at 0
-        let bundles = compute_contraction_bundles(65536, 256);
-        assert_eq!(bundles, vec![(4, (0, 256), 0)]);
+        let bundles = compute_contraction_ops(65536, 256);
+        assert_eq!(
+            bundles,
+            vec![LevelContractionOp {
+                level: 4,
+                update_range: (0, 256),
+                immediate_boundary: 0,
+            }]
+        );
 
         // Old: Subtree level[3, 4] with bottom level node IDs [0, 256),
         // New: Subtree level[3, 4] with bottom level node IDs [0, 2)
         // Old and New Subtree root at Level 3, no need to update
         // Expect: level 4, updates[2, 256), extract end at 256
-        let bundles = compute_contraction_bundles(65535, 512);
-        assert_eq!(bundles, vec![(4, (2, 256), 256)]);
+        let bundles = compute_contraction_ops(65535, 512);
+        assert_eq!(
+            bundles,
+            vec![LevelContractionOp {
+                level: 4,
+                update_range: (2, 256),
+                immediate_boundary: 256,
+            }]
+        );
 
         // Old: Subtree level[2, 4] with bottom level node IDs [0..257),
         // New: Subtree level[3, 4] with bottom level node IDs [0,3)
         // Expect:
         //   - level 4: updates[3, 257), extract end at 256
         //   - level 3: updates[0, 2), extract end at 0
-        let bundles = compute_contraction_bundles(65537, 513);
-        assert_eq!(bundles, vec![(4, (3, 257), 256), (3, (0, 2), 0)]);
+        let bundles = compute_contraction_ops(65537, 513);
+        assert_eq!(
+            bundles,
+            vec![
+                LevelContractionOp {
+                    level: 4,
+                    update_range: (3, 257),
+                    immediate_boundary: 256,
+                },
+                LevelContractionOp {
+                    level: 3,
+                    update_range: (0, 2),
+                    immediate_boundary: 0,
+                }
+            ]
+        );
 
         // Old: Subtree level[2, 4] with bottom level node IDs [0, 65536),
         // New: Subtree level[3, 4] with bottom level node IDs [0, 2)
         // Expect:
         //   - level 4: updates[2, 65536), extract end at 256
         //   - level 3: updates[0, 256), extract end at 0
-        let bundles = compute_contraction_bundles(16777216, 257);
-        assert_eq!(bundles, vec![(4, (2, 65536), 256), (3, (0, 256), 0)]);
+        let bundles = compute_contraction_ops(16777216, 257);
+        assert_eq!(
+            bundles,
+            vec![
+                LevelContractionOp {
+                    level: 4,
+                    update_range: (2, 65536),
+                    immediate_boundary: 256,
+                },
+                LevelContractionOp {
+                    level: 3,
+                    update_range: (0, 256),
+                    immediate_boundary: 0,
+                }
+            ]
+        );
 
         // Old: Subtree level[1, 4] with bottom level node IDs [0, 65537),
         // New: Subtree level[3, 4] with bottom level node IDs[0, 2)
@@ -2620,10 +2663,26 @@ mod tests {
         //   - level 4: updates[2, 65537), extract end at 256
         //   - level 3: updates[0, 257), extract end at 0
         //   - level 2: updates[0, 2], extract end at 0
-        let bundles = compute_contraction_bundles(16777217, 512);
+        let bundles = compute_contraction_ops(16777217, 512);
         assert_eq!(
             bundles,
-            vec![(4, (2, 65537), 256), (3, (0, 257), 0), (2, (0, 2), 0)]
+            vec![
+                LevelContractionOp {
+                    level: 4,
+                    update_range: (2, 65537),
+                    immediate_boundary: 256,
+                },
+                LevelContractionOp {
+                    level: 3,
+                    update_range: (0, 257),
+                    immediate_boundary: 0,
+                },
+                LevelContractionOp {
+                    level: 2,
+                    update_range: (0, 2),
+                    immediate_boundary: 0,
+                }
+            ]
         );
     }
 
