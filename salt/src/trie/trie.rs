@@ -2070,6 +2070,61 @@ mod tests {
         );
     }
 
+    /// Tests that witness creation and verification remain functional after bucket
+    /// rehashing with various non-power-of-two capacity multipliers, including
+    /// edge cases with different multiplier combinations.
+    #[test]
+    fn test_bucket_rehash_non_power_of_two_multiplier() {
+        use crate::Witness;
+
+        let test_cases = vec![(512, 257), (257, 129), (513, 257), (321, 123), (999, 3)];
+
+        for (expansion_multiplier, contraction_multiplier) in test_cases {
+            let n = 5;
+            let kvs = create_random_kvs(n);
+            let store = MemStore::new();
+
+            // Step 1: Insert kvs and collect bucket IDs
+            let mut state = EphemeralSaltState::new(&store);
+            let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+            let bids: HashSet<_> = kvs
+                .iter()
+                .map(|(key, _)| crate::hasher::bucket_id(key))
+                .collect();
+
+            // Helper to perform rehash on all buckets and verify witness
+            let mut rehash_and_verify = |mut updates: StateUpdates, capacity_multiplier: u64| {
+                for bid in &bids {
+                    let meta = store.metadata(*bid).unwrap();
+                    let mut rehash_updates = StateUpdates::default();
+                    state
+                        .shi_rehash(
+                            *bid,
+                            meta.nonce,
+                            MIN_BUCKET_SIZE as u64 * capacity_multiplier,
+                            &mut rehash_updates,
+                        )
+                        .unwrap();
+                    updates.merge(rehash_updates);
+                }
+                store.update_state(updates.clone());
+                let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+                store.update_trie(trie_updates);
+
+                let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
+                let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
+                assert_eq!(root, witness.state_root().unwrap());
+                assert!(witness.verify().is_ok());
+            };
+
+            // Step 2: Mock expansion
+            rehash_and_verify(updates, expansion_multiplier);
+
+            // Step 3: Mock contraction
+            rehash_and_verify(StateUpdates::default(), contraction_multiplier);
+        }
+    }
+
     #[test]
     fn test_add_commitment_deltas() {
         let store = EmptySalt;
@@ -2570,68 +2625,6 @@ mod tests {
             bundles,
             vec![(4, (2, 65537), 256), (3, (0, 257), 0), (2, (0, 2), 0)]
         );
-    }
-
-    #[test]
-    fn test_bucket_rehash_with_new_capacity() {
-        use crate::Witness;
-        let expansion_multiplier = 512;
-        let contraction_multiplier = 257;
-        let n = 2;
-        let kvs = create_random_kvs(n);
-        let store = MemStore::new();
-        // Step 1: insert all kvs and mock expansion
-        let mut state = EphemeralSaltState::new(&store);
-        let mut updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
-
-        let mut bids = HashSet::new();
-        for (key, _) in &kvs {
-            bids.insert(crate::hasher::bucket_id(key));
-        }
-        for bid in &bids {
-            let meta = store.metadata(*bid).unwrap();
-            let mut rehash_updates = StateUpdates::default();
-            state
-                .shi_rehash(
-                    *bid,
-                    meta.nonce,
-                    MIN_BUCKET_SIZE as u64 * expansion_multiplier,
-                    &mut rehash_updates,
-                )
-                .unwrap();
-            updates.merge(rehash_updates);
-        }
-        store.update_state(updates.clone());
-        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_trie(trie_updates);
-        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
-        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
-        assert_eq!(root, witness.state_root().unwrap());
-        assert!(witness.verify().is_ok());
-        // Step 2: mock contraction
-        let mut updates = StateUpdates::default();
-        for bid in &bids {
-            let meta = store.metadata(*bid).unwrap();
-            let mut rehash_updates = StateUpdates::default();
-            state
-                .shi_rehash(
-                    *bid,
-                    meta.nonce,
-                    MIN_BUCKET_SIZE as u64 * contraction_multiplier,
-                    &mut rehash_updates,
-                )
-                .unwrap();
-            updates.merge(rehash_updates);
-        }
-
-        store.update_state(updates.clone());
-        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_trie(trie_updates);
-
-        let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
-        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
-        assert_eq!(root, witness.state_root().unwrap());
-        assert!(witness.verify().is_ok());
     }
 
     fn get_delta_ranges(c_deltas: &[(NodeId, Element)], task_size: usize) -> Vec<(usize, usize)> {
