@@ -167,10 +167,9 @@ where
     /// Updates the trie incrementally without computing the final state root.
     ///
     /// This method implements the "update phase" of the two-phase commit algorithm.
-    /// It processes state changes and updates bucket and its parent commitments
-    /// (main trie leaves) but deliberately avoids propagating changes to upper trie
-    /// levels. This lazy approach allows multiple `update()` calls to be batched
-    /// together efficiently.
+    /// It processes state changes and updates the last two level main trie nodes
+    /// but deliberately avoids propagating changes to upper trie levels. This lazy
+    /// approach allows multiple `update()` calls to be batched together efficiently.
     ///
     /// Changes are accumulated internally until `finalize()` is called to complete
     /// the computation. This avoids redundant updates of upper-level node commitments
@@ -179,12 +178,12 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
-        let trie_updates = self.update_bucket_subtrees(state_updates)?;
-        let bucket_updates = Self::filter_updates_by_level(&trie_updates, MAIN_TRIE_LEVELS);
+        let subtree_updates = self.update_bucket_subtrees(state_updates)?;
+        let l3_updates = Self::drop_updates_below_level(&subtree_updates, MAIN_TRIE_LEVELS);
 
-        let level_updates = self.update_internal_nodes(bucket_updates)?;
+        let l2_updates = self.update_internal_nodes(l3_updates)?;
 
-        for (node_id, (old, new)) in trie_updates.into_iter().chain(level_updates) {
+        for (node_id, (old, new)) in subtree_updates.into_iter().chain(l2_updates) {
             self.cache.insert(node_id, new);
             self.updates
                 .entry(node_id)
@@ -201,8 +200,7 @@ where
     /// to compute the final state root commitment.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
-        let root_hash =
-            self.update_main_trie_upper_level(&mut trie_updates, MAIN_TRIE_LEVELS - 1)?;
+        let root_hash = self.update_main_trie(&mut trie_updates, MAIN_TRIE_LEVELS - 1)?;
         for (node_id, (_, new)) in &trie_updates {
             self.cache.insert(*node_id, *new);
         }
@@ -224,38 +222,32 @@ where
 
     /// Propagates commitment updates through upper trie levels to compute the root.
     ///
-    /// This method processes the main trie level by level in a bottom-up manner,
-    /// starting from level `level-1` and working toward the root (level 0),
-    /// ensuring that all affected nodes are updated consistently.
+    /// Processes main trie nodes level-by-level in bottom-up order, starting from
+    /// level `start_level-1` and working toward the root (level 0).
     ///
     /// # Arguments
-    /// * `trie_updates` - Contains commitment updates from the update phase.
-    ///   During execution, this collection is progressively expanded with
-    ///   parent node updates at each level until reaching the root.
-    /// * `level` - The starting level threshold. Updates at levels >= `level`
-    ///   (e.g., bucket subtree nodes) are filtered out, and propagation begins
-    ///   from level `level-1` upward to level 0.
+    /// * `acc_updates` - Commitment changes from the update phase (including all nodes
+    ///   at or below `start_level`). Extended in-place with parent updates at each level
+    ///   during propagation.
+    /// * `start_level` - Propagation begins from level `level-1` upward to level 0.
     ///
     /// # Returns
     /// * `ScalarBytes` - The new root commitment hash
-    fn update_main_trie_upper_level(
+    fn update_main_trie(
         &self,
-        trie_updates: &mut TrieUpdates,
-        level: usize,
+        acc_updates: &mut TrieUpdates,
+        start_level: usize,
     ) -> Result<ScalarBytes, <Store as TrieReader>::Error> {
-        // Filter out subtree nodes and levels below L[level - 1], keeping only L[level - 1] updates
-        let mut level_updates = Self::filter_updates_by_level(trie_updates, level);
+        let mut level_updates = Self::drop_updates_below_level(acc_updates, start_level);
 
-        // Propagate updates level by level from deepest (level 3) to root (level 0).
-        // Each iteration processes one level, computing parent updates from child changes.
-        for _ in (0..level - 1).rev() {
+        for _ in (0..start_level - 1).rev() {
             level_updates = self.update_internal_nodes(level_updates)?;
-            trie_updates.extend(level_updates.iter());
+            acc_updates.extend(level_updates.iter());
         }
 
         // Extract the root commitment from the last update, or fetch from storage
         // if root wasn't modified
-        let root_commitment = if let Some((0, (_, c))) = trie_updates.last() {
+        let root_commitment = if let Some((0, (_, c))) = acc_updates.last() {
             *c
         } else {
             self.store.commitment(0)?
@@ -264,23 +256,15 @@ where
         Ok(hash_commitment(root_commitment))
     }
 
-    /// Filters updates to extract only those at trie levels below the specified threshold.
-    ///
-    /// Nodes with `node_id >= STARTING_NODE_ID[level]` are filtered out (subtree nodes),
-    /// keeping only main trie internal nodes at levels 0 to `level-1`.
-    fn filter_updates_by_level(
+    /// Drops updates at levels greater than or equal to the specified threshold.
+    fn drop_updates_below_level(
         updates: &TrieUpdates,
         level: usize,
     ) -> Vec<(NodeId, (CommitmentBytes, CommitmentBytes))> {
         updates
             .iter()
-            .filter_map(|(node_id, change)| {
-                if *node_id >= STARTING_NODE_ID[level] as NodeId {
-                    None
-                } else {
-                    Some((*node_id, *change))
-                }
-            })
+            .filter(|(node_id, _)| *node_id < STARTING_NODE_ID[level] as NodeId)
+            .copied()
             .collect()
     }
 
@@ -965,7 +949,7 @@ impl StateRoot<'_, EmptySalt> {
 
         // Step 4: Compute commitments for all internal nodes in the main trie
         let root_hash = StateRoot::new(&EmptySalt)
-            .update_main_trie_upper_level(&mut all_trie_updates, MAIN_TRIE_LEVELS)
+            .update_main_trie(&mut all_trie_updates, MAIN_TRIE_LEVELS)
             .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
         Ok((root_hash, all_trie_updates))
     }
