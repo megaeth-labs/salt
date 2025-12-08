@@ -772,12 +772,13 @@ mod tests {
                 .collect(),
         };
 
-        let (initialize_root, initialize_trie_updates) =
+        let (initialize_root, mut initialize_trie_updates) =
             trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates.clone());
 
         let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        initialize_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         init_trie_updates.sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
         assert_eq!(init_trie_updates, initialize_trie_updates);
