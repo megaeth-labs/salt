@@ -7,10 +7,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-banderwagon = { path = "../banderwagon" }
+banderwagon = { path = "../banderwagon", default-features = false}
 itertools = "0.10.1"
 sha2 = "0.9.8"
-rayon = "1.8.0"
+rayon = {version = "*", optional = true}
 hex = "0.4.3"
 thiserror = "2.0"
 
@@ -26,3 +26,8 @@ ark-std = { version = "0.5.0", default-features = false }
 [[bench]]
 name = "benchmark_main"
 harness = false
+
+[features]
+default = ["parallel"]
+parallel = ["rayon", "banderwagon/parallel"]
+std = ["banderwagon/std"]
