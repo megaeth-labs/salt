@@ -1,7 +1,10 @@
 use ark_ec::scalar_mul::wnaf::WnafContext;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsProjective, Fr};
 use ark_ff::Zero;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+use crate::use_iter;
 
 use crate::Element;
 #[derive(Clone, Debug)]
@@ -49,9 +52,8 @@ impl MSMPrecompWnaf {
     // TODO put this behind a config flag
     pub fn mul_par(&self, scalars: &[Fr]) -> Element {
         let wnaf_context = WnafContext::new(self.window_size);
-        let result: EdwardsProjective = scalars
-            .par_iter()
-            .zip(self.tables.par_iter())
+        let result: EdwardsProjective = use_iter!(scalars)
+            .zip(use_iter!(self.tables))
             .filter(|(scalar, _)| !scalar.is_zero())
             .map(|(scalar, table)| wnaf_context.mul_with_table(table, scalar).unwrap())
             .sum();

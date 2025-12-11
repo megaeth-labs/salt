@@ -9,12 +9,15 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ops::{Range, RangeInclusive},
 };
+
+use banderwagon::use_iter;
 
 /// Salt witness for stateless validation with security guarantees.
 ///
@@ -84,8 +87,7 @@ impl SaltWitness {
     where
         Store: StateReader + TrieReader,
     {
-        let kvs = keys
-            .par_iter()
+        let kvs = use_iter!(keys)
             .map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
                     // Handle metadata keys
