@@ -292,19 +292,34 @@ where
     /// # Returns
     /// * `Ok(TrieUpdates)` - Commitment updates for all affected trie nodes
     /// * `Err` - On store failures or invalid metadata
+    /// 更新桶子树（bucket subtrees）的承诺值
+    ///
+    /// 这个函数处理桶容量变化时的子树更新，包括：
+    ///   - 桶扩展（容量增加）
+    ///   - 桶收缩（容量减少）
+    ///   - 或两者结合的情况
+    ///
+    /// # 返回值
+    /// * `Ok(TrieUpdates)` - 所有受影响的trie节点的承诺更新
+    /// * `Err` - 存储失败或元数据无效
     fn update_bucket_subtrees(
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        // 存储未计算的更新（用于收缩操作）
         let mut uncomputed_updates = vec![];
+        // 存储额外的更新（按层级组织）
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
 
-        // Step 1.1: Extract metadata changes from state updates
+        // 步骤 1.1: 从状态更新中提取元数据变更
+        // 遍历所有在元数据键范围内的更新，构建子树变更信息映射
         let mut subtree_change_info: BTreeMap<BucketId, SubtrieChangeInfo> = state_updates
             .data
             .range(METADATA_KEYS_RANGE)
             .map(|(key, meta_change)| {
+                // 从元数据键中提取桶ID
                 let bucket_id = bucket_id_from_metadata_key(*key);
+                // 解析旧的和新的元数据
                 let old_meta: BucketMeta = meta_change
                     .0
                     .clone()
@@ -317,6 +332,7 @@ where
                     .expect("new meta exist in updates")
                     .try_into()
                     .expect("new meta should be valid");
+                // 创建子树变更信息
                 (
                     bucket_id,
                     SubtrieChangeInfo::new(bucket_id, old_meta.capacity, new_meta.capacity),
@@ -324,47 +340,52 @@ where
             })
             .collect();
 
-        // Step 1.2: update capacities for next `update_bucket_subtrees` call
+        // 步骤 1.2: 为下一次 `update_bucket_subtrees` 调用更新容量缓存
         for (ub_id, change) in &subtree_change_info {
             self.bucket_capacity_cache
                 .insert(*ub_id, change.new_capacity);
         }
 
-        // Step 1.3: Identify buckets that need subtree processing
+        // 步骤 1.3: 识别需要子树处理的桶
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
 
+        // 遍历所有状态更新的键
         for key in state_updates.data.keys() {
             let bucket_id = key.bucket_id();
+            // 如果是新桶且不是元数据桶
             if last_bucket_id != bucket_id && bucket_id >= NUM_META_BUCKETS as BucketId {
                 last_bucket_id = bucket_id;
-                // Check if bucket has capacity changes or needs subtree handling
+                // 检查桶是否有容量变更或需要子树处理
                 if let Some(subtree_change) = subtree_change_info.get(&bucket_id) {
+                    // 获取桶根的承诺值
                     let bucket_root = self.commitment(subtree_change.root_id)?;
-                    // The `old_top_id` commiment of curent subtree is `bucket_root`
+                    // 当前子树的 `old_top_id` 承诺值就是 `bucket_root`
                     self.cache.insert(subtree_change.old_top_id, bucket_root);
-                    // Handle capacity changes
+
+                    // 处理容量变更
                     match subtree_change
                         .new_capacity
                         .cmp(&subtree_change.old_capacity)
                     {
                         std::cmp::Ordering::Greater => {
-                            // When bucket expands, cache default commitments for new leaf segments
-                            // and their ancestors. The underlying store doesn't have these yet.
+                            // 当桶扩展时，为新的叶段及其祖先缓存默认承诺值
+                            // 底层存储还没有这些值
                             let old_segments =
                                 subtree_change.old_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
                             let new_segments =
                                 subtree_change.new_capacity.div_ceil(MIN_BUCKET_SIZE as u64);
 
-                            // Track visited nodes to avoid redundant work when segments share ancestors
+                            // 跟踪已访问的节点以避免当段共享祖先时的冗余工作
                             let mut visited = HashSet::new();
 
+                            // 为每个新增的段计算其祖先节点并设置默认承诺值
                             for segment_id in old_segments..new_segments {
                                 let mut node = ((bucket_id as NodeId) << BUCKET_SLOT_BITS)
                                     + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId
                                     + segment_id;
 
-                                // Walk up from leaf, stopping at existing commitments or new_top_id
+                                // 从叶节点向上遍历，直到遇到已存在的承诺值或到达new_top_id
                                 while !visited.contains(&node) && self.commitment(node).is_err() {
                                     visited.insert(node);
                                     self.cache.insert(node, default_commitment(node));
@@ -375,7 +396,7 @@ where
                                 }
                             }
 
-                            // Will be handled in subtree processing
+                            // 将在子树处理中处理
                             let level = MAX_SUBTREE_LEVELS - subtree_change.old_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
                             if key.slot_id() < level_capacity {
@@ -384,7 +405,7 @@ where
                             }
                         }
                         std::cmp::Ordering::Less => {
-                            // Will be handled in subtree processing
+                            // 收缩情况：将在子树处理中处理
                             let level = MAX_SUBTREE_LEVELS - subtree_change.new_top_level;
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
                             if key.slot_id() < level_capacity {
@@ -393,22 +414,26 @@ where
                             }
                         }
                         std::cmp::Ordering::Equal => {
+                            // 容量不变但大于最小容量时仍需处理
                             if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
                                 need_handle_buckets.insert(bucket_id);
                             }
                         }
                     }
                 } else {
+                    // 没有元数据变更的情况（只有KV变更）
                     let bucket_capacity =
                         if let Some(capacity) = self.bucket_capacity_cache.get(&bucket_id) {
                             *capacity
                         } else {
+                            // 从存储中获取子树层级信息
                             let level = self.store.get_subtree_levels(bucket_id)?;
                             (TRIE_WIDTH as NodeId).pow(level as u32)
                         };
 
+                    // 如果桶容量大于最小容量，则需要处理
                     if bucket_capacity > MIN_BUCKET_SIZE as u64 {
-                        // KV changes in expanded bucket (capacity unchanged)
+                        // KV 变更发生在扩展的桶中（容量未改变）
                         need_handle_buckets.insert(bucket_id);
                         let subtree_change =
                             SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity);
@@ -420,13 +445,13 @@ where
             }
         }
 
-        // Initialize trigger levels for later processing
+        // 初始化触发层级用于后续处理
         let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
 
-        // Step 2: Update leaf node commitments
+        // 步骤 2: 更新叶节点承诺值
         let mut trie_updates = self.update_leaf_nodes(state_updates, &subtree_change_info)?;
 
-        // Helper closure for expansion without KV changes
+        // 辅助闭包：处理无KV变更的扩展操作
         let add_expansion_update =
             |extra_updates: &mut Vec<Vec<_>>, subtree_change: &SubtrieChangeInfo| {
                 let default_c = default_commitment(subtree_change.old_top_id);
@@ -436,7 +461,7 @@ where
                 Ok(())
             };
 
-        // Helper closure for contraction without KV changes
+        // 辅助闭包：处理无KV变更的收缩操作
         let add_contraction_update =
             |uncomputed_updates: &mut Vec<_>, subtree_change: &SubtrieChangeInfo| {
                 uncomputed_updates.push((
@@ -449,19 +474,22 @@ where
                 Ok(())
             };
 
-        // Step 3: Optimize contracted buckets by resetting unused nodes to defaults
+        // 步骤 3: 通过将未使用的节点重置为默认值来优化收缩的桶
         for (bucket_id, subtree_change) in &subtree_change_info {
+            // 如果新容量不小于旧容量，则跳过
             if subtree_change.new_capacity >= subtree_change.old_capacity {
                 continue;
             }
+
             let bucket_id = (*bucket_id as NodeId) << BUCKET_SLOT_BITS as NodeId;
-            // Iterate through each contraction level with its update range and extraction endpoint
+            // 遍历每个收缩操作的层级及其更新范围和提取端点
             for op in
                 compute_contraction_ops(subtree_change.old_capacity, subtree_change.new_capacity)
             {
                 let (updates_start, updates_end) = op.update_range;
                 let extract_end =
                     op.immediate_boundary + bucket_id + STARTING_NODE_ID[op.level] as NodeId;
+                // 计算需要更新的节点
                 let updates = use_into_iter!(updates_start..updates_end)
                     .filter_map(|i| {
                         let node_id = bucket_id + i + STARTING_NODE_ID[op.level] as NodeId;
@@ -471,47 +499,51 @@ where
                     })
                     .collect::<Vec<_>>();
 
+                // 分割点：区分立即处理和延迟处理的更新
                 let split_point = updates.partition_point(|node| node.0 < extract_end);
                 uncomputed_updates.extend(updates[split_point..].iter());
 
                 extra_updates[op.level].extend(updates[0..split_point].iter());
             }
         }
-        // Step 4: Set up triggers and handle capacity-only changes
+
+        // 步骤 4: 设置触发器并处理仅容量变更的情况
         for (bucket_id, subtree_change) in &subtree_change_info {
             if need_handle_buckets.contains(bucket_id) {
+                // 设置新顶层的触发器
                 trigger_levels[subtree_change.new_top_level]
                     .insert(*bucket_id, subtree_change.clone());
+                // 如果是扩展操作，同时处理旧层级和新层级
                 if subtree_change.old_top_level > subtree_change.new_top_level {
-                    // Expansion: handle both old and new levels
                     trigger_levels[subtree_change.old_top_level]
                         .insert(*bucket_id, subtree_change.clone());
                 }
             } else {
-                // Handle capacity-only changes (no KV updates)
+                // 处理仅容量变更（无KV更新）
                 match subtree_change
                     .old_top_level
                     .cmp(&subtree_change.new_top_level)
                 {
                     std::cmp::Ordering::Greater => {
-                        // Expansion: update old subtree root
+                        // 扩展：更新旧子树根
                         add_expansion_update(&mut extra_updates, subtree_change)?;
                         need_handle_buckets.insert(*bucket_id);
-                        // Also handle both top level
+                        // 同时处理两个顶层
                         trigger_levels[subtree_change.old_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                         trigger_levels[subtree_change.new_top_level]
                             .insert(*bucket_id, subtree_change.clone());
                     }
                     std::cmp::Ordering::Less => {
-                        // Contraction: new root equals bucket commitment
+                        // 收缩：新根等于桶承诺值
                         add_contraction_update(&mut uncomputed_updates, subtree_change)?;
                     }
                     std::cmp::Ordering::Equal => {}
                 }
             }
         }
-        // Step 5: Extract subtree nodes for hierarchical processing
+
+        // 步骤 5: 提取子树节点进行分层处理
         let start = trie_updates
             .iter()
             .position(|update| is_subtree_node(update.0))
@@ -521,9 +553,10 @@ where
         } else {
             trie_updates.drain(start..).collect()
         };
-        // Step 6: Process subtree levels bottom-up
+
+        // 步骤 6: 自底向上处理子树层级
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
-            // Handle subtree triggers at this level (if any)
+            // 处理此层级的子树触发器（如果有的话）
             if !trigger_levels[level].is_empty() {
                 let (subtrie_updates, subtrie_roots): (Vec<_>, Vec<_>) =
                     use_into_iter!(subtree_commitmens)
@@ -535,7 +568,7 @@ where
                                 trigger_levels[level].get(&current_bucket_id)
                             {
                                 if subtree_change.new_top_level == level {
-                                    // Handle the new top level, subtree update is done
+                                    // 处理新的顶层，子树更新完成
                                     assert_eq!(subtree_change.new_top_id, node_id);
                                     let root_commitment = self
                                         .commitment(subtree_change.root_id)
@@ -549,7 +582,7 @@ where
                                     );
                                 }
 
-                                // Expansion - new level going up, need to compute
+                                // 扩展 - 新层级向上，需要计算
                                 (
                                     vec![(
                                         node_id,
@@ -566,16 +599,16 @@ where
                         })
                         .unzip();
 
-                // Add the new subtree root updates to the main trie updates
+                // 将新的子树根更新添加到主trie更新中
                 trie_updates.extend(subtrie_roots.into_iter().flatten());
                 subtree_commitmens = subtrie_updates.into_iter().flatten().collect();
             }
 
-            // Add level-specific updates
+            // 添加特定层级的更新
             subtree_commitmens.extend(extra_updates[level].iter());
             trie_updates.extend(subtree_commitmens.iter());
 
-            // Early exit optimization
+            // 早期退出优化
             let total_remaining_triggers: usize = trigger_levels
                 .iter()
                 .take(level)
@@ -585,7 +618,7 @@ where
                 break;
             }
 
-            // Propagate updates to next level up
+            // 将更新传播到上一层级
             subtree_commitmens = self
                 .update_internal_nodes(subtree_commitmens)
                 .expect("update internal nodes for subtrie failed");
@@ -594,6 +627,7 @@ where
         trie_updates.extend(uncomputed_updates.iter());
         Ok(trie_updates)
     }
+
 
     /// Updates leaf node commitments in the trie based on state key-value changes.
     ///
