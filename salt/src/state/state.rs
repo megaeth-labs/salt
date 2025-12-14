@@ -48,7 +48,7 @@ use crate::{
 use hex;
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
 };
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
@@ -75,16 +75,13 @@ use std::{
 #[derive(Clone)]
 pub struct EphemeralSaltState<'a, Store> {
     /// Storage backend to fetch data from.
-    store: &'a Store,
+    pub store: &'a Store,
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
     /// Optionally caches reads when [`cache_reads`] is enabled. Each entry maps
     /// a [`SaltKey`] to its current value (`Some(value)`) or deletion marker (`None`).
-    ///
-    /// Note: This field is `pub(crate)` to enable proof generation modules to
-    /// access the set of touched keys for witness construction.
-    pub(crate) cache: HashMap<SaltKey, Option<SaltValue>>,
+    pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the net change in bucket usage counts relative to the base store.
     ///
     /// Each value represents the delta from the base store's bucket usage count:
@@ -95,9 +92,11 @@ pub struct EphemeralSaltState<'a, Store> {
     /// only the `nonce` and `capacity` fields are preserved - the usage count is dropped.
     /// Without this delta tracking, computing the current bucket occupancy would require
     /// reconciling the base store's usage count with all cached modifications.
-    usage_count_delta: HashMap<BucketId, i64>,
+    pub usage_count_delta: HashMap<BucketId, i64>,
+    /// Tracks which buckets have had their metadata changed (rehashed) during this session.
+    pub rehashed_buckets: HashSet<BucketId>,
     /// Whether to cache values read from the store for subsequent access
-    cache_read: bool,
+    pub cache_read: bool,
 }
 
 impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
@@ -137,14 +136,14 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                             Err(_) => writeln!(
                                 f,
                                 " [METADATA - DECODE ERROR]\n    Raw Value: {}",
-                                hex::encode(val.data)
+                                hex::encode(&val.data[..val.data_len()])
                             )?,
                         }
                     } else {
                         writeln!(
                             f,
                             "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
-                            hex::encode(val.data),
+                            hex::encode(&val.data[..val.data_len()]),
                             String::from_utf8_lossy(val.key()),
                             String::from_utf8_lossy(val.value())
                         )?
@@ -182,6 +181,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             store,
             cache: HashMap::new(),
             usage_count_delta: HashMap::new(),
+            rehashed_buckets: HashSet::new(),
             cache_read: false,
         }
     }
@@ -263,6 +263,32 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// Empty values (`None`) indicate deletions. Returns the resulting changes
     /// as [`StateUpdates`] that can be applied to persistent storage.
+    ///
+    /// ## Usage Pattern
+    ///
+    /// **CRITICAL**: For correctness, you must always complete the update sequence
+    /// by calling either [`canonicalize()`] or [`update_fin()`]. Failing to do so
+    /// may result in non-canonical bucket layouts.
+    ///
+    /// - **Single batch updates**: Use [`update_fin()`] for convenience (combines
+    ///   `update()` + `canonicalize()` in one call)
+    /// - **Incremental updates**: Call `update()` multiple times for different batches,
+    ///   then call [`canonicalize()`] once at the end
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// // Incremental updates
+    /// let mut state = EphemeralSaltState::new(&store);
+    /// let updates1 = state.update(&batch1)?;
+    /// let updates2 = state.update(&batch2)?;
+    /// let updates3 = state.update(&batch3)?;
+    /// let final_updates = state.canonicalize()?;  // Must call this!
+    ///
+    /// // Single batch (simpler)
+    /// let mut state = EphemeralSaltState::new(&store);
+    /// let updates = state.update_fin(&batch)?;  // Automatically canonicalized
+    /// ```
     pub fn update<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
@@ -284,6 +310,99 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         }
         Ok(state_updates)
     }
+
+    /// Updates the SALT state and canonicalizes bucket layouts in one operation.
+    ///
+    /// This is a convenience method that combines [`update()`] and [`canonicalize()`].
+    pub fn update_fin<'b>(
+        &mut self,
+        kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+    ) -> Result<StateUpdates, Store::Error> {
+        let mut updates = self.update(kvs)?;
+        updates.merge(self.canonicalize()?);
+        Ok(updates)
+    }
+
+    /// Prevents automatic, pre-mature bucket expansions caused by incremental updates.
+    ///
+    /// During incremental operations, buckets may expand to accommodate insertions
+    /// but remain inflated even after subsequent deletions. This method replays all
+    /// entries in rehashed buckets to apply more conservative expansion logic based
+    /// on the final key-value changes.
+    ///
+    /// **Warning**: This method clears the effect of manual invocations of
+    /// [`set_nonce`] or [`shi_rehash`]. If you need to modify bucket metadata
+    /// manually, do so after calling `canonicalize()`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(StateUpdates)` - State changes to revert premature bucket expansions
+    /// * `Err(error)` - If store access fails
+    /// 防止因增量更新导致的桶过早扩展。
+    ///
+    /// 在增量操作期间，桶可能会扩展以容纳插入的键值对，
+    /// 但在后续删除操作后可能仍然保持扩展状态。此方法会重放所有
+    /// 已重哈希桶中的条目，基于最终的键值变化应用更保守的扩展逻辑。
+    ///
+    /// **警告**: 此方法会清除手动调用[`set_nonce`]或[`shi_rehash`]的效果。
+    /// 如果需要手动修改桶元数据，请在此方法调用之后进行。
+    ///
+    /// # 返回值
+    ///
+    /// * `Ok(StateUpdates)` - 用于撤销过早桶扩展的状态变更
+    /// * `Err(error)` - 如果存储访问失败
+    pub fn canonicalize(&mut self) -> Result<StateUpdates, Store::Error> {
+        let mut updates = StateUpdates::default();
+
+        // 处理所有已重哈希的桶
+        // 使用std::mem::take获取并清空rehashed_buckets集合，避免重复处理
+        for bucket_id in std::mem::take(&mut self.rehashed_buckets) {
+            // 获取桶的当前元数据（扩展前的状态）
+            let old_metadata = self.metadata(bucket_id, false)?;
+
+            // 收集桶中的所有键值对并清空桶槽位
+            let mut kv_pairs = Vec::new();
+            for slot in 0..old_metadata.capacity {
+                let salt_key = SaltKey::from((bucket_id, slot));
+                if let Some(value) = self.value(salt_key)? {
+                    // 将键值对添加到临时存储中
+                    kv_pairs.push(value.clone());
+                    // 在缓存中标记该槽位为空
+                    self.cache.insert(salt_key, None);
+                    // 记录删除操作到更新记录中
+                    updates.add(salt_key, Some(value), None);
+                }
+            }
+
+            // 清除缓存中的元数据
+            let metadata_key = bucket_metadata_key(bucket_id);
+            self.cache.remove(&metadata_key);
+            // 获取新的元数据（通常是重置为默认状态）
+            let new_metadata = self.metadata(bucket_id, false)?;
+            // 记录元数据变更到更新记录中
+            updates.add(
+                metadata_key,
+                Some(SaltValue::from(old_metadata)),
+                Some(SaltValue::from(new_metadata)),
+            );
+
+            // 更新缓存中的使用计数差值
+            // 减去已收集的键值对数量，因为这些键值对即将被重新插入
+            *self.usage_count_delta.entry(bucket_id).or_insert(0) -= kv_pairs.len() as i64;
+
+            // 基于nonce和容量重新插入键值对
+            // 这里使用的是更新前的元数据，确保应用正确的扩展逻辑
+            for value in &kv_pairs {
+                self.shi_upsert(bucket_id, value.key(), value.value(), &mut updates)?;
+            }
+        }
+
+        // 清空已重哈希桶的记录
+        self.rehashed_buckets.clear();
+
+        Ok(updates)
+    }
+
 
     /// Sets a new nonce for the specified bucket, triggering a manual rehash.
     ///
@@ -391,17 +510,22 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// - **Slot access**: Ability to read/write individual slots within the bucket
     /// - **Usage count**: Only needed for bucket resizing decisions when inserting
     ///   new keys. Updating existing keys does not require usage count information.
-    fn shi_upsert(
+    /// 使用SHI算法在桶中插入或更新键值对
+    ///
+    /// 这个方法实现了Salt Hash Table的插入/更新操作，采用线性探测和键替换策略
+    /// 来维护强历史独立性（Strongly History-Independent）属性。
+    pub(crate) fn shi_upsert(
         &mut self,
         bucket_id: BucketId,
         plain_key: &[u8],
         plain_val: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
-        // Start with the new key-value pair we want to insert
+        // 创建要插入的新键值对
         let mut new_salt_val = SaltValue::new(plain_key, plain_val);
 
-        // Step 1: Try direct lookup first
+        // 第一步：首先尝试直接查找
+        // 对于支持快速查找的存储后端，可以直接定位键的位置
         if let Ok(Some((salt_key, old_salt_val))) = self.direct_find(plain_key) {
             self.update_value(
                 out_updates,
@@ -412,17 +536,26 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             return Ok(());
         }
 
-        // Step 2: Fall through to standard SHI upsert algorithm
+        // 第二步：回落到标准的SHI插入算法
         let metadata = self.metadata(bucket_id, false)?;
+        println!(
+            "SHI Upsert: bucket_id={}, nonce={}, capacity={}",
+            bucket_id, metadata.nonce, metadata.capacity
+        );
+        // 使用桶的nonce对键进行哈希，确保在桶内的一致性
         let hashed_key = hasher::hash_with_nonce(plain_key, metadata.nonce);
 
-        // Linear probe through the bucket, creating a displacement chain
+        // 线性探测遍历桶中的槽位，创建置换链
         for step in 0..metadata.capacity {
+            // 计算当前探测位置的槽位ID
             let salt_key = (bucket_id, probe(hashed_key, step, metadata.capacity)).into();
+
+            // 检查当前槽位是否有值
             if let Some(old_salt_val) = self.value(salt_key)? {
+                // 比较现有键与新键的字典序
                 match old_salt_val.key().cmp(new_salt_val.key()) {
                     Ordering::Equal => {
-                        // Found the key - this is an update operation
+                        // 找到相同键 - 这是一个更新操作
                         self.update_value(
                             out_updates,
                             salt_key,
@@ -432,73 +565,93 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                         return Ok(());
                     }
                     Ordering::Less => {
-                        // Key displacement: the existing key is smaller, so it gets displaced.
-                        // Place our key here and continue inserting the displaced key.
-                        // This creates a displacement chain that shi_delete will later retrace.
+                        // 键置换：现有键字典序更小，因此需要被置换
+                        // 将新键放在此处，并继续插入被置换的键
+                        // 这会创建一个置换链，shi_delete方法后续会追溯这个链
                         self.update_value(
                             out_updates,
                             salt_key,
                             Some(old_salt_val.clone()),
                             Some(new_salt_val),
                         );
-                        new_salt_val = old_salt_val; // Continue inserting the displaced key
+                        // 继续插入被置换的键
+                        new_salt_val = old_salt_val;
                     }
-                    _ => (), // Existing key is larger, continue probing
+                    _ => (), // 现有键字典序更大，继续探测下一个槽位
                 }
             } else {
-                // Found empty slot - insert the key and complete
+                // 找到空槽位 - 插入键并完成操作
                 self.update_value(out_updates, salt_key, None, Some(new_salt_val));
 
-                // Update the usage count delta for this insertion
-                *self.usage_count_delta.entry(bucket_id).or_insert(0) += 1;
-
+                // 检查是否需要调整桶大小（基于负载因子）
                 if let Ok(used) = self.usage_count(bucket_id) {
-                    // Resize the bucket if load factor threshold exceeded
+                    // 如果使用数量超过容量与阈值的乘积，则触发桶调整
                     if used > metadata.capacity * get_bucket_resize_threshold() / 100 {
+                        // 计算新的容量以满足负载因子要求
                         let new_capacity = compute_resize_capacity(metadata.capacity, used);
+                        // 对桶进行重哈希以扩展容量
                         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
                     }
                 } else {
-                    // Bucket usage count is unavailable (metadata.used is None).
+                    // 桶使用计数不可用（metadata.used为None）
                     //
-                    // This can only occur during stateless validation when replaying blocks
-                    // with execution witnesses. The witness may omit the bucket usage count
-                    // to optimize witness size.
+                    // 这种情况只会在无状态验证期间重放带有执行见证的区块时出现。
+                    // 见证可能会省略桶使用计数以优化见证大小。
                     //
-                    // ## Witness Size Trade-off
-                    // Including the usage count would require revealing ALL slots in the
-                    // bucket (to prove the count is correct), significantly increasing
-                    // witness size for every insertion operation.
+                    // ## 见证大小权衡
+                    // 包含使用计数需要揭示桶中的所有槽位（以证明计数正确），
+                    // 这会显著增加每次插入操作的见证大小。
                     //
-                    // ## Security Model
-                    // We accept this optimization because:
-                    // 1. Omitting usage count cannot create invalid key-value pairs
-                    // 2. It can only delay bucket resizing (temporary deviation from the
-                    //    canonical state)
-                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal load factor, degrading performance but not correctness
+                    // ## 安全模型
+                    // 我们接受这种优化是因为：
+                    // 1. 省略使用计数不会创建无效的键值对
+                    // 2. 它只能延迟桶调整大小（与规范状态的临时偏差）
+                    // 3. 最坏情况：恶意定序器导致桶超过理想负载因子，
+                    //    降低性能但不影响正确性
                     //
-                    // ## Self-Healing Mechanism
-                    // When a legitimate sequencer performs the next insertion, it will:
-                    // 1. Compute the actual usage count from the full state
-                    // 2. Trigger resize if needed (restoring optimal bucket structure)
-                    // 3. Continue normal operations with proper load factor tracking
-                    // Even a malicious sequencer will be forced to resize the bucket when
-                    // no empty slot can be found for insertion because it has no choice
-                    // but to reveal all slots at this point.
+                    // ## 自我修复机制
+                    // 当合法定序器执行下一次插入时，它将：
+                    // 1. 从完整状态计算实际使用计数
+                    // 2. 如需要则触发调整大小（恢复最佳桶结构）
+                    // 3. 使用正确的负载因子跟踪继续正常操作
+                    // 即使是恶意定序器在找不到空槽位进行插入时也会被迫调整桶大小，
+                    // 因为此时别无选择只能揭示所有槽位。
                     //
-                    // This approach prioritizes witness compactness while maintaining
-                    // eventual consistency of bucket structure.
+                    // 这种方法优先考虑见证紧凑性，同时保持桶结构的最终一致性。
                 }
                 return Ok(());
             }
         }
+        /*
+        这段代码存在的意义是什么？
+        尽管在正常情况下不会执行到，但这段代码仍然具有重要意义：
 
-        // Recovery mechanism: forced bucket expansion if no empty slot found.
+        安全兜底机制：
+        作为一种防御性编程措施，确保即使在异常情况下也能正确处理
+        防止因某些边界条件或bug导致的无限循环
+        特殊情况处理：
+
+        在某些特殊配置下（比如负载因子阈值被设置为100%）
+        或者在并发环境下可能出现的竞态条件
+        代码完整性：
+
+        保证算法在数学上的完整性，处理所有可能的情况
+        所以您的理解是正确的：在正常使用场景下，由于80%的负载因子阈值机制，这段恢复代码几乎不会被执行到。它更像是一个"最后一道防线"的安全保障。
+         */
+        // 恢复机制：如果找不到空槽位，则强制扩展桶容量
+        // 当桶完全填满时，通过扩容来解决问题
         let new_capacity = compute_resize_capacity(metadata.capacity, metadata.capacity);
+        // 对桶进行重哈希以扩展容量
         self.shi_rehash(bucket_id, metadata.nonce, new_capacity, out_updates)?;
-        self.shi_upsert(bucket_id, plain_key, plain_val, out_updates)
+        // 递归调用shi_upsert将当前元素插入到新的更大的桶中
+        self.shi_upsert(
+            bucket_id,
+            new_salt_val.key(),
+            new_salt_val.value(),
+            out_updates,
+        )
     }
+
 
     /// Deletes a plain key using the SHI hash table deletion algorithm.
     ///
@@ -513,54 +666,72 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// - **Slot access**: Ability to read/write individual slots within the bucket
     ///   for key lookup and slot compaction
     /// - **Usage count**: Not required (deletion only updates internal delta tracking)
+    /// 使用SHI哈希表删除算法删除一个键。
+    ///
+    /// 实现了带槽位压缩的删除操作以维护SHI属性。
+    /// 删除目标键后，合适的条目会被移动来填补空隙，从而保持确定性的布局。
+    ///
+    /// # 所需信息
+    ///
+    /// 要使此方法成功，底层存储必须提供：
+    /// - **桶元数据**：目标桶的`nonce`和`capacity`
+    /// - **槽位访问**：读取/写入桶内单个槽位的能力，用于键查找和槽位压缩
+    /// - **使用计数**：不需要（删除仅更新内部增量跟踪）
     fn shi_delete(
         &mut self,
         bucket_id: BucketId,
         key: &[u8],
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
+        // 获取桶的元数据（不需要使用计数）
         let metadata = self.metadata(bucket_id, false)?;
+
+        // 尝试在桶中查找要删除的键
         if let Some((slot, salt_val)) =
             self.shi_find(bucket_id, metadata.nonce, metadata.capacity, key)?
         {
-            // Update the usage count delta for this deletion
-            *self.usage_count_delta.entry(bucket_id).or_insert(0) -= 1;
+            // 槽位压缩：追溯由shi_upsert创建的置换链。
+            // 当shi_upsert为了腾出空间而置换键时，删除操作必须撤销这个过程，
+            // 通过将条目移回它们的理想位置来填补空隙。
+            let mut del_slot = slot;      // 当前要删除的槽位
+            let mut del_value = salt_val; // 当前要删除的值
 
-            // Slot compaction: retrace the displacement chain created by shi_upsert.
-            // When shi_upsert displaced keys to make room, deletion must undo this
-            // by moving entries back toward their ideal positions to fill the gap.
-            let mut del_slot = slot;
-            let mut del_value = salt_val;
+            // 循环处理槽位压缩
             loop {
-                // Find the next entry that should move into the gap
+                // 查找适合移动到当前空隙的下一个条目
                 let suitable_slot =
                     self.shi_next(bucket_id, del_slot, metadata.nonce, metadata.capacity)?;
+
+                // 构造当前槽位的SaltKey
                 let salt_key = (bucket_id, del_slot).into();
+
                 match suitable_slot {
                     Some((slot, salt_value)) => {
-                        // Move this entry into the current gap and continue filling
-                        // the new gap it left behind. This retraces the displacement
-                        // chain that shi_upsert created.
+                        // 将此条目移动到当前空隙中，并继续填充它留下的新空隙。
+                        // 这追溯了shi_upsert创建的置换链。
                         self.update_value(
                             out_updates,
                             salt_key,
-                            Some(del_value),
-                            Some(salt_value.clone()),
+                            Some(del_value),           // 旧值（将被替换）
+                            Some(salt_value.clone()),  // 新值（从其他位置移过来的）
                         );
+
+                        // 更新要删除的槽位和值，继续处理下一个空隙
                         (del_slot, del_value) = (slot, salt_value);
                     }
                     None => {
-                        // No suitable entry found - this gap becomes empty, completing
-                        // the deletion. The table is now in the same state as if the
-                        // deleted key had never been inserted (history independence).
+                        // 没有找到合适的条目 - 这个空隙变为空，完成删除。
+                        // 表现在处于与从未插入过被删除键相同的状态（历史独立性）。
                         self.update_value(out_updates, salt_key, Some(del_value), None);
                         return Ok(());
                     }
                 }
             }
         }
+        // 如果没有找到键，则不做任何操作
         Ok(())
     }
+
 
     /// Rehashes all entries in a bucket with new metadata.
     ///
@@ -572,6 +743,15 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// If the new capacity is smaller than the number of existing entries in the bucket,
     /// the function returns early without making any changes to prevent data loss.
+    /// 使用新的元数据重新哈希桶中的所有条目。
+    ///
+    /// 此操作会清除现有的桶布局，并使用新的桶元数据（通常是增加的容量或更改的nonce）
+    /// 重新插入所有条目。
+    ///
+    /// ## 数据丢失防护
+    ///
+    /// 如果新容量小于桶中现有条目的数量，函数会提前返回而不做任何更改，
+    /// 以防止数据丢失。
     pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
@@ -579,12 +759,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         new_capacity: u64,
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
+        // 验证新容量不超过最大桶容量限制
         assert!(
             new_capacity <= BUCKET_SLOT_ID_MASK,
             "Exceeds max bucket capacity: {new_capacity} > {BUCKET_SLOT_ID_MASK}"
         );
 
-        // Step 1: Extract all existing entries (but do not clear the cache yet)
+        // 第一步：提取所有现有条目（但不立即清除缓存）
         let old_metadata = self.metadata(bucket_id, true)?;
         let mut old_bucket = BTreeMap::new();
         for slot in 0..old_metadata.capacity {
@@ -594,31 +775,29 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
 
-        // Step 2: Validate that new capacity can accommodate all existing entries
+        // 第二步：验证新容量是否能容纳所有现有条目
         if new_capacity < old_bucket.len() as u64 {
-            // Cannot fit all existing entries in the new capacity.
-            // Return early without making changes to prevent data loss.
+            // 新容量无法容纳所有现有条目，提前返回以防止数据丢失
             return Ok(());
         }
 
-        // Step 3: Convert to plain key-value pairs for reinsertion
+        // 第三步：转换为普通键值对以便重新插入
         let plain_kv_pairs = old_bucket
             .values()
             .map(|salt_val| (salt_val.key().to_vec(), salt_val.value().to_vec()))
             .collect::<BTreeMap<_, _>>();
 
-        // Step 4: Reinsert plain key-value pairs in reverse lexicographic order.
-        // So we use the simplified SHI insertion algorithm without key comparisons.
+        // 第四步：按反向字典序重新插入普通键值对
+        // 这样我们可以使用简化的SHI插入算法而无需键比较
         let mut new_bucket = BTreeMap::new();
         for (plain_key, plain_val) in plain_kv_pairs.iter().rev() {
             let hashed_key = hasher::hash_with_nonce(plain_key, new_nonce);
             let salt_val = SaltValue::new(plain_key, plain_val);
 
-            // Find first empty slot - no need for key comparison
+            // 查找第一个空槽位 - 无需键比较
             for step in 0..new_capacity {
                 let salt_key = SaltKey::from((bucket_id, probe(hashed_key, step, new_capacity)));
-                // Note the code below operates directly on `new_bucket` as the
-                // cache has not been cleared yet
+                // 注意下面的代码直接操作`new_bucket`，因为缓存尚未清除
                 use std::collections::btree_map::Entry;
                 match new_bucket.entry(salt_key) {
                     Entry::Vacant(entry) => {
@@ -630,24 +809,33 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             }
         }
 
-        // Step 5: Record state changes by comparing slot-by-slot differences
-        for slot in 0..old_metadata.capacity.max(new_capacity) {
+        // 第五步：通过逐槽比较记录状态变更
+        let old_capacity = old_metadata.capacity;
+        for slot in 0..old_capacity.max(new_capacity) {
             let salt_key = SaltKey::from((bucket_id, slot));
-            let old_value = old_bucket.get(&salt_key);
-            let new_value = new_bucket.get(&salt_key);
-            self.update_value(
-                out_updates,
-                salt_key,
-                old_value.cloned(),
-                new_value.cloned(),
-            );
+            let old_value = (slot < old_capacity)
+                .then(|| old_bucket.get(&salt_key))
+                .flatten();
+            let new_value = (slot < new_capacity)
+                .then(|| new_bucket.get(&salt_key))
+                .flatten();
+
+            // 缓存更新：仅当发生变化时更新重叠范围，扩展范围总是更新
+            if old_value != new_value || slot >= old_capacity {
+                self.cache.insert(salt_key, new_value.cloned());
+            }
+
+            // 状态更新：仅当有实际数据需要记录时才记录
+            if old_value != new_value && (old_value.is_some() || new_value.is_some()) {
+                out_updates.add(salt_key, old_value.cloned(), new_value.cloned());
+            }
         }
 
-        // Update bucket metadata
+        // 更新桶元数据
         let new_metadata = BucketMeta {
-            nonce: new_nonce,
-            capacity: new_capacity,
-            ..old_metadata
+            nonce: new_nonce,      // 新的nonce值
+            capacity: new_capacity, // 新的容量
+            ..old_metadata         // 保留其他原有元数据
         };
         self.update_value(
             out_updates,
@@ -656,8 +844,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             Some(new_metadata.into()),
         );
 
+        // 将此桶标记为已重哈希，用于规范化处理
+        self.rehashed_buckets.insert(bucket_id);
+
         Ok(())
     }
+
 
     /// Searches for a plain key in a bucket using linear probing.
     ///
@@ -671,20 +863,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         capacity: u64,
         plain_key: &[u8],
     ) -> Result<Option<(SlotId, SaltValue)>, Store::Error> {
-        let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
-        for step in 0..capacity {
-            let slot = probe(hashed_key, step, capacity);
-            if let Some(salt_val) = self.value((bucket_id, slot).into())? {
-                match salt_val.key().cmp(plain_key) {
-                    Ordering::Less => return Ok(None),
-                    Ordering::Equal => return Ok(Some((slot, salt_val))),
-                    Ordering::Greater => (),
-                }
-            } else {
-                return Ok(None);
-            }
-        }
-        Ok(None)
+        shi_search(bucket_id, nonce, capacity, plain_key, |key| self.value(key))
     }
 
     /// Attempts to find a plain key via direct lookup.
@@ -754,7 +933,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// This method handles both the in-memory cache update and the delta tracking
     /// needed for generating [`StateUpdates`]. Changes are only recorded when the
     /// old and new values differ to avoid empty deltas.
-    fn update_value(
+    pub fn update_value(
         &mut self,
         out_updates: &mut StateUpdates,
         key: SaltKey,
@@ -762,10 +941,105 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         new_value: Option<SaltValue>,
     ) {
         if old_value != new_value {
+            // Update usage_count_delta: +1 for insert, -1 for delete, 0 for update
+            let delta = new_value.is_some() as i64 - old_value.is_some() as i64;
+            if delta != 0 {
+                *self.usage_count_delta.entry(key.bucket_id()).or_insert(0) += delta;
+            }
+
             out_updates.add(key, old_value, new_value.clone());
             self.cache.insert(key, new_value);
         }
     }
+}
+
+/// A read-only, lightweight wrapper for retrieving plain values by plain keys.
+///
+/// `PlainStateProvider` is a simplified version of [`EphemeralSaltState`] designed for
+/// direct value lookups. It is read-only with zero allocation overhead, no caching, and
+/// requires complete state storage (not compatible with partial backends like witnesses).
+#[derive(Debug)]
+pub struct PlainStateProvider<'a, S> {
+    /// The state storage to read data from.
+    pub store: &'a S,
+}
+
+impl<'a, S: StateReader> PlainStateProvider<'a, S> {
+    /// Creates a new [`PlainStateProvider`] wrapping the given state reader.
+    ///
+    /// This is a zero-cost operation with no allocations.
+    pub const fn new(store: &'a S) -> Self {
+        Self { store }
+    }
+
+    /// Retrieves a plain value by plain key.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    /// * `hint` - Optional bucket_id hint for performance optimization. If provided, only
+    ///   that bucket will be searched. Otherwise, the bucket_id will be computed from the key.
+    ///
+    /// # Returns
+    /// * `Ok(Some(value))` - The plain value if the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - If there was an error accessing the underlying storage
+    pub fn plain_value(
+        &self,
+        plain_key: &[u8],
+        hint: Option<BucketId>,
+    ) -> Result<Option<Vec<u8>>, S::Error> {
+        // Use the hint if provided, otherwise compute the bucket_id
+        let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
+        let meta = self.store.metadata(bucket_id)?;
+
+        match shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
+            self.store.value(key)
+        })? {
+            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Core SHI linear probing search algorithm.
+///
+/// This function implements the canonical SHI hash table lookup that searches for a key
+/// within a single bucket using linear probing. It terminates early when encountering:
+/// - An empty slot (key doesn't exist)
+/// - A key with lower lexicographic order (key cannot exist due to SHI ordering)
+/// - An exact match (key found)
+///
+/// # Arguments
+/// * `bucket_id` - The bucket to search in
+/// * `nonce` - The nonce used for hashing
+/// * `capacity` - The capacity of the bucket
+/// * `plain_key` - The plain key to search for
+/// * `get_value` - Closure that retrieves a value given a SaltKey
+///
+/// # Returns
+/// Returns `Ok(Some((slot_id, salt_value)))` if the key is found, `Ok(None)` if not found,
+/// or an error if the underlying storage operation fails.
+fn shi_search<E>(
+    bucket_id: BucketId,
+    nonce: u32,
+    capacity: u64,
+    plain_key: &[u8],
+    mut get_value: impl FnMut(SaltKey) -> Result<Option<SaltValue>, E>,
+) -> Result<Option<(SlotId, SaltValue)>, E> {
+    let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
+    for step in 0..capacity {
+        let slot = probe(hashed_key, step, capacity);
+        if let Some(salt_val) = get_value((bucket_id, slot).into())? {
+            match salt_val.key().cmp(plain_key) {
+                Ordering::Less => return Ok(None),
+                Ordering::Equal => return Ok(Some((slot, salt_val))),
+                Ordering::Greater => (),
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
 }
 
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
@@ -858,8 +1132,8 @@ mod tests {
     // ============================
 
     /// Helper function to verify all key-value pairs are present with correct values.
-    fn verify_all_keys_present(
-        state: &mut EphemeralSaltState<EmptySalt>,
+    fn verify_all_keys_present<S: StateReader>(
+        state: &mut EphemeralSaltState<S>,
         bucket_id: BucketId,
         nonce: u32,
         capacity: u64,
@@ -896,7 +1170,6 @@ mod tests {
         num_iterations: usize,
     ) {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
         // Create reference state
         let reader = EmptySalt;
@@ -953,7 +1226,7 @@ mod tests {
 
             // Create shuffled order of indices
             let mut indices: Vec<usize> = (0..keys.len()).collect();
-            indices.shuffle(&mut thread_rng());
+            indices.shuffle(&mut rand::rng());
 
             // Insert in shuffled order
             for &i in &indices {
@@ -971,12 +1244,12 @@ mod tests {
             );
 
             // Verify all keys are accessible with correct values and locations
-            for i in 0..keys.len() {
+            for (i, key) in keys.iter().enumerate() {
                 let ref_find = ref_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, key)
                     .unwrap();
                 let test_find = test_state
-                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, &keys[i])
+                    .shi_find(TEST_BUCKET, 0, final_meta.capacity, key)
                     .unwrap();
                 assert_eq!(
                     ref_find, test_find,
@@ -1234,7 +1507,7 @@ mod tests {
 
         // Setup test data with collision-prone keys
         let kvs = create_same_bucket_test_data(3);
-        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         store.update_state(updates);
 
         // Test successful retrieval (validates collision handling)
@@ -1263,6 +1536,38 @@ mod tests {
             cache_state.usage_count_delta.is_empty(),
             "Usage count delta should remain empty"
         );
+    }
+
+    #[test]
+    fn test_plain_state_provider_plain_value() {
+        let store = MemStore::new();
+        let kvs = create_same_bucket_test_data(2);
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let provider = PlainStateProvider::new(&store);
+        let (key, value) = &kvs[0];
+        let bucket_id = hasher::bucket_id(key);
+
+        // Test successful retrieval
+        assert_eq!(provider.plain_value(key, None).unwrap(), value.clone());
+
+        // Test with correct hint
+        assert_eq!(
+            provider.plain_value(key, Some(bucket_id)).unwrap(),
+            value.clone()
+        );
+
+        // Test with wrong hint
+        assert_eq!(
+            provider.plain_value(key, Some(bucket_id + 1)).unwrap(),
+            None
+        );
+
+        // Test non-existent key
+        assert_eq!(provider.plain_value(b"missing", None).unwrap(), None);
     }
 
     /// Tests cache hit and miss behavior in the value() method.
@@ -1381,12 +1686,12 @@ mod tests {
         // Helper to apply updates and store them
         let apply_updates =
             |state: &mut EphemeralSaltState<_>, batch: BTreeMap<Vec<u8>, Option<Vec<u8>>>| {
-                let updates = state.update(&batch).unwrap();
+                let updates = state.update_fin(&batch).unwrap();
                 store.update_state(updates);
             };
 
         // Phase 1: Empty batch handling
-        assert!(state.update(&BTreeMap::new()).unwrap().data.is_empty());
+        assert!(state.update_fin(&BTreeMap::new()).unwrap().data.is_empty());
         verify_state(&expected);
 
         // Phase 2: Batch insertion of new keys
@@ -1406,8 +1711,8 @@ mod tests {
             (test_data[1].0.clone(), None),                            // Delete
             (test_data[10].0.clone(), test_data[10].1.clone()),        // Insert new
         ]
-        .into_iter()
-        .collect();
+            .into_iter()
+            .collect();
 
         expected.insert(test_data[0].0.clone(), b"updated_value".to_vec());
         expected.remove(&test_data[1].0);
@@ -1424,7 +1729,7 @@ mod tests {
             .iter()
             .map(|(k, _)| (k.clone(), None))
             .collect();
-        for (k, _) in &delete_batch {
+        for k in delete_batch.keys() {
             expected.remove(k);
         }
         apply_updates(&mut state, delete_batch);
@@ -1440,6 +1745,244 @@ mod tests {
         verify_state(&expected);
     }
 
+    /// Verifies that canonicalize() works properly when no shrinking is needed.
+    #[test]
+    /// 测试canonicalize()在存在键值对时不收缩桶容量的行为
+    ///
+    /// 此测试验证当桶因插入大量键值对而扩展后，即使调用canonicalize()，
+    /// 桶的容量也不会收缩回最小值，因为仍有键值对存在于桶中。
+    #[test]
+    fn test_canonicalize_no_shrink() {
+        // 创建内存存储和状态实例
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // 定义要插入的键值对数量
+        let n = 210;
+
+        // 生成测试用的键和值
+        let keys: Vec<Vec<u8>> = (1..=n).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (1..=n).map(|i| vec![(i + 99) as u8; 32]).collect();
+
+        // 创建状态更新记录器
+        let mut updates = StateUpdates::default();
+
+        // 阶段1：插入n个键值对以强制桶扩展超出最小桶大小
+        for i in 0..keys.len() {
+            if i==100{
+                println!("i={}",i);
+            }
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+
+        // 获取扩展后的桶容量并验证确实已扩展
+        let expanded_capacity = state.metadata(TEST_BUCKET, false).unwrap().capacity;
+        assert!(expanded_capacity > MIN_BUCKET_SIZE as u64);
+
+        // 阶段2：调用canonicalize()，由于仍存在键值对，应保持扩展后的容量
+        updates.merge(state.canonicalize().unwrap());
+        let metadata = state.metadata(TEST_BUCKET, false).unwrap();
+        assert_eq!(
+            metadata.capacity, expanded_capacity,
+            "当存在键值对时，canonicalize应保持扩展后的容量"
+        );
+
+        // 验证所有键仍然可以访问
+        for i in 0..keys.len() {
+            let found = state
+                .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &keys[i])
+                .unwrap();
+            let (_, salt_value) = found.unwrap();
+            assert_eq!(salt_value.value(), &vals[i]);
+        }
+
+        // 验证重哈希桶集合为空（表示没有需要重哈希的桶）
+        assert!(state.rehashed_buckets.is_empty());
+
+        // 验证桶使用计数等于插入的键数量
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), keys.len() as u64);
+    }
+
+
+    /// Verifies that canonicalize() reverts premature bucket expansions
+    /// that occur during incremental updates.
+    #[test]
+        /// 测试canonicalize函数收缩桶容量的功能
+    ///
+    /// 此测试验证当一个桶经历扩展后又被清空时，canonicalize操作能够正确地将其容量重置
+    /// 到最小值，同时清理相关的重哈希桶。
+    fn test_canonicalize_shrink_capacity() {
+        // 创建内存存储和临时SALT状态实例
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+
+        // 定义要插入的键值对数量（210个）
+        let n = 210;
+
+        // 创建测试键值对：
+        // - 键：1到210的数字，每个转换为32字节的向量
+        // - 值：100到309的数字，每个转换为32字节的向量
+        let keys: Vec<Vec<u8>> = (1..=n).map(|i| vec![i as u8; 32]).collect();
+        let vals: Vec<Vec<u8>> = (1..=n).map(|i| vec![(i + 99) as u8; 32]).collect();
+
+        // 初始化状态更新收集器
+        let mut updates = StateUpdates::default();
+
+        // 阶段1：插入n个键以强制桶扩展超出最小桶大小
+        // 通过插入足够多的元素触发桶的扩容机制
+        for i in 0..keys.len() {
+            state
+                .shi_upsert(TEST_BUCKET, &keys[i], &vals[i], &mut updates)
+                .unwrap();
+        }
+
+        // 获取扩展后的桶容量并验证确实发生了扩展
+        let expanded_capacity = state.metadata(TEST_BUCKET, false).unwrap().capacity;
+        assert!(expanded_capacity > MIN_BUCKET_SIZE as u64);
+
+        // 阶段2：删除所有键（但桶容量仍保持扩展状态）
+        // 这里模拟了一个场景：桶被扩展后又被完全清空，但容量没有自动收缩
+        for key in &keys {
+            state.shi_delete(TEST_BUCKET, key, &mut updates).unwrap();
+        }
+
+        // 验证桶容量仍然保持扩展状态，且有一个待处理更新
+        assert_eq!(
+            state.metadata(TEST_BUCKET, false).unwrap().capacity,
+            expanded_capacity
+        );
+        assert!(updates.len() == 1, "Bucket remained expanded");
+
+        // 阶段3：Canonicalize操作撤销过早的扩展
+        // - 插入和删除的待处理更新相互抵消（合并为空）
+        // - 桶容量重置为MIN_BUCKET_SIZE
+        // - 清理重哈希桶
+        updates.merge(state.canonicalize().unwrap());
+
+        // 验证更新已被抵消，桶容量已重置，重哈希桶已清理，使用计数归零
+        assert!(updates.is_empty());
+        assert_eq!(
+            state.metadata(TEST_BUCKET, false).unwrap().capacity,
+            MIN_BUCKET_SIZE as u64
+        );
+        assert!(state.rehashed_buckets.is_empty());
+        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
+    }
+
+
+    /// Verifies that canonicalize() correctly maintains the bucket state
+    /// after multiple rounds of random key-value updates.
+    #[test]
+    fn test_canonicalize_random_kvs() {
+        use rand::rngs::StdRng;
+        use rand::seq::IndexedRandom;
+        use rand::SeedableRng;
+
+        const N: usize = 100; // Total number of keys
+        const M: usize = 10; // Number of rounds
+        const K: usize = 20; // Keys to update per round
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Pre-generate all keys with human-readable format
+        let all_keys: Vec<Vec<u8>> = (0..N)
+            .map(|i| format!("key_{:04}", i).into_bytes())
+            .collect();
+
+        // Track expected plain key -> plain value mappings
+        let mut expected: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+        let store = MemStore::new();
+        for round in 0..M {
+            let mut state = EphemeralSaltState::new(&store);
+
+            // Randomly select k keys and generate values for this round
+            let batch: BTreeMap<_, _> = (0..N)
+                .collect::<Vec<_>>()
+                .choose_multiple(&mut rng, K)
+                .map(|&idx| {
+                    let key = all_keys[idx].clone();
+                    let value = format!("value_r{:02}_k{:04}", round, idx).into_bytes();
+                    expected.insert(key.clone(), value.clone());
+                    (key, Some(value))
+                })
+                .collect();
+
+            // Apply updates and canonicalize
+            let updates = state.update_fin(&batch).unwrap();
+            store.update_state(updates);
+
+            // Verify all expected keys are present with correct values
+            let mut verify_state = EphemeralSaltState::new(&store);
+            for (key, expected_value) in &expected {
+                let actual_value = verify_state.plain_value(key).unwrap();
+                assert_eq!(
+                    actual_value,
+                    Some(expected_value.clone()),
+                    "Round {}: Key '{}' should have value '{}', got {:?}",
+                    round,
+                    String::from_utf8_lossy(key),
+                    String::from_utf8_lossy(expected_value),
+                    actual_value.as_ref().map(|v| String::from_utf8_lossy(v))
+                );
+            }
+
+            // Verify sum of bucket usage counts equals total number of keys
+            assert_eq!(
+                expected
+                    .keys()
+                    .map(|k| hasher::bucket_id(k))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .map(|id| verify_state.usage_count(id).unwrap())
+                    .sum::<u64>(),
+                expected.len() as u64,
+                "Round {}: sum of bucket usage counts should equal key count",
+                round
+            );
+        }
+    }
+
+    /// Tests that canonicalize() correctly maintains bucket usage counts.
+    ///
+    /// Verifies that after canonicalization, the bucket usage count accurately
+    /// reflects the number of keys stored in the bucket, even when the bucket
+    /// has been marked as rehashed and has undergone replay of all entries.
+    #[test]
+    fn test_canonicalize_bucket_usage_count() {
+        let store = MemStore::new();
+
+        // Set up store with one kv in TEST_BUCKET
+        let mut state = EphemeralSaltState::new(&store);
+        let key1 = b"key1";
+        let val1 = b"value1";
+        let mut updates = StateUpdates::default();
+        state
+            .shi_upsert(TEST_BUCKET, key1, val1, &mut updates)
+            .unwrap();
+        store.update_state(updates);
+
+        //Insert one more kv and manually add to rehashed_buckets
+        let mut state = EphemeralSaltState::new(&store);
+        let key2 = b"key2";
+        let val2 = b"value2";
+        let mut updates = StateUpdates::default();
+        state
+            .shi_upsert(TEST_BUCKET, key2, val2, &mut updates)
+            .unwrap();
+        state.rehashed_buckets.insert(TEST_BUCKET);
+
+        // Canonicalize and verify usage count equals 2
+        updates.merge(state.canonicalize().unwrap());
+        assert_eq!(
+            state.usage_count(TEST_BUCKET).unwrap(),
+            2,
+            "Bucket usage count should reflect actual number of keys after canonicalize"
+        );
+    }
+
     /// Tests that set_nonce preserves all key-value pairs while changing bucket layout.
     ///
     /// Verifies that changing nonce values causes slot reassignments but maintains
@@ -1451,7 +1994,7 @@ mod tests {
         let mut state = EphemeralSaltState::new(&store);
         let kvs = create_same_bucket_test_data(5);
         let bucket_id = hasher::bucket_id(&kvs[0].0);
-        let updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
         store.update_state(updates);
 
         // Take a snapshot of the original bucket layout
@@ -1524,7 +2067,7 @@ mod tests {
                 test_key,
                 (None, Some(SaltValue::new(&[1u8; 32], &[2u8; 32]))),
             )]
-            .into(),
+                .into(),
         });
         assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 1);
 
@@ -1646,7 +2189,7 @@ mod tests {
     /// of the order in which mixed operations (insert, update, delete) are performed.
     ///
     /// ## Initial State
-    /// - Bucket capacity: 12 slots (smaller capacity to create more collisions)
+    /// - Bucket capacity: 10 slots (smaller capacity to create more collisions)
     /// - Pre-populated with 6 key-value pairs:
     ///   - Key 1 → Value 11
     ///   - Key 2 → Value 12
@@ -1677,7 +2220,7 @@ mod tests {
     ///
     /// ## Verification Strategy
     /// 1. Apply operations in reference order to create baseline state
-    /// 2. For 10 iterations, shuffle operations randomly and apply to fresh state
+    /// 2. For 100 iterations, shuffle operations randomly and apply to fresh state
     /// 3. Verify that each key exists in same slot with same value across all orderings
     /// 4. Verify that deleted keys are absent in all states
     ///
@@ -1686,9 +2229,8 @@ mod tests {
     #[test]
     fn test_history_independence_with_mixed_operations() {
         use rand::seq::SliceRandom;
-        use rand::thread_rng;
 
-        const BUCKET_CAPACITY: u64 = 12;
+        const BUCKET_CAPACITY: u64 = 10;
 
         #[derive(Clone, Debug)]
         enum Op {
@@ -1711,34 +2253,39 @@ mod tests {
             Op::Insert(9, 19),
         ];
 
-        // Create reference state
-        let reader = EmptySalt;
-        let mut ref_state = EphemeralSaltState::new(&reader);
-        let mut ref_updates = StateUpdates::default();
-
-        ref_state
-            .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut ref_updates)
+        // Create a MemStore with custom bucket capacity
+        let store = MemStore::new();
+        let mut setup_state = EphemeralSaltState::new(&store);
+        let mut setup_updates = StateUpdates::default();
+        setup_state
+            .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut setup_updates)
             .unwrap();
+        store.update_state(setup_updates);
+
+        // Create reference state
+        let mut ref_state = EphemeralSaltState::new(&store);
+        let mut ref_updates = StateUpdates::default();
         for (k, v) in &initial_data {
             ref_state
-                .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut ref_updates)
                 .unwrap();
         }
         for op in &operations {
             match op {
                 Op::Delete(k) => {
                     ref_state
-                        .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut ref_updates)
+                        .shi_delete(TEST_BUCKET, &[*k; 32], &mut ref_updates)
                         .unwrap();
                 }
                 Op::Update(k, v) | Op::Insert(k, v) => {
                     ref_state
-                        .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut ref_updates)
+                        .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut ref_updates)
                         .unwrap();
                 }
             }
         }
         let ref_meta = ref_state.metadata(TEST_BUCKET, false).unwrap();
+        let _ = ref_state.canonicalize().unwrap();
 
         // Verify reference state has all expected final key-value pairs
         let expected_keys: Vec<Vec<u8>> = vec![
@@ -1768,54 +2315,33 @@ mod tests {
             &expected_values,
         );
 
-        // Test 10 random operation orders
-        for iteration in 0..10 {
+        // Test 100 random operation orders
+        for iteration in 0..100 {
             let mut shuffled = operations.clone();
-            shuffled.shuffle(&mut thread_rng());
+            shuffled.shuffle(&mut rand::rng());
 
-            let test_reader = EmptySalt;
-            let mut test_state = EphemeralSaltState::new(&test_reader);
+            let mut test_state = EphemeralSaltState::new(&store);
             let mut test_updates = StateUpdates::default();
-
-            test_state
-                .shi_rehash(TEST_BUCKET, 0, BUCKET_CAPACITY, &mut test_updates)
-                .unwrap();
             for (k, v) in &initial_data {
                 test_state
-                    .shi_upsert(TEST_BUCKET, &vec![*k; 32], &vec![*v; 32], &mut test_updates)
+                    .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut test_updates)
                     .unwrap();
             }
             for op in &shuffled {
                 match op {
                     Op::Delete(k) => {
                         test_state
-                            .shi_delete(TEST_BUCKET, &vec![*k; 32], &mut test_updates)
+                            .shi_delete(TEST_BUCKET, &[*k; 32], &mut test_updates)
                             .unwrap();
                     }
                     Op::Update(k, v) | Op::Insert(k, v) => {
                         test_state
-                            .shi_upsert(
-                                TEST_BUCKET,
-                                &vec![*k; 32],
-                                &vec![*v; 32],
-                                &mut test_updates,
-                            )
+                            .shi_upsert(TEST_BUCKET, &[*k; 32], &[*v; 32], &mut test_updates)
                             .unwrap();
                     }
                 }
             }
-
-            // Bucket capacity can vary based on delete timing during insertion sequence.
-            // Normalize capacity to avoid flaky test failures.
-            let test_meta = test_state.metadata(TEST_BUCKET, false).unwrap();
-            if test_meta.capacity != ref_meta.capacity {
-                let _ = test_state.shi_rehash(
-                    TEST_BUCKET,
-                    test_meta.nonce,
-                    ref_meta.capacity,
-                    &mut test_updates,
-                );
-            }
+            let _ = test_state.canonicalize().unwrap();
 
             // Expected final keys: 1(100), 2(12), 4(200), 5(15), 7(17), 8(18), 9(19)
             for (k, _) in [
@@ -1900,52 +2426,40 @@ mod tests {
         assert_eq!(state.metadata(TEST_BUCKET, false).unwrap().capacity, 4);
     }
 
-    /// Tests shi_upsert recovery mechanism when bucket is completely full.
+    /// Tests that shi_upsert recovery correctly handles displaced keys when bucket is full.
     #[test]
     fn test_shi_upsert_recovery_when_bucket_full() {
-        use crate::proof::salt_witness::create_witness;
-
-        // Create a completely full bucket (capacity 4, all slots occupied)
-        let key_to_insert = [1u8; 32];
-        let hashed = hasher::hash_with_nonce(&key_to_insert, 0);
-
-        // Fill all 4 slots with different keys so no empty slot exists
-        let occupied_slots = (0..4)
-            .map(|i| {
-                let slot = probe(hashed, i, 4);
-                let dummy_key = [i as u8; 32]; // Different key for each slot
-                (slot, Some(SaltValue::new(&dummy_key, &[i as u8; 32])))
-            })
-            .collect();
-
-        let witness = create_witness(
-            TEST_BUCKET,
-            Some(BucketMeta {
-                nonce: 0,
-                capacity: 4,
-                used: Some(4),
-            }),
-            occupied_slots,
-        );
-
-        let mut state = EphemeralSaltState::new(&witness);
+        let mut state = EphemeralSaltState::new(&EmptySalt);
         let mut updates = StateUpdates::default();
+        let keys = [100u8, 101, 102, 103, 104];
 
-        // This should trigger recovery mechanism since all probe slots are full
-        let result = state.shi_upsert(TEST_BUCKET, &key_to_insert, &[99u8; 32], &mut updates);
-        assert!(result.is_ok());
+        // Insert first 4 keys, then set capacity to 4 to ensure bucket is full
+        for &key in &keys[..4] {
+            state
+                .shi_upsert(TEST_BUCKET, &[key; 32], &[], &mut updates)
+                .unwrap();
+        }
+        state.shi_rehash(TEST_BUCKET, 0, 4, &mut updates).unwrap();
 
-        // Verify that rehash was triggered by checking if capacity increased
-        let new_metadata = state.metadata(TEST_BUCKET, true).unwrap();
+        // Insert 5th key (largest value) - triggers displacement, then bucket-full recovery
+        state
+            .shi_upsert(TEST_BUCKET, &[keys[4]; 32], &[], &mut updates)
+            .unwrap();
+
+        // Verify capacity increased and all keys are retrievable
+        let metadata = state.metadata(TEST_BUCKET, false).unwrap();
         assert!(
-            new_metadata.capacity > 4,
+            metadata.capacity > 4,
             "Bucket should have been expanded during recovery"
         );
 
-        // Verify the new key-value pair is retrievable from state
-        let salt_key = SaltKey::from((TEST_BUCKET, probe(hashed, 0, new_metadata.capacity)));
-        let retrieved = state.value(salt_key).unwrap().unwrap();
-        assert_eq!(retrieved.value(), [99u8; 32].as_slice());
+        for &key in &keys {
+            let (_, found) = state
+                .shi_find(TEST_BUCKET, metadata.nonce, metadata.capacity, &[key; 32])
+                .unwrap()
+                .unwrap_or_else(|| panic!("Key {} missing", key));
+            assert_eq!(found.value(), &[] as &[u8]);
+        }
     }
 
     /// Tests shi_delete when the bucket usage count is unknown (incomplete witness).
@@ -2041,7 +2555,7 @@ mod tests {
             let (_, found) = state
                 .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
                 .unwrap()
-                .expect(&format!("Key {} missing", i));
+                .unwrap_or_else(|| panic!("Key {} missing", i));
             assert_eq!(found.key(), k);
             assert_eq!(found.value(), v);
         }
@@ -2066,7 +2580,7 @@ mod tests {
                 let (_, found) = state
                     .shi_find(TEST_BUCKET, 0, MIN_BUCKET_SIZE as u64, k)
                     .unwrap()
-                    .expect(&format!("Key {} missing after deletion", i));
+                    .unwrap_or_else(|| panic!("Key {} missing after deletion", i));
                 assert_eq!(found.key(), k);
                 assert_eq!(found.value(), v);
             }
@@ -2154,9 +2668,9 @@ mod tests {
             &mut state,
             TEST_BUCKET,
             vec![
-                (0, Some(SaltValue::new(&key_a, &vec![0x01; 32]))),
+                (0, Some(SaltValue::new(&key_a, &[0x01; 32]))),
                 (1, None), // empty slot
-                (3, Some(SaltValue::new(&key_b, &vec![0x02; 32]))),
+                (3, Some(SaltValue::new(&key_b, &[0x02; 32]))),
             ],
         );
 
@@ -2220,8 +2734,8 @@ mod tests {
     /// **Setup**:
     /// - Slot 2: Entry with ideal position 2 (already optimal, rank=0)
     /// - Slot 3: Entry with ideal position 0 (displaced by 3, rank=3)
-    /// **Action**: Delete slot 1 (probe sequence: 2 → 3 → 0...)
-    /// **Expected**: Skips slot 2 (no rank improvement: 0 vs 3) and returns slot 3 (rank improves: 3 → 1)
+    ///   **Action**: Delete slot 1 (probe sequence: 2 → 3 → 0...)
+    ///   **Expected**: Skips slot 2 (no rank improvement: 0 vs 3) and returns slot 3 (rank improves: 3 → 1)
     #[test]
     fn test_shi_next_skips_non_suitable_entries() {
         let mut state = EphemeralSaltState::new(&EmptySalt);
@@ -2239,8 +2753,8 @@ mod tests {
             &mut state,
             TEST_BUCKET,
             vec![
-                (2, Some(SaltValue::new(&key_optimal, &vec![0x02; 32]))),
-                (3, Some(SaltValue::new(&key_displaced, &vec![0x03; 32]))),
+                (2, Some(SaltValue::new(&key_optimal, &[0x02; 32]))),
+                (3, Some(SaltValue::new(&key_displaced, &[0x03; 32]))),
             ],
         );
 
@@ -2290,12 +2804,7 @@ mod tests {
         let layout: Vec<_> = keys
             .iter()
             .enumerate()
-            .map(|(slot, key)| {
-                (
-                    slot as SlotId,
-                    Some(SaltValue::new(key, &vec![slot as u8; 32])),
-                )
-            })
+            .map(|(slot, key)| (slot as SlotId, Some(SaltValue::new(key, &[slot as u8; 32]))))
             .collect();
 
         setup_bucket_layout(&mut state, TEST_BUCKET, layout);
@@ -2327,19 +2836,23 @@ mod tests {
         // None → Some (insert)
         state.update_value(&mut updates, key, None, val1.clone());
         assert_eq!(updates.data.get(&key), Some(&(None, val1.clone())));
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&1));
 
         // Some → Some different (update)
         state.update_value(&mut updates, key, val1.clone(), val2.clone());
         assert_eq!(updates.data.get(&key), Some(&(None, val2.clone())));
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&1));
 
         // Some → None (delete)
         state.update_value(&mut updates, key, val2, None);
         assert_eq!(updates.data.get(&key), None); // Full roundtrip
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&0));
 
         // No-op cases (no updates recorded)
         let prev_len = updates.data.len();
         state.update_value(&mut updates, key, None, None);
         state.update_value(&mut updates, key, val1.clone(), val1);
         assert_eq!(updates.data.len(), prev_len);
+        assert_eq!(state.usage_count_delta.get(&TEST_BUCKET), Some(&0));
     }
 }

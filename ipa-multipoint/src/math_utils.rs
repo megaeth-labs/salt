@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 /// Computes the inner product between two scalar vectors
 pub fn inner_product(a: &[Fr], b: &[Fr]) -> Fr {
+    assert_eq!(a.len(), b.len());
     a.iter().zip(b.iter()).map(|(a, b)| *a * *b).sum()
 }
 

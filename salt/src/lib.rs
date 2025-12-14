@@ -5,7 +5,9 @@ pub mod empty_salt;
 pub mod proof;
 pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
-pub use state::{hasher, state::EphemeralSaltState, updates::StateUpdates};
+pub use state::{
+    hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,
+};
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
@@ -17,6 +19,8 @@ pub mod types;
 pub use types::*;
 pub mod mem_store;
 pub use mem_store::MemStore;
+#[cfg(test)]
+pub mod fuzz;
 
 #[cfg(test)]
 mod tests {
@@ -38,7 +42,7 @@ mod tests {
         ]);
 
         // Apply kv updates and get SALT-encoded state changes
-        let state_updates = state.update(&kvs)?;
+        let state_updates = state.update_fin(&kvs)?;
         // "Persist" the state updates to storage (the "trie" remains unchanged)
         store.update_state(state_updates.clone());
 
@@ -48,7 +52,7 @@ mod tests {
 
         // Incremental state root computation from the SALT-encoded state changes
         let mut state_root = StateRoot::new(&store);
-        let (root_hash, trie_updates) = state_root.update_fin(state_updates)?;
+        let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
         let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
@@ -59,8 +63,7 @@ mod tests {
 
         // Alice creates a witness for plain key-value pairs
         let lookups = vec![b"account1".to_vec(), b"non_existent_key".to_vec()];
-        let updates = BTreeMap::new();
-        let witness = Witness::create(&lookups, updates, &store)?;
+        let witness = Witness::create([], &lookups, &BTreeMap::new(), &store)?;
 
         // Bob verifies the witness against its local state root.
         assert_eq!(root_hash, witness.state_root().unwrap());

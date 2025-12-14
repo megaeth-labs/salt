@@ -13,9 +13,11 @@ use crate::{
     types::*,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ops::{Range, RangeInclusive},
 };
+
+use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
 
 /// A cryptographic witness enabling stateless validation and execution.
 ///
@@ -37,7 +39,7 @@ pub struct Witness {
     /// - All salt keys needed for inclusion/exclusion proofs
     /// - Their values (or None for empty slots)
     /// - Cryptographic commitments proving authenticity
-    pub(crate) salt_witness: SaltWitness,
+    pub salt_witness: SaltWitness,
 }
 
 impl From<SaltWitness> for Witness {
@@ -75,22 +77,27 @@ impl Witness {
     /// afterwards (using the state updates). It generates inclusion proofs for
     /// existing keys and exclusion proofs for non-existing keys.
     ///
+    /// # Deterministic Ordering
+    ///
+    /// The `updates` parameter uses `BTreeMap` to enforece deterministic key ordering.
+    /// When producer and validator process keys in the same order, correctness becomes
+    /// straightforward to verify.
+    ///
     /// # Arguments
-    /// * `lookups` - The read-set of plain keys needed to execute transactions.
-    ///   These are keys that need to be read during transaction execution.
-    /// * `updates` - The write-set of state updates resulting from transaction execution.
-    ///   Each item is a tuple of (plain_key, optional_value) where None indicates deletion.
-    ///   Updates that duplicate lookup keys are filtered out (except deletions which are
-    ///   always processed to maintain correct state transitions).
+    /// * `bucket_ids` - Buckets whose metadata are read during execution
+    /// * `lookups` - Plain keys to be read during execution
+    /// * `updates` - Plain keys to be inserted, deleted, or updated during execution.
+    ///   Each entry is (plain_key, optional_value) where:
+    ///   - Some(value) indicates an insert or update
+    ///   - None indicates deletion
     /// * `store` - The storage backend providing access to both state data
     ///   (key-value pairs) and trie data (cryptographic commitments).
     ///
     /// # Returns
     /// A `Witness` containing:
-    /// - A mapping from each lookup key to its corresponding salt key (if it exists)
-    /// - All state data needed for transaction execution (from lookups)
-    /// - All state changes needed to update the root (from filtered updates)
-    /// - Cryptographic proofs (SaltWitness) for verification
+    /// - The minimal set of SALT key-value pairs needed for transaction execution
+    /// - A minimal SALT subtrie needed for updating the state root post-execution
+    /// - A cryptographic proof that proves the authenticity of these data
     ///
     /// # Errors
     /// Returns `ProofError::StateReadError` if:
@@ -99,8 +106,9 @@ impl Witness {
     /// - Unable to access required state data
     /// - Witness creation fails
     pub fn create<'b, Store>(
-        lookups: &[Vec<u8>],
-        updates: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
+        bucket_ids: impl IntoIterator<Item = BucketId>,
+        lookups: impl IntoIterator<Item = &'b Vec<u8>>,
+        updates: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
         store: &Store,
     ) -> Result<Witness, ProofError>
     where
@@ -109,11 +117,13 @@ impl Witness {
         let mut witnessed_keys = vec![];
         let mut direct_lookup_tbl = HashMap::new();
 
+        witnessed_keys.extend(bucket_ids.into_iter().map(bucket_metadata_key));
+
         (|| -> Result<(), <Store as StateReader>::Error> {
             // We use two separate state instances to collect witness data:
             // - 'state': For performing lookups to determine if keys exist
             // - 'recorder': For recording slot accesses during non-existence
-            //   proofs and state updates
+            //   proofs and key insertion/deletion
             let mut state = EphemeralSaltState::new(store);
             let mut recorder = EphemeralSaltState::new(store).cache_read();
 
@@ -137,17 +147,49 @@ impl Witness {
                 }
             }
 
-            // Filter out plain keys from updates that are already in direct_lookup_tbl,
-            // but only if the update is not a deletion (None value indicates deletion).
-            // Since most updates are in-place, this optimization reduces the number of
-            // slots that need to be tracked in the witness significantly.
-            let filtered_updates: Vec<_> = updates
-                .into_iter()
-                .filter(|(key, value)| !direct_lookup_tbl.contains_key(*key) || value.is_none())
-                .collect();
-            recorder.update(filtered_updates)?;
+            // Separate update operations from insert/delete operations
+            let inserts_or_deletes: Vec<_> = updates
+                .iter()
+                .filter_map(|(plain_key, new_value)| {
+                    let bucket_id = hasher::bucket_id(plain_key);
+                    let metadata = store.metadata(bucket_id).ok()?;
 
-            witnessed_keys.extend(recorder.cache.into_keys());
+                    match state
+                        .shi_find(bucket_id, metadata.nonce, metadata.capacity, plain_key)
+                        .ok()?
+                    {
+                        Some((slot_id, _)) if new_value.is_some() => {
+                            // Update operation: witness the old state (same as lookups)
+                            let salt_key = SaltKey::from((bucket_id, slot_id));
+                            direct_lookup_tbl.insert(plain_key.clone(), salt_key);
+                            witnessed_keys.push(salt_key);
+                            None
+                        }
+                        _ => Some((plain_key, new_value)), // Insert or delete operation
+                    }
+                })
+                .collect();
+
+            let state_updates = recorder.update(inserts_or_deletes)?;
+
+            // Extract old capacities from buckets that had capacity changes
+            let old_capacities: HashMap<_, _> = state_updates
+                .data
+                .range(METADATA_KEYS_RANGE)
+                .filter_map(|(key, (old_val, _))| {
+                    old_val
+                        .as_ref()
+                        .and_then(|v| BucketMeta::try_from(v).ok())
+                        .map(|meta| (bucket_id_from_metadata_key(*key), meta.capacity))
+                })
+                .collect();
+
+            // Filter out keys that exceed old capacities (this can happen after bucket expansion)
+            witnessed_keys.extend(recorder.cache.into_keys().filter(|key| {
+                old_capacities
+                    .get(&key.bucket_id())
+                    .is_none_or(|&old_cap| key.slot_id() < old_cap)
+            }));
 
             Ok(())
         })()
@@ -276,13 +318,18 @@ impl TrieReader for Witness {
 }
 
 #[cfg(test)]
+#[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
     use crate::{
         constant::*,
+        empty_salt::EmptySalt,
         mem_store::MemStore,
-        proof::salt_witness::{create_mock_proof, SaltWitness},
-        proof::test_utils::*,
+        proof::{
+            salt_witness::{create_mock_proof, SaltWitness},
+            test_utils::*,
+        },
+        state::updates::StateUpdates,
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
@@ -314,9 +361,9 @@ mod tests {
             .iter()
             .map(|k| (k.clone(), Some(k[0..20].to_vec())))
             .collect();
-        let updates = EphemeralSaltState::new(store).update(&kvs).unwrap();
+        let updates = EphemeralSaltState::new(store).update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
-        let (root, trie_updates) = StateRoot::new(store).update_fin(updates).unwrap();
+        let (root, trie_updates) = StateRoot::new(store).update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
         root
     }
@@ -400,19 +447,14 @@ mod tests {
 
         // Insert into Salt storage and update the trie
         let store = MemStore::new();
-        let updates = EphemeralSaltState::new(&store).update(&kvs).unwrap();
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (root, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
 
         // Generate a witness for the inserted key
-        let witness = Witness::create(
-            &kvs.keys().cloned().collect::<Vec<_>>(),
-            std::iter::empty(),
-            &store,
-        )
-        .unwrap();
+        let witness = Witness::create([], kvs.keys(), &BTreeMap::new(), &store).unwrap();
 
         // Test serialization round-trip of the underlying SaltWitness
         let serialized =
@@ -452,7 +494,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5, 6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -475,7 +517,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -528,7 +570,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -580,7 +622,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![6, 0, 2]), &store);
 
         let plain_key = test_keys_with_known_mappings()[1].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -633,7 +675,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![]), &store);
 
         let plain_key = test_keys_with_known_mappings()[0].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -674,7 +716,7 @@ mod tests {
         let root = setup_state_with_keys(select_test_keys(vec![0, 1, 2, 3, 4, 5]), &store);
 
         let plain_key = test_keys_with_known_mappings()[6].clone();
-        let proof = Witness::create(&[plain_key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -740,7 +782,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[7].clone();
 
-        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -782,7 +824,7 @@ mod tests {
 
         let key = test_keys_with_known_mappings()[8].clone();
 
-        let proof = Witness::create(&[key.clone()], std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &[key.clone()], &BTreeMap::new(), &store).unwrap();
 
         assert_eq!(root, proof.state_root().unwrap());
         assert!(proof.verify().is_ok());
@@ -821,19 +863,14 @@ mod tests {
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&kvs).unwrap();
+        let updates = state.update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
-        let (_, trie_updates) = StateRoot::new(&store).update_fin(updates).unwrap();
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
 
         store.update_trie(trie_updates);
 
-        let witness = Witness::create(
-            &kvs.keys().cloned().collect::<Vec<_>>(),
-            std::iter::empty(),
-            &store,
-        )
-        .unwrap();
+        let witness = Witness::create([], kvs.keys(), &BTreeMap::new(), &store).unwrap();
 
         for key in witness.salt_witness.kvs.keys() {
             let proof_value = witness.value(*key).unwrap();
@@ -861,7 +898,7 @@ mod tests {
 
         // Create a witness for the same 3 keys that were inserted
         let keys = select_test_keys(vec![7, 8, 9]);
-        let proof = Witness::create(&keys, std::iter::empty(), &store).unwrap();
+        let proof = Witness::create([], &keys, &BTreeMap::new(), &store).unwrap();
 
         // Verify the witness is valid against the state root
         assert_eq!(root, proof.state_root().unwrap());
@@ -923,5 +960,113 @@ mod tests {
         let witness = Witness::from(salt_witness);
 
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), used_slots);
+    }
+
+    /// Verifies that witnesses contain sufficient data to correctly compute new
+    /// state roots, which is essential for stateless validation.
+    #[test]
+    fn test_witness_state_root_update() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Generate `n` random key-value pairs
+        let n = 230;
+        let kvs: HashMap<_, _> = (0..n)
+            .map(|_| (mock_data(&mut rng, 32), Some(mock_data(&mut rng, 32))))
+            .collect();
+
+        // Both paths share the same starting point (empty MemStore in this case)
+        let store = MemStore::new();
+
+        // Create witness from initial state BEFORE any mutations
+        let updates: BTreeMap<_, _> = kvs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let witness = Witness::create([], std::iter::empty(), &updates, &store).unwrap();
+
+        // Pass 1: MemStore-based insertion (mutates store)
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (store_root, _) = StateRoot::new(&store).update_fin(&updates).unwrap();
+
+        // Pass 2: Witness-based insertion (using witness created from initial state)
+        let witness_updates = EphemeralSaltState::new(&witness).update_fin(&kvs).unwrap();
+        let (witness_root, _) = StateRoot::new(&witness)
+            .update_fin(&witness_updates)
+            .unwrap();
+
+        // Both passes should produce identical roots
+        assert_eq!(store_root, witness_root);
+    }
+
+    /// Verifie that Witness::create() should not canonicalize the bucket layouts before
+    /// filtering out invalid keys.
+    #[test]
+    fn test_witness_create_should_not_canonicalize() {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Inserts then deletes `n` random key-value pairs
+        let n = 230;
+        let inserts: HashMap<_, _> = (0..n)
+            .map(|_| (mock_data(&mut rng, 32), Some(mock_data(&mut rng, 32))))
+            .collect();
+
+        let deletes: HashMap<_, _> = inserts.keys().map(|k| (k.clone(), None)).collect();
+
+        // Salt proof creation should fail with an InvalidSaltKey error if Witness::create()
+        // incorrectly uses update_fin() to eliminate the bucket capacity changes too early
+        let combined: BTreeMap<_, _> = inserts
+            .iter()
+            .chain(deletes.iter())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let witness = Witness::create([], std::iter::empty(), &combined, &EmptySalt).unwrap();
+
+        // Verify no keys should exist in witness
+        let mut witness_state = EphemeralSaltState::new(&witness);
+        for key in inserts.keys() {
+            assert_eq!(
+                witness_state.plain_value(key).unwrap(),
+                None,
+                "Key should be deleted in witness after insert+delete"
+            );
+        }
+    }
+
+    /// Verifies that Witness::create include bucket metadata for explicitly requested buckets.
+    #[test]
+    fn test_witness_create_bucket_ids() {
+        // Test bucket IDs across the full 24-bit bucket ID space.
+        let bucket_ids = [65536, 100_000, 1_000_000, 5_000_000, 16_777_215];
+        let new_metadata = BucketMeta {
+            capacity: (8 * MIN_BUCKET_SIZE) as u64,
+            ..BucketMeta::default()
+        };
+
+        let meta_updates = StateUpdates {
+            data: bucket_ids
+                .iter()
+                .map(|&id| {
+                    (
+                        bucket_metadata_key(id),
+                        (
+                            Some(BucketMeta::default().into()),
+                            Some(new_metadata.into()),
+                        ),
+                    )
+                })
+                .collect(),
+        };
+
+        let store = MemStore::new();
+        let (root, trie_updates) = StateRoot::new(&store).update_fin(&meta_updates).unwrap();
+        store.update_state(meta_updates);
+        store.update_trie(trie_updates);
+
+        // Create witness with explicit bucket IDs (no plain keys)
+        let witness = Witness::create(bucket_ids, [], &BTreeMap::new(), &store).unwrap();
+
+        assert_eq!(witness.state_root().unwrap(), root);
+        assert!(witness.verify().is_ok());
+        assert!(bucket_ids
+            .iter()
+            .all(|&id| witness.metadata(id).unwrap() == new_metadata));
     }
 }

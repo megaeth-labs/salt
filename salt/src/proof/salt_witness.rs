@@ -46,7 +46,7 @@ use banderwagon::use_iter;
 /// - **No Range Manipulation**: Range queries are disabled to prevent selective
 ///   omission attacks where a prover hides some keys while including others in a range.
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SaltWitness {
     /// All witnessed data in this proof, including both metadata and regular
     /// key-value pairs.
@@ -297,7 +297,7 @@ impl TrieReader for SaltWitness {
     /// - Returns an error if the node is not included in the witness
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
         match self.proof.parents_commitments.get(&node_id) {
-            Some(commitment) => Ok(commitment.0),
+            Some(commitment) => Ok(commitment.as_bytes()),
             None => Err(SaltError::NotInWitness { what: "Trie node" }),
         }
     }
@@ -363,6 +363,7 @@ mod tests {
         state::updates::StateUpdates,
         trie::trie::StateRoot,
     };
+    use banderwagon::{Element, Fr};
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
 
@@ -373,11 +374,13 @@ mod tests {
         let mem_store = MemStore::new();
 
         // 1. Initialize the state & trie to represent the origin state.
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (old_trie_root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (old_trie_root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -386,10 +389,10 @@ mod tests {
         let new_kvs = create_random_kv_pairs(100);
 
         let mut state = EphemeralSaltState::new(&mem_store).cache_read();
-        let state_updates = state.update(&new_kvs).unwrap();
+        let state_updates = state.update_fin(&new_kvs).unwrap();
 
         // Update the trie with the new inserts
-        let (new_trie_root, mut trie_updates) = trie.update_fin(state_updates.clone()).unwrap();
+        let (new_trie_root, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
@@ -403,13 +406,13 @@ mod tests {
         let mut prover_state = EphemeralSaltState::new(&salt_witness);
 
         // 3.3 prover client execute the same blocks, and get the same new_kvs
-        let prover_updates = prover_state.update(&new_kvs).unwrap();
+        let prover_updates = prover_state.update_fin(&new_kvs).unwrap();
 
         assert_eq!(state_updates, prover_updates);
 
         let mut prover_trie = StateRoot::new(&salt_witness);
         let (prover_trie_root, mut prover_trie_updates) =
-            prover_trie.update_fin(prover_updates).unwrap();
+            prover_trie.update_fin(&prover_updates).unwrap();
 
         trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         prover_trie_updates.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -426,11 +429,13 @@ mod tests {
         // 1. Initialize the state & trie to represent the origin state.
         let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (root, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (root, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -441,7 +446,7 @@ mod tests {
         let pv = Some(mock_data(&mut rng, 32));
 
         let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(vec![(&pk, &pv)]).unwrap();
+        state.update_fin(vec![(&pk, &pv)]).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
         let salt_witness_res = SaltWitness::create(&min_sub_tree_keys, &mem_store).unwrap();
@@ -457,11 +462,13 @@ mod tests {
         // 1. Initialize the state & trie to represent the origin state.
         let mem_store = MemStore::new();
 
-        let initial_updates = EphemeralSaltState::new(&mem_store).update(&kvs).unwrap();
+        let initial_updates = EphemeralSaltState::new(&mem_store)
+            .update_fin(&kvs)
+            .unwrap();
         mem_store.update_state(initial_updates.clone());
 
         let mut trie = StateRoot::new(&mem_store);
-        let (_, initial_trie_updates) = trie.update_fin(initial_updates).unwrap();
+        let (_, initial_trie_updates) = trie.update_fin(&initial_updates).unwrap();
 
         mem_store.update_trie(initial_trie_updates);
 
@@ -469,7 +476,7 @@ mod tests {
         // after the execution of the block.
         let new_kvs = create_random_kv_pairs(100);
         let mut state = EphemeralSaltState::new(&mem_store);
-        state.update(&new_kvs).unwrap();
+        state.update_fin(&new_kvs).unwrap();
 
         let min_sub_tree_keys = state.cache.keys().copied().collect::<Vec<_>>();
 
@@ -514,9 +521,11 @@ mod tests {
         let bucket3 = NUM_META_BUCKETS as u32 + 2;
 
         // Test Case 1: Explicit metadata present (Some(Some(meta)))
-        let mut explicit_meta = BucketMeta::default();
-        explicit_meta.nonce = 42;
-        explicit_meta.capacity = 512;
+        let explicit_meta = BucketMeta {
+            nonce: 42,
+            capacity: 512,
+            ..Default::default()
+        };
 
         let mut kvs = BTreeMap::new();
         let metadata_key = bucket_metadata_key(bucket1);
@@ -746,7 +755,7 @@ mod tests {
             kvs,
             proof: create_mock_proof(),
         };
-        let expected = (MIN_BUCKET_SIZE as u64 + 2) / 3;
+        let expected = (MIN_BUCKET_SIZE as u64).div_ceil(3);
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), expected);
     }
 
@@ -763,11 +772,10 @@ mod tests {
     fn test_witness_trie_reader_security() {
         // Build witness with two witnessed nodes
         let mut proof = create_mock_proof();
-        proof.parents_commitments = [
-            (12345, SerdeCommitment([1u8; 64])),
-            (67890, SerdeCommitment([2u8; 64])),
-        ]
-        .into();
+        let gen = Element::prime_subgroup_generator();
+        let c1 = SerdeCommitment(gen * Fr::from(1u64));
+        let c2 = SerdeCommitment(gen * Fr::from(2u64));
+        proof.parents_commitments = [(12345, c1.clone()), (67890, c2.clone())].into();
 
         let witness = SaltWitness {
             kvs: BTreeMap::new(),
@@ -775,8 +783,8 @@ mod tests {
         };
 
         // Witnessed nodes return correct commitments
-        assert_eq!(witness.commitment(12345).unwrap(), [1u8; 64]);
-        assert_eq!(witness.commitment(67890).unwrap(), [2u8; 64]);
+        assert_eq!(witness.commitment(12345).unwrap(), c1.as_bytes());
+        assert_eq!(witness.commitment(67890).unwrap(), c2.as_bytes());
 
         // Unknown nodes must return errors (critical security test)
         assert!(
@@ -796,7 +804,7 @@ mod tests {
         let mem_store = MemStore::new();
 
         let mut trie = StateRoot::new(&mem_store);
-        let (root, _) = trie.update_fin(StateUpdates::default()).unwrap();
+        let (root, _) = trie.update_fin(&StateUpdates::default()).unwrap();
 
         let bucket_id: BucketId = 100000;
         let salt_key = bucket_metadata_key(bucket_id);

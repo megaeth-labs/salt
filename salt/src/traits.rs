@@ -5,6 +5,7 @@ use crate::{
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
+use std::error::Error;
 use std::{
     fmt::Debug,
     ops::{Range, RangeInclusive},
@@ -23,9 +24,10 @@ use std::{
 /// rehashed).
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait StateReader: Debug + Send + Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Debug + Send + Sync + Error + 'static;
 
     /// Retrieves a state value by key.
     ///
@@ -210,9 +212,10 @@ pub trait StateReader: Debug + Send + Sync {
 /// explicitly stored, ensuring the trie behaves as if fully materialized.
 ///
 /// See [`MemStore`](crate::MemStore) for a reference in-memory implementation.
+#[auto_impl::auto_impl(&, Arc)]
 pub trait TrieReader: Sync {
     /// Custom trait's error type.
-    type Error: Debug + Send;
+    type Error: Debug + Send + Sync + Error + 'static;
 
     /// Retrieves the commitment for a specific trie node.
     ///
@@ -294,7 +297,7 @@ mod tests {
             // Create state updates to store the metadata
             let mut updates = StateUpdates::default();
             let meta_key = bucket_metadata_key(bucket_id);
-            let meta_value = SaltValue::try_from(meta).unwrap();
+            let meta_value = SaltValue::from(meta);
             updates.add(meta_key, None, Some(meta_value));
 
             // Update the store with this metadata

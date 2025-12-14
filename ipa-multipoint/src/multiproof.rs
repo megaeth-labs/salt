@@ -17,8 +17,6 @@ use banderwagon::{
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-#[cfg(target_os = "zkvm")]
-use risc0_zkvm::guest::env;
 pub struct MultiPoint;
 
 #[derive(Clone, Debug)]
@@ -40,7 +38,7 @@ impl From<ProverQuery> for VerifierQuery {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VerifierQuery {
     pub commitment: Element,
     pub point: Fr,
@@ -219,9 +217,7 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
         .for_each(|(chunk_res, p)| {
             // Commitment
             chunk_res[0] = b'C';
-            p.commitment()
-                .serialize_compressed(&mut chunk_res[1..33])
-                .expect("Failed to serialize commitment");
+            chunk_res[1..33].copy_from_slice(&p.commitment().to_bytes());
 
             // Point
             chunk_res[33] = b'z';
@@ -238,7 +234,7 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
         });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MultiPointProof {
     open_proof: IPAProof,
     g_x_comm: Element,
@@ -250,8 +246,8 @@ impl MultiPointProof {
 
         let g_x_comm_bytes = &bytes[0..32];
         let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
-        let point: Element =
-            Element::from_bytes(g_x_comm_bytes).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+        let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
+            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
         let g_x_comm = point;
 
         let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;
@@ -281,16 +277,11 @@ impl MultiPointProof {
         // 1. Compute `r`
         //
         // Add points and evaluations
-        #[cfg(target_os = "zkvm")]
-        let start1 = env::cycle_count();
         record_query_transcript(transcript, queries);
 
         let r = transcript.challenge_scalar(b"r");
-        #[cfg(target_os = "zkvm")]
-        let start2 = env::cycle_count();
         let powers_of_r = powers_of_par(r, queries.len());
-        #[cfg(target_os = "zkvm")]
-        let start3 = env::cycle_count();
+
         // 2. Compute `t`
         transcript.append_point(b"D", &self.g_x_comm);
         let t = transcript.challenge_scalar(b"t");
@@ -298,70 +289,34 @@ impl MultiPointProof {
         // 3. Compute g_2(t)
         //
         let mut g2_den: Vec<_> = use_iter!(queries).map(|query| t - query.point).collect();
-        #[cfg(target_os = "zkvm")]
-        let start4 = env::cycle_count();
+
         batch_inversion(&mut g2_den);
-        #[cfg(target_os = "zkvm")]
-        let start5 = env::cycle_count();
 
         let helper_scalars: Vec<_> = use_into_iter!(powers_of_r)
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
-        #[cfg(target_os = "zkvm")]
-        let start6 = env::cycle_count();
 
         let g2_t: Fr = use_iter!(helper_scalars)
             .zip(use_iter!(queries))
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
-        #[cfg(target_os = "zkvm")]
-        let start7 = env::cycle_count();
 
         //4. Compute [g_1(X)] = E
         let comms: Vec<_> = use_iter!(queries).map(|query| query.commitment).collect();
-        #[cfg(target_os = "zkvm")]
-        let start8 = env::cycle_count();
+
         let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
-        #[cfg(target_os = "zkvm")]
-        let start9 = env::cycle_count();
 
         transcript.append_point(b"E", &g1_comm);
 
         // E - D
         let g3_comm = g1_comm - self.g_x_comm;
-        #[cfg(target_os = "zkvm")]
-        let start10 = env::cycle_count();
 
         // Check IPA
         let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t); // TODO: we could put this as a method on PrecomputedWeights
-        #[cfg(target_os = "zkvm")]
-        let start11 = env::cycle_count();
-        let res = self.open_proof
-            .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t);
-        #[cfg(target_os = "zkvm")]
-        let start12 = env::cycle_count();
-        #[cfg(target_os = "zkvm")]
-        {
-            println!(
-                "Multiproof timings (in cycles):\n\
-            record_query_transcript: {},\n\
-            powers_of_r: {},\n\
-            batch_inversion: {},\n\
-            helper_scalars and g2_t: {},\n\
-            multi_scalar_mul_par: {},\n\
-            IPA verify: {}",
-            start2 - start1,
-            start3 - start2,
-            start5 - start4,
-            start7 - start6,
-            start9 - start8,
-            start12 - start11,
-            );
-            println!("check CYCLES: {},{},{},{},{},{},{},{},{},{},{},{}", start1,start2,start3,start4,start5,start6,start7,start8,start9,start10,start11,start12);
 
-        }
-        res
+        self.open_proof
+            .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t)
     }
 }
 

@@ -47,20 +47,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             ))
         })
     });
-
-    c.bench_function("ipa - verify (256)", |b| {
-        b.iter(|| {
-            let mut verifier_transcript = Transcript::new(b"ip_no_zk");
-            black_box(proof.verify(
-                &mut verifier_transcript,
-                crs.clone(),
-                b_vec.clone(),
-                a_comm,
-                input_point,
-                output_point,
-            ))
-        })
-    });
 }
 
 criterion_group!(benches, criterion_benchmark);

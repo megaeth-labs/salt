@@ -12,7 +12,7 @@ $$
 g(X) =  r^0 \frac{f_0(X) - y_0}{X-z_0} + r^1 \frac{f_1(X) - y_1}{X-z_1} + \ldots +r^{m-1} \frac{f_{m-1}(X) - y_{m-1}}{X-z_{m-1}}
 $$
 
-In our context, $z_i$ is an element in the domain, so naively we cannot compute this division in lagrange form. We also do not want to use monomial form, as we would need to interpolate our polynomials, which is exp  
+In our context, $z_i$ is an element in the domain, so naively we cannot compute this division in lagrange form. We also do not want to use monomial form, as we would need to interpolate our polynomials, which is expensive.
 
 Simplifying the problem:
 

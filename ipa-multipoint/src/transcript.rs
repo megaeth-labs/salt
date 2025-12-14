@@ -57,8 +57,7 @@ impl TranscriptProtocol for Transcript {
     }
 
     fn append_point(&mut self, label: &'static [u8], point: &Element) {
-        let mut bytes = [0u8; 32];
-        point.serialize_compressed(&mut bytes[..]).unwrap();
+        let bytes = point.to_bytes();
         self.append_message(&bytes, label)
     }
 

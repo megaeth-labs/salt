@@ -308,6 +308,18 @@ impl SaltValue {
         let value_len = self.data[1] as usize;
         &self.data[2 + key_len..2 + key_len + value_len]
     }
+
+    /// Returns the total length of the encoded data (header + key + value).
+    ///
+    /// This is the sum of:
+    /// - 2 bytes for the length headers (key_len and value_len)
+    /// - key length
+    /// - value length
+    pub fn data_len(&self) -> usize {
+        let key_len = self.data[0] as usize;
+        let value_len = self.data[1] as usize;
+        2 + key_len + value_len
+    }
 }
 
 impl From<BucketMeta> for SaltValue {
@@ -611,8 +623,7 @@ mod tests {
         assert_eq!(bytes.len(), 12);
 
         // Serialize using bincode (which will use our custom serde implementation)
-        let bincode_bytes =
-            bincode::serde::encode_to_vec(&meta, bincode::config::legacy()).unwrap();
+        let bincode_bytes = bincode::serde::encode_to_vec(meta, bincode::config::legacy()).unwrap();
 
         assert_eq!(bincode_bytes, bytes);
 
@@ -791,7 +802,7 @@ mod tests {
         assert!(is_subtree_node(bucket_max));
 
         // Even bucket root addressing for data buckets should return true
-        let bucket_root_65536 = (65536u64 << BUCKET_SLOT_BITS) | 0;
+        let bucket_root_65536 = 65536u64 << BUCKET_SLOT_BITS;
         assert!(is_subtree_node(bucket_root_65536));
     }
 

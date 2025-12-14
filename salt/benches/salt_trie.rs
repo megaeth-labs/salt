@@ -59,8 +59,9 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                 let mut salt_key;
                 // Retry until we find a unique key
                 loop {
-                    let bid = rng.gen_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId);
-                    let slot_id = rng.gen_range(0..MIN_BUCKET_SIZE as SlotId);
+                    let bid =
+                        rng.random_range(NUM_META_BUCKETS as BucketId..NUM_BUCKETS as BucketId);
+                    let slot_id = rng.random_range(0..MIN_BUCKET_SIZE as SlotId);
                     salt_key = SaltKey::from((bid, slot_id));
                     if used_keys.insert(salt_key) {
                         break; // Found a unique key
@@ -72,8 +73,8 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
                     salt_key,
                     None, // old_value: None indicates this is an insertion
                     Some(SaltValue::new(
-                        &rng.gen::<[u8; 20]>(), // 20-byte random key
-                        &rng.gen::<[u8; 32]>(), // 32-byte random value
+                        &rng.random::<[u8; 20]>(), // 20-byte random key
+                        &rng.random::<[u8; 32]>(), // 32-byte random value
                     )),
                 );
             }
@@ -103,7 +104,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                 // Measured operation: Single large update with immediate finalization
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -121,7 +122,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             |inputs| {
                 black_box(
                     StateRoot::new(&EmptySalt)
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap(),
                 )
             },
@@ -141,7 +142,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                     let mut trie = StateRoot::new(&EmptySalt);
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
-                        trie.update(state_updates).unwrap();
+                        trie.update(&state_updates).unwrap();
                     }
                     // Single expensive commitment computation at the end
                     trie.finalize().unwrap()
@@ -163,7 +164,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                     // Anti-pattern: Create fresh trie and compute root for each update
                     for state_updates in inputs.into_iter() {
                         StateRoot::new(&EmptySalt)
-                            .update_fin(state_updates)
+                            .update_fin(&state_updates)
                             .unwrap();
                     }
                 }
@@ -183,7 +184,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             |inputs| {
                 black_box({
                     StateRoot::new(&MockExpandedBuckets::new(65536 * 16, 512))
-                        .update_fin(inputs.into_iter().next().unwrap())
+                        .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap()
                 })
             },

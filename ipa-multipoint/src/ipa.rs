@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use std::iter;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
     pub(crate) L_vec: Vec<Element>,
     pub(crate) R_vec: Vec<Element>,
@@ -36,15 +36,15 @@ impl IPAProof {
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let point: Element =
-                Element::from_bytes(chunk).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
+                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
             L_vec.push(point)
         }
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
-            let point: Element =
-                Element::from_bytes(chunk).ok_or(IOError::from(IOErrorKind::InvalidData))?;
+            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
+                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
             R_vec.push(point)
         }
 
@@ -186,73 +186,6 @@ fn log2(n: usize) -> u32 {
 }
 
 impl IPAProof {
-    pub fn verify(
-        &self,
-        transcript: &mut Transcript,
-        mut crs: CRS,
-        mut b: Vec<Fr>,
-        a_comm: Element,
-        input_point: Fr,
-        output_point: Fr,
-    ) -> bool {
-        transcript.domain_sep(b"ipa");
-
-        let mut G = &mut crs.G[..];
-        let mut b = &mut b[..];
-
-        let num_rounds = self.L_vec.len();
-
-        // Check that the prover computed an inner proof
-        // over a vector of size n
-        if crs.n != 1 << num_rounds {
-            return false;
-        }
-
-        // transcript.append_u64(b"n", n as u64);
-        transcript.append_point(b"C", &a_comm);
-        transcript.append_scalar(b"input point", &input_point);
-        transcript.append_scalar(b"output point", &output_point);
-
-        let w = transcript.challenge_scalar(b"w");
-        let Q = crs.Q * w;
-
-        let num_rounds = self.L_vec.len();
-
-        let mut a_comm = a_comm + (Q * output_point);
-
-        let challenges = generate_challenges(self, transcript);
-        let mut challenges_inv = challenges.clone();
-        batch_inversion(&mut challenges_inv);
-
-        // Compute the expected commitment
-        // TODO use a multizip from itertools
-        for i in 0..num_rounds {
-            let x = challenges[i];
-            let x_inv = challenges_inv[i];
-            let L = self.L_vec[i];
-            let R = self.R_vec[i];
-
-            a_comm = a_comm + (L * x) + (R * x_inv);
-        }
-
-        for x_inv in challenges_inv.iter() {
-            let (G_L, G_R) = halve(G);
-            let (b_L, b_R) = halve(b);
-
-            for i in 0..G_L.len() {
-                G_L[i] += G_R[i] * *x_inv;
-                b_L[i] += b_R[i] * x_inv;
-            }
-            G = G_L;
-            b = b_L;
-        }
-        assert_eq!(G.len(), 1);
-        assert_eq!(b.len(), 1);
-
-        let exp_P = (G[0] * self.a) + Q * (self.a * b[0]);
-
-        exp_P == a_comm
-    }
     pub fn verify_multiexp(
         &self,
         transcript: &mut Transcript,
@@ -326,74 +259,6 @@ impl IPAProof {
         )
         .is_zero()
     }
-    // It's only semi unrolled.
-    // This is being committed incase someone goes through the git history
-    // The fully unrolled code is not that intuitive, but maybe this semi
-    // unrolled version can help you to figure out the gap
-    pub fn verify_semi_multiexp(
-        &self,
-        transcript: &mut Transcript,
-        crs: &CRS,
-        b_Vec: Vec<Fr>,
-        a_comm: Element,
-        input_point: Fr,
-        output_point: Fr,
-    ) -> bool {
-        transcript.domain_sep(b"ipa");
-
-        let logn = self.L_vec.len();
-        let n = crs.n;
-        // Check that the prover computed an inner proof
-        // over a vector of size n
-        if n != (1 << logn) {
-            return false;
-        }
-
-        // transcript.append_u64(b"n", n as u64);
-        transcript.append_point(b"C", &a_comm);
-        transcript.append_scalar(b"input point", &input_point);
-        transcript.append_scalar(b"output point", &output_point);
-
-        let w = transcript.challenge_scalar(b"w");
-        let Q = crs.Q * w;
-
-        let a_comm = a_comm + (Q * output_point);
-
-        let challenges = generate_challenges(self, transcript);
-        let mut challenges_inv = challenges.clone();
-        batch_inversion(&mut challenges_inv);
-
-        let P = slow_vartime_multiscalar_mul(
-            challenges
-                .iter()
-                .chain(challenges_inv.iter())
-                .chain(iter::once(&Fr::one())),
-            self.L_vec
-                .iter()
-                .chain(self.R_vec.iter())
-                .chain(iter::once(&a_comm)),
-        );
-
-        // {g_i}
-        let mut g_i: Vec<Fr> = Vec::with_capacity(1 << logn);
-
-        for index in 0..n {
-            let mut g = Fr::one();
-            for (bit, x_inv) in to_bits(index, logn).zip_eq(&challenges_inv) {
-                if bit == 1 {
-                    g *= x_inv;
-                }
-            }
-            g_i.push(g);
-        }
-
-        let b_0 = inner_product(&b_Vec, &g_i);
-        let G_0 = slow_vartime_multiscalar_mul(g_i.iter(), crs.G.iter()); // TODO: Optimise; the majority of the time is spent on this vector, precompute
-
-        let exp_P = (G_0 * self.a) + Q * (self.a * b_0);
-
-        exp_P == P
-    }
 }
 
 fn to_bits(n: usize, bits_needed: usize) -> impl Iterator<Item = u8> {
@@ -466,9 +331,9 @@ mod tests {
         );
 
         let mut verifier_transcript = Transcript::new(b"ip_no_zk");
-        assert!(proof.verify(
+        assert!(proof.verify_multiexp(
             &mut verifier_transcript,
-            crs,
+            &crs,
             b,
             P,
             input_point,

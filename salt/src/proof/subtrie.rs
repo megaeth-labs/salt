@@ -15,8 +15,8 @@
 //! 5. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)
 use crate::{
     constant::{
-        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS,
-        NUM_META_BUCKETS, POLY_DEGREE, STARTING_NODE_ID,
+        default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS,
+        META_BUCKET_SIZE, NUM_META_BUCKETS, STARTING_NODE_ID,
     },
     proof::{
         prover::slot_to_field,
@@ -81,10 +81,12 @@ fn multi_commitments_to_scalars<Store>(
 where
     Store: TrieReader,
 {
-    // Pre-allocate capacity for better memory efficiency
-    // Each node contributes exactly 256 commitments
-    let total_capacity = nodes.len() * POLY_DEGREE;
-    let mut all_child_commitments: Vec<[u8; 64]> = Vec::with_capacity(total_capacity);
+    // Helper closures for concise element conversion
+    let to_element = |bytes| Element::from_bytes_unchecked_uncompressed(bytes);
+    let default_element = |node_id| to_element(default_commitment(node_id));
+
+    let total_capacity = nodes.len() * DOMAIN_SIZE;
+    let mut all_child_commitments = Vec::with_capacity(total_capacity);
 
     // Load child commitments for each internal node
     for (node_id, _) in nodes {
@@ -93,36 +95,34 @@ where
 
         // Load existing child commitments from storage
         let children = store
-            .node_entries(child_idx..child_idx + POLY_DEGREE as NodeId)
+            .node_entries(child_idx..child_idx + DOMAIN_SIZE as NodeId)
             .map_err(|e| ProofError::StateReadError {
                 reason: format!("Failed to load child nodes for parent {node_id}: {e:?}"),
             })?;
 
-        // Initialize with appropriate default commitments based on tree level
-        let mut child_commitments = if child_idx == ROOT_LEVEL_CHILD_START {
-            // Root level: first child uses different default than others
-            let mut commitments = vec![default_commitment(child_idx + 1); POLY_DEGREE];
-            commitments[0] = default_commitment(child_idx);
-            commitments
+        // Initialize with appropriate default commitments
+        let default_idx = if child_idx == ROOT_LEVEL_CHILD_START {
+            child_idx + 1 // Root level: most children use child_idx + 1 as default
         } else {
-            // Non-root levels: all positions use same default
-            vec![default_commitment(child_idx); POLY_DEGREE]
+            child_idx // Non-root levels: all use child_idx as default
         };
+        let mut child_commitments = vec![default_element(default_idx); DOMAIN_SIZE];
 
-        // Replace defaults with actual commitments where child nodes exist
-        for (absolute_node_id, commitment) in children {
+        // Special case: root level first child uses different default
+        if child_idx == ROOT_LEVEL_CHILD_START {
+            child_commitments[0] = default_element(child_idx);
+        }
+
+        // Replace defaults with actual commitments where they exist
+        for (absolute_node_id, commitment_bytes) in children {
             let relative_index = absolute_node_id as usize - child_idx as usize;
-            child_commitments[relative_index] = commitment;
+            child_commitments[relative_index] = to_element(commitment_bytes);
         }
 
         all_child_commitments.extend(child_commitments);
     }
 
-    // Convert all Element commitments to scalar field elements in one batch operation
-    // This is more efficient than converting individually
-    Ok(Element::serial_batch_map_to_scalar_field(
-        all_child_commitments,
-    ))
+    Ok(Element::batch_map_to_scalar_field(&all_child_commitments))
 }
 
 /// Creates IPA prover queries for a given commitment and evaluation points.
@@ -179,6 +179,7 @@ fn create_prover_queries(
 /// # Errors
 ///
 /// Returns `ProofError::StateReadError` if unable to read bucket metadata or trie commitments.
+/// Returns `ProofError::InvalidSaltKey` if any salt key has a slot_id that exceeds its bucket's capacity.
 pub(crate) fn create_sub_trie<Store>(
     store: &Store,
     salt_keys: &[SaltKey],
@@ -191,6 +192,30 @@ where
             reason: "empty key set".to_string(),
         });
     }
+
+    // Validate salt keys
+    salt_keys.iter().try_for_each(|key| {
+        let capacity = if key.is_in_meta_bucket() {
+            META_BUCKET_SIZE as u64
+        } else {
+            store
+                .metadata(key.bucket_id())
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!(
+                        "Failed to read metadata for bucket {}: {e:?}",
+                        key.bucket_id()
+                    ),
+                })?
+                .capacity
+        };
+
+        (key.slot_id() < capacity)
+            .then_some(())
+            .ok_or(ProofError::InvalidSaltKey {
+                key: *key,
+                capacity,
+            })
+    })?;
 
     // Step 1: Extract and deduplicate bucket IDs from the input keys
     let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
@@ -226,14 +251,15 @@ where
         .chain(leaf_nodes.iter())
         .map(|(&parent, _)| {
             let physical_parent = connect_parent_id(parent);
-            let commitment =
+            let commitment = Element::from_bytes_unchecked_uncompressed(
                 store
                     .commitment(physical_parent)
                     .map_err(|e| ProofError::StateReadError {
                         reason: format!(
                             "Failed to load commitment for node {physical_parent}: {e:?}"
                         ),
-                    })?;
+                    })?,
+            );
 
             Ok((physical_parent, SerdeCommitment(commitment)))
         })
@@ -248,7 +274,7 @@ where
 
             let res = nodes
                 .iter()
-                .zip(children_scalars.chunks(POLY_DEGREE))
+                .zip(children_scalars.chunks(DOMAIN_SIZE))
                 .map(|((parent, points), children_scalars)| {
                     let commitment = store
                         .commitment(connect_parent_id(*parent))
@@ -322,13 +348,13 @@ where
     };
 
     let start_key = SaltKey::from((bucket_id, slot_start));
-    let end_key = SaltKey::from((bucket_id, slot_start + POLY_DEGREE as SlotId - 1));
+    let end_key = SaltKey::from((bucket_id, slot_start + DOMAIN_SIZE as SlotId - 1));
 
     let entries = store.entries(start_key..=end_key).map_err(|e| {
         ProofError::StateReadError {
             reason: format!(
                 "Failed to load bucket entries for bucket {bucket_id}, slots {slot_start}-{}: {e:?}",
-                slot_start + POLY_DEGREE as SlotId - 1
+                slot_start + DOMAIN_SIZE as SlotId - 1
             ),
         }
     })?;
@@ -336,10 +362,10 @@ where
     // Initialize polynomial coefficients with appropriate default values
     let mut default_coefficients = if bucket_id < NUM_META_BUCKETS as BucketId {
         // Metadata buckets: initialize with default metadata hash
-        vec![slot_to_field(&Some(BucketMeta::default().into())); POLY_DEGREE]
+        vec![slot_to_field(&Some(BucketMeta::default().into())); DOMAIN_SIZE]
     } else {
         // Data buckets: initialize with empty slot hash
-        vec![slot_to_field(&None); POLY_DEGREE]
+        vec![slot_to_field(&None); DOMAIN_SIZE]
     };
 
     // Replace default values with actual key-value hashes where data exists
@@ -360,6 +386,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::META_BUCKET_SIZE;
     use crate::proof::test_utils::*;
     use crate::{
         mem_store::MemStore, proof::prover::PRECOMPUTED_WEIGHTS, state::state::EphemeralSaltState,
@@ -379,11 +406,11 @@ mod tests {
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
-        let updates = state.update(&kvs).unwrap();
+        let updates = state.update_fin(&kvs).unwrap();
         store.update_state(updates.clone());
 
         let mut trie = StateRoot::new(&store);
-        let (_, trie_updates) = trie.update_fin(updates.clone()).unwrap();
+        let (_, trie_updates) = trie.update_fin(&updates).unwrap();
         store.update_trie(trie_updates);
 
         (store, *updates.data.keys().next().unwrap())
@@ -507,6 +534,27 @@ mod tests {
         // Single internal node
         let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
         let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
-        assert_eq!(scalars.len(), POLY_DEGREE);
+        assert_eq!(scalars.len(), DOMAIN_SIZE);
+    }
+
+    #[test]
+    fn validate_salt_keys() {
+        let (store, _) = setup_test_store();
+
+        // Invalid meta bucket key (slot_id >= META_BUCKET_SIZE)
+        let invalid_meta_key = SaltKey::from((0u32, META_BUCKET_SIZE as u64));
+        let result = create_sub_trie(&store, &[invalid_meta_key]);
+        assert!(matches!(result, Err(ProofError::InvalidSaltKey { .. })));
+
+        // Invalid data bucket key (slot_id >= capacity)
+        let data_bucket_id = NUM_META_BUCKETS as u32;
+        let invalid_data_key = SaltKey::from((data_bucket_id, 1000u64));
+        let result = create_sub_trie(&store, &[invalid_data_key]);
+        assert!(matches!(result, Err(ProofError::InvalidSaltKey { .. })));
+
+        // Valid keys should work
+        let valid_meta_key = SaltKey::from((0u32, 0u64));
+        let result = create_sub_trie(&store, &[valid_meta_key]);
+        assert!(result.is_ok());
     }
 }

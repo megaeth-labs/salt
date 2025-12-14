@@ -294,9 +294,11 @@ NUM_DATA_BUCKETS=3 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo build --features test-b
 
 ## References
 
-### Papers
+### Papers & Blog Posts
 - [Bandersnatch Curve Specification](https://eprint.iacr.org/2021/1152.pdf)
+- [Understanding The Wagon - From Bandersnatch to Banderwagon](https://hackmd.io/@kevaundray/BJBNcv9fq)
 - [Verkle Trees and Vector Commitments](https://hackmd.io/@6iQDuIePQjyYBqDChYw_jg/BJ2-L6Nzc)
+- [Anatomy of a Verkle Proof](https://ihagopian.com/posts/anatomy-of-a-verkle-proof)
 - [Inner Product Arguments (BCMS20)](https://eprint.iacr.org/2019/1177.pdf)
 
 ### Presentations & Talks

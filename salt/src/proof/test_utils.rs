@@ -4,6 +4,7 @@
 
 use crate::proof::SerdeCommitment;
 use crate::types::SaltValue;
+use banderwagon::{Element, Fr};
 use rand::{rngs::StdRng, Rng};
 
 /// Generates random test data of specified length.
@@ -20,14 +21,14 @@ use rand::{rngs::StdRng, Rng};
 /// let data = mock_data(&mut rng, 52);
 /// ```
 pub(crate) fn mock_data(rng: &mut StdRng, len: usize) -> Vec<u8> {
-    (0..len).map(|_| rng.gen()).collect()
+    (0..len).map(|_| rng.random()).collect()
 }
 
 /// Creates a dummy 64-byte cryptographic commitment for testing.
 ///
 /// Used in proof verification tests where actual commitment content doesn't matter.
 pub(crate) fn mock_commitment() -> SerdeCommitment {
-    SerdeCommitment([1u8; 64])
+    SerdeCommitment(Element::prime_subgroup_generator() * Fr::from(42))
 }
 
 /// Creates a mock SaltValue for testing.

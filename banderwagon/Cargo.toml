@@ -6,10 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
-ark-ff = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517"}
-ark-ec = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
-ark-serialize = { git = "https://github.com/arkworks-rs/algebra.git", rev = "da450f98b9b4bf1b4c8eec8f96b4501f9705c517" }
+ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-ff = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-ec = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
+ark-serialize = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695" }
 
 rayon = {version = "*", optional = true}
 hugepage-rs = { version = "0.1.0", optional = true}

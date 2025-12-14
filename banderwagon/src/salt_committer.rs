@@ -28,15 +28,14 @@
 use crate::element::Element;
 #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
 use crate::riscv_zkvm_ops::*;
-use ark_ec::AdditiveGroup;
+#[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
+use crate::{use_edw_proj_zero, use_iter};
+use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
-use ark_ff::{Field, Zero};
-use ark_serialize::CanonicalSerialize;
+use ark_ff::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-
-use crate::{use_edw_proj_zero, use_iter};
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
 /// The `Committer` precomputes and stores windowed multiples of a set of base points
@@ -121,7 +120,7 @@ impl Committer {
                     }
                     element += element;
                 }
-                Element::batch_proj_to_affine(&table)
+                EdwardsProjective::normalize_batch(&table)
             })
             .collect();
 
@@ -201,7 +200,16 @@ impl Committer {
                         element += element;
                     }
                 }
-                Element::batch_proj_to_affine(&table)
+
+                #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
+                {
+                    Element::normalize_batch_riscv32(&table)
+                }
+
+                #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
+                {
+                    EdwardsProjective::normalize_batch(&table)
+                }
             })
             .collect();
 
@@ -209,57 +217,6 @@ impl Committer {
             tables,
             window_size,
         }
-    }
-
-    /// Returns the 64-byte representation of the identity element (point at infinity).
-    ///
-    /// The identity element is encoded as (0, 1) in affine coordinates,
-    /// which serializes to 32 zero bytes followed by 32 bytes representing 1.
-    pub const fn zero() -> [u8; 64] {
-        [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
-        ]
-    }
-
-    /// Efficiently updates a commitment by applying a series of delta changes.
-    ///
-    /// This method is crucial for SALT's incremental update mechanism. Instead of
-    /// recomputing the entire commitment from scratch, it only computes the changes.
-    ///
-    /// # Arguments
-    ///
-    /// * `old_commitment` - The current commitment value (64 bytes)
-    /// * `delta_indices` - Vector of (index, old_value, new_value) tuples where:
-    ///   - `index`: Position in the commitment vector
-    ///   - `old_value`: Previous 32-byte value at this position
-    ///   - `new_value`: New 32-byte value at this position
-    ///
-    /// # Returns
-    ///
-    /// The updated commitment as an `Element`.
-    ///
-    /// # Algorithm
-    ///
-    /// For each delta (i, old, new), computes:
-    /// ```text
-    /// result = old_commitment + Σ (new[i] - old[i]) * G[i]
-    /// ```
-    pub fn add_deltas(
-        &self,
-        old_commitment: [u8; 64],
-        delta_indices: &[(usize, [u8; 32], [u8; 32])],
-    ) -> Element {
-        let mut old = Element::from_bytes_unchecked_uncompressed(old_commitment);
-        delta_indices
-            .iter()
-            .for_each(|(tb_i, old_bytes, new_bytes)| {
-                let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
-                let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
-                old += self.mul_index(&(new_fr - old_fr), *tb_i)
-            });
-        old
     }
 
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
@@ -414,26 +371,6 @@ impl Committer {
             .iter()
             .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
-    }
-
-    /// Computes the contribution of a single delta to a commitment update.
-    ///
-    /// This is a convenience method that computes `G[i] * (new - old)`,
-    /// which represents the change in commitment for position i.
-    ///
-    /// # Arguments
-    ///
-    /// * `old_bytes` - Previous 32-byte value at position i
-    /// * `new_bytes` - New 32-byte value at position i
-    /// * `g_i` - Index of the base point
-    ///
-    /// # Returns
-    ///
-    /// The delta contribution as an `Element`.
-    pub fn gi_mul_delta(&self, old_bytes: &[u8; 32], new_bytes: &[u8; 32], g_i: usize) -> Element {
-        let old_fr = Fr::from_le_bytes_mod_order(old_bytes);
-        let new_fr = Fr::from_le_bytes_mod_order(new_bytes);
-        self.mul_index(&(new_fr - old_fr), g_i)
     }
 }
 
@@ -647,233 +584,6 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     index_vec
 }
 
-impl Element {
-    /// Efficiently converts a batch of projective points to affine coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `elements` - Slice of points in projective coordinates
-    ///
-    /// # Returns
-    ///
-    /// Vector of the same points in affine coordinates.
-    #[inline]
-    #[cfg(not(all(target_os = "zkvm", target_arch = "riscv32")))]
-    pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
-        let commitments = Element::batch_to_commitments(
-            &elements
-                .iter()
-                .map(|element| Element(*element))
-                .collect::<Vec<Element>>(),
-        );
-        // Convert commitments from CommitmentBytes to EdwardsAffine
-        commitments
-            .iter()
-            .map(|bytes| EdwardsAffine {
-                x: Fq::from_le_bytes_mod_order(&bytes[0..32]),
-                y: Fq::from_le_bytes_mod_order(&bytes[32..64]),
-            })
-            .collect()
-    }
-
-    /// Efficiently converts a batch of projective points to affine coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `elements` - Slice of points in projective coordinates
-    ///
-    /// # Returns
-    ///
-    /// Vector of the same points in affine coordinates.
-    #[cfg(all(target_os = "zkvm", target_arch = "riscv32"))]
-    pub(crate) fn batch_proj_to_affine(elements: &[EdwardsProjective]) -> Vec<EdwardsAffine> {
-        let mut zeroes = vec![false; elements.len()];
-
-        let mut zs_mul = Fq::zero();
-        zs_mul.0 .0[0] = 1;
-
-        // zs_mul = z0 * z1 * ... * zn
-        // result[i] = z0 * z1 * ... * zi-1
-        let mut result: Vec<EdwardsAffine> = (0..elements.len())
-            .into_iter()
-            .map(|i| {
-                if elements[i].z.is_zero() {
-                    zeroes[i] = true;
-                    return EdwardsAffine::default();
-                }
-
-                let r = EdwardsAffine {
-                    x: zs_mul,
-                    y: Fq::default(),
-                };
-
-                let zs_mul_clone = zs_mul.clone();
-                mod_mul_zkvm(&mut zs_mul.0 .0, &zs_mul_clone.0 .0, &elements[i].z.0 .0);
-                r
-            })
-            .collect();
-
-        // zs_inv = 1 / zs_mul
-        let zs_mul_clone = zs_mul.clone();
-        from_bigint_to_mont(&mut zs_mul.0 .0, &zs_mul_clone.0 .0);
-        // println!("zs_mul {:?}",zs_mul);
-        let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
-        let zs_inv_clone = zs_inv.clone();
-        from_mont_to_bigint(&mut zs_inv.0 .0, &zs_inv_clone.0 .0);
-        // println!("zs_inv {:?}",zs_inv.0.0);
-
-        // result[i] = (z0 * z1 * ... * zi-1)/(z0 * z1 * ... * zi) = 1/zi
-        for i in (0..elements.len()).rev() {
-            if zeroes[i] {
-                continue;
-            }
-            // result[i].x = result[i].x * &zs_inv;
-            // zs_inv = zs_inv * &elements[i].z;
-            let temp = result[i].x.0 .0.clone();
-            mod_mul_zkvm(&mut result[i].x.0 .0, &temp, &zs_inv.0 .0);
-            let temp = zs_inv.0 .0.clone();
-            mod_mul_zkvm(&mut zs_inv.0 .0, &temp, &elements[i].z.0 .0);
-        }
-
-        // result[i].x = xi / zi, result[i].y = xi / zi
-        elements
-            .into_iter()
-            .zip(result.iter_mut())
-            .zip(zeroes.iter())
-            .for_each(|((element, res), &is_zero)| {
-                if is_zero {
-                    return;
-                }
-
-                let z_inv = res.x;
-                // res.x = &element.x * &z_inv;
-                mod_mul_zkvm(&mut res.x.0 .0, &element.x.0 .0, &z_inv.0 .0);
-                // res.y = &element.y * &z_inv;
-                mod_mul_zkvm(&mut res.y.0 .0, &element.y.0 .0, &z_inv.0 .0);
-            });
-
-        result
-    }
-
-    /// Converts multiple elliptic curve points to their 64-byte commitment representations.
-    ///
-    /// This function efficiently serializes a batch of `Element` points into their
-    /// uncompressed byte representations. It uses Montgomery's batch inversion trick
-    /// to normalize all Z-coordinates with a single field inversion.
-    ///
-    /// # Arguments
-    ///
-    /// * `elements` - Slice of elliptic curve points to convert
-    ///
-    /// # Returns
-    ///
-    /// Vector of 64-byte arrays, each containing:
-    /// - Bytes 0-31: X-coordinate (little-endian)
-    /// - Bytes 32-63: Y-coordinate (little-endian)
-    ///
-    /// # Special Cases
-    ///
-    /// - Identity elements (Z=0) are encoded as (0, 1)
-    #[inline]
-    pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let mut commitments = vec![[0u8; 64]; elements.len()];
-        let mut zi_mul = vec![Fq::ZERO; elements.len()];
-        let mut zeroes = vec![false; elements.len()];
-        let mut zs_mul = Fq::ONE;
-
-        // Montgomery batch inversion algorithm:
-        // Phase 1: Forward pass - compute accumulative products
-        //   zi_mul[i] = z1 * z2 * ... * z_{i-1}
-        elements.iter().enumerate().for_each(|(i, element)| {
-            if element.0.z.is_zero() {
-                zeroes[i] = true;
-                return;
-            }
-            zi_mul[i] = zs_mul;
-            zs_mul *= &element.0.z;
-        });
-
-        // Phase 2: Single inversion - compute 1/(z1 * z2 * ... * zn)
-        let mut zs_inv = zs_mul.inverse().expect("zs_mul is not zero");
-
-        // Phase 3: Backward pass - extract individual inverses
-        // We use the formula: 1/zi = zs_mul[i] * 1/(z1 * z2 * ... * zn) * (z_{i+1} * ... * zn)
-        for i in (0..elements.len()).rev().step_by(1) {
-            if zeroes[i] {
-                let _ = Fq::ONE.serialize_uncompressed(&mut commitments[i][32..64]);
-                continue;
-            }
-            let z_inv = zi_mul[i] * zs_inv;
-            zs_inv *= &elements[i].0.z;
-
-            let _ = (elements[i].0.x * z_inv).serialize_uncompressed(&mut commitments[i][0..32]);
-            let _ = (elements[i].0.y * z_inv).serialize_uncompressed(&mut commitments[i][32..64]);
-        }
-        commitments
-    }
-
-    /// Compresses commitment points into 32-byte hashes for storage efficiency.
-    ///
-    /// This function converts 64-byte commitment representations (x, y) into
-    /// 32-byte hashes by computing x/y for each point. This compression is
-    /// useful for storage in SALT's trie nodes where full coordinates aren't needed.
-    ///
-    /// # Arguments
-    ///
-    /// * `commitments` - Slice of 64-byte commitment representations
-    ///
-    /// # Returns
-    ///
-    /// Vector of 32-byte arrays containing x/y for each commitment.
-    ///
-    /// # Algorithm
-    ///
-    /// Uses Montgomery's batch inversion trick to compute all y-inverses
-    /// with a single field inversion, then multiplies each x by 1/y.
-    ///
-    /// # Special Cases
-    ///
-    /// - Points with y=0 result in empty (zero) hash bytes
-    #[inline]
-    pub fn hash_commitments(commitments: &[[u8; 64]]) -> Vec<[u8; 32]> {
-        let elements = commitments
-            .iter()
-            .map(|commitment| Element::from_bytes_unchecked_uncompressed(*commitment))
-            .collect::<Vec<_>>();
-        let mut hashs = vec![[0u8; 32]; elements.len()];
-        let mut yi_mul = vec![Fq::ZERO; elements.len()];
-        let mut zeroes = vec![false; elements.len()];
-        let mut ys_mul = Fq::ONE;
-
-        // Montgomery batch inversion algorithm for y-coordinates:
-        // Phase 1: Forward pass - compute comulative products
-        //   yi_mul[i] = y1 * y2 * ... * y_{i-1}
-        elements.iter().enumerate().for_each(|(i, element)| {
-            if element.0.y.is_zero() {
-                zeroes[i] = true;
-                return;
-            }
-            yi_mul[i] = ys_mul;
-            ys_mul *= &elements[i].0.y;
-        });
-
-        // Phase 2: Single inversion - compute 1/(y1 * y2 * ... * yn)
-        let mut ys_inv = ys_mul.inverse().expect("ys_mul is not zero");
-
-        // Phase 3: Backward pass - extract individual inverses
-        // We use the formula: 1/yi = yi_mul[i]* 1/(y1 * ... * yn) * (y_{i+1} * ... * yn)
-        for i in (0..elements.len()).rev().step_by(1) {
-            if zeroes[i] {
-                continue;
-            }
-            let y_inv = yi_mul[i] * ys_inv;
-            ys_inv *= &elements[i].0.y;
-            let _ = (elements[i].0.x * y_inv).serialize_uncompressed(&mut hashs[i][..]);
-        }
-        hashs
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,100 +594,6 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
-
-    /// Tests the batch conversion from 64-byte commitments to 32-byte hash representations.
-    ///
-    /// This test verifies that `hash_commitments` correctly computes x/y for each point,
-    /// which is used to compress elliptic curve points for storage in SALT trie nodes.
-    ///
-    /// # Test Process
-    /// 1. Creates test points as multiples of the generator
-    /// 2. Converts them to 64-byte uncompressed format
-    /// 3. Calls `hash_commitments` to compress to 32 bytes
-    /// 4. Manually computes x/y for verification
-    /// 5. Ensures the batch operation matches individual computations
-    #[test]
-    fn batch_elements_to_hash_bytes() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(1111)),
-            (Element::prime_subgroup_generator() * Fr::from(2222)),
-        ];
-
-        let c_vec = a_vec
-            .iter()
-            .map(|e| e.to_bytes_uncompressed())
-            .collect::<Vec<_>>();
-
-        let hash_bytes = Element::hash_commitments(&c_vec);
-
-        for i in 0..a_vec.len() {
-            let mut bytes = [0_u8; 32];
-            let x = a_vec[i].0.x * a_vec[i].0.y.inverse().unwrap();
-            let _ = x.serialize_uncompressed(&mut bytes[..]);
-            assert_eq!(bytes, hash_bytes[i]);
-        }
-    }
-
-    /// Tests the batch conversion from projective Elements to 64-byte commitment format.
-    ///
-    /// This test validates that `batch_to_commitments` correctly normalizes projective
-    /// points (X:Y:Z) to affine coordinates (X/Z, Y/Z) and serializes them as 64-byte arrays.
-    ///
-    /// # Test Process
-    /// 1. Creates test points in projective coordinates
-    /// 2. Calls `batch_to_commitments` for batch conversion
-    /// 3. Manually computes affine coordinates (x/z, y/z) for each point
-    /// 4. Serializes manually computed values
-    /// 5. Verifies batch results match individual computations
-    ///
-    /// # Importance
-    /// This ensures the Montgomery batch inversion optimization produces correct results.
-    #[test]
-    fn batch_elements_to_commitments() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(3333)),
-            (Element::prime_subgroup_generator() * Fr::from(4444)),
-        ];
-
-        let hash_bytes = Element::batch_to_commitments(&a_vec);
-
-        for i in 0..a_vec.len() {
-            let mut bytes = [0_u8; 64];
-            let x = a_vec[i].0.x * a_vec[i].0.z.inverse().unwrap();
-            let y = a_vec[i].0.y * a_vec[i].0.z.inverse().unwrap();
-            let _ = x.serialize_uncompressed(&mut bytes[0..32]);
-            let _ = y.serialize_uncompressed(&mut bytes[32..64]);
-            assert_eq!(bytes, hash_bytes[i]);
-        }
-    }
-
-    /// Tests the batch conversion from projective to affine coordinates.
-    ///
-    /// This test verifies that `batch_proj_to_affine` correctly converts multiple
-    /// points from projective representation (X:Y:Z) to affine representation (x, y).
-    ///
-    /// # Test Process
-    /// 1. Creates projective points directly (accessing internal .0 field)
-    /// 2. Calls `batch_proj_to_affine` for batch conversion
-    /// 3. Verifies each result by checking x = X/Z and y = Y/Z
-    ///
-    /// # Implementation Detail
-    /// The function internally uses `batch_to_commitments` and deserializes the results,
-    /// leveraging the same Montgomery batch inversion optimization.
-    #[test]
-    fn batch_proj_to_affine() {
-        let a_vec = vec![
-            (Element::prime_subgroup_generator() * Fr::from(1)).0,
-            (Element::prime_subgroup_generator() * Fr::from(2)).0,
-        ];
-
-        let es = Element::batch_proj_to_affine(&a_vec);
-
-        for i in 0..a_vec.len() {
-            assert_eq!(es[i].y, a_vec[i].y / a_vec[i].z);
-            assert_eq!(es[i].x, a_vec[i].x / a_vec[i].z);
-        }
-    }
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
     ///
