@@ -11,7 +11,7 @@ pub use state::{
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
-    trie::{StateRoot, TrieUpdates},
+    trie::{RebuildError, StateRoot, TrieUpdates},
 };
 
 pub mod traits;
@@ -55,7 +55,7 @@ mod tests {
         let (root_hash, trie_updates) = state_root.update_fin(&state_updates)?;
 
         // Or compute from scratch based on the previously updated state
-        let (root_hash_from_scratch, _) = StateRoot::rebuild(&store)?;
+        let (root_hash_from_scratch, _) = StateRoot::rebuild(&store, None)?;
         assert_eq!(root_hash, root_hash_from_scratch);
 
         // "Persist" the trie updates to storage

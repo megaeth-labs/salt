@@ -207,7 +207,7 @@ fn benchmark_trie_rebuild(c: &mut Criterion) {
         c.bench_function(&format!("rebuild {} KVs", num_kvs), |b| {
             b.iter(|| {
                 let reader = MockRebuildReader::new(num_kvs);
-                black_box(StateRoot::rebuild(&reader).unwrap())
+                black_box(StateRoot::rebuild(&reader, None).unwrap())
             });
         });
     }

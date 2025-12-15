@@ -40,6 +40,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
 };
+use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
@@ -53,8 +55,32 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> =
 /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
 pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 
+/// Errors that can occur while rebuilding the trie from storage.
+#[derive(Debug, Error)]
+pub enum RebuildError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    #[error(transparent)]
+    State(#[from] E),
+    #[error("rebuild cancelled")]
+    Cancelled,
+}
+
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
+
+#[inline(always)]
+fn check_cancellation<E>(cancel: Option<&CancellationToken>) -> Result<(), RebuildError<E>>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    if cancel.is_some_and(CancellationToken::is_cancelled) {
+        Err(RebuildError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
 
 /// Describes a shrink operation for a single trie level during bucket contraction.
 ///
@@ -896,61 +922,75 @@ impl StateRoot<'_, EmptySalt> {
     /// # Returns
     ///
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
-    /// * `Err(S::Error)` - If reading from storage fails
-    pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
+    /// * `Err(RebuildError<S::Error>)` - If reading from storage fails or cancellation is requested
+    ///
+    /// # Cancellation
+    /// Pass an optional [`CancellationToken`] (from `tokio-util`) to cooperatively
+    /// abort long-running rebuilds. Cancellation is checked between chunked work
+    /// units so progress may be partial.
+    pub fn rebuild<S: StateReader>(
+        reader: &S,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(ScalarBytes, TrieUpdates), RebuildError<S::Error>> {
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
 
         let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
             .into_par_iter()
             .step_by(CHUNK_SIZE)
-            .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
-                let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
+            .map(
+                |chunk_start| -> Result<TrieUpdates, RebuildError<S::Error>> {
+                    check_cancellation::<S::Error>(cancel)?;
 
-                // Step 1: Read metadata for all buckets in this chunk
-                let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
-                let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
-                let mut chunk_updates = reader
-                    .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
-                    .into_iter()
-                    .map(|(key, actual_metadata)| {
-                        // Simulate metadata change: default -> actual
-                        (
-                            key,
-                            (Some(BucketMeta::default().into()), Some(actual_metadata)),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
+                    let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
-                // Step 2: Read all key-value pairs for buckets in this chunk
-                // Treat as insertions since we're rebuilding from scratch
-                chunk_updates.extend(
-                    reader
-                        .entries(SaltKey::bucket_range(
-                            chunk_start as BucketId,
-                            chunk_end as BucketId,
-                        ))?
+                    // Step 1: Read metadata for all buckets in this chunk
+                    let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
+                    let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
+                    let mut chunk_updates = reader
+                        .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
                         .into_iter()
-                        .map(|(key, value)| (key, (None, Some(value)))),
-                );
+                        .map(|(key, actual_metadata)| {
+                            // Simulate metadata change: default -> actual
+                            (
+                                key,
+                                (Some(BucketMeta::default().into()), Some(actual_metadata)),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
 
-                // Step 3: Apply updates to trie, handling expansion automatically
-                // `update_bucket_subtrees` detects metadata capacity changes and creates
-                // appropriate subtrie structures without special handling
-                StateRoot::new(&EmptySalt)
-                    .update_bucket_subtrees(&StateUpdates {
-                        data: chunk_updates,
-                    })
-                    .map_err(|_| unreachable!("EmptySalt never returns errors"))
-            })
+                    // Step 2: Read all key-value pairs for buckets in this chunk
+                    // Treat as insertions since we're rebuilding from scratch
+                    chunk_updates.extend(
+                        reader
+                            .entries(SaltKey::bucket_range(
+                                chunk_start as BucketId,
+                                chunk_end as BucketId,
+                            ))?
+                            .into_iter()
+                            .map(|(key, value)| (key, (None, Some(value)))),
+                    );
+
+                    // Step 3: Apply updates to trie, handling expansion automatically
+                    // `update_bucket_subtrees` detects metadata capacity changes and creates
+                    // appropriate subtrie structures without special handling
+                    StateRoot::new(&EmptySalt)
+                        .update_bucket_subtrees(&StateUpdates {
+                            data: chunk_updates,
+                        })
+                        .map_err(|_| unreachable!("EmptySalt never returns errors"))
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
+        check_cancellation::<S::Error>(cancel)?;
+
         // Step 4: Compute commitments for all internal nodes in the main trie
         let root_hash = StateRoot::new(&EmptySalt)
             .update_main_trie(&mut all_trie_updates, MAIN_TRIE_LEVELS)
-            .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
+            .unwrap_or_else(|_| unreachable!("EmptySalt never returns errors"));
         Ok((root_hash, all_trie_updates))
     }
 }
@@ -1342,7 +1382,7 @@ mod tests {
         let (root1, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
+        let (cmp_root, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root1, cmp_root);
 
         // only ‌contract capacity
@@ -1445,7 +1485,7 @@ mod tests {
             store.update_trie(trie_updates);
 
             // Ensure incremental update matches full trie reconstruction
-            let (rebuilt_root, _) = StateRoot::rebuild(&store).unwrap();
+            let (rebuilt_root, _) = StateRoot::rebuild(&store, None).unwrap();
             assert_eq!(root, rebuilt_root, "Phase {} root mismatch", phase + 1);
         }
     }
@@ -1476,7 +1516,7 @@ mod tests {
             trie.update_fin(&initialize_state_updates).unwrap();
         store.update_state(initialize_state_updates);
         store.update_trie(initialize_trie_updates);
-        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
+        let (root, mut init_trie_updates) = StateRoot::rebuild(&store, None).unwrap();
         init_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
         assert_eq!(root, initialize_root);
 
@@ -1514,7 +1554,7 @@ mod tests {
         let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root, expansion_root);
         // update expansion bucket
         let expand_state_updates = StateUpdates {
@@ -1531,7 +1571,7 @@ mod tests {
         let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
         store.update_state(expand_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root, expansion_root);
 
         // contract capacity and remove kvs
@@ -1567,7 +1607,7 @@ mod tests {
         let (contraction_root, trie_updates) = trie.update_fin(&contract_state_updates).unwrap();
         store.update_state(contract_state_updates);
         store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
+        let (root, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root, contraction_root);
 
         let contract_state_updates = StateUpdates {
@@ -1606,7 +1646,7 @@ mod tests {
         let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root1, _) = StateRoot::rebuild(&store).unwrap();
+        let (root1, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root, root1);
 
         // extend the trie
@@ -1643,7 +1683,7 @@ mod tests {
         let (extended_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root2, _) = StateRoot::rebuild(&store).unwrap();
+        let (root2, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root2, extended_root);
 
         // contract the trie
@@ -1679,7 +1719,7 @@ mod tests {
         let (contraction_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
         store.update_state(state_updates);
         store.update_trie(trie_updates);
-        let (root3, _) = StateRoot::rebuild(&store).unwrap();
+        let (root3, _) = StateRoot::rebuild(&store, None).unwrap();
         assert_eq!(root3, contraction_root);
     }
 
@@ -1878,7 +1918,7 @@ mod tests {
                 .set_nonce(bucket, 42)
                 .unwrap(),
         );
-        assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
+        assert_eq!(root, StateRoot::rebuild(&store, None).unwrap().0);
     }
 
     #[test]
@@ -1917,7 +1957,7 @@ mod tests {
 
         let (root0, _) = trie.update_fin(&state_updates).unwrap();
         mock_db.update_state(state_updates);
-        let (root1, trie_updates) = StateRoot::rebuild(&mock_db).unwrap();
+        let (root1, trie_updates) = StateRoot::rebuild(&mock_db, None).unwrap();
 
         let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
         let c = rebuild_subtrie_without_expanded_buckets(node_id, &mock_db);
@@ -1925,6 +1965,21 @@ mod tests {
         assert_eq!(c, mock_db.commitment(node_id).unwrap());
 
         assert_eq!(root0, root1);
+    }
+
+    #[test]
+    fn test_rebuild_cancelled() {
+        let mock_db = MemStore::new();
+        // Immediately cancel to ensure early exit without touching storage
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let res = StateRoot::rebuild(&mock_db, Some(&token));
+        if let Err(RebuildError::Cancelled) = res {
+            // expected
+        } else {
+            panic!("expected cancellation error, got {:?}", res);
+        }
     }
 
     #[test]
@@ -1962,7 +2017,7 @@ mod tests {
 
         let (root0, _) = trie.update_fin(&state_updates).unwrap();
         mock_db.update_state(state_updates);
-        let (root1, _) = StateRoot::rebuild(&mock_db).unwrap();
+        let (root1, _) = StateRoot::rebuild(&mock_db, None).unwrap();
 
         assert_eq!(root0, root1);
     }
@@ -2005,7 +2060,7 @@ mod tests {
         println!("Phase 1 root: {:?}", hex::encode(root1));
         assert_eq!(
             root1,
-            StateRoot::rebuild(&store).unwrap().0,
+            StateRoot::rebuild(&store, None).unwrap().0,
             "Phase 1 mismatch"
         );
 
@@ -2036,7 +2091,7 @@ mod tests {
         println!("Phase 2 root: {:?}", hex::encode(root2));
         assert_eq!(
             root2,
-            StateRoot::rebuild(&store).unwrap().0,
+            StateRoot::rebuild(&store, None).unwrap().0,
             "Phase 2 mismatch"
         );
 
@@ -2059,7 +2114,7 @@ mod tests {
         println!("Phase 3 root: {:?}", hex::encode(root3));
         assert_eq!(
             hex::encode(root3),
-            hex::encode(StateRoot::rebuild(&store).unwrap().0),
+            hex::encode(StateRoot::rebuild(&store, None).unwrap().0),
             "Phase 3 mismatch"
         );
         assert_eq!(

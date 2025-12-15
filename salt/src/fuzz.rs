@@ -89,7 +89,7 @@ fn e2e_test(blocks: &Vec<Block>) {
     // Create the mock database and BTreeMap-based reference state implementation.
     let db = MemStore::new();
     let mut ref_state = BTreeMap::new();
-    let mut pre_state_root = StateRoot::rebuild(&db)
+    let mut pre_state_root = StateRoot::rebuild(&db, None)
         .expect("Failed to get initial state root")
         .0;
 
@@ -228,7 +228,7 @@ fn e2e_test(blocks: &Vec<Block>) {
     }
 
     // Post-test verification: Rebuild state root from scratch and ensure consistency
-    let (rebuilt_root, _) = StateRoot::rebuild(&db).expect("Failed to rebuild state root");
+    let (rebuilt_root, _) = StateRoot::rebuild(&db, None).expect("Failed to rebuild state root");
     assert_eq!(
         rebuilt_root, pre_state_root,
         "Rebuilt state root mismatch: expected {:?}, got {:?}",
