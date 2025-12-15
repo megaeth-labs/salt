@@ -671,6 +671,7 @@ mod tests {
             used: Some(100), // This value is not serialized
         };
         let salt_value = SaltValue::from(meta);
+        println!("SaltValue: {:?}", salt_value);
 
         assert_eq!(salt_value.data[0], 12); // key length (BucketMeta serialized size)
         assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)

@@ -311,8 +311,8 @@ where
         // 存储额外的更新（按层级组织）
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
 
-        // 步骤 1.1: 从状态更新中提取元数据变更
-        // 遍历所有在元数据键范围内的更新，构建子树变更信息映射
+        // 步骤 1.1: 从meta bucket更新中提取元数据,查找扩容的桶
+        // 遍历所有在元数据键范围内的更新，搜集扩容的桶以及桶的元数据变化
         let mut subtree_change_info: BTreeMap<BucketId, SubtrieChangeInfo> = state_updates
             .data
             .range(METADATA_KEYS_RANGE)
@@ -346,7 +346,7 @@ where
                 .insert(*ub_id, change.new_capacity);
         }
 
-        // 步骤 1.3: 识别需要子树处理的桶
+        // 步骤 1.3: 识别需要扩容处理的桶
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
 
@@ -445,7 +445,7 @@ where
             }
         }
 
-        // 初始化触发层级用于后续处理
+        // 初始化触发器层级用于后续处理
         let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
 
         // 步骤 2: 更新叶节点承诺值
@@ -1300,428 +1300,6 @@ mod tests {
         level_commitments[0].1
     }
 
-    /// Tests incremental trie updates (applying changes sequentially to the same
-    /// trie instance) produce identical results to batch updates (applying all
-    /// changes at once to a fresh trie).
-    #[test]
-    fn test_incremental_vs_batch_update() {
-        let mut trie = StateRoot::new(&EmptySalt); // Trie for incremental updates
-        let mut cumulative = StateUpdates::default(); // Tracks all changes for batch comparison
-
-        // Test data: 3 keys in bucket 65538
-        let (k1, k2, k3) = (
-            SaltKey::from((65538, 0)),
-            SaltKey::from((65538, 1)),
-            SaltKey::from((65538, 2)),
-        );
-        let (v1, v2, v3) = (
-            SaltValue::new(&[1; 32], &[1; 32]),
-            SaltValue::new(&[2; 32], &[2; 32]),
-            SaltValue::new(&[3; 32], &[3; 32]),
-        );
-
-        // Update 1: Insert 3 keys
-        let mut updates1 = StateUpdates::default();
-        updates1.add(k1, None, Some(v1.clone()));
-        updates1.add(k2, None, Some(v2.clone()));
-        updates1.add(k3, None, Some(v3));
-        cumulative.merge(updates1.clone());
-        trie.update_fin(&updates1).unwrap();
-
-        // Update 2: k1: v1 → v2
-        let mut updates2 = StateUpdates::default();
-        updates2.add(k1, Some(v1.clone()), Some(v2.clone()));
-        cumulative.merge(updates2.clone());
-
-        let (incremental_root2, _) = trie.update_fin(&updates2).unwrap();
-        let (batch_root2, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
-        assert_eq!(incremental_root2, batch_root2);
-
-        // Update 3: k2: v2 → v1
-        let mut updates3 = StateUpdates::default();
-        updates3.add(k2, Some(v2), Some(v1));
-        cumulative.merge(updates3.clone());
-
-        let (incremental_root3, _) = trie.update_fin(&updates3).unwrap();
-        let (batch_root3, _) = StateRoot::new(&EmptySalt).update_fin(&cumulative).unwrap();
-        assert_eq!(incremental_root3, batch_root3);
-    }
-
-    #[test]
-    fn expansion_and_contraction_no_kvchanges() {
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
-        let bid = KV_BUCKET_OFFSET as BucketId + 4;
-        let salt_key = bucket_metadata_key(bid);
-        // initialize the trie
-        let state_updates = StateUpdates {
-            data: vec![(
-                (bid, 3).into(),
-                (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-
-        // only expand capacity
-        let state_updates = StateUpdates {
-            data: vec![(
-                salt_key,
-                (
-                    Some(BucketMeta::default().into()),
-                    Some(bucket_meta(0, 131072).into()),
-                ),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let (root1, trie_updates) = trie.update_fin(&state_updates).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (cmp_root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root1, cmp_root);
-
-        // only ‌contract capacity
-        let state_updates = StateUpdates {
-            data: vec![(
-                salt_key,
-                (
-                    Some(bucket_meta(0, 131072).into()),
-                    Some(BucketMeta::default().into()),
-                ),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let (root1, _) = trie.update_fin(&state_updates).unwrap();
-        assert_eq!(root1, root);
-    }
-
-    /// Tests bucket capacity expansion and contraction within the same subtree level.
-    ///
-    /// This test verifies that the trie correctly handles bucket capacity changes
-    /// when those changes don't change the bucket subtree's root.
-    ///
-    /// The test uses capacities 512, 4096, and 1024, all of which require a Level 3
-    /// subtree root, ensuring the trie structure remains stable during resizing.
-    ///
-    /// # Test Flow
-    /// 1. **Initial Setup**: Create bucket with capacity 512 and one key-value pair
-    /// 2. **Expansion**: Increase capacity to 4096, add a key at a high slot
-    /// 3. **Contraction**: Reduce capacity to 1024, remove the out-of-bounds key
-    ///
-    /// # Verification Strategy
-    /// After each operation, the test:
-    /// - Updates the trie incrementally using `update_fin()`
-    /// - Rebuilds the entire trie from scratch using `rebuild()`
-    /// - Verifies both methods produce identical root hashes
-    ///
-    /// This ensures incremental updates correctly maintain trie integrity
-    /// during capacity changes that don't alter the subtree structure.
-    #[test]
-    fn expansion_and_contraction_at_same_level() {
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
-
-        // Use data bucket 65540 (NUM_META_BUCKETS + 4)
-        // Data buckets start at 65536, so this is the 5th data bucket
-        let bid = KV_BUCKET_OFFSET as BucketId + 4;
-        let meta_key = bucket_metadata_key(bid);
-
-        // Define test phases: (old_capacity, new_capacity, slot_changes)
-        // All capacities (512, 4096, 1024) require Level 3 as subtree root:
-        // - 512 > 256 but < 65,536: needs 2 Level 4 nodes (512/256 = 2)
-        // - 4096 < 65,536: needs 16 Level 4 nodes (4096/256 = 16)
-        // - 1024 < 65,536: needs 4 Level 4 nodes (1024/256 = 4)
-        // The subtree root stays at Level 3 throughout, hence "same level"
-        let phases = [
-            // Phase 1: Initialize with capacity 512, add key at slot 1
-            // Creates subtree with 2 Level 4 nodes under Level 3 root
-            (None, 512, vec![(1, None, Some([1; 32]))]),
-            // Phase 2: Expand to 4096, add key at slot 4090 near end of range
-            // Expands subtree to 16 Level 4 nodes, root still at Level 3
-            (Some(512), 4096, vec![(4090, None, Some([2; 32]))]),
-            // Phase 3: Contract to 1024, remove key now out of bounds
-            // Contracts subtree to 4 Level 4 nodes, root remains at Level 3
-            (Some(4096), 1024, vec![(4090, Some([2; 32]), None)]),
-        ];
-
-        for (phase, (old_cap, new_cap, slot_changes)) in phases.iter().enumerate() {
-            // Build metadata update for capacity change
-            let mut updates = vec![(
-                meta_key,
-                (
-                    // Old metadata: either previous capacity or default (256)
-                    old_cap
-                        .map(|c| bucket_meta(0, c).into())
-                        .or(Some(BucketMeta::default().into())),
-                    // New metadata: target capacity
-                    Some(bucket_meta(0, *new_cap).into()),
-                ),
-            )];
-
-            // Add slot-level changes (insertions/deletions)
-            for (slot, old_val, new_val) in slot_changes {
-                updates.push((
-                    (bid, *slot).into(),
-                    (
-                        old_val.map(|v| SaltValue::new(&v, &v)),
-                        new_val.map(|v| SaltValue::new(&v, &v)),
-                    ),
-                ));
-            }
-
-            let state_updates = StateUpdates {
-                data: updates.into_iter().collect(),
-            };
-
-            // Apply incremental updates and verify against full rebuild
-            let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
-            store.update_state(state_updates);
-            store.update_trie(trie_updates);
-
-            // Ensure incremental update matches full trie reconstruction
-            let (rebuilt_root, _) = StateRoot::rebuild(&store).unwrap();
-            assert_eq!(root, rebuilt_root, "Phase {} root mismatch", phase + 1);
-        }
-    }
-
-    #[test]
-    fn expansion_and_contraction_small() {
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
-        let bid = KV_BUCKET_OFFSET as BucketId + 4;
-        let salt_key = bucket_metadata_key(bid);
-        // initialize the trie
-        let initialize_state_updates = StateUpdates {
-            data: vec![
-                (
-                    (bid, 3).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                ),
-                (
-                    (bid, 5).into(),
-                    (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-
-        let (initialize_root, initialize_trie_updates) =
-            trie.update_fin(&initialize_state_updates).unwrap();
-        store.update_state(initialize_state_updates);
-        store.update_trie(initialize_trie_updates);
-        let (root, mut init_trie_updates) = StateRoot::rebuild(&store).unwrap();
-        init_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
-        assert_eq!(root, initialize_root);
-
-        // expand capacity and add kvs
-        let new_capacity = 131072;
-        let expand_state_updates = StateUpdates {
-            data: vec![
-                (
-                    salt_key,
-                    (
-                        Some(BucketMeta::default().into()),
-                        Some(bucket_meta(0, new_capacity).into()),
-                    ),
-                ),
-                (
-                    (bid, 3).into(),
-                    (Some(SaltValue::new(&[1; 32], &[1; 32])), None),
-                ),
-                (
-                    (bid, 2049).into(),
-                    (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
-                ),
-                (
-                    (bid, new_capacity - 259).into(),
-                    (None, Some(SaltValue::new(&[4; 32], &[4; 32]))),
-                ),
-                (
-                    (bid, new_capacity - 1).into(),
-                    (None, Some(SaltValue::new(&[5; 32], &[5; 32]))),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
-        store.update_state(expand_state_updates);
-        store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, expansion_root);
-        // update expansion bucket
-        let expand_state_updates = StateUpdates {
-            data: vec![(
-                (bid, new_capacity - 1).into(),
-                (
-                    Some(SaltValue::new(&[5; 32], &[5; 32])),
-                    Some(SaltValue::new(&[5; 32], &[6; 32])),
-                ),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let (expansion_root, trie_updates) = trie.update_fin(&expand_state_updates).unwrap();
-        store.update_state(expand_state_updates);
-        store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, expansion_root);
-
-        // contract capacity and remove kvs
-        let contract_state_updates = StateUpdates {
-            data: vec![
-                (
-                    salt_key,
-                    (
-                        Some(bucket_meta(0, new_capacity).into()),
-                        Some(bucket_meta(0, 1024).into()),
-                    ),
-                ),
-                (
-                    (bid, 3).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                ),
-                (
-                    (bid, 2049).into(),
-                    (Some(SaltValue::new(&[3; 32], &[3; 32])), None),
-                ),
-                (
-                    (bid, new_capacity - 259).into(),
-                    (Some(SaltValue::new(&[4; 32], &[4; 32])), None),
-                ),
-                (
-                    (bid, new_capacity - 1).into(),
-                    (Some(SaltValue::new(&[5; 32], &[6; 32])), None),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        let (contraction_root, trie_updates) = trie.update_fin(&contract_state_updates).unwrap();
-        store.update_state(contract_state_updates);
-        store.update_trie(trie_updates);
-        let (root, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, contraction_root);
-
-        let contract_state_updates = StateUpdates {
-            data: vec![(
-                salt_key,
-                (
-                    Some(bucket_meta(0, 1024).into()),
-                    Some(bucket_meta(0, 256).into()),
-                ),
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let (contraction_root, _) = trie.update_fin(&contract_state_updates).unwrap();
-        assert_eq!(initialize_root, contraction_root);
-    }
-
-    #[test]
-    fn expansion_and_contraction_large() {
-        let store = MemStore::new();
-        let mut trie = StateRoot::new(&store);
-        let mut state_updates = StateUpdates::default();
-
-        for bid in KV_BUCKET_OFFSET..KV_BUCKET_OFFSET + 10000 {
-            for slot_id in 0..128 {
-                state_updates.data.insert(
-                    (bid as BucketId, slot_id).into(),
-                    (
-                        None,
-                        Some(SaltValue::new(&[slot_id as u8; 32], &[slot_id as u8; 32])),
-                    ),
-                );
-            }
-        }
-
-        let (root, trie_updates) = trie.update_fin(&state_updates).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (root1, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root, root1);
-
-        // extend the trie
-        let expand_capacity = 131072;
-        let mut state_updates = StateUpdates::default();
-        for bid in KV_BUCKET_OFFSET..KV_BUCKET_OFFSET + 100 {
-            let salt_key: SaltKey = (
-                bid as BucketId >> MIN_BUCKET_SIZE_BITS,
-                bid as SlotId % MIN_BUCKET_SIZE as SlotId,
-            )
-                .into();
-            state_updates.data.insert(
-                salt_key,
-                (
-                    Some(BucketMeta::default().into()),
-                    Some(bucket_meta(0, expand_capacity).into()),
-                ),
-            );
-            for slot_id in 200..300 {
-                state_updates.data.insert(
-                    (bid as BucketId, slot_id).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                );
-            }
-            let start = expand_capacity - 200;
-            for slot_id in start..start + 100 {
-                state_updates.data.insert(
-                    (bid as BucketId, slot_id).into(),
-                    (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-                );
-            }
-        }
-
-        let (extended_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (root2, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root2, extended_root);
-
-        // contract the trie
-        let mut state_updates = StateUpdates::default();
-        for bid in KV_BUCKET_OFFSET..KV_BUCKET_OFFSET + 10 {
-            let salt_key: SaltKey = (
-                bid as BucketId >> MIN_BUCKET_SIZE_BITS,
-                bid as SlotId % MIN_BUCKET_SIZE as SlotId,
-            )
-                .into();
-            state_updates.data.insert(
-                salt_key,
-                (
-                    Some(bucket_meta(0, expand_capacity).into()),
-                    Some(BucketMeta::default().into()),
-                ),
-            );
-            for slot_id in 200..300 {
-                state_updates.data.insert(
-                    (bid as BucketId, slot_id).into(),
-                    (Some(SaltValue::new(&[1; 32], &[1; 32])), None),
-                );
-            }
-
-            let start = expand_capacity - 200;
-            for slot_id in start..start + 100 {
-                state_updates.data.insert(
-                    (bid as BucketId, slot_id).into(),
-                    (Some(SaltValue::new(&[1; 32], &[1; 32])), None),
-                );
-            }
-        }
-        let (contraction_root, trie_updates) = trie.update_fin(&state_updates).unwrap();
-        store.update_state(state_updates);
-        store.update_trie(trie_updates);
-        let (root3, _) = StateRoot::rebuild(&store).unwrap();
-        assert_eq!(root3, contraction_root);
-    }
-
     #[test]
     fn incremental_update_small() {
         // set expansion bucket metadata and check update with expanded bucket
@@ -1856,379 +1434,24 @@ mod tests {
     }
 
     #[test]
-    fn incremental_updates_large() {
-        let kvs = create_random_kvs(10000);
-        let mock_db = MemStore::new();
-        let mut state = EphemeralSaltState::new(&mock_db);
-        let mut trie = StateRoot::new(&mock_db);
-        let total_state_updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
-        let (root, total_trie_updates) = trie.update_fin(&total_state_updates).unwrap();
-
-        let sub_kvs = kvs.chunks(1000).collect::<Vec<_>>();
-
-        let mut state = EphemeralSaltState::new(&mock_db);
-        let mut trie = StateRoot::new(&mock_db);
-        let mut final_state_updates = StateUpdates::default();
-        for kvs in &sub_kvs {
-            let state_updates = state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
-            trie.update(&state_updates).unwrap();
-            final_state_updates.merge(state_updates);
-        }
-        let (final_root, final_trie_updates) = trie.finalize().unwrap();
-
-        assert_eq!(root, final_root);
-        assert_eq!(total_state_updates, final_state_updates);
-
-        let minified_final_updates = minify_trie_updates(final_trie_updates);
-        let minified_total_updates = minify_trie_updates(total_trie_updates);
-        assert_eq!(minified_total_updates, minified_final_updates);
-    }
-
-    /// Tests `update_bucket_subtrees` correctly handles bucket rehashing by inserting
-    /// `n` keys into a single bucket, rehashing it, and verifying root consistency.
-    #[test]
-    fn test_update_bucket_subtrees_bucket_rehash() {
-        let n = 800;
-        let kvs = create_random_kvs(n);
-        let store = MemStore::new();
-        let bucket = (NUM_META_BUCKETS + 1) as BucketId;
-
-        // Helper: Apply state and trie updates, return root
-        let apply = |updates: StateUpdates| {
-            let (root, trie) = StateRoot::new(&store).update_fin(&updates).unwrap();
-            store.update_state(updates);
-            store.update_trie(trie);
-            root
-        };
-
-        // Insert n keys into the bucket
-        let mut state = EphemeralSaltState::new(&store);
-        let mut updates = StateUpdates::default();
-        for (key, val) in &kvs {
-            state
-                .shi_upsert(bucket, key, val.as_ref().unwrap(), &mut updates)
-                .unwrap();
-        }
-        apply(updates);
-
-        // Rehash bucket and verify root consistency with rebuild
-        let root = apply(
-            EphemeralSaltState::new(&store)
-                .set_nonce(bucket, 42)
-                .unwrap(),
-        );
-        assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
-    }
-
-    #[test]
-    fn test_rebuild_small() {
-        let mock_db = MemStore::new();
-        let mut trie = StateRoot::new(&mock_db);
-        let mut state_updates = StateUpdates::default();
-
-        let bid = KV_BUCKET_OFFSET as BucketId;
-        let salt_key: SaltKey = bucket_metadata_key(bid);
-        // bucket meta changes at bucket[bid]
-        state_updates.data.insert(
-            salt_key,
-            (
-                Some(SaltValue::from(BucketMeta::default())),
-                Some(SaltValue::from(bucket_meta(15, 512))),
-            ),
-        );
-
-        state_updates.data.insert(
-            (bid, 1).into(),
-            (None, Some(SaltValue::new(&[1; 32], &[1; 32]))),
-        );
-        state_updates.data.insert(
-            (bid, 2).into(),
-            (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
-        );
-        state_updates.data.insert(
-            (bid + 1, 111).into(),
-            (None, Some(SaltValue::new(&[2; 32], &[2; 32]))),
-        );
-        state_updates.data.insert(
-            (bid + 65536, 55).into(),
-            (None, Some(SaltValue::new(&[3; 32], &[3; 32]))),
-        );
-
-        let (root0, _) = trie.update_fin(&state_updates).unwrap();
-        mock_db.update_state(state_updates);
-        let (root1, trie_updates) = StateRoot::rebuild(&mock_db).unwrap();
-
-        let node_id = bid as NodeId / (MIN_BUCKET_SIZE * MIN_BUCKET_SIZE) as NodeId;
-        let c = rebuild_subtrie_without_expanded_buckets(node_id, &mock_db);
-        mock_db.update_trie(trie_updates);
-        assert_eq!(c, mock_db.commitment(node_id).unwrap());
-
-        assert_eq!(root0, root1);
-    }
-
-    #[test]
-    fn test_rebuild_large() {
-        let mock_db = MemStore::new();
-        let mut trie = StateRoot::new(&mock_db);
-        let mut state_updates = StateUpdates::default();
-
-        // bucket nonce changes
-        state_updates.data.insert(
-            (256, 0).into(),
-            (
-                Some(SaltValue::from(BucketMeta::default())),
-                Some(SaltValue::from(bucket_meta(10, MIN_BUCKET_SIZE as SlotId))),
-            ),
-        );
-
-        state_updates.data.insert(
-            (65535, 255).into(),
-            (
-                Some(SaltValue::from(BucketMeta::default())),
-                Some(SaltValue::from(bucket_meta(11, MIN_BUCKET_SIZE as SlotId))),
-            ),
-        );
-
-        // key-value pairs changes
-        for i in KV_BUCKET_OFFSET..KV_BUCKET_OFFSET + 1000 {
-            for j in 0..256 {
-                state_updates.data.insert(
-                    (i as BucketId, j).into(),
-                    (None, Some(SaltValue::new(&[j as u8; 32], &[j as u8; 32]))),
-                );
-            }
-        }
-
-        let (root0, _) = trie.update_fin(&state_updates).unwrap();
-        mock_db.update_state(state_updates);
-        let (root1, _) = StateRoot::rebuild(&mock_db).unwrap();
-
-        assert_eq!(root0, root1);
-    }
-
-    /// Tests bucket capacity expansion and complete state reversibility.
-    ///
-    /// **Note**: This test is most effective when run with `NUM_DATA_BUCKETS=1` and
-    /// `BUCKET_RESIZE_LOAD_FACTOR_PCT=1`. These settings make bucket expansion occur
-    /// with a few insertions, allowing the test to verify expansion and reversion behavior.
-    ///
-    /// This test verifies that:
-    /// 1. Inserting keys triggers automatic bucket capacity expansion
-    /// 2. All capacity changes are properly tracked in StateUpdates metadata
-    /// 3. State can be completely reverted by deleting keys and reversing capacity changes
-    ///
-    /// # Test Phases
-    ///
-    /// **Phase 1**: Insert n keys to establish baseline state with root₁
-    ///
-    /// **Phase 2**: Insert n more keys, triggering bucket expansions. Records which
-    /// buckets were resized (bucket_id, old_nonce, old_capacity) for later reversal.
-    ///
-    /// **Phase 3**: Delete the n keys from Phase 2 and reverse all bucket capacity
-    /// changes by calling `shi_rehash` with original parameters. Proves complete
-    /// reversibility by verifying root₃ == root₁.
-    #[test]
-    fn test_bucket_huge_expansion() {
-        let n = 1000;
-        let kvs = create_random_kvs(2 * n);
-        let store = MemStore::new();
-
-        // Phase 1: Insert first n kvs
-        let mut state = EphemeralSaltState::new(&store);
-        let updates = state
-            .update_fin(kvs[..n].iter().map(|(k, v)| (k, v)))
-            .unwrap();
-        let (root1, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_state(updates);
-        store.update_trie(trie_updates);
-        println!("Phase 1 root: {:?}", hex::encode(root1));
-        assert_eq!(
-            root1,
-            StateRoot::rebuild(&store).unwrap().0,
-            "Phase 1 mismatch"
-        );
-
-        // Phase 2: Insert second n kvs and detect resizes
-        let updates = state
-            .update_fin(kvs[n..].iter().map(|(k, v)| (k, v)))
-            .unwrap();
-        let resizes: Vec<_> = updates
-            .data
-            .range(METADATA_KEYS_RANGE)
-            .filter_map(|(key, (old, new))| {
-                let old_meta = BucketMeta::try_from(old.as_ref()?).ok()?;
-                let new_meta = BucketMeta::try_from(new.as_ref()?).ok()?;
-                (old_meta.capacity != new_meta.capacity).then(|| {
-                    let bid = bucket_id_from_metadata_key(*key);
-                    println!(
-                        "  Bucket {}: {} -> {}",
-                        bid, old_meta.capacity, new_meta.capacity
-                    );
-                    (bid, old_meta.nonce, old_meta.capacity)
-                })
-            })
-            .collect();
-
-        let (root2, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_state(updates);
-        store.update_trie(trie_updates);
-        println!("Phase 2 root: {:?}", hex::encode(root2));
-        assert_eq!(
-            root2,
-            StateRoot::rebuild(&store).unwrap().0,
-            "Phase 2 mismatch"
-        );
-
-        // Phase 3: Delete last n kvs and reverse resizes
-        let none: Option<Vec<u8>> = None;
-        let mut updates = state
-            .update_fin(kvs[n..].iter().map(|(k, _)| (k, &none)))
-            .unwrap();
-        for (bid, nonce, cap) in resizes {
-            let mut rehash_updates = StateUpdates::default();
-            state
-                .shi_rehash(bid, nonce, cap, &mut rehash_updates)
-                .unwrap();
-            updates.merge(rehash_updates);
-        }
-
-        let (root3, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_state(updates);
-        store.update_trie(trie_updates);
-        println!("Phase 3 root: {:?}", hex::encode(root3));
-        assert_eq!(
-            hex::encode(root3),
-            hex::encode(StateRoot::rebuild(&store).unwrap().0),
-            "Phase 3 mismatch"
-        );
-        assert_eq!(
-            hex::encode(root1),
-            hex::encode(root3),
-            "Reversion failed: Phase 3 ≠ Phase 1"
-        );
-    }
-
-    /// Tests that witness creation and verification remain functional after bucket
-    /// rehashing with various non-power-of-two capacity multipliers, including
-    /// edge cases with different multiplier combinations.
-    #[test]
-    fn test_bucket_rehash_non_power_of_two_multiplier() {
-        use crate::Witness;
-
-        let test_cases = vec![(512, 257), (257, 129), (513, 257), (321, 123), (999, 3)];
-
-        for (expansion_multiplier, contraction_multiplier) in test_cases {
-            let n = 5;
-            let kvs = create_random_kvs(n);
-            let store = MemStore::new();
-
-            // Step 1: Insert kvs and collect bucket IDs
-            let mut state = EphemeralSaltState::new(&store);
-            let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
-            let bids: HashSet<_> = kvs
-                .iter()
-                .map(|(key, _)| crate::hasher::bucket_id(key))
-                .collect();
-
-            // Helper to perform rehash on all buckets and verify witness
-            let mut rehash_and_verify = |mut updates: StateUpdates, capacity_multiplier: u64| {
-                for bid in &bids {
-                    let meta = store.metadata(*bid).unwrap();
-                    let mut rehash_updates = StateUpdates::default();
-                    state
-                        .shi_rehash(
-                            *bid,
-                            meta.nonce,
-                            MIN_BUCKET_SIZE as u64 * capacity_multiplier,
-                            &mut rehash_updates,
-                        )
-                        .unwrap();
-                    updates.merge(rehash_updates);
-                }
-                store.update_state(updates.clone());
-                let (root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-                store.update_trie(trie_updates);
-
-                let lookups = vec![kvs[0].0.clone(), b"non_existent_key".to_vec()];
-                let witness = Witness::create([], &lookups, &BTreeMap::new(), &store).unwrap();
-                assert_eq!(root, witness.state_root().unwrap());
-                assert!(witness.verify().is_ok());
-            };
-
-            // Step 2: Mock expansion
-            rehash_and_verify(updates, expansion_multiplier);
-
-            // Step 3: Mock contraction
-            rehash_and_verify(StateUpdates::default(), contraction_multiplier);
-        }
-    }
-
-    #[test]
-    fn test_add_commitment_deltas() {
-        let store = EmptySalt;
-        let elements: Vec<Element> = create_commitments(11)
-            .iter()
-            .map(|c| Element::from_bytes_unchecked_uncompressed(*c))
-            .collect();
-        let binding = EmptySalt;
-        let trie = StateRoot::new(&binding);
-        let task_size = 3;
-        let c_deltas = vec![
-            (0, elements[0]),
-            (1, elements[1]),
-            (1, elements[2]),
-            (2, elements[3]),
-            (2, elements[4]),
-            (2, elements[5]),
-            (2, elements[6]),
-            (3, elements[7]),
-            (3, elements[8]),
-            (4, elements[9]),
-            (4, elements[10]),
-        ];
-
-        // expected ranges[(0,3), (3,7), (7,11)]
-        let ranges = get_delta_ranges(&c_deltas, task_size);
-        assert_eq!(vec![(0, 3), (3, 7), (7, 11)], ranges);
-
-        let updates = trie
-            .add_commitment_deltas(c_deltas.clone(), task_size)
-            .unwrap();
-
-        let exp_id_vec = [0 as NodeId, 1, 2, 3, 4];
-        assert_eq!(exp_id_vec.len(), updates.len());
-        updates
-            .iter()
-            .zip(exp_id_vec.iter())
-            .for_each(|((id, (old_c, new_c)), exp_id)| {
-                assert_eq!(*id, *exp_id);
-                let cmp_old_c = store.commitment(*id).unwrap();
-                assert_eq!(cmp_old_c, *old_c);
-
-                let delta: Element = c_deltas
-                    .iter()
-                    .filter(|(i, _)| *i == *id)
-                    .map(|(_, e)| *e)
-                    .sum();
-
-                let cmp_new_c = (Element::from_bytes_unchecked_uncompressed(cmp_old_c) + delta)
-                    .to_bytes_uncompressed();
-                assert_eq!(cmp_new_c, *new_c);
-            });
-    }
-
-    #[test]
     fn trie_update_leaf_nodes() {
+        // 创建一个内存存储和一个 StateRoot（trie）实例，用于测试对叶子节点的更新
         let store = MemStore::new();
         let mut trie = StateRoot::new(&store);
         let mut state_updates = StateUpdates::default();
+
+        // 三个不同的 key（每个 key 是 32 字节的数组），以及一个 value
         let key = [[1u8; 32], [2u8; 32], [3u8; 32]];
         let value = [100u8; 32];
+
+        // 计算底层层级和起始节点 id，用于定位 bucket 的 node id
         let bottom_level = MAIN_TRIE_LEVELS - 1;
         let bottom_level_start = STARTING_NODE_ID[bottom_level] as NodeId;
+        // kv_none 代表空值的哈希（用于对比默认/空插槽）
         let kv_none = kv_hash(&None);
 
-        // Add the kv state updates
+        // 添加 kv 类型的状态更新：把 key[0], key[1] 分别写入 bucket (KV_BUCKET_OFFSET + 1, index 1/2)
+        // 这里旧值是 None，新值是对应的 SaltValue
         state_updates.add(
             (KV_BUCKET_OFFSET as BucketId + 1, 1).into(),
             None,
@@ -2239,31 +1462,37 @@ mod tests {
             None,
             Some(SaltValue::new(&key[1], &value)),
         );
-        // Add the bucket meta state updates
+        // 添加 bucket meta 的状态更新：把 bucket meta 从默认值更新为包含 5 个元素的元数据
         state_updates.add(
             (4, 1).into(),
             Some(SaltValue::from(BucketMeta::default())),
             Some(SaltValue::from(bucket_meta(5, MIN_BUCKET_SIZE as SlotId))),
         );
 
+        // 调用被测函数：根据 state_updates 更新与 bucket 相关的子树，返回需要写回的 commitment 更新项
         let salt_updates = trie.update_bucket_subtrees(&state_updates).unwrap();
 
+        // 下面构造期望的 commitment 变化：先获取底层 meta/data 的默认 commitment
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
+
+        // 对 meta 节点应用 delta，得到期望的新 commitment c1
         let c1 = add_deltas(
             &trie.committer,
             bottom_meta_c,
-            &[(
+            &[ (
                 1,
                 kv_hash(&Some(SaltValue::from(BucketMeta::default()))),
                 kv_hash(&Some(SaltValue::from(bucket_meta(
                     5,
                     MIN_BUCKET_SIZE as SlotId,
                 )))),
-            )],
+            ) ],
         )
         .to_bytes_uncompressed();
+
+        // 对 data 节点应用 delta，得到期望的新 commitment c2（两个插槽分别从 None 变为对应 kv 哈希）
         let c2 = add_deltas(
             &trie.committer,
             bottom_data_c,
@@ -2274,6 +1503,7 @@ mod tests {
         )
         .to_bytes_uncompressed();
 
+        // 最终断言：返回的需要更新的节点 commitment 列表应包含两个条目（meta 和 data 的节点 id 与新旧 commitment）
         assert_eq!(
             salt_updates,
             vec![
@@ -2288,16 +1518,22 @@ mod tests {
 
     #[test]
     fn trie_update_internal_nodes() {
+        // 测试从底层（leaf 层）的变更向上传播到内部节点的处理逻辑
         let bottom_level = MAIN_TRIE_LEVELS - 1;
         let trie = StateRoot::new(&EmptySalt);
         let committer = &trie.committer;
+
+        // 构造底层节点的默认 commitments（作为原始状态）
         let bottom_meta_c = default_commitment(STARTING_NODE_ID[bottom_level] as NodeId);
         let bottom_data_c =
             default_commitment((STARTING_NODE_ID[bottom_level] + NUM_META_BUCKETS) as NodeId);
-        //let (zero, nonce_c) = (zero_commitment(), bottom_meta_c);
+        // bottom_level 的起始 node id
         let bottom_level_start = STARTING_NODE_ID[bottom_level] as NodeId;
+
+        // 准备三个新的 commitment（模拟底层某些节点被更新后的承诺值）
         let cs = create_commitments(3);
 
+        // updates 向量模拟从底层产生的未处理更新：格式为 (node_id, (old_commitment, new_commitment))
         let updates = vec![
             (bottom_level_start + 1, (bottom_meta_c, cs[0])),
             (
@@ -2310,14 +1546,18 @@ mod tests {
             ),
         ];
 
-        // Check and handle the commitment updates of the bottom-level node
+        // 处理底层节点的 commitment 更新，会返回上一层需要更新的节点列表（未处理的更新）
         let cur_level = bottom_level - 1;
         let unprocess_updates = trie.update_internal_nodes(updates).unwrap();
 
+        // 计算哈希索引（bytes_indices）用于构造上一层的期望 delta
         let bytes_indices =
             Element::hash_commitments(&[bottom_data_c, bottom_meta_c, cs[0], cs[1], cs[2]]);
+        // 上一层（cur_level）的默认 meta/data commitment
         let l3_meta_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let l3_data_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId + 256);
+
+        // 构造期望的上层 meta/data 的新 commitment（应用 delta 后）
         let c1 = add_deltas(
             committer,
             l3_meta_c,
@@ -2335,15 +1575,17 @@ mod tests {
         )
         .to_bytes_uncompressed();
 
+        // 断言：从底层处理后返回的未处理更新应当包含上层需要写回的两个节点更新
         assert_eq!(
             unprocess_updates,
             vec![(257, (l3_meta_c, c1)), (513, (l3_data_c, c2))]
         );
 
-        // Check and handle the commitment updates of the second-level node
+        // 继续对更上一层进行处理：把刚才返回的未处理更新再次传入，检查第二层的合并结果
         let cur_level = cur_level - 1;
         let unprocess_updates = trie.update_internal_nodes(unprocess_updates).unwrap();
 
+        // 计算本次需要合并的哈希索引
         let bytes_indices = Element::hash_commitments(&[l3_data_c, l3_meta_c, c1, c2]);
         let l2_meta_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId);
         let l2_data_c = default_commitment(STARTING_NODE_ID[cur_level] as NodeId + 1);
@@ -2360,11 +1602,13 @@ mod tests {
         )
         .to_bytes_uncompressed();
 
+        // 验证返回的更新列表与预期一致
         assert_eq!(
             unprocess_updates,
             vec![(1, (l2_meta_c, c3)), (2, (l2_data_c, c4))]
         );
 
+        // 再向上一层合并一次，最终验证根附近的一次更新
         let cur_level = cur_level - 1;
         let unprocess_updates = trie.update_internal_nodes(unprocess_updates).unwrap();
         let bytes_indices = Element::hash_commitments(&[l2_data_c, l2_meta_c, c3, c4]);
@@ -2379,133 +1623,6 @@ mod tests {
         )
         .to_bytes_uncompressed();
         assert_eq!(unprocess_updates, vec![(0, (l1_c, c5))]);
-    }
-
-    #[test]
-    fn trie_calculate_inner() {
-        let mut trie = StateRoot::new(&EmptySalt);
-
-        let mut state_updates = StateUpdates::default();
-        let kv1 = Some(SaltValue::new(&[1; 32], &[1; 32]));
-        let kv2 = Some(SaltValue::new(&[2; 32], &[2; 32]));
-        let fr1 = kv_hash(&kv1);
-        let fr2 = kv_hash(&kv2);
-        let kv_none = kv_hash(&None);
-        let default_bucket_data =
-            default_commitment(bucket_root_node_id(NUM_META_BUCKETS as BucketId));
-
-        // Prepare the state updates
-        let bucket_ids = [
-            KV_BUCKET_OFFSET as BucketId + 257,
-            KV_BUCKET_OFFSET as BucketId + 65536,
-        ];
-        state_updates.add((bucket_ids[0], 1).into(), None, kv1.clone());
-        state_updates.add((bucket_ids[0], 9).into(), None, kv2.clone());
-        state_updates.add((bucket_ids[1], 9).into(), kv1, kv2);
-
-        let (_, mut trie_updates) = trie.update_fin(&state_updates).unwrap();
-        trie_updates.par_sort_unstable_by(|(a, _), (b, _)| b.cmp(a));
-
-        // Check the commitment updates of the bottom-level node
-        let committer = &trie.committer;
-        let c1 =
-            add_deltas(committer, default_bucket_data, &[(9, fr1, fr2)]).to_bytes_uncompressed();
-        let c2 = add_deltas(
-            committer,
-            default_bucket_data,
-            &[(1, kv_none, fr1), (9, kv_none, fr2)],
-        )
-        .to_bytes_uncompressed();
-        assert_eq!(
-            trie_updates[0..2],
-            vec![
-                (
-                    bucket_root_node_id(bucket_ids[1]),
-                    (default_bucket_data, c1)
-                ),
-                (
-                    bucket_root_node_id(bucket_ids[0]),
-                    (default_bucket_data, c2)
-                ),
-            ]
-        );
-
-        // Check the commitment updates of the TRIE_LEVELS - 2 level node
-        let default_l3_c = default_commitment((STARTING_NODE_ID[2] + 256) as NodeId);
-        let bytes_indices = Element::hash_commitments(&[default_bucket_data, c1, c2]);
-        let c3 = add_deltas(
-            committer,
-            default_l3_c,
-            &[(0, bytes_indices[0], bytes_indices[1])],
-        )
-        .to_bytes_uncompressed();
-        let c4 = add_deltas(
-            committer,
-            default_l3_c,
-            &[(1, bytes_indices[0], bytes_indices[2])],
-        )
-        .to_bytes_uncompressed();
-        assert_eq!(
-            trie_updates[2..4],
-            vec![
-                (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 2] as NodeId
-                        + bucket_ids[1] as NodeId / 256,
-                    (default_l3_c, c3)
-                ),
-                (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 2] as NodeId
-                        + bucket_ids[0] as NodeId / 256,
-                    (default_l3_c, c4)
-                ),
-            ]
-        );
-
-        // Check the commitment updates of the TRIE_LEVELS - 3 level node
-        let default_l2_c = default_commitment((STARTING_NODE_ID[1] + 1) as NodeId);
-        let bytes_indices = Element::hash_commitments(&[default_l3_c, c3, c4]);
-        let c5 = add_deltas(
-            committer,
-            default_l2_c,
-            &[(0, bytes_indices[0], bytes_indices[1])],
-        )
-        .to_bytes_uncompressed();
-        let c6 = add_deltas(
-            committer,
-            default_l2_c,
-            &[(1, bytes_indices[0], bytes_indices[2])],
-        )
-        .to_bytes_uncompressed();
-        assert_eq!(
-            trie_updates[4..6],
-            vec![
-                (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 3] as NodeId
-                        + bucket_ids[1] as NodeId / 65536,
-                    (default_l2_c, c5)
-                ),
-                (
-                    STARTING_NODE_ID[MAIN_TRIE_LEVELS - 3] as NodeId
-                        + bucket_ids[0] as NodeId / 65536,
-                    (default_l2_c, c6)
-                ),
-            ]
-        );
-
-        // Check the commitment updates of the last level node
-        let default_l1_c = default_commitment(STARTING_NODE_ID[0] as NodeId);
-        assert_eq!(trie_updates[6].0, 0);
-        let bytes_indices = Element::hash_commitments(&[default_l2_c, c5, c6]);
-        let c7 = add_deltas(
-            committer,
-            default_l1_c,
-            &[
-                (2, bytes_indices[0], bytes_indices[1]),
-                (1, bytes_indices[0], bytes_indices[2]),
-            ],
-        )
-        .to_bytes_uncompressed();
-        assert_eq!(trie_updates[6], (0, (default_l1_c, c7)));
     }
 
     /// Checks if the default commitment is correct
@@ -2531,10 +1648,18 @@ mod tests {
         for i in (0..MAIN_TRIE_LEVELS).rev() {
             let (meta_delta_indices, data_delta_indices) = if i == MAIN_TRIE_LEVELS - 1 {
                 let meta_delta_indices = (0..len_vec[i])
-                    .map(|i| (i, Fr::zero(), kv_hash(&Some(BucketMeta::default().into()))))
+                    .map(|i| {
+                        let old_value = Fr::zero();
+                        let new_value = kv_hash(&Some(BucketMeta::default().into()));
+                        (i, old_value, new_value)
+                    })
                     .collect();
                 let data_delta_indices = (0..len_vec[i])
-                    .map(|i| (i, Fr::zero(), kv_hash(&None)))
+                    .map(|i| {
+                        let old_value = Fr::zero();
+                        let new_value = kv_hash(&None);
+                        (i, old_value, new_value)
+                    })
                     .collect();
                 (meta_delta_indices, data_delta_indices)
             } else if i == 0 {
