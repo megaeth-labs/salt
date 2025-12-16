@@ -951,46 +951,48 @@ impl StateRoot<'_, EmptySalt> {
         let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
             .into_par_iter()
             .step_by(CHUNK_SIZE)
-            .map(|chunk_start| -> Result<TrieUpdates, RebuildError<S::Error>> {
-                check_cancellation::<S::Error>(cancel)?;
-                let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
+            .map(
+                |chunk_start| -> Result<TrieUpdates, RebuildError<S::Error>> {
+                    check_cancellation::<S::Error>(cancel)?;
+                    let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
-                // Step 1: Read metadata for all buckets in this chunk
-                let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
-                let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
-                let mut chunk_updates = reader
-                    .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
-                    .into_iter()
-                    .map(|(key, actual_metadata)| {
-                        // Simulate metadata change: default -> actual
-                        (
-                            key,
-                            (Some(BucketMeta::default().into()), Some(actual_metadata)),
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>();
-
-                // Step 2: Read all key-value pairs for buckets in this chunk
-                // Treat as insertions since we're rebuilding from scratch
-                chunk_updates.extend(
-                    reader
-                        .entries(SaltKey::bucket_range(
-                            chunk_start as BucketId,
-                            chunk_end as BucketId,
-                        ))?
+                    // Step 1: Read metadata for all buckets in this chunk
+                    let meta_bucket_start = (chunk_start / META_BUCKET_SIZE) as BucketId;
+                    let meta_bucket_end = (chunk_end / META_BUCKET_SIZE) as BucketId;
+                    let mut chunk_updates = reader
+                        .entries(SaltKey::bucket_range(meta_bucket_start, meta_bucket_end))?
                         .into_iter()
-                        .map(|(key, value)| (key, (None, Some(value)))),
-                );
+                        .map(|(key, actual_metadata)| {
+                            // Simulate metadata change: default -> actual
+                            (
+                                key,
+                                (Some(BucketMeta::default().into()), Some(actual_metadata)),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>();
 
-                // Step 3: Apply updates to trie, handling expansion automatically
-                // `update_bucket_subtrees` detects metadata capacity changes and creates
-                // appropriate subtrie structures without special handling
-                StateRoot::new(&EmptySalt)
-                    .update_bucket_subtrees(&StateUpdates {
-                        data: chunk_updates,
-                    })
-                    .map_err(|_| unreachable!("EmptySalt never returns errors"))
-            })
+                    // Step 2: Read all key-value pairs for buckets in this chunk
+                    // Treat as insertions since we're rebuilding from scratch
+                    chunk_updates.extend(
+                        reader
+                            .entries(SaltKey::bucket_range(
+                                chunk_start as BucketId,
+                                chunk_end as BucketId,
+                            ))?
+                            .into_iter()
+                            .map(|(key, value)| (key, (None, Some(value)))),
+                    );
+
+                    // Step 3: Apply updates to trie, handling expansion automatically
+                    // `update_bucket_subtrees` detects metadata capacity changes and creates
+                    // appropriate subtrie structures without special handling
+                    StateRoot::new(&EmptySalt)
+                        .update_bucket_subtrees(&StateUpdates {
+                            data: chunk_updates,
+                        })
+                        .map_err(|_| unreachable!("EmptySalt never returns errors"))
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
