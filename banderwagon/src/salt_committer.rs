@@ -322,7 +322,7 @@ impl Committer {
                 }
                 carry = 1;
             } else {
-                ponits.push(precom_table[index + i * (half_win + 1)].clone());
+                ponits.push(precom_table[index + i * (half_win + 1)]);
             }
         }
         ponits
@@ -364,7 +364,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     let e = d - a - b;
     let f = result.z - c;
     let g = result.z + c;
-    a = a * Fq::from(5u64);
+    a *= Fq::from(5u64);
     let h = b + a;
 
     result.x = e * f;

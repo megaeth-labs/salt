@@ -35,11 +35,15 @@ use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
-use std::sync::Arc;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
+use thiserror::Error;
 
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
@@ -53,8 +57,32 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> =
 /// formatted as (`node_id`, (`old_commitment`, `new_commitment`)).
 pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 
+/// Errors that can occur while rebuilding the trie from storage.
+#[derive(Debug, Error)]
+pub enum RebuildError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    #[error(transparent)]
+    State(#[from] E),
+    #[error("rebuild cancelled")]
+    Cancelled,
+}
+
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
+
+#[inline(always)]
+fn check_cancellation<E>(cancel: Option<&Arc<AtomicBool>>) -> Result<(), RebuildError<E>>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        Err(RebuildError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
 
 /// Describes a shrink operation for a single trie level during bucket contraction.
 ///
@@ -896,15 +924,35 @@ impl StateRoot<'_, EmptySalt> {
     /// # Returns
     ///
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
-    /// * `Err(S::Error)` - If reading from storage fails
-    pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
+    /// * `Err(RebuildError<S::Error>)` - If reading from storage fails or cancellation is requested
+    ///
+    /// # Cancellation
+    /// Use [`StateRoot::rebuild_with_cancel`] to cooperatively abort long-running rebuilds.
+    pub fn rebuild<S: StateReader>(
+        reader: &S,
+    ) -> Result<(ScalarBytes, TrieUpdates), RebuildError<S::Error>> {
+        Self::rebuild_with_cancel(reader, None)
+    }
+
+    /// Reconstructs the entire trie from scratch using data stored in the database,
+    /// with optional cooperative cancellation support.
+    ///
+    /// Pass an optional `Arc<AtomicBool>` flag to request cancellation. Set the flag
+    /// to `true` to abort; checks happen between chunked work units so progress may
+    /// be partial.
+    pub fn rebuild_with_cancel<S: StateReader>(
+        reader: &S,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<(ScalarBytes, TrieUpdates), RebuildError<S::Error>> {
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
+        let cancel = cancel.as_ref();
 
         let all_trie_updates = (NUM_META_BUCKETS..NUM_BUCKETS)
             .into_par_iter()
             .step_by(CHUNK_SIZE)
-            .map(|chunk_start| -> Result<TrieUpdates, S::Error> {
+            .map(|chunk_start| -> Result<TrieUpdates, RebuildError<S::Error>> {
+                check_cancellation::<S::Error>(cancel)?;
                 let chunk_end = NUM_BUCKETS.min(chunk_start + CHUNK_SIZE) - 1;
 
                 // Step 1: Read metadata for all buckets in this chunk
@@ -947,10 +995,12 @@ impl StateRoot<'_, EmptySalt> {
 
         let mut all_trie_updates = all_trie_updates.into_iter().flatten().collect::<Vec<_>>();
 
+        check_cancellation::<S::Error>(cancel)?;
+
         // Step 4: Compute commitments for all internal nodes in the main trie
         let root_hash = StateRoot::new(&EmptySalt)
             .update_main_trie(&mut all_trie_updates, MAIN_TRIE_LEVELS)
-            .map_err(|_| unreachable!("EmptySalt never returns errors"))?;
+            .unwrap_or_else(|_| unreachable!("EmptySalt never returns errors"));
         Ok((root_hash, all_trie_updates))
     }
 }
@@ -1925,6 +1975,20 @@ mod tests {
         assert_eq!(c, mock_db.commitment(node_id).unwrap());
 
         assert_eq!(root0, root1);
+    }
+
+    #[test]
+    fn test_rebuild_cancelled() {
+        let mock_db = MemStore::new();
+        // Immediately cancel to ensure early exit without touching storage
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let res = StateRoot::rebuild_with_cancel(&mock_db, Some(cancel));
+        if let Err(RebuildError::Cancelled) = res {
+            // expected
+        } else {
+            panic!("expected cancellation error, got {:?}", res);
+        }
     }
 
     #[test]

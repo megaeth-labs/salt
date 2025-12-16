@@ -11,7 +11,7 @@ pub use state::{
 pub mod trie;
 pub use trie::{
     node_utils::get_child_node,
-    trie::{StateRoot, TrieUpdates},
+    trie::{RebuildError, StateRoot, TrieUpdates},
 };
 
 pub mod traits;
