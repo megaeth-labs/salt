@@ -85,6 +85,10 @@ struct LevelContractionOp {
 /// 2. **Finalize Phase**: Propagates all accumulated changes through the trie
 ///    hierarchy and computes the final state root.
 ///
+/// The work split between phases is configurable via `with_deferred_levels()`.
+/// By default (`deferred_levels=1`), `update()` handles the bottom three main trie
+/// levels (L3→L2→L1), and `finalize()` handles only the root level (L0).
+///
 /// This design avoids redundant recomputation of upper-level node commitments when
 /// processing multiple state updates in sequence. The struct maintains internal
 /// caches to track both incremental changes and current commitment values during
@@ -140,6 +144,13 @@ pub struct StateRoot<'a, Store> {
     /// Controls when to use parallel computation via rayon. Operations with fewer
     /// tasks than this threshold execute sequentially. Default: 64.
     min_par_batch_size: usize,
+
+    /// Number of main trie levels to defer to the finalize phase.
+    ///
+    /// Controls work split: update() propagates (MAIN_TRIE_LEVELS - deferred_levels - 1) times,
+    /// finalize() propagates from level (MAIN_TRIE_LEVELS - deferred_levels) to root.
+    /// Default: 1 (defer L0 to finalize, update L3→L2→L1 in update)
+    deferred_levels: usize,
 }
 
 impl<'a, Store> StateRoot<'a, Store>
@@ -155,6 +166,7 @@ where
             bucket_capacity_cache: HashMap::new(),
             committer: Arc::clone(&SHARED_COMMITTER),
             min_par_batch_size: 64,
+            deferred_levels: 1,
         }
     }
 
@@ -164,43 +176,67 @@ where
         self
     }
 
+    /// Configure the number of main trie levels to defer to finalize phase.
+    ///
+    /// Controls work split between `update()` and `finalize()`:
+    /// - Higher values: More work in finalize, faster updates
+    /// - Lower values: More work in update, faster finalize
+    ///
+    /// Default is 1. Valid range: [1, MAIN_TRIE_LEVELS-1].
+    ///
+    /// # Panics
+    /// Panics if `levels` is not in valid range [1, MAIN_TRIE_LEVELS-1].
+    pub fn with_deferred_levels(mut self, levels: usize) -> Self {
+        assert!(
+            levels > 0 && levels < MAIN_TRIE_LEVELS,
+            "deferred_levels must be in [1, {}), got {}",
+            MAIN_TRIE_LEVELS,
+            levels
+        );
+        self.deferred_levels = levels;
+        self
+    }
+
     /// Updates the trie incrementally without computing the final state root.
     ///
     /// This method implements the "update phase" of the two-phase commit algorithm.
-    /// It processes state changes and updates the last two level main trie nodes
-    /// but deliberately avoids propagating changes to upper trie levels. This lazy
-    /// approach allows multiple `update()` calls to be batched together efficiently.
+    /// It processes state changes and propagates through a configurable number of
+    /// main trie levels (controlled by `deferred_levels`), deliberately deferring
+    /// upper levels. This lazy approach allows multiple `update()` calls to be
+    /// batched together efficiently.
     ///
     /// Changes are accumulated internally until `finalize()` is called to complete
     /// the computation. This avoids redundant updates of upper-level node commitments
     /// when processing sequential state updates.
+    ///
+    /// By default (`deferred_levels=1`), updates main trie levels L3, L2, and L1.
     pub fn update(
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
         let subtree_updates = self.update_bucket_subtrees(state_updates)?;
-        let l3_updates = Self::drop_updates_below_level(&subtree_updates, MAIN_TRIE_LEVELS);
+        let mut level_updates = Self::drop_updates_below_level(&subtree_updates, MAIN_TRIE_LEVELS);
+        self.apply_updates_to_caches(subtree_updates);
 
-        let l2_updates = self.update_internal_nodes(l3_updates)?;
-
-        for (node_id, (old, new)) in subtree_updates.into_iter().chain(l2_updates) {
-            self.cache.insert(node_id, new);
-            self.updates
-                .entry(node_id)
-                .and_modify(|change| change.1 = new)
-                .or_insert((old, new));
+        // Propagate (MAIN_TRIE_LEVELS - deferred_levels - 1) times
+        for _ in 0..MAIN_TRIE_LEVELS.saturating_sub(self.deferred_levels + 1) {
+            level_updates = self.update_internal_nodes(level_updates)?;
+            self.apply_updates_to_caches(level_updates.iter().copied());
         }
+
         Ok(())
     }
 
     /// Completes the two-phase commit and returns the final state root.
     ///
     /// This method implements the "finalize phase" by propagating all accumulated
-    /// changes from the `updates` cache through the upper main trie levels (L1-L0)
-    /// to compute the final state root commitment.
+    /// changes from the `updates` cache through the remaining main trie levels
+    /// (as configured by `deferred_levels`) to compute the final state root commitment.
+    ///
+    /// By default (`deferred_levels=1`), propagates L1→L0.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
-        let root_hash = self.update_main_trie(&mut trie_updates, MAIN_TRIE_LEVELS - 1)?;
+        let root_hash = self.update_main_trie(&mut trie_updates, self.deferred_levels + 1)?;
         for (node_id, (_, new)) in &trie_updates {
             self.cache.insert(*node_id, *new);
         }
@@ -254,6 +290,24 @@ where
         };
 
         Ok(hash_commitment(root_commitment))
+    }
+
+    /// Applies trie updates to both the cache and updates map.
+    ///
+    /// This helper method ensures consistent state by:
+    /// - Updating `self.cache` with the new commitment
+    /// - Merging into `self.updates`, preserving the original old value if it exists
+    fn apply_updates_to_caches(
+        &mut self,
+        updates: impl IntoIterator<Item = (NodeId, (CommitmentBytes, CommitmentBytes))>,
+    ) {
+        for (node_id, (old, new)) in updates {
+            self.cache.insert(node_id, new);
+            self.updates
+                .entry(node_id)
+                .and_modify(|change| change.1 = new)
+                .or_insert((old, new));
+        }
     }
 
     /// Drops updates at levels greater than or equal to the specified threshold.
@@ -1683,8 +1737,9 @@ mod tests {
         assert_eq!(root3, contraction_root);
     }
 
-    #[test]
-    fn incremental_update_small() {
+    /// Helper function to test incremental updates with a specific deferred_levels value.
+    /// Tests bucket expansion, updates to expanded buckets, and incremental vs batch consistency.
+    fn incremental_update_small_with_level(deferred_levels: usize) {
         // set expansion bucket metadata and check update with expanded bucket
         let update_bid = KV_BUCKET_OFFSET as BucketId + 2;
         let extend_bid = KV_BUCKET_OFFSET as BucketId + 3;
@@ -1753,7 +1808,7 @@ mod tests {
 
         let trie_reader = &EmptySalt;
         let mut state_updates = StateUpdates::default();
-        let mut trie = StateRoot::new(trie_reader);
+        let mut trie = StateRoot::new(trie_reader).with_deferred_levels(deferred_levels);
         trie.update(&state_updates1).unwrap();
         state_updates.merge(state_updates1);
         trie.update(&state_updates2).unwrap();
@@ -1808,12 +1863,19 @@ mod tests {
         };
         assert_eq!(cmp_state_updates, state_updates);
 
-        let mut trie = StateRoot::new(trie_reader);
+        let mut trie = StateRoot::new(trie_reader).with_deferred_levels(deferred_levels);
         let (cmp_root, mut cmp_trie_updates) = trie.update_fin(&cmp_state_updates).unwrap();
         assert_eq!(root, cmp_root);
         trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         cmp_trie_updates.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         assert_eq!(trie_updates, cmp_trie_updates);
+    }
+
+    #[test]
+    fn incremental_update_small() {
+        for deferred_levels in [1, 2, 3] {
+            incremental_update_small_with_level(deferred_levels);
+        }
     }
 
     #[test]
@@ -1881,10 +1943,11 @@ mod tests {
         assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
     }
 
-    #[test]
-    fn test_rebuild_small() {
+    /// Helper function to test rebuild with a specific deferred_levels value.
+    /// Tests that a trie built with specific deferred_levels produces the same root as rebuild.
+    fn test_rebuild_small_with_level(deferred_levels: usize) {
         let mock_db = MemStore::new();
-        let mut trie = StateRoot::new(&mock_db);
+        let mut trie = StateRoot::new(&mock_db).with_deferred_levels(deferred_levels);
         let mut state_updates = StateUpdates::default();
 
         let bid = KV_BUCKET_OFFSET as BucketId;
@@ -1925,6 +1988,13 @@ mod tests {
         assert_eq!(c, mock_db.commitment(node_id).unwrap());
 
         assert_eq!(root0, root1);
+    }
+
+    #[test]
+    fn test_rebuild_small() {
+        for deferred_levels in [1, 2, 3] {
+            test_rebuild_small_with_level(deferred_levels);
+        }
     }
 
     #[test]
