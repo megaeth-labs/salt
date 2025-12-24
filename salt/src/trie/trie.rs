@@ -110,7 +110,7 @@ pub struct StateRoot<'a, Store> {
     ///
     /// This field tracks (old_commitment, new_commitment) pairs for each modified
     /// node. It's essential for the incremental update algorithm because:
-    /// - `update()` only computes changes at the bucket level
+    /// - `update()` only computes changes below the top `deferred_levels` levels
     /// - Upper trie levels remain unchanged until `finalize()` is called
     /// - This avoids redundant recomputation when processing multiple updates
     ///
@@ -237,9 +237,12 @@ where
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
         let root_hash = self.update_main_trie(&mut trie_updates, self.deferred_levels + 1)?;
-        for (node_id, (_, new)) in &trie_updates {
-            self.cache.insert(*node_id, *new);
+
+        let deferred_updates = Self::drop_updates_below_level(&trie_updates, self.deferred_levels);
+        for (node_id, (_, new)) in deferred_updates {
+            self.cache.insert(node_id, new);
         }
+
         Ok((root_hash, trie_updates))
     }
 
