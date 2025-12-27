@@ -40,6 +40,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
 };
+#[cfg(feature = "timetrace")]
+use timetrace_ffi::*;
 
 /// The size of the precomputed window.
 const PRECOMP_WINDOW_SIZE: usize = 11;
@@ -217,15 +219,27 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(), <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::incremental_update start");
         let subtree_updates = self.update_bucket_subtrees(state_updates)?;
         let mut level_updates = Self::drop_updates_below_level(&subtree_updates, MAIN_TRIE_LEVELS);
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::incremental_update update caches start");
         self.apply_updates_to_caches(subtree_updates);
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::incremental_update update caches finished");
 
         // Propagate (MAIN_TRIE_LEVELS - deferred_levels - 1) times
         for _ in 0..MAIN_TRIE_LEVELS.saturating_sub(self.deferred_levels + 1) {
             level_updates = self.update_internal_nodes(level_updates)?;
             self.apply_updates_to_caches(level_updates.iter().copied());
         }
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::incremental_update %u level and update %u commitments and finished",
+            MAIN_TRIE_LEVELS.saturating_sub(self.deferred_levels + 1) as u32,
+            level_updates.len() as u32
+        );
 
         Ok(())
     }
@@ -238,13 +252,21 @@ where
     ///
     /// By default (`deferred_levels=1`), propagates L1→L0.
     pub fn finalize(&mut self) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::finalize start");
         let mut trie_updates = std::mem::take(&mut self.updates).into_iter().collect();
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::finalize take trie_updates");
         let root_hash = self.update_main_trie(&mut trie_updates, self.deferred_levels + 1)?;
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::finalize update_main_trie");
 
         let deferred_updates = Self::drop_updates_below_level(&trie_updates, self.deferred_levels);
         for (node_id, (_, new)) in deferred_updates {
             self.cache.insert(node_id, new);
         }
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::finalize update cache and finished");
 
         Ok((root_hash, trie_updates))
     }
@@ -258,8 +280,18 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update fin started, updated kvs %u",
+            state_updates.data.len() as u32
+        );
         self.update(state_updates)?;
-        self.finalize()
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update fin incremental_update");
+        let ret = self.finalize();
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update fin finished");
+        ret
     }
 
     /// Propagates commitment updates through upper trie levels to compute the root.
@@ -280,12 +312,35 @@ where
         acc_updates: &mut TrieUpdates,
         start_level: usize,
     ) -> Result<ScalarBytes, <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_main_trie start");
         let mut level_updates = Self::drop_updates_below_level(acc_updates, start_level);
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_main_trie get updates %u",
+            level_updates.len() as u32
+        );
 
-        for _ in (0..start_level - 1).rev() {
+        for _level in (0..start_level - 1).rev() {
+            #[cfg(feature = "timetrace")]
+            tt_record!(
+                "StateRoot::update_internal_nodes started, level %u",
+                _level as u32
+            );
             level_updates = self.update_internal_nodes(level_updates)?;
+            #[cfg(feature = "timetrace")]
+            tt_record!(
+                "StateRoot::update_internal_nodes finished, level %u",
+                _level as u32
+            );
             acc_updates.extend(level_updates.iter());
         }
+
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_main_trie finished, updated nodes %u",
+            acc_updates.len() as u32
+        );
 
         // Extract the root commitment from the last update, or fetch from storage
         // if root wasn't modified
@@ -350,6 +405,8 @@ where
         &mut self,
         state_updates: &StateUpdates,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_bucket_subtrees started");
         let mut uncomputed_updates = vec![];
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
         let mut expansion_kvs: Vec<_> = Vec::with_capacity(state_updates.data.len());
@@ -486,6 +543,8 @@ where
                 expansion_kvs.push((key, value));
             }
         }
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_bucket_subtrees get expansion buckets");
 
         // Initialize trigger levels for later processing
         let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
@@ -494,6 +553,11 @@ where
         let mut trie_updates = self.update_leaf_nodes(&mut non_expansion_kvs, |salt_key| {
             salt_key.bucket_id() as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
         })?;
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_bucket_subtrees generate non-expansion commitment %u",
+            trie_updates.len() as u32
+        );
 
         // Helper closure for expansion without KV changes
         let add_expansion_update =
@@ -658,8 +722,12 @@ where
                 .update_internal_nodes(subtree_commitmens)
                 .expect("update internal nodes for subtrie failed");
         }
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_bucket_subtrees generate expansion commitment");
 
         trie_updates.extend(uncomputed_updates.iter());
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_bucket_subtrees: finished");
         Ok(trie_updates)
     }
 
@@ -688,10 +756,18 @@ where
     where
         N: Fn(&SaltKey) -> NodeId + Sync + Send,
     {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_leaf_nodes started");
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             (a.slot_id() % TRIE_WIDTH as SlotId).cmp(&(b.slot_id() % TRIE_WIDTH as SlotId))
         });
+
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_leaf_nodes: sorted %u state updates by G_i",
+            state_updates.len() as u32
+        );
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let batch_size = self.par_batch_size(state_updates.len());
@@ -709,7 +785,16 @@ where
             })
             .collect();
 
-        self.add_commitment_deltas(c_deltas, batch_size)
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_leaf_nodes: generated commitment %u deltas",
+            c_deltas.len() as u32
+        );
+
+        let ret = self.add_commitment_deltas(c_deltas, batch_size);
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_leaf_nodes: add_commitment_deltas and finish");
+        ret
     }
 
     /// Propagates commitment updates from child nodes to their parent nodes.
@@ -739,11 +824,18 @@ where
         child_updates.par_sort_unstable_by(|(a, _), (b, _)| {
             vc_position_in_parent(a).cmp(&vc_position_in_parent(b))
         });
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_internal_nodes: sorted %u child_updates by G_i",
+            child_updates.len() as u32
+        );
 
         let batch_size = self.par_batch_size(child_updates.len());
-        let delta_list = child_updates
+        let delta_list: DeltaList = child_updates
             .par_chunks(batch_size)
             .flat_map(|c_updates| {
+                #[cfg(feature = "timetrace")]
+                tt_record!("StateRoot::update_internal_nodes: processing child_updates chunk ");
                 // Interleave old and new commitments for efficient batch hashing
                 let hashes = Element::hash_commitments(
                     &c_updates
@@ -751,8 +843,13 @@ where
                         .flat_map(|(_, (old_c, new_c))| [*old_c, *new_c])
                         .collect::<Vec<_>>(),
                 );
+                #[cfg(feature = "timetrace")]
+                tt_record!(
+                    "StateRoot::update_internal_nodes: hash_commitments %u",
+                    hashes.len() as u32
+                );
 
-                c_updates
+                let deltas = c_updates
                     .iter()
                     .zip(hashes.chunks_exact(2))
                     .map(|((id, _), h)| {
@@ -762,11 +859,27 @@ where
                                 .mul_index(&(h[1] - h[0]), vc_position_in_parent(id)),
                         )
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+
+                #[cfg(feature = "timetrace")]
+                tt_record!(
+                    "StateRoot::update_internal_nodes: %u ecmuls",
+                    deltas.len() as u32
+                );
+
+                deltas
             })
             .collect();
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::update_internal_nodes: generated %u commitment deltas",
+            delta_list.len() as u32
+        );
 
-        self.add_commitment_deltas(delta_list, batch_size)
+        let ret = self.add_commitment_deltas(delta_list, batch_size);
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::update_internal_nodes: add_commitment_deltas and finish");
+        ret
     }
 
     /// Computes a resonable batch size for parallel processing to balance workload
@@ -819,18 +932,32 @@ where
         mut commitment_deltas: DeltaList,
         task_size: usize,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::add_commitment_deltas started");
         // Sort deltas by NodeId to group changes for the same node together
         // This enables efficient accumulation and ensures deterministic ordering
         commitment_deltas.par_sort_unstable_by_key(|&(node_id, _)| node_id);
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::add_commitment_deltas: sorted %u deltas by parent id",
+            commitment_deltas.len() as u32
+        );
 
         // Create node-aligned chunks for parallel processing
         let chunks = self.create_node_aligned_chunks(&commitment_deltas, task_size);
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::add_commitment_deltas: create_node_aligned_chunks into %u parts",
+            chunks.len() as u32
+        );
 
         // Process each chunk in parallel and collect results
         let results: Result<Vec<_>, _> = chunks
             .par_iter()
             .map(|chunk_range| self.accumulate_chunk_deltas(&commitment_deltas, chunk_range))
             .collect();
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::add_commitment_deltas finished");
 
         // Flatten results from all chunks
         Ok(results?.into_iter().flatten().collect())
@@ -883,6 +1010,9 @@ where
         let mut nodes_with_old_commitments = Vec::with_capacity(estimated_nodes);
         let mut current_node_id = NodeId::MAX;
 
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::accumulate_chunk_deltas: start");
+
         // Accumulate deltas for each node in this chunk
         for &(node_id, delta) in chunk_deltas {
             if node_id == current_node_id {
@@ -901,9 +1031,17 @@ where
                 current_node_id = node_id;
             }
         }
+        #[cfg(feature = "timetrace")]
+        tt_record!("StateRoot::accumulate_chunk_deltas: summed up deltas by parent ids");
 
         // Batch convert all accumulated elements to commitment bytes
         let new_commitments = Element::batch_to_commitments(&accumulated_elements);
+
+        #[cfg(feature = "timetrace")]
+        tt_record!(
+            "StateRoot::accumulate_chunk_deltas: completed batch_to_commitments %u cs",
+            accumulated_elements.len() as u32
+        );
 
         // Combine into final (NodeId, (old_commitment, new_commitment)) format
         Ok(nodes_with_old_commitments
