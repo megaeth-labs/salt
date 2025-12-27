@@ -9,7 +9,7 @@ test-bucket-resize = []
 enable-hugepages = ["banderwagon/enable-hugepages"]
 
 [dependencies]
-banderwagon = { path = "../banderwagon", default-features = false, features = ["parallel"]}
+banderwagon = { path = "../banderwagon" }
 ipa-multipoint = { path = "../ipa-multipoint" }
 
 # standard dependencies
