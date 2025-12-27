@@ -139,7 +139,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |inputs| {
                 black_box({
-                    let mut trie = StateRoot::new(&EmptySalt);
+                    let mut trie = StateRoot::new(&EmptySalt).with_deferred_levels(3);
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
                         trie.update(&state_updates).unwrap();

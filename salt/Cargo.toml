@@ -6,9 +6,10 @@ edition = "2021"
 [features]
 default = []
 test-bucket-resize = []
+enable-hugepages = ["banderwagon/enable-hugepages"]
 
 [dependencies]
-banderwagon = { path = "../banderwagon" }
+banderwagon = { path = "../banderwagon", default-features = false, features = ["parallel"]}
 ipa-multipoint = { path = "../ipa-multipoint" }
 
 # standard dependencies
