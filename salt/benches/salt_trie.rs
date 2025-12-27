@@ -21,6 +21,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::ThreadPoolBuilder;
 use salt::{
     constant::{default_commitment, MIN_BUCKET_SIZE, NUM_BUCKETS, NUM_META_BUCKETS},
     empty_salt::EmptySalt,
@@ -32,6 +33,7 @@ use salt::{
 use std::collections::HashSet;
 use std::hint::black_box;
 use std::ops::Range;
+use std::time::Duration;
 
 /// Generates synthetic state updates for benchmarking SALT trie operations.
 ///
@@ -93,44 +95,44 @@ fn benchmark_trie_updates(c: &mut Criterion) {
     // Pre-initialize cryptographic precomputation tables to ensure consistent timing
     let _ = StateRoot::new(&EmptySalt);
 
-    // BENCHMARK 1: Large Batch Update (100,000 KVs)
-    // Simulates: Blockchain state sync, large data imports, initial state population
-    // Tests: Performance with massive single updates, memory allocation patterns
-    // Expected: High absolute time but good amortized cost per KV
-    c.bench_function("salt trie update 100k KVs", |b| {
-        b.iter_batched(
-            || gen_state_updates(1, 100_000, &mut rng), // Setup: Generate test data
-            |inputs| {
-                // Measured operation: Single large update with immediate finalization
-                black_box(
-                    StateRoot::new(&EmptySalt)
-                        .update_fin(&inputs.into_iter().next().unwrap())
-                        .unwrap(),
-                )
-            },
-            criterion::BatchSize::SmallInput, // Data generation cost is small vs computation
-        );
-    });
+    // BENCHMARK 1: Multi-threaded batch updates across different sizes
+    // Tests 100k, 10k, and 1k KVs with varying thread counts (1, 2, 4, 8, 16)
+    for batch_size in [100_000, 10_000, 1_000] {
+        let mut group = c.benchmark_group(format!("update {batch_size} KVs"));
+        group.throughput(criterion::Throughput::Elements(batch_size as u64));
+        group.measurement_time(Duration::from_secs(30));
 
-    // BENCHMARK 2: Moderate Batch Update (1,000 KVs)
-    // Simulates: Typical blockchain block processing, application batch operations
-    // Tests: Performance sweet spot for most real-world usage
-    // Expected: Good balance of throughput and latency
-    c.bench_function("salt trie update 1k KVs", |b| {
-        b.iter_batched(
-            || gen_state_updates(1, 1_000, &mut rng),
-            |inputs| {
-                black_box(
-                    StateRoot::new(&EmptySalt)
-                        .update_fin(&inputs.into_iter().next().unwrap())
-                        .unwrap(),
-                )
-            },
-            criterion::BatchSize::SmallInput,
-        );
-    });
+        // Test with different thread counts
+        for num_threads in [1, 2, 4, 8, 16] {
+            group.bench_function(format!("{num_threads} threads"), |b| {
+                // Create thread pool for this specific thread count
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap();
 
-    // BENCHMARK 3: Two-Phase Commit Pattern (10 × 100 KVs)
+                b.iter_batched(
+                    || gen_state_updates(1, batch_size, &mut rng),
+                    |inputs| {
+                        // Run the actual work inside the custom thread pool
+                        pool.install(|| {
+                            black_box(
+                                StateRoot::new(&EmptySalt)
+                                    .with_deferred_levels(3)
+                                    .update_fin(&inputs.into_iter().next().unwrap())
+                                    .unwrap(),
+                            )
+                        })
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            });
+        }
+
+        group.finish();
+    }
+
+    // BENCHMARK 2: Two-Phase Commit Pattern (10 × 100 KVs)
     // Simulates: Transaction processing with delayed root computation
     // Tests: Efficiency of update() + finalize() vs repeated update_fin()
     // Expected: Better performance than Benchmark 4 due to batched commitment computation
@@ -139,7 +141,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             || gen_state_updates(10, 100, &mut rng),
             |inputs| {
                 black_box({
-                    let mut trie = StateRoot::new(&EmptySalt);
+                    let mut trie = StateRoot::new(&EmptySalt).with_deferred_levels(3);
                     // Accumulate multiple updates without computing intermediate roots
                     for state_updates in inputs.into_iter() {
                         trie.update(&state_updates).unwrap();
@@ -152,7 +154,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
         );
     });
 
-    // BENCHMARK 4: Repeated Individual Updates (10 × 100 KVs)
+    // BENCHMARK 3: Repeated Individual Updates (10 × 100 KVs)
     // Simulates: Processing transactions individually (anti-pattern)
     // Tests: Overhead of repeated StateRoot creation and full commitment computation
     // Expected: Worse performance than Benchmark 3, shows cost of not batching
@@ -164,6 +166,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
                     // Anti-pattern: Create fresh trie and compute root for each update
                     for state_updates in inputs.into_iter() {
                         StateRoot::new(&EmptySalt)
+                            .with_deferred_levels(3)
                             .update_fin(&state_updates)
                             .unwrap();
                     }
@@ -174,7 +177,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
         );
     });
 
-    // BENCHMARK 5: Expanded Buckets Scenario (100,000 KVs)
+    // BENCHMARK 4: Expanded Buckets Scenario (100,000 KVs)
     // Simulates: High-load buckets that have grown beyond minimum 256-slot capacity
     // Tests: Performance impact of bucket subtree creation and larger commitment vectors
     // Expected: Slower than Benchmark 1 due to subtree management overhead
@@ -184,6 +187,7 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             |inputs| {
                 black_box({
                     StateRoot::new(&MockExpandedBuckets::new(65536 * 16, 512))
+                        .with_deferred_levels(3)
                         .update_fin(&inputs.into_iter().next().unwrap())
                         .unwrap()
                 })
