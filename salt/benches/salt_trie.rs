@@ -34,6 +34,8 @@ use std::collections::HashSet;
 use std::hint::black_box;
 use std::ops::Range;
 use std::time::Duration;
+#[cfg(feature = "timetrace")]
+use timetrace_ffi::*;
 
 /// Generates synthetic state updates for benchmarking SALT trie operations.
 ///
@@ -91,6 +93,11 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
 /// performance characteristics under various real-world scenarios.
 fn benchmark_trie_updates(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(42);
+    #[cfg(feature = "timetrace")]
+    {
+        set_output_filename("timetrace_salt_trie.log");
+        set_keepoldevents(true);
+    }
 
     // Pre-initialize cryptographic precomputation tables to ensure consistent timing
     let _ = StateRoot::new(&EmptySalt);
@@ -195,6 +202,9 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             criterion::BatchSize::SmallInput,
         );
     });
+
+    #[cfg(feature = "timetrace")]
+    tt_print();
 }
 
 /// Benchmarks StateRoot::rebuild performance with different numbers of key-value pairs.
