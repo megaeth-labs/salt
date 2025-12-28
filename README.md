@@ -265,11 +265,18 @@ grep HugePages /proc/meminfo
 sudo sysctl -w vm.nr_hugepages=1024
 ```
 
-To enable hugepages for better performance:
+To enable hugepages when building SALT:
+
+```bash
+cargo build --features enable-hugepages
+cargo test --features enable-hugepages
+```
+
+Or enable it in your Cargo.toml:
 
 ```toml
 [dependencies]
-banderwagon = { path = "banderwagon", features = ["enable-hugepages"] }
+salt = { path = "path/to/salt", features = ["enable-hugepages"] }
 ```
 
 ## Development and Testing
