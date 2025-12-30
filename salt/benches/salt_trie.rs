@@ -95,12 +95,37 @@ fn benchmark_trie_updates(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(42);
     #[cfg(feature = "timetrace")]
     {
-        set_output_filename("timetrace_salt_trie.log");
+        set_output_filename("update_100k.log");
         set_keepoldevents(true);
     }
 
     // Pre-initialize cryptographic precomputation tables to ensure consistent timing
     let _ = StateRoot::new(&EmptySalt);
+
+    // BENCHMARK 0: Large Batch Update (100,000 KVs)
+    // Simulates: Blockchain state sync, large data imports, initial state population
+    // Tests: Performance with massive single updates, memory allocation patterns
+    // Expected: High absolute time but good amortized cost per KV
+    c.bench_function("salt trie update 100k KVs", |b| {
+        b.iter_batched(
+            || gen_state_updates(1, 100_000, &mut rng), // Setup: Generate test data
+            |inputs| {
+                // Measured operation: Single large update with immediate finalization
+                black_box(
+                    StateRoot::new(&EmptySalt)
+                        .with_deferred_levels(3)
+                        .update_fin(&inputs.into_iter().next().unwrap())
+                        .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput, // Data generation cost is small vs computation
+        );
+    });
+    #[cfg(feature = "timetrace")]
+    {
+        tt_print();
+        set_output_filename("update_with_diff_threads.log");
+    }
 
     // BENCHMARK 1: Multi-threaded batch updates across different sizes
     // Tests 100k, 10k, and 1k KVs with varying thread counts (1, 2, 4, 8, 16)
@@ -139,6 +164,12 @@ fn benchmark_trie_updates(c: &mut Criterion) {
         group.finish();
     }
 
+    #[cfg(feature = "timetrace")]
+    {
+        tt_print();
+        set_output_filename("incremental_update_10x100.log");
+    }
+
     // BENCHMARK 2: Two-Phase Commit Pattern (10 × 100 KVs)
     // Simulates: Transaction processing with delayed root computation
     // Tests: Efficiency of update() + finalize() vs repeated update_fin()
@@ -160,6 +191,12 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             criterion::BatchSize::SmallInput,
         );
     });
+
+    #[cfg(feature = "timetrace")]
+    {
+        tt_print();
+        set_output_filename("update_10x100.log");
+    }
 
     // BENCHMARK 3: Repeated Individual Updates (10 × 100 KVs)
     // Simulates: Processing transactions individually (anti-pattern)
@@ -183,6 +220,12 @@ fn benchmark_trie_updates(c: &mut Criterion) {
             criterion::BatchSize::SmallInput,
         );
     });
+
+    #[cfg(feature = "timetrace")]
+    {
+        tt_print();
+        set_output_filename("expansion_update_100k.log");
+    }
 
     // BENCHMARK 4: Expanded Buckets Scenario (100,000 KVs)
     // Simulates: High-load buckets that have grown beyond minimum 256-slot capacity
