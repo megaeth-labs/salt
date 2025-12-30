@@ -6,6 +6,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Configure git credentials to allow getting the private repo in megaeth
+      - name: Configure Git credentials
+        uses: ./.github/actions/git_config
+        with:
+          github_pat: ${{ secrets.CODECOV_TOKEN }}
 
       # Nightly toolchain + llvm-tools (needed by cargo-llvm-cov)
       - uses: dtolnay/rust-toolchain@nightly
