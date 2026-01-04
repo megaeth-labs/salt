@@ -352,10 +352,8 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         let mut uncomputed_updates = vec![];
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
-        // expansion kvs and non-expansion kvs are sorted separately
-        let mut expansion_kvs: Vec<StateUpdateRef> = Vec::with_capacity(state_updates.data.len());
-        let mut non_expansion_kvs: Vec<StateUpdateRef> =
-            Vec::with_capacity(state_updates.data.len());
+        let mut expansion_kvs: Vec<_> = Vec::with_capacity(state_updates.data.len());
+        let mut non_expansion_kvs: Vec<_> = Vec::with_capacity(state_updates.data.len());
 
         // Step 1.1: Extract metadata changes from state updates
         let mut subtree_change_info: BTreeMap<BucketId, SubtrieChangeInfo> = state_updates
@@ -391,8 +389,8 @@ where
         // Step 1.3: Identify buckets that need subtree processing
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
-        let mut expansion_bucket = false;
-        let mut edge_capacity = MIN_BUCKET_SIZE as u64;
+        let mut is_expanded_bucket = false;
+        let mut cur_bucket_cap = MIN_BUCKET_SIZE as u64;
 
         for (key, value) in state_updates.data.iter() {
             let bucket_id = key.bucket_id();
@@ -403,8 +401,8 @@ where
                     let bucket_root = self.commitment(subtree_change.root_id)?;
                     // The `old_top_id` commiment of curent subtree is `bucket_root`
                     self.cache.insert(subtree_change.old_top_id, bucket_root);
-                    expansion_bucket = true;
-                    edge_capacity = subtree_change.new_capacity;
+                    is_expanded_bucket = true;
+                    cur_bucket_cap = subtree_change.new_capacity;
                     // Handle capacity changes
                     match subtree_change
                         .new_capacity
@@ -453,15 +451,15 @@ where
                             }
                         }
                         std::cmp::Ordering::Equal => {
-                            if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
+                            is_expanded_bucket =
+                                subtree_change.new_capacity > MIN_BUCKET_SIZE as u64;
+                            if is_expanded_bucket {
                                 need_handle_buckets.insert(bucket_id);
-                            } else {
-                                expansion_bucket = false;
                             }
                         }
                     }
                 } else {
-                    edge_capacity =
+                    cur_bucket_cap =
                         if let Some(capacity) = self.bucket_capacity_cache.get(&bucket_id) {
                             *capacity
                         } else {
@@ -469,27 +467,23 @@ where
                             (TRIE_WIDTH as NodeId).pow(level as u32)
                         };
 
-                    if edge_capacity > MIN_BUCKET_SIZE as u64 {
+                    is_expanded_bucket = cur_bucket_cap > MIN_BUCKET_SIZE as u64;
+                    if is_expanded_bucket {
                         // KV changes in expanded bucket (capacity unchanged)
-                        expansion_bucket = true;
                         need_handle_buckets.insert(bucket_id);
                         let subtree_change =
-                            SubtrieChangeInfo::new(bucket_id, edge_capacity, edge_capacity);
+                            SubtrieChangeInfo::new(bucket_id, cur_bucket_cap, cur_bucket_cap);
                         let bucket_root = self.commitment(subtree_change.root_id)?;
                         self.cache.insert(subtree_change.old_top_id, bucket_root);
                         subtree_change_info.insert(bucket_id, subtree_change);
-                    } else {
-                        expansion_bucket = false;
                     }
                 }
             }
 
-            if expansion_bucket {
-                if key.slot_id() < edge_capacity {
-                    expansion_kvs.push((key, value));
-                }
-            } else {
+            if !is_expanded_bucket {
                 non_expansion_kvs.push((key, value));
+            } else if key.slot_id() < cur_bucket_cap {
+                expansion_kvs.push((key, value));
             }
         }
 
@@ -682,22 +676,21 @@ where
     /// # Arguments
     /// * `state_updates` - Key-value changes in the underlying state. These K-V pairs
     ///   are not part of the trie itself but are committed to by the trie's leaf nodes.
-    /// * `get_node_id` - A function that maps a `SaltKey` to its corresponding `NodeId`.
+    /// * `to_node_id` - Maps `SaltKey` to its corresponding `NodeId`.
     ///
     /// # Returns
     /// * `TrieUpdates` - Commitment updates for the affected leaf nodes
     fn update_leaf_nodes<N>(
         &self,
         state_updates: &mut [StateUpdateRef],
-        get_node_id: N,
+        to_node_id: N,
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
     where
         N: Fn(&SaltKey) -> NodeId + Sync + Send,
     {
         // Sort the state updates by slot IDs
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            (a.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId)
-                .cmp(&(b.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId))
+            (a.slot_id() % TRIE_WIDTH as SlotId).cmp(&(b.slot_id() % TRIE_WIDTH as SlotId))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
@@ -707,10 +700,10 @@ where
             .with_min_len(batch_size)
             .map(|(salt_key, (old_value, new_value))| {
                 (
-                    get_node_id(salt_key),
+                    to_node_id(salt_key),
                     self.committer.mul_index(
                         &(kv_hash(new_value) - kv_hash(old_value)),
-                        (salt_key.slot_id() & (MIN_BUCKET_SIZE - 1) as SlotId) as usize,
+                        (salt_key.slot_id() % TRIE_WIDTH as SlotId) as usize,
                     ),
                 )
             })
