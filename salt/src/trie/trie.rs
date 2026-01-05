@@ -56,6 +56,9 @@ pub type TrieUpdates = Vec<(NodeId, (CommitmentBytes, CommitmentBytes))>;
 /// List of commitment deltas to be applied to specific nodes.
 type DeltaList = Vec<(NodeId, Element)>;
 
+/// Reference to a state update entry: (key, (old_value, new_value))
+type StateUpdateRef<'a> = (&'a SaltKey, &'a (Option<SaltValue>, Option<SaltValue>));
+
 /// Describes a shrink operation for a single trie level during bucket contraction.
 ///
 /// When bucket capacity shrinks, this specifies which nodes at a particular level
@@ -349,6 +352,8 @@ where
     ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
         let mut uncomputed_updates = vec![];
         let mut extra_updates = vec![vec![]; MAX_SUBTREE_LEVELS];
+        let mut expansion_kvs: Vec<_> = Vec::with_capacity(state_updates.data.len());
+        let mut non_expansion_kvs: Vec<_> = Vec::with_capacity(state_updates.data.len());
 
         // Step 1.1: Extract metadata changes from state updates
         let mut subtree_change_info: BTreeMap<BucketId, SubtrieChangeInfo> = state_updates
@@ -384,8 +389,10 @@ where
         // Step 1.3: Identify buckets that need subtree processing
         let mut need_handle_buckets = HashSet::new();
         let mut last_bucket_id = u32::MAX;
+        let mut is_expanded_bucket = false;
+        let mut cur_bucket_cap = MIN_BUCKET_SIZE as u64;
 
-        for key in state_updates.data.keys() {
+        for (key, value) in state_updates.data.iter() {
             let bucket_id = key.bucket_id();
             if last_bucket_id != bucket_id && bucket_id >= NUM_META_BUCKETS as BucketId {
                 last_bucket_id = bucket_id;
@@ -394,6 +401,8 @@ where
                     let bucket_root = self.commitment(subtree_change.root_id)?;
                     // The `old_top_id` commiment of curent subtree is `bucket_root`
                     self.cache.insert(subtree_change.old_top_id, bucket_root);
+                    is_expanded_bucket = true;
+                    cur_bucket_cap = subtree_change.new_capacity;
                     // Handle capacity changes
                     match subtree_change
                         .new_capacity
@@ -431,7 +440,6 @@ where
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
                             if key.slot_id() < level_capacity {
                                 need_handle_buckets.insert(bucket_id);
-                                continue;
                             }
                         }
                         std::cmp::Ordering::Less => {
@@ -440,17 +448,18 @@ where
                             let level_capacity = (MIN_BUCKET_SIZE as u64).pow(level as u32);
                             if key.slot_id() < level_capacity {
                                 need_handle_buckets.insert(bucket_id);
-                                continue;
                             }
                         }
                         std::cmp::Ordering::Equal => {
-                            if subtree_change.new_capacity > MIN_BUCKET_SIZE as u64 {
+                            is_expanded_bucket =
+                                subtree_change.new_capacity > MIN_BUCKET_SIZE as u64;
+                            if is_expanded_bucket {
                                 need_handle_buckets.insert(bucket_id);
                             }
                         }
                     }
                 } else {
-                    let bucket_capacity =
+                    cur_bucket_cap =
                         if let Some(capacity) = self.bucket_capacity_cache.get(&bucket_id) {
                             *capacity
                         } else {
@@ -458,24 +467,33 @@ where
                             (TRIE_WIDTH as NodeId).pow(level as u32)
                         };
 
-                    if bucket_capacity > MIN_BUCKET_SIZE as u64 {
+                    is_expanded_bucket = cur_bucket_cap > MIN_BUCKET_SIZE as u64;
+                    if is_expanded_bucket {
                         // KV changes in expanded bucket (capacity unchanged)
                         need_handle_buckets.insert(bucket_id);
                         let subtree_change =
-                            SubtrieChangeInfo::new(bucket_id, bucket_capacity, bucket_capacity);
+                            SubtrieChangeInfo::new(bucket_id, cur_bucket_cap, cur_bucket_cap);
                         let bucket_root = self.commitment(subtree_change.root_id)?;
                         self.cache.insert(subtree_change.old_top_id, bucket_root);
                         subtree_change_info.insert(bucket_id, subtree_change);
                     }
                 }
             }
+
+            if !is_expanded_bucket {
+                non_expansion_kvs.push((key, value));
+            } else if key.slot_id() < cur_bucket_cap {
+                expansion_kvs.push((key, value));
+            }
         }
 
         // Initialize trigger levels for later processing
         let mut trigger_levels = vec![HashMap::new(); MAX_SUBTREE_LEVELS];
 
-        // Step 2: Update leaf node commitments
-        let mut trie_updates = self.update_leaf_nodes(state_updates, &subtree_change_info)?;
+        // Step 2: Update leaf node commitments for non-expansion buckets
+        let mut trie_updates = self.update_leaf_nodes(&mut non_expansion_kvs, |salt_key| {
+            salt_key.bucket_id() as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
+        })?;
 
         // Helper closure for expansion without KV changes
         let add_expansion_update =
@@ -564,14 +582,14 @@ where
             }
         }
         // Step 5: Extract subtree nodes for hierarchical processing
-        let start = trie_updates
-            .iter()
-            .position(|update| is_subtree_node(update.0))
-            .unwrap_or(trie_updates.len());
         let mut subtree_commitmens = if need_handle_buckets.is_empty() {
             vec![]
         } else {
-            trie_updates.drain(start..).collect()
+            self.update_leaf_nodes(&mut expansion_kvs, |salt_key| {
+                ((salt_key.bucket_id() as NodeId) << BUCKET_SLOT_BITS)
+                    + (salt_key.slot_id() >> 8) as NodeId
+                    + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId
+            })?
         };
         // Step 6: Process subtree levels bottom-up
         for level in (0..MAX_SUBTREE_LEVELS).rev() {
@@ -658,19 +676,21 @@ where
     /// # Arguments
     /// * `state_updates` - Key-value changes in the underlying state. These K-V pairs
     ///   are not part of the trie itself but are committed to by the trie's leaf nodes.
-    /// * `subtree_change_info` - TODO: define this argument precisely
+    /// * `to_node_id` - Maps `SaltKey` to its corresponding `NodeId`.
     ///
     /// # Returns
     /// * `TrieUpdates` - Commitment updates for the affected leaf nodes
-    fn update_leaf_nodes(
+    fn update_leaf_nodes<N>(
         &self,
-        state_updates: &StateUpdates,
-        subtree_change_info: &BTreeMap<BucketId, SubtrieChangeInfo>,
-    ) -> Result<TrieUpdates, <Store as TrieReader>::Error> {
+        state_updates: &mut [StateUpdateRef],
+        to_node_id: N,
+    ) -> Result<TrieUpdates, <Store as TrieReader>::Error>
+    where
+        N: Fn(&SaltKey) -> NodeId + Sync + Send,
+    {
         // Sort the state updates by slot IDs
-        let mut state_updates = state_updates.data.iter().collect::<Vec<_>>();
         state_updates.par_sort_unstable_by(|(a, _), (b, _)| {
-            (a.slot_id() as usize % TRIE_WIDTH).cmp(&(b.slot_id() as usize % TRIE_WIDTH))
+            (a.slot_id() % TRIE_WIDTH as SlotId).cmp(&(b.slot_id() % TRIE_WIDTH as SlotId))
         });
 
         // Compute the commitment deltas to be applied to the parent nodes.
@@ -678,36 +698,16 @@ where
         let c_deltas: DeltaList = state_updates
             .par_iter()
             .with_min_len(batch_size)
-            .filter_map(|(salt_key, (old_value, new_value))| {
-                let bucket_id = salt_key.bucket_id();
-                let (capacity, is_subtree) =
-                    if let Some(meta_change) = subtree_change_info.get(&bucket_id) {
-                        (
-                            meta_change.new_capacity,
-                            meta_change.new_capacity > MIN_BUCKET_SIZE as u64
-                                || meta_change.old_capacity > MIN_BUCKET_SIZE as u64,
-                        )
-                    } else {
-                        (MIN_BUCKET_SIZE as u64, false)
-                    };
-                if salt_key.slot_id() >= capacity {
-                    // This slot is beyond the current capacity, so it does not affect the commitment.
-                    None
-                } else {
-                    Some((
-                        if is_subtree {
-                            subtree_leaf_for_key(salt_key)
-                        } else {
-                            bucket_root_node_id(bucket_id)
-                        },
-                        self.committer.mul_index(
-                            &(kv_hash(new_value) - kv_hash(old_value)),
-                            salt_key.slot_id() as usize % TRIE_WIDTH,
-                        ),
-                    ))
-                }
+            .map(|(salt_key, (old_value, new_value))| {
+                (
+                    to_node_id(salt_key),
+                    self.committer.mul_index(
+                        &(kv_hash(new_value) - kv_hash(old_value)),
+                        (salt_key.slot_id() % TRIE_WIDTH as SlotId) as usize,
+                    ),
+                )
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         self.add_commitment_deltas(c_deltas, batch_size)
     }
