@@ -21,7 +21,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use rayon::ThreadPoolBuilder;
+//use rayon::ThreadPoolBuilder;
 use salt::{
     constant::{default_commitment, MIN_BUCKET_SIZE, NUM_BUCKETS, NUM_META_BUCKETS},
     empty_salt::EmptySalt,
@@ -33,7 +33,7 @@ use salt::{
 use std::collections::HashSet;
 use std::hint::black_box;
 use std::ops::Range;
-use std::time::Duration;
+//use std::time::Duration;
 #[cfg(feature = "timetrace")]
 use timetrace_ffi::*;
 
@@ -124,12 +124,12 @@ fn benchmark_trie_updates(c: &mut Criterion) {
     #[cfg(feature = "timetrace")]
     {
         tt_print();
-        set_output_filename("update_with_diff_threads.log");
+        set_output_filename("update_1k.log");
     }
 
     // BENCHMARK 1: Multi-threaded batch updates across different sizes
     // Tests 100k, 10k, and 1k KVs with varying thread counts (1, 2, 4, 8, 16)
-    for batch_size in [100_000, 10_000, 1_000] {
+    /*for batch_size in [100_000, 10_000, 1_000] {
         let mut group = c.benchmark_group(format!("update {batch_size} KVs"));
         group.throughput(criterion::Throughput::Elements(batch_size as u64));
         group.measurement_time(Duration::from_secs(30));
@@ -162,7 +162,22 @@ fn benchmark_trie_updates(c: &mut Criterion) {
         }
 
         group.finish();
-    }
+    }*/
+
+    c.bench_function("salt trie update 1k KVs", |b| {
+        b.iter_batched(
+            || gen_state_updates(1, 1_000, &mut rng),
+            |inputs| {
+                black_box(
+                    StateRoot::new(&EmptySalt)
+                        .with_deferred_levels(3)
+                        .update_fin(&inputs.into_iter().next().unwrap())
+                        .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
 
     #[cfg(feature = "timetrace")]
     {
