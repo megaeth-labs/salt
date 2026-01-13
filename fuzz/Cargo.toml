@@ -1,0 +1,27 @@
+[package]
+name = "salt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rand = "0.9"
+bincode = { version = "2.0", features = ["serde"] }
+
+[dependencies.salt]
+path = "../salt"
+
+[features]
+test-bucket-resize = ["salt/test-bucket-resize"]
+enable-hugepages = ["salt/enable-hugepages"]
+
+[[bin]]
+name = "salt_fuzz"
+path = "fuzz_targets/salt_fuzz.rs"
+test = false
+doc = false
+bench = false
