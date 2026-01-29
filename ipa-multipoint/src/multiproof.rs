@@ -239,8 +239,15 @@ impl MultiPointProof {
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
         use crate::{IOError, IOErrorKind};
 
+        if bytes.len() < 32 {
+            return Err(IOError::new(
+                IOErrorKind::InvalidData,
+                "bytes length is less than 32",
+            ));
+        }
+
         let g_x_comm_bytes = &bytes[0..32];
-        let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
+        let ipa_bytes = &bytes[32..];
         let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
             .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
         let g_x_comm = point;
@@ -660,5 +667,13 @@ mod tests {
             transcript.append_scalar(b"y", &query.result);
         }
         transcript.state
+    }
+
+    #[test]
+    fn test_from_bytes_invalid_length() {
+        let bytes = [0u8; 31];
+        let result = MultiPointProof::from_bytes(&bytes, 256);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 }
