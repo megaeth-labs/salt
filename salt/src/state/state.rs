@@ -933,6 +933,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
 /// # Returns
 /// Returns `Ok(Some((slot_id, salt_value)))` if the key is found, `Ok(None)` if not found,
 /// or an error if the underlying storage operation fails.
+#[inline]
 fn shi_search<E>(
     bucket_id: BucketId,
     nonce: u32,
@@ -940,36 +941,26 @@ fn shi_search<E>(
     plain_key: &[u8],
     mut get_value: impl FnMut(SaltKey) -> Result<Option<SaltValue>, E>,
 ) -> Result<Option<(SlotId, SaltValue)>, E> {
-    let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
-    for step in 0..capacity {
-        let slot = probe(hashed_key, step, capacity);
-        if let Some(salt_val) = get_value((bucket_id, slot).into())? {
-            match salt_val.key().cmp(plain_key) {
-                Ordering::Less => return Ok(None),
-                Ordering::Equal => return Ok(Some((slot, salt_val))),
-                Ordering::Greater => (),
-            }
-        } else {
-            return Ok(None);
-        }
-    }
-    Ok(None)
+    shi_search_with_version(bucket_id, nonce, capacity, plain_key, |key| {
+        Ok(get_value(key)?.map(|v| (v, ())))
+    })
+    .map(|opt| opt.map(|(slot, val, _)| (slot, val)))
 }
 
-fn shi_search_with_version<E>(
+fn shi_search_with_version<E, T>(
     bucket_id: BucketId,
     nonce: u32,
     capacity: u64,
     plain_key: &[u8],
-    mut get_value_with_version: impl FnMut(SaltKey) -> Result<Option<(SaltValue, SaltVersion)>, E>,
-) -> Result<Option<(SlotId, SaltValue, SaltVersion)>, E> {
+    mut get_value_with_extra: impl FnMut(SaltKey) -> Result<Option<(SaltValue, T)>, E>,
+) -> Result<Option<(SlotId, SaltValue, T)>, E> {
     let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
     for step in 0..capacity {
         let slot = probe(hashed_key, step, capacity);
-        if let Some((salt_val, version)) = get_value_with_version((bucket_id, slot).into())? {
+        if let Some((salt_val, extra)) = get_value_with_extra((bucket_id, slot).into())? {
             match salt_val.key().cmp(plain_key) {
                 Ordering::Less => return Ok(None),
-                Ordering::Equal => return Ok(Some((slot, salt_val, version))),
+                Ordering::Equal => return Ok(Some((slot, salt_val, extra))),
                 Ordering::Greater => (),
             }
         } else {
