@@ -122,7 +122,7 @@ impl std::fmt::Debug for MemStore {
         for (key, value) in &state_guard.kvs {
             writeln!(f, "  Key: {} (bucket: {}, slot: {})\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
                 key.0, key.bucket_id(), key.slot_id(),
-                hex::encode(value.data()),
+                hex::encode(&value.data[..value.data_len()]),
                 String::from_utf8_lossy(value.key()),
                 String::from_utf8_lossy(value.value())
             )?;
