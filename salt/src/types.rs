@@ -22,6 +22,9 @@ pub type CommitmentBytes = [u8; 64];
 /// 32-byte scalar field element for cryptographic commitments.
 pub type ScalarBytes = [u8; 32];
 
+/// Version number for tracking state value changes.
+pub type SaltVersion = u64;
+
 /// Hash a 64-byte commitment into its 32-byte compressed format.
 pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
     use banderwagon::{CanonicalSerialize, Element};
@@ -271,6 +274,7 @@ pub const MAX_SALT_VALUE_BYTES: usize = 94;
 /// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
 /// Supports Account, Storage, and BucketMeta types.
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(align(8))]
 pub struct SaltValue {
     /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
@@ -287,13 +291,15 @@ impl SaltValue {
         let key_len = key.len();
         let value_len = value.len();
 
-        let mut data = [0u8; MAX_SALT_VALUE_BYTES];
-        data[0] = key_len as u8;
-        data[1] = value_len as u8;
-        data[2..2 + key_len].copy_from_slice(key);
-        data[2 + key_len..2 + key_len + value_len].copy_from_slice(value);
+        let mut result = Self {
+            data: [0u8; MAX_SALT_VALUE_BYTES],
+        };
+        result.data[0] = key_len as u8;
+        result.data[1] = value_len as u8;
+        result.data[2..2 + key_len].copy_from_slice(key);
+        result.data[2 + key_len..2 + key_len + value_len].copy_from_slice(value);
 
-        Self { data }
+        result
     }
 
     /// Extract the key portion from the encoded data.
