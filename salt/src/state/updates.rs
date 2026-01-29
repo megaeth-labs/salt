@@ -107,12 +107,12 @@ impl StateUpdates {
                 .unwrap_or_else(|_| {
                     format!(
                         "[METADATA - DECODE ERROR] Raw: {}",
-                        hex::encode(val.data())
+                        hex::encode(&val.data[..val.data_len()])
                     )
                 }),
             Some(val) => format!(
                 "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                hex::encode(val.data()),
+                hex::encode(&val.data[..val.data_len()]),
                 String::from_utf8_lossy(val.key()),
                 String::from_utf8_lossy(val.value())
             ),
@@ -192,14 +192,14 @@ impl std::fmt::Debug for StateUpdates {
                                 Err(_) => writeln!(
                                     f,
                                     "[METADATA - DECODE ERROR] Raw: {}",
-                                    hex::encode(val.data())
+                                    hex::encode(&val.data[..val.data_len()])
                                 )?,
                             }
                         } else {
                             writeln!(
                                 f,
                                 "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                                hex::encode(val.data()),
+                                hex::encode(&val.data[..val.data_len()]),
                                 String::from_utf8_lossy(val.key()),
                                 String::from_utf8_lossy(val.value())
                             )?;

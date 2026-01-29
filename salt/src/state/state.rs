@@ -136,14 +136,14 @@ impl<'a, Store> std::fmt::Debug for EphemeralSaltState<'a, Store> {
                             Err(_) => writeln!(
                                 f,
                                 " [METADATA - DECODE ERROR]\n    Raw Value: {}",
-                                hex::encode(val.data())
+                                hex::encode(&val.data[..val.data_len()])
                             )?,
                         }
                     } else {
                         writeln!(
                             f,
                             "\n    Raw Value: {}\n    Plain Key: {:?}\n    Plain Value: {:?}",
-                            hex::encode(val.data()),
+                            hex::encode(&val.data[..val.data_len()]),
                             String::from_utf8_lossy(val.key()),
                             String::from_utf8_lossy(val.value())
                         )?
@@ -901,7 +901,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         &self,
         plain_key: &[u8],
         hint: Option<BucketId>,
-    ) -> Result<Option<(SaltVersion, Vec<u8>)>, S::Error> {
+    ) -> Result<Option<Vec<u8>>, S::Error> {
         // Use the hint if provided, otherwise compute the bucket_id
         let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
         let meta = self.store.metadata(bucket_id)?;
@@ -909,7 +909,7 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         match shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
             self.store.value(key)
         })? {
-            Some((_, salt_val)) => Ok(Some((salt_val.version(), salt_val.value().to_vec()))),
+            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
             None => Ok(None),
         }
     }
