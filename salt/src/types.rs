@@ -252,73 +252,130 @@ impl From<u64> for SaltKey {
 ///
 /// For `Account`, the key length is 20 bytes, and the value length is either 40
 /// (for EOA's) or 72 bytes (for smart contracts). So, encoding an `Account` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(40 or 72) = 62 or 94 bytes.
+///     `version`(1) + `key_len`(1) + `value_len`(1) + `key`(20) + `value`(40 or 72) = 63 or 95 bytes.
 ///
 /// For `Storage`, the key length is 52 bytes, and the value length is 32 bytes.
 /// So, encoding a `Storage` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 86 bytes.
+///     `version`(1) + `key_len`(1) + `value_len`(1) + `key`(52) + `value`(32) = 87 bytes.
 ///
 /// For `BucketMeta`, the serialized form is 12 bytes (nonce:4 + capacity:8).
 /// So, encoding a `BucketMetadata` requires:
-///     `key_len`(1) + `value_len`(1) + `key`(12) + `value`(0) = 14 bytes.
+///     `version`(1) + `key_len`(1) + `value_len`(1) + `key`(12) + `value`(0) = 15 bytes.
 ///
-/// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 94,
-/// which is the maximum of 94, 86, and 14.
-pub const MAX_SALT_VALUE_BYTES: usize = 94;
+/// Hence, the maximum number of bytes that can be stored in a [`SaltValue`] is 95,
+/// which is the maximum of 95, 87, and 15. We align this to 96 bytes for better cache alignment.
+pub const MAX_SALT_VALUE_BYTES: usize = 96;
 
 /// Variable-length encoding of key-value pairs with length prefixes.
 ///
-/// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
+/// Format: `version` (1 byte) | `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
 /// Supports Account, Storage, and BucketMeta types.
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
-    /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
+    /// Fixed-size array accommodating the largest possible encoded data (96 bytes).
     #[deref]
     #[deref_mut]
     #[serde(with = "serde_arrays")]
-    pub data: [u8; MAX_SALT_VALUE_BYTES],
+    data: [u8; MAX_SALT_VALUE_BYTES],
 }
 
+pub type SaltVersion = u8;
+
 impl SaltValue {
+    // SaltValue layout offsets
+    const VERSION_OFFSET: usize = 0;
+    const KEY_LEN_OFFSET: usize = 1;
+    const VAL_LEN_OFFSET: usize = 2;
+    const DATA_START_OFFSET: usize = 3;
+
     /// Create a new encoded value from separate key and value byte slices.
     ///
-    /// Encodes the data in the format: `key_len`(1) | `value_len`(1) | `key` | `value`
+    /// Encodes the data in the format: `version`(1) | `key_len`(1) | `value_len`(1) | `key` | `value`
+    /// The version field is initialized to 0 by default.
     pub fn new(key: &[u8], value: &[u8]) -> Self {
         let key_len = key.len();
         let value_len = value.len();
 
         let mut data = [0u8; MAX_SALT_VALUE_BYTES];
-        data[0] = key_len as u8;
-        data[1] = value_len as u8;
-        data[2..2 + key_len].copy_from_slice(key);
-        data[2 + key_len..2 + key_len + value_len].copy_from_slice(value);
+        data[Self::VERSION_OFFSET] = 0;
+        data[Self::KEY_LEN_OFFSET] = key_len as u8;
+        data[Self::VAL_LEN_OFFSET] = value_len as u8;
+        data[Self::DATA_START_OFFSET..Self::DATA_START_OFFSET + key_len].copy_from_slice(key);
+        data[Self::DATA_START_OFFSET + key_len..Self::DATA_START_OFFSET + key_len + value_len].copy_from_slice(value);
 
         Self { data }
     }
 
+    /// Create a new encoded value from a data slice (excluding version).
+    ///
+    /// The input slice should contain: `key_len`(1) | `value_len`(1) | `key` | `value`
+    /// The version field is initialized to 0.
+    pub fn from_data(data_slice: &[u8]) -> Self {
+        let mut data = [0u8; MAX_SALT_VALUE_BYTES];
+        data[Self::VERSION_OFFSET] = 0;
+        data[Self::KEY_LEN_OFFSET..Self::KEY_LEN_OFFSET + data_slice.len()].copy_from_slice(data_slice);
+
+        Self { data }
+    }
+
+    /// Create a new encoded value with a specific version.
+    ///
+    /// This is similar to [`Self::new`] but allows specifying a custom version value.
+    pub fn with_version(key: &[u8], value: &[u8], version: u8) -> Self {
+        let mut salt_value = Self::new(key, value);
+        salt_value[Self::VERSION_OFFSET] = version;
+        salt_value
+    }
+
     /// Extract the key portion from the encoded data.
     pub fn key(&self) -> &[u8] {
-        let key_len = self.data[0] as usize;
-        &self.data[2..2 + key_len]
+        let key_len = self[Self::KEY_LEN_OFFSET] as usize;
+        &self[Self::DATA_START_OFFSET..Self::DATA_START_OFFSET + key_len]
     }
 
     /// Extract the value portion from the encoded data.
     pub fn value(&self) -> &[u8] {
-        let key_len = self.data[0] as usize;
-        let value_len = self.data[1] as usize;
-        &self.data[2 + key_len..2 + key_len + value_len]
+        let key_len = self[Self::KEY_LEN_OFFSET] as usize;
+        let value_len = self[Self::VAL_LEN_OFFSET] as usize;
+        &self[Self::DATA_START_OFFSET + key_len..Self::DATA_START_OFFSET + key_len + value_len]
+    }
+
+    /// Get the version field from the encoded data.
+    pub fn version(&self) -> SaltVersion {
+        self[Self::VERSION_OFFSET]
+    }
+
+    /// Set the version field in the encoded data.
+    pub fn set_version(&mut self, version: u8) {
+        self[Self::VERSION_OFFSET] = version;
     }
 
     /// Returns the total length of the encoded data (header + key + value).
     ///
     /// This is the sum of:
-    /// - 2 bytes for the length headers (key_len and value_len)
+    /// - 3 bytes for the headers (version, key_len, and value_len)
     /// - key length
     /// - value length
     pub fn data_len(&self) -> usize {
-        let key_len = self.data[0] as usize;
-        let value_len = self.data[1] as usize;
-        2 + key_len + value_len
+        let key_len = self[Self::KEY_LEN_OFFSET] as usize;
+        let value_len = self[Self::VAL_LEN_OFFSET] as usize;
+        Self::DATA_START_OFFSET + key_len + value_len
+    }
+
+    /// Returns the data slice excluding the version byte.
+    ///
+    /// This returns everything from offset 1 (key_len) to the end of the actual data,
+    /// which includes: key_len(1) | value_len(1) | key | value
+    pub fn data(&self) -> &[u8] {
+        &self[Self::KEY_LEN_OFFSET..self.data_len()]
+    }
+
+    /// Returns the key and value lengths as a tuple (key_len, value_len).
+    ///
+    /// This is a test-only helper function for accessing the internal length fields.
+    #[cfg(test)]
+    pub fn key_val_length(&self) -> (u8, u8) {
+        (self[Self::KEY_LEN_OFFSET], self[Self::VAL_LEN_OFFSET])
     }
 }
 
@@ -656,8 +713,10 @@ mod tests {
 
         assert_eq!(salt_value.key(), key);
         assert_eq!(salt_value.value(), value);
-        assert_eq!(salt_value.data[0], key.len() as u8);
-        assert_eq!(salt_value.data[1], value.len() as u8);
+
+        let (key_len, val_len) = salt_value.key_val_length();
+        assert_eq!(key_len, key.len() as u8);
+        assert_eq!(val_len, value.len() as u8);
     }
 
     /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
@@ -672,8 +731,9 @@ mod tests {
         };
         let salt_value = SaltValue::from(meta);
 
-        assert_eq!(salt_value.data[0], 12); // key length (BucketMeta serialized size)
-        assert_eq!(salt_value.data[1], 0); // value length (empty for metadata)
+        let (key_len, val_len) = salt_value.key_val_length();
+        assert_eq!(key_len, 12); // BucketMeta serialized size
+        assert_eq!(val_len, 0); // empty for metadata
 
         let recovered_meta = BucketMeta::try_from(salt_value).unwrap();
         assert_eq!(recovered_meta.nonce, meta.nonce);
