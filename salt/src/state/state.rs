@@ -907,7 +907,8 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         let meta = self.store.metadata(bucket_id)?;
 
         match shi_search_with_version(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
-            self.store.value_with_version(key)
+            let (value, version) = self.store.value_with_version(key)?;
+            Ok(value.map(|v| (v, version)))
         })? {
             Some((_, salt_val, version)) => Ok(Some((salt_val, version))),
             None => Ok(None),

@@ -51,9 +51,9 @@ pub trait StateReader: Debug + Send + Sync {
 
     /// Retrieves a state value and its version by key.
     ///
-    /// Returns the state value and version associated with the given key, or `None`
-    /// if the key doesn't exist. The default implementation returns version 0 for
-    /// implementations that don't track versions.
+    /// Returns the state value and version associated with the given key. The value
+    /// is `None` if the key doesn't exist. The default implementation returns version 0
+    /// for implementations that don't track versions.
     ///
     /// # Arguments
     ///
@@ -61,16 +61,16 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// - `Ok(Some((value, version)))` if the key exists
-    /// - `Ok(None)` if the key doesn't exist
+    /// - `Ok((Some(value), version))` if the key exists
+    /// - `Ok((None, version))` if the key doesn't exist
     /// - `Err(_)` on storage errors
     fn value_with_version(
         &self,
         key: SaltKey,
-    ) -> Result<Option<(SaltValue, SaltVersion)>, Self::Error> {
+    ) -> Result<(Option<SaltValue>, SaltVersion), Self::Error> {
         match self.value(key)? {
-            Some(value) => Ok(Some((value, 0))), // Default version to 0 if not tracked
-            None => Ok(None),
+            Some(value) => Ok((Some(value), 0)), // Default version to 0 if not tracked
+            None => Ok((None, 0)),
         }
     }
 
