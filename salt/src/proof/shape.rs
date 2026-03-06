@@ -7,12 +7,18 @@
 //! ## Architecture Overview
 //!
 //! SALT uses a two-tier trie structure:
-//! - **Main Trie**: 4-level, 256-ary tree with 16,777,216 leaf nodes (buckets)  
+//! - **Main Trie**: 4-level, 256-ary tree with 16,777,216 leaf nodes (buckets)
 //! - **Bucket Subtrees**: Dynamic trees within buckets that can expand from 1-5 levels
 
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap as FxHashMap;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
+
+use banderwagon::{iter, reduce};
 
 use crate::{
     constant::{BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},
@@ -57,9 +63,8 @@ pub(crate) fn parents_and_points(
     BTreeMap<NodeId, BTreeSet<usize>>,
     BTreeMap<NodeId, BTreeSet<usize>>,
 ) {
-    salt_keys
-        .par_iter()
-        .map(|salt_key| {
+    reduce!(
+        iter!(salt_keys).map(|salt_key| {
             let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let mut slot_position_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let bucket_id = salt_key.bucket_id();
@@ -141,19 +146,18 @@ pub(crate) fn parents_and_points(
                 .insert((salt_key.slot_id() & 0xFF) as usize);
 
             (internal_nodes, slot_position_nodes)
-        })
-        .reduce(
-            || (BTreeMap::new(), BTreeMap::new()),
-            |mut acc, (internal_map, slot_map)| {
-                for (node_id, positions) in internal_map {
-                    acc.0.entry(node_id).or_default().extend(positions);
-                }
-                for (node_id, positions) in slot_map {
-                    acc.1.entry(node_id).or_default().extend(positions);
-                }
-                acc
-            },
-        )
+        }),
+        || (BTreeMap::new(), BTreeMap::new()),
+        |mut acc, (internal_map, slot_map)| {
+            for (node_id, positions) in internal_map {
+                acc.0.entry(node_id).or_default().extend(positions);
+            }
+            for (node_id, positions) in slot_map {
+                acc.1.entry(node_id).or_default().extend(positions);
+            }
+            acc
+        }
+    )
 }
 
 /// Encodes bucket tree level information into a main trie node ID.
@@ -304,6 +308,7 @@ pub const fn logic_parent_id(maybe_encoded_node: NodeId) -> NodeId {
 mod tests {
     use super::*;
     use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::vec::Vec;
 
     #[test]
     fn test_parents_and_points() {

@@ -4,11 +4,17 @@ use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
 use crate::{IOError, IOErrorKind, IOResult};
-use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
+use banderwagon::{multi_scalar_mul, num_threads, trait_defs::*, chunks, Element, Fr};
 use itertools::Itertools;
-use rayon::prelude::*;
+use std::vec::Vec;
 
+#[cfg(feature = "std")]
 use std::iter;
+#[cfg(not(feature = "std"))]
+use core::iter;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
@@ -141,7 +147,13 @@ pub fn create(
             R
         };
 
+        #[cfg(feature = "parallel")]
         let (L, R) = rayon::join(left_compute, right_compute);
+        #[cfg(not(feature = "parallel"))]
+        let (L, R) = {
+            let (mut left_compute, mut right_compute) = (left_compute, right_compute);
+            (left_compute(), right_compute())
+        };
 
         transcript.append_point(b"L", &L);
 
@@ -268,11 +280,10 @@ pub fn slow_vartime_multiscalar_mul<'a>(
 }
 
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    let chunk_size = bases.len().div_ceil(rayon::current_num_threads());
+    let chunk_size = bases.len().div_ceil(num_threads!());
 
-    bases
-        .par_chunks(chunk_size)
-        .zip(scalars.par_chunks(chunk_size))
+    chunks!(bases, chunk_size)
+        .zip(chunks!(scalars, chunk_size))
         .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
         .sum()
 }

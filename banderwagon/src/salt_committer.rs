@@ -30,7 +30,11 @@ use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::Zero;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use std::{vec, vec::Vec};
+use crate::iter;
+
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
 /// The `Committer` precomputes and stores windowed multiples of a set of base points
@@ -158,8 +162,7 @@ impl Committer {
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
 
-        let tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
+        let tables: Vec<Vec<EdwardsAffine>> = iter!(bases)
             .map(|base| {
                 let mut table = Vec::with_capacity(inner_length);
                 let mut element = base.0;
@@ -197,7 +200,7 @@ impl Committer {
     /// # Returns
     ///
     /// The result of `scalar * G[g_i]` as an `Element`.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
@@ -293,7 +296,7 @@ impl Committer {
     /// # Returns
     ///
     /// The result of `scalar * G[g_i]` as an `Element`.
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
@@ -478,6 +481,7 @@ mod tests {
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
+    use std::string::ToString;
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
     ///
@@ -555,14 +559,7 @@ mod tests {
         .unwrap();
 
         let precompute = Committer::new(&basic_crs, 11);
-        let mem_byte_size = precompute.tables.len() * precompute.tables[0].len() * 2 * 32;
-        println!("precompute_size: {mem_byte_size:?}");
-        use std::time::Instant;
-        let start = Instant::now();
         let got_result = precompute.mul_index(&scalar, 0);
-
-        let duration = start.elapsed();
-        println!("Time elapsed in mul is: {:?}", duration / 1000);
 
         let affine_result = got_result.0.into_affine();
         let string_x =
@@ -573,7 +570,6 @@ mod tests {
         let y = affine_result.y.to_string();
         assert_eq!(string_x, x);
         assert_eq!(string_y, y);
-        println!("got_result: {affine_result:?}");
     }
 
     /// Comprehensive correctness test across multiple window sizes with random scalars.

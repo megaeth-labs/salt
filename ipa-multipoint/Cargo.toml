@@ -3,18 +3,23 @@ name = "ipa-multipoint"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["parallel"]
+std = ["banderwagon/std", "itertools/use_std", "sha2/std", "hex/std", "thiserror", "rustc-hash/std"]
+parallel = ["std", "rayon", "banderwagon/parallel"]
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-banderwagon = { path = "../banderwagon" }
-itertools = "0.10.1"
-sha2 = "0.9.8"
-rayon = "1.8.0"
-hex = "0.4.3"
-thiserror = "2.0"
-
-rustc-hash = "2.1.0"
+banderwagon = { path = "../banderwagon", default-features = false }
+itertools = { version = "0.10.1", default-features = false, features = ["use_alloc"] }
+sha2 = { version = "0.9.8", default-features = false }
+rayon = { version = "*", optional = true }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+thiserror = { version = "2.0", optional = true }
+rustc-hash = { version = "2.1.0", default-features = false, optional = true}
+hashbrown = { version = "0.16", features = ["serde"] }
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -22,6 +27,10 @@ rand_chacha = { version = "0.3.0", default-features = false }
 ark-poly = { version = "0.5.0", default-features = false }
 ark-std = { version = "0.5.0", default-features = false }
 
+[[bin]]
+name = "ipa-multipoint"
+path = "src/main.rs"
+required-features = ["std"]
 
 [[bench]]
 name = "benchmark_main"

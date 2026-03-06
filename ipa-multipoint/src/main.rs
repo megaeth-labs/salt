@@ -1,3 +1,5 @@
+#![cfg(feature = "std")]
+
 use banderwagon::{salt_committer::Committer, trait_defs::*, Fr};
 use ipa_multipoint::crs::CRS;
 use std::time::Instant;

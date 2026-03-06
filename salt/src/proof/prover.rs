@@ -14,18 +14,23 @@ use crate::{
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
-use banderwagon::{Element, Fr};
+use banderwagon::{chunks, iter, num_threads, sort_unstable, Element, Fr};
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap as FxHashMap;
 use ipa_multipoint::{
     crs::CRS,
     lagrange_basis::PrecomputedWeights,
     multiproof::{MultiPoint, MultiPointProof, VerifierQuery},
     transcript::Transcript,
 };
-use once_cell::sync::Lazy;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
+#[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};
+use std::{format, string::ToString, vec::Vec};
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
@@ -135,7 +140,7 @@ impl SaltProof {
         let needs_sorting = keys.windows(2).any(|w| w[0] > w[1]);
 
         if needs_sorting {
-            keys.par_sort_unstable();
+            sort_unstable!(keys);
         }
         keys.dedup();
 
@@ -302,9 +307,8 @@ fn create_internal_node_queries(
 ) -> ProofResult<Vec<VerifierQuery>> {
     // Distribute internal nodes across CPU threads for parallel processing
     let in_nodes: Vec<_> = internal_nodes.iter().collect();
-
-    let queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let queries = chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             // Step 1: Collect all child commitments needed by this thread's nodes
             // This enables efficient batch conversion to field elements
@@ -435,8 +439,7 @@ fn create_leaf_node_queries(
     kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
 ) -> ProofResult<impl Iterator<Item = VerifierQuery>> {
     // Process leaf nodes in parallel - each represents a data bucket
-    let queries = leaf_nodes
-        .par_iter()
+    let queries = iter!(leaf_nodes)
         .map(|(parent_node, evaluation_points)| {
             // Get the polynomial commitment for this bucket
             let commitment =
@@ -504,7 +507,7 @@ mod tests {
     use banderwagon::{CanonicalSerialize, PrimeField};
     use ipa_multipoint::lagrange_basis::LagrangeBasis;
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
+    use std::vec;
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -633,7 +636,7 @@ mod tests {
         let key = mock_data(&mut rng, 52);
         let value = mock_data(&mut rng, 32);
 
-        let initial_key_values = HashMap::from([(key, Some(value))]);
+        let initial_key_values: FxHashMap<_, _> = [(key, Some(value))].into_iter().collect();
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
@@ -663,7 +666,7 @@ mod tests {
         let key = mock_data(&mut rng, 52);
         let value = mock_data(&mut rng, 32);
 
-        let initial_key_values = HashMap::from([(key, Some(value))]);
+        let initial_key_values: FxHashMap<_, _> = [(key, Some(value))].into_iter().collect();
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
@@ -699,7 +702,7 @@ mod tests {
                 let v = mock_data(&mut rng, 32);
                 (k, Some(v))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
 
         let mem_store = MemStore::new();
         let mut state = EphemeralSaltState::new(&mem_store);
@@ -1034,7 +1037,7 @@ mod tests {
             .enumerate()
             .take(260)
             .map(|(i, key)| (key.clone(), Some(i.to_be_bytes().to_vec())))
-            .collect::<HashMap<Vec<u8>, Option<Vec<u8>>>>();
+            .collect::<FxHashMap<Vec<u8>, Option<Vec<u8>>>>();
 
         // Update state and trie with expanded bucket
         let state_updates = state.update_fin(&kvs).unwrap();
@@ -1089,7 +1092,7 @@ mod tests {
             Some(mock_salt_value()),
         )]
         .into();
-        let mut buckets_level = FxHashMap::default();
+        let mut buckets_level: FxHashMap<_, _> = FxHashMap::default();
         buckets_level.insert(NUM_META_BUCKETS as u32, 0u8); // Bucket levels match
 
         let proof = SaltProof::create([SaltKey::from((100, 0))], &MemStore::new()).unwrap();

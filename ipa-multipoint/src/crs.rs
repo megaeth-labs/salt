@@ -11,9 +11,15 @@
 
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
 use banderwagon::{try_reduce_to_element, Element, SerializationError};
+
+use std::{string::String, vec::Vec};
+use core::iter;
+
+#[cfg(feature = "std")]
 use thiserror::Error;
 
 /// Error type for CRS operations.
+#[cfg(feature = "std")]
 #[derive(Error, Debug)]
 pub enum CrsError {
     #[error("Empty input: CRS requires at least one point")]
@@ -27,6 +33,29 @@ pub enum CrsError {
 
     #[error("Point deserialization failed: {0}")]
     Deserialization(#[from] SerializationError),
+}
+
+#[cfg(not(feature = "std"))]
+#[derive(Debug)]
+pub enum CrsError {
+    EmptyInput,
+    HexDecode,
+    InvalidLength(usize),
+    Deserialization,
+}
+
+#[cfg(not(feature = "std"))]
+impl From<hex::FromHexError> for CrsError {
+    fn from(_: hex::FromHexError) -> Self {
+        CrsError::HexDecode
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl From<SerializationError> for CrsError {
+    fn from(_: SerializationError) -> Self {
+        CrsError::Deserialization
+    }
 }
 
 /// Common Reference String for the Pedersen commitment scheme.
@@ -129,11 +158,11 @@ impl CRS {
     /// # Returns
     /// Vector of 32-byte arrays representing the CRS points
     pub fn to_bytes(&self) -> Vec<[u8; 32]> {
-        self.G
-            .iter()
-            .chain(std::iter::once(&self.Q))
-            .map(Element::to_bytes)
-            .collect()
+            self.G
+                .iter()
+                .chain(iter::once(&self.Q))
+                .map(Element::to_bytes)
+                .collect()
     }
 
     /// Serializes the CRS to hex-encoded strings.
@@ -149,9 +178,9 @@ impl CRS {
     /// This is a critical security check to ensure the CRS has full rank.
     /// Duplicate points would compromise the binding property of commitments.
     fn assert_dedup(points: &[Element]) {
-        use std::collections::HashSet;
-        let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
-        assert_eq!(set.len(), points.len(), "crs has duplicated points");
+            use hashbrown::HashSet;
+            let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
+            assert_eq!(set.len(), points.len(), "crs has duplicated points");
     }
 
     /// Commits to a polynomial in Lagrange basis form.
@@ -169,7 +198,7 @@ impl CRS {
     }
 }
 
-impl std::ops::Index<usize> for CRS {
+impl core::ops::Index<usize> for CRS {
     type Output = Element;
 
     fn index(&self, index: usize) -> &Self::Output {
