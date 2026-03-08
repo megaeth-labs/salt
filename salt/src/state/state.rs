@@ -46,6 +46,9 @@ use crate::{
     types::*,
 };
 use core::cmp::Ordering;
+#[cfg(feature = "std")]
+use std::collections::{hash_map::Entry, HashMap, HashSet};
+#[cfg(not(feature = "std"))]
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 use hex;
 use std::collections::BTreeMap;
