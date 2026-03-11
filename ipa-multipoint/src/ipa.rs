@@ -4,14 +4,14 @@ use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
 use crate::{IOError, IOErrorKind, IOResult};
-use banderwagon::{multi_scalar_mul, num_threads, trait_defs::*, chunks, Element, Fr};
+use banderwagon::{chunks, multi_scalar_mul, num_threads, trait_defs::*, Element, Fr};
 use itertools::Itertools;
 use std::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::iter;
 #[cfg(not(feature = "std"))]
 use core::iter;
+#[cfg(feature = "std")]
+use std::iter;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

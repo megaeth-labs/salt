@@ -12,8 +12,8 @@
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
 use banderwagon::{try_reduce_to_element, Element, SerializationError};
 
-use std::{string::String, vec::Vec};
 use core::iter;
+use std::{string::String, vec::Vec};
 
 #[cfg(feature = "std")]
 use thiserror::Error;
@@ -158,11 +158,11 @@ impl CRS {
     /// # Returns
     /// Vector of 32-byte arrays representing the CRS points
     pub fn to_bytes(&self) -> Vec<[u8; 32]> {
-            self.G
-                .iter()
-                .chain(iter::once(&self.Q))
-                .map(Element::to_bytes)
-                .collect()
+        self.G
+            .iter()
+            .chain(iter::once(&self.Q))
+            .map(Element::to_bytes)
+            .collect()
     }
 
     /// Serializes the CRS to hex-encoded strings.
@@ -178,9 +178,9 @@ impl CRS {
     /// This is a critical security check to ensure the CRS has full rank.
     /// Duplicate points would compromise the binding property of commitments.
     fn assert_dedup(points: &[Element]) {
-            use hashbrown::HashSet;
-            let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
-            assert_eq!(set.len(), points.len(), "crs has duplicated points");
+        use hashbrown::HashSet;
+        let set = points.iter().map(Element::to_bytes).collect::<HashSet<_>>();
+        assert_eq!(set.len(), points.len(), "crs has duplicated points");
     }
 
     /// Commits to a polynomial in Lagrange basis form.

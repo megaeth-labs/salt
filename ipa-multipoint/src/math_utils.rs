@@ -1,4 +1,4 @@
-use banderwagon::{num_threads, trait_defs::*, chunks_mut, Fr};
+use banderwagon::{chunks_mut, num_threads, trait_defs::*, Fr};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{vec, vec::Vec};

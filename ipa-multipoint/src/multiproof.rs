@@ -9,13 +9,15 @@ use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use banderwagon::{num_threads, trait_defs::*, chunks, chunks_mut, into_iter, iter, reduce, Element, Fr};
+use banderwagon::{
+    chunks, chunks_mut, into_iter, iter, num_threads, reduce, trait_defs::*, Element, Fr,
+};
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap as FxHashMap;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 #[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap as FxHashMap;
 use std::vec::Vec;
 
 pub struct MultiPoint;
