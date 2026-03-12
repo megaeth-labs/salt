@@ -15,23 +15,23 @@ use crate::{
     BucketId, ScalarBytes,
 };
 use banderwagon::{Element, Fr};
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap as FxHashMap;
 use ipa_multipoint::{
     crs::CRS,
     lagrange_basis::PrecomputedWeights,
     multiproof::{MultiPoint, MultiPointProof, VerifierQuery},
     transcript::Transcript,
 };
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-#[cfg(feature = "std")]
-use rustc_hash::FxHashMap;
+
+use salt_macros::prelude::*;
 use salt_macros::{chunks, iter, num_threads, sort_unstable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, vec::Vec};
+
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =

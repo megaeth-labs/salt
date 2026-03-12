@@ -1,6 +1,5 @@
 use banderwagon::{trait_defs::*, Fr};
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use salt_macros::prelude::*;
 use salt_macros::{chunks_mut, num_threads};
 use std::{vec, vec::Vec};
 

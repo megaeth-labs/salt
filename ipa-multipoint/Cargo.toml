@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = ["parallel"]
 std = ["banderwagon/std", "itertools/use_std", "sha2/std", "hex/std", "rustc-hash/std"]
-parallel = ["std", "dep:rayon", "salt-macros/parallel", "banderwagon/parallel"]
+parallel = ["std", "dep:rayon", "salt-macros/parallel", "banderwagon/parallel", "hashbrown/rayon"]
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -19,7 +19,7 @@ sha2 = { version = "0.9.8", default-features = false }
 rayon = { version = "*", optional = true }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 thiserror = { version = "2.0", default-features = false }
-rustc-hash = { version = "2.1.0", default-features = false, optional = true }
+rustc-hash = { version = "2.1.0", default-features = false }
 hashbrown = { version = "0.16", features = ["serde"] }
 
 [dev-dependencies]

@@ -1,5 +1,13 @@
 #![no_std]
 //! Macros for configuration options
+//!
+
+pub mod prelude {
+    #[cfg(not(feature = "parallel"))]
+    pub use core::iter::{IntoIterator, Iterator};
+    #[cfg(feature = "parallel")]
+    pub use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+}
 
 /// Returns the number of threads to use.
 /// Uses `rayon::current_num_threads()` if the "parallel" feature is enabled, otherwise returns 1.
@@ -42,6 +50,7 @@ macro_rules! iter {
     ($e: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::iter::IntoParallelRefIterator as _;
             $e.par_iter()
         }
 
@@ -53,6 +62,7 @@ macro_rules! iter {
     ($e:expr, $min_len:expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::iter::IntoParallelRefIterator as _;
             $e.par_iter().with_min_len($min_len)
         }
         #[cfg(not(feature = "parallel"))]
@@ -69,6 +79,7 @@ macro_rules! chunks_mut {
     ($e: expr, $size: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::prelude::ParallelSliceMut as _;
             $e.par_chunks_mut($size)
         }
 
@@ -84,6 +95,7 @@ macro_rules! chunks {
     ($e: expr, $size: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::prelude::ParallelSlice as _;
             $e.par_chunks($size)
         }
 
@@ -116,6 +128,7 @@ macro_rules! sort_unstable {
     ($e: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::prelude::ParallelSliceMut as _;
             $e.par_sort_unstable()
         }
 
@@ -133,6 +146,7 @@ macro_rules! sort_unstable_by {
     ($e: expr, $op: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::prelude::ParallelSliceMut as _;
             $e.par_sort_unstable_by($op)
         }
 
@@ -150,6 +164,7 @@ macro_rules! sort_unstable_by_key {
     ($e: expr, $op: expr) => {{
         #[cfg(feature = "parallel")]
         {
+            use rayon::prelude::ParallelSliceMut as _;
             $e.par_sort_unstable_by_key($op)
         }
 

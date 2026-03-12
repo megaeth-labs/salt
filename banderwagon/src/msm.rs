@@ -2,10 +2,11 @@ use crate::Element;
 use ark_ec::scalar_mul::wnaf::WnafContext;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsProjective, Fr};
 use ark_ff::Zero;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+
 use salt_macros::iter;
+use salt_macros::prelude::*;
 use std::vec::Vec;
+
 #[derive(Clone, Debug)]
 pub struct MSMPrecompWnaf {
     window_size: usize,

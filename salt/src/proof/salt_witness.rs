@@ -10,9 +10,8 @@ use crate::{
     types::*,
 };
 use core::ops::{Range, RangeInclusive};
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-use salt_macros::iter;
+
+use salt_macros::{iter, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, format, vec::Vec};
 

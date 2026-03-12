@@ -7,8 +7,8 @@ use crate::{IOResult, SerdeError};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
 use core::iter;
 use itertools::Itertools;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+
+use salt_macros::prelude::*;
 use salt_macros::{chunks, join, num_threads};
 use std::vec::Vec;
 

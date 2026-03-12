@@ -10,15 +10,13 @@
 //! - **Main Trie**: 4-level, 256-ary tree with 16,777,216 leaf nodes (buckets)
 //! - **Bucket Subtrees**: Dynamic trees within buckets that can expand from 1-5 levels
 
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap as FxHashMap;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-#[cfg(feature = "std")]
-use rustc_hash::FxHashMap;
+use salt_macros::prelude::*;
+use salt_macros::{iter, reduce};
 use std::collections::{BTreeMap, BTreeSet};
 
-use salt_macros::{iter, reduce};
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 use crate::{
     constant::{BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},

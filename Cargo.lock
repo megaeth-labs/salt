@@ -633,6 +633,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+ "rayon",
  "serde",
  "serde_core",
 ]
@@ -1020,6 +1021,9 @@ dependencies = [
 [[package]]
 name = "salt-macros"
 version = "0.1.0"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "same-file"

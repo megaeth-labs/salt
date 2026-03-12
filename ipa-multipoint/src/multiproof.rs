@@ -10,12 +10,11 @@ use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
 use banderwagon::{trait_defs::*, Element, Fr};
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap as FxHashMap;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-#[cfg(feature = "std")]
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+
+use salt_macros::prelude::*;
 use salt_macros::{chunks, chunks_mut, into_iter, iter, num_threads, reduce};
 use std::vec::Vec;
 

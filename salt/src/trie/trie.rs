@@ -33,14 +33,11 @@ use crate::{
 };
 use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
+use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
 
-use spin::Lazy;
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 use hashbrown::{HashMap, HashSet};
+use spin::Lazy;
 use std::{collections::BTreeMap, vec::Vec};
 use std::{sync::Arc, vec};
 

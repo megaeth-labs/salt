@@ -46,12 +46,9 @@ use crate::{
     types::*,
 };
 use core::cmp::Ordering;
-#[cfg(not(feature = "std"))]
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 use hex;
 use std::collections::BTreeMap;
-#[cfg(feature = "std")]
-use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::{format, string::String, vec::Vec};
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.

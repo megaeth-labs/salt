@@ -5,4 +5,7 @@ edition = "2021"
 
 [features]
 default = ["parallel"]
-parallel = []
+parallel = ["dep:rayon"]
+
+[dependencies]
+rayon = { version = "*", optional = true }

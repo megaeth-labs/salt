@@ -11,7 +11,7 @@ std = [
     "blake3/std",
     "serde/std",
 ]
-parallel = ["std", "dep:rayon", "salt-macros/parallel", "ipa-multipoint/parallel", "banderwagon/parallel"]
+parallel = ["std", "dep:rayon", "salt-macros/parallel", "ipa-multipoint/parallel", "banderwagon/parallel", "hashbrown/rayon"]
 test-bucket-resize = []
 enable-hugepages = ["std", "banderwagon/enable-hugepages"]
 
