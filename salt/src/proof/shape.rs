@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
-use banderwagon::{iter, reduce};
+use salt_macros::{iter, reduce};
 
 use crate::{
     constant::{BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},

@@ -1,3 +1,4 @@
+#![no_std]
 //! Macros for configuration options
 
 /// Returns the number of threads to use.
@@ -44,6 +45,16 @@ macro_rules! iter {
             $e.par_iter()
         }
 
+        #[cfg(not(feature = "parallel"))]
+        {
+            $e.iter()
+        }
+    }};
+    ($e:expr, $min_len:expr) => {{
+        #[cfg(feature = "parallel")]
+        {
+            $e.par_iter().with_min_len($min_len)
+        }
         #[cfg(not(feature = "parallel"))]
         {
             $e.iter()
@@ -145,6 +156,21 @@ macro_rules! sort_unstable_by_key {
         #[cfg(not(feature = "parallel"))]
         {
             $e.sort_unstable_by_key($op)
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! join {
+    ($left:expr, $right:expr) => {{
+        #[cfg(feature = "parallel")]
+        {
+            rayon::join($left, $right)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let (mut left, mut right) = ($left, $right);
+            (left(), right())
         }
     }};
 }

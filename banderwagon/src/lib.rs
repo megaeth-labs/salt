@@ -11,9 +11,6 @@ pub use element::{multi_scalar_mul, Element, Fr};
 pub mod salt_committer;
 mod scalar_multi_asm;
 
-#[macro_use]
-pub mod config_iter;
-
 // Re-export arkworks traits that one may need to use in order to use
 // specific methods on field elements and for serialization.
 //

@@ -9,15 +9,14 @@ use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use banderwagon::{
-    chunks, chunks_mut, into_iter, iter, num_threads, reduce, trait_defs::*, Element, Fr,
-};
+use banderwagon::{trait_defs::*, Element, Fr};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap as FxHashMap;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 #[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
+use salt_macros::{chunks, chunks_mut, into_iter, iter, num_threads, reduce};
 use std::vec::Vec;
 
 pub struct MultiPoint;
@@ -245,12 +244,12 @@ pub struct MultiPointProof {
 
 impl MultiPointProof {
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
-        use crate::{IOError, IOErrorKind};
+        use crate::SerdeError;
 
         let g_x_comm_bytes = &bytes[0..32];
         let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
         let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
-            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+            .map_err(|_| SerdeError::InvalidData)?;
         let g_x_comm = point;
 
         let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;

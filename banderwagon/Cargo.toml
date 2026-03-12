@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+salt-macros = { path = "../salt-macros", default-features = false }
 ark-ed-on-bls12-381-bandersnatch = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695", default-features = false }
 ark-ff = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695", default-features = false }
 ark-ec = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695", default-features = false }
@@ -20,5 +21,5 @@ rand_chacha = "0.3.1"
 [features]
 default = ["parallel"]
 std = ["ark-ed-on-bls12-381-bandersnatch/std", "ark-ff/std", "ark-ec/std", "ark-serialize/std"]
-parallel = ["std", "rayon", "ark-ff/parallel", "ark-ff/asm", "ark-ec/parallel"]
-enable-hugepages = ["std", "hugepage-rs"]
+parallel = ["std", "dep:rayon", "salt-macros/parallel", "ark-ff/parallel", "ark-ff/asm", "ark-ec/parallel"]
+enable-hugepages = ["std", "dep:hugepage-rs"]

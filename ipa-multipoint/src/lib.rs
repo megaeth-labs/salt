@@ -12,46 +12,18 @@ pub mod transcript;
 
 pub mod lagrange_basis;
 
-// TODO: We use the IO Result while we do not have a dedicated Error enum
-#[cfg(feature = "std")]
-pub(crate) type IOResult<T> = std::io::Result<T>;
-#[cfg(feature = "std")]
-pub(crate) type IOError = std::io::Error;
-#[cfg(feature = "std")]
-pub(crate) type IOErrorKind = std::io::ErrorKind;
+/// A custom error type for serialization and deserialization errors.
+#[derive(Debug)]
+pub enum SerdeError {
+    InvalidData,
+}
 
-#[cfg(not(feature = "std"))]
-mod io_compat {
-    use core::fmt;
-
-    #[derive(Debug)]
-    pub struct Error(&'static str);
-
-    impl fmt::Display for Error {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}", self.0)
+impl core::fmt::Display for SerdeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SerdeError::InvalidData => f.write_str("invalid data"),
         }
-    }
-
-    impl From<ErrorKind> for Error {
-        fn from(kind: ErrorKind) -> Self {
-            Error(kind.0)
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub struct ErrorKind(&'static str);
-
-    impl ErrorKind {
-        /// Mimics std::io::ErrorKind::InvalidData for compatibility
-        #[allow(non_upper_case_globals)]
-        pub const InvalidData: Self = ErrorKind("invalid data");
     }
 }
 
-#[cfg(not(feature = "std"))]
-pub(crate) type IOResult<T> = Result<T, io_compat::Error>;
-#[cfg(not(feature = "std"))]
-pub(crate) type IOError = io_compat::Error;
-#[cfg(not(feature = "std"))]
-pub(crate) type IOErrorKind = io_compat::ErrorKind;
+pub type IOResult<T> = Result<T, SerdeError>;

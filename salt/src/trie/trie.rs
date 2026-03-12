@@ -31,11 +31,9 @@ use crate::{
     trie::node_utils::*,
     types::*,
 };
-use banderwagon::{
-    chunks, into_iter, iter, num_threads, salt_committer::Committer, sort_unstable_by,
-    sort_unstable_by_key, Element, Fr, PrimeField,
-};
+use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
+use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
 
 use spin::Lazy;
 
@@ -705,12 +703,7 @@ where
 
         // Compute the commitment deltas to be applied to the parent nodes.
         let batch_size = self.par_batch_size(state_updates.len());
-        #[cfg(feature = "parallel")]
-        let delta_iter = iter!(state_updates).with_min_len(batch_size);
-        #[cfg(not(feature = "parallel"))]
-        let delta_iter = iter!(state_updates);
-
-        let c_deltas: DeltaList = delta_iter
+        let c_deltas: DeltaList = iter!(state_updates, batch_size)
             .map(|(salt_key, (old_value, new_value))| {
                 (
                     to_node_id(salt_key),
@@ -2084,8 +2077,6 @@ mod tests {
         let (root1, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
         store.update_state(updates);
         store.update_trie(trie_updates);
-        #[cfg(feature = "std")]
-        println!("Phase 1 root: {:?}", hex::encode(root1));
         assert_eq!(
             root1,
             StateRoot::rebuild(&store).unwrap().0,
@@ -2104,11 +2095,6 @@ mod tests {
                 let new_meta = BucketMeta::try_from(new.as_ref()?).ok()?;
                 (old_meta.capacity != new_meta.capacity).then(|| {
                     let bid = bucket_id_from_metadata_key(*key);
-                    #[cfg(feature = "std")]
-                    println!(
-                        "  Bucket {}: {} -> {}",
-                        bid, old_meta.capacity, new_meta.capacity
-                    );
                     (bid, old_meta.nonce, old_meta.capacity)
                 })
             })
@@ -2117,8 +2103,6 @@ mod tests {
         let (root2, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
         store.update_state(updates);
         store.update_trie(trie_updates);
-        #[cfg(feature = "std")]
-        println!("Phase 2 root: {:?}", hex::encode(root2));
         assert_eq!(
             root2,
             StateRoot::rebuild(&store).unwrap().0,
@@ -2141,8 +2125,6 @@ mod tests {
         let (root3, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
         store.update_state(updates);
         store.update_trie(trie_updates);
-        #[cfg(feature = "std")]
-        println!("Phase 3 root: {:?}", hex::encode(root3));
         assert_eq!(
             hex::encode(root3),
             hex::encode(StateRoot::rebuild(&store).unwrap().0),

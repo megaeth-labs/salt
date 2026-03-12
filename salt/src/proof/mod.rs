@@ -63,13 +63,9 @@
 //! - [`subtrie`]: Constructs minimal subtries and generates IPA proofs by building
 //!   authentication paths from specified keys to the state root.
 
-#[cfg(feature = "std")]
-use thiserror::Error;
-
 use crate::types::SaltKey;
-
-#[cfg(not(feature = "std"))]
 use std::string::String;
+use thiserror::Error;
 
 pub mod prover;
 pub mod salt_witness;
@@ -85,7 +81,6 @@ pub use salt_witness::SaltWitness;
 pub use witness::Witness;
 
 /// Error type for proof operations
-#[cfg(feature = "std")]
 #[derive(Debug, Error)]
 pub enum ProofError {
     /// Failed to read state data during proof operations
@@ -116,57 +111,6 @@ pub enum ProofError {
             key.slot_id(), capacity, key.bucket_id())]
     InvalidSaltKey { key: SaltKey, capacity: u64 },
 }
-
-#[cfg(not(feature = "std"))]
-#[derive(Debug)]
-pub enum ProofError {
-    StateReadError {
-        reason: String,
-    },
-    MissingRootCommitment,
-    RootMismatch {
-        expected: [u8; 32],
-        actual: [u8; 32],
-    },
-    MultiPointProofFailed,
-    InvalidLookupTable {
-        reason: String,
-    },
-    InvalidSaltKey {
-        key: SaltKey,
-        capacity: u64,
-    },
-}
-
-#[cfg(not(feature = "std"))]
-impl core::fmt::Display for ProofError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ProofError::StateReadError { reason } => write!(f, "failed to read state: {}", reason),
-            ProofError::MissingRootCommitment => write!(f, "missing root commitment in proof"),
-            ProofError::RootMismatch { expected, actual } => write!(
-                f,
-                "state root mismatch: expected {:?}, got {:?}",
-                expected, actual
-            ),
-            ProofError::MultiPointProofFailed => write!(f, "multi-point proof check failed"),
-            ProofError::InvalidLookupTable { reason } => {
-                write!(f, "invalid lookup table: {}", reason)
-            }
-            ProofError::InvalidSaltKey { key, capacity } => write!(
-                f,
-                "invalid salt key {:?}: slot_id {} exceeds {} for bucket {}",
-                key,
-                key.slot_id(),
-                capacity,
-                key.bucket_id()
-            ),
-        }
-    }
-}
-
-#[cfg(not(feature = "std"))]
-impl core::error::Error for ProofError {}
 
 /// Result type for operations that can fail during subtrie creation
 pub type ProofResult<T> = Result<T, ProofError>;

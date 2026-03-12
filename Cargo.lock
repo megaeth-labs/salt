@@ -229,6 +229,7 @@ dependencies = [
  "hugepage-rs",
  "rand_chacha 0.3.1",
  "rayon",
+ "salt-macros",
 ]
 
 [[package]]
@@ -672,6 +673,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
  "rustc-hash",
+ "salt-macros",
  "sha2",
  "thiserror",
 ]
@@ -1006,6 +1008,7 @@ dependencies = [
  "rand 0.9.2",
  "rayon",
  "rustc-hash",
+ "salt-macros",
  "serde",
  "serde_arrays",
  "serde_json",
@@ -1013,6 +1016,10 @@ dependencies = [
  "thiserror",
  "zerocopy 0.7.35",
 ]
+
+[[package]]
+name = "salt-macros"
+version = "0.1.0"
 
 [[package]]
 name = "same-file"

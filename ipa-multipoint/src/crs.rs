@@ -11,50 +11,34 @@
 
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
 use banderwagon::{try_reduce_to_element, Element, SerializationError};
-
-use core::iter;
 use std::{string::String, vec::Vec};
-
-#[cfg(feature = "std")]
 use thiserror::Error;
 
 /// Error type for CRS operations.
-#[cfg(feature = "std")]
 #[derive(Error, Debug)]
 pub enum CrsError {
     #[error("Empty input: CRS requires at least one point")]
     EmptyInput,
 
-    #[error("Invalid hex encoding: {0}")]
-    HexDecode(#[from] hex::FromHexError),
+    #[error("Invalid hex encoding")]
+    HexDecode(hex::FromHexError),
 
     #[error("Invalid byte length: expected 32 bytes, got {0}")]
     InvalidLength(usize),
 
-    #[error("Point deserialization failed: {0}")]
-    Deserialization(#[from] SerializationError),
+    #[error("Point deserialization failed")]
+    Deserialization(SerializationError),
 }
 
-#[cfg(not(feature = "std"))]
-#[derive(Debug)]
-pub enum CrsError {
-    EmptyInput,
-    HexDecode,
-    InvalidLength(usize),
-    Deserialization,
-}
-
-#[cfg(not(feature = "std"))]
-impl From<hex::FromHexError> for CrsError {
-    fn from(_: hex::FromHexError) -> Self {
-        CrsError::HexDecode
+impl From<SerializationError> for CrsError {
+    fn from(e: SerializationError) -> Self {
+        CrsError::Deserialization(e)
     }
 }
 
-#[cfg(not(feature = "std"))]
-impl From<SerializationError> for CrsError {
-    fn from(_: SerializationError) -> Self {
-        CrsError::Deserialization
+impl From<hex::FromHexError> for CrsError {
+    fn from(e: hex::FromHexError) -> Self {
+        CrsError::HexDecode(e)
     }
 }
 
@@ -160,7 +144,7 @@ impl CRS {
     pub fn to_bytes(&self) -> Vec<[u8; 32]> {
         self.G
             .iter()
-            .chain(iter::once(&self.Q))
+            .chain(core::iter::once(&self.Q))
             .map(Element::to_bytes)
             .collect()
     }

@@ -12,10 +12,9 @@ use crate::{
 use core::ops::{Range, RangeInclusive};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use salt_macros::iter;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, format, vec::Vec};
-
-use banderwagon::iter;
 
 /// Salt witness for stateless validation with security guarantees.
 ///

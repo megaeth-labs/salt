@@ -34,15 +34,12 @@ pub fn hash_commitment(commitment: CommitmentBytes) -> ScalarBytes {
 }
 
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "std")]
 use thiserror::Error;
 
 /// Unified error type for SALT operations.
 ///
 /// This enum consolidates all string-based errors throughout the SALT codebase
 /// into a structured, type-safe error system using the `thiserror` crate.
-#[cfg(feature = "std")]
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum SaltError {
     #[error("Invalid data format: {message}")]
@@ -54,30 +51,6 @@ pub enum SaltError {
     #[error("Operation '{operation}' not supported")]
     UnsupportedOperation { operation: &'static str },
 }
-
-#[cfg(not(feature = "std"))]
-#[derive(Debug, Clone, PartialEq)]
-pub enum SaltError {
-    InvalidFormat { message: &'static str },
-    NotInWitness { what: &'static str },
-    UnsupportedOperation { operation: &'static str },
-}
-
-#[cfg(not(feature = "std"))]
-impl core::fmt::Display for SaltError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            SaltError::InvalidFormat { message } => write!(f, "Invalid data format: {}", message),
-            SaltError::NotInWitness { what } => write!(f, "{} not available in witness", what),
-            SaltError::UnsupportedOperation { operation } => {
-                write!(f, "Operation '{}' not supported", operation)
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "std"))]
-impl core::error::Error for SaltError {}
 
 /// 24-bit bucket identifier (up to ~16M buckets).
 pub type BucketId = u32;

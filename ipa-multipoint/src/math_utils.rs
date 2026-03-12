@@ -1,6 +1,7 @@
-use banderwagon::{chunks_mut, num_threads, trait_defs::*, Fr};
+use banderwagon::{trait_defs::*, Fr};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use salt_macros::{chunks_mut, num_threads};
 use std::{vec, vec::Vec};
 
 /// Computes the inner product between two scalar vectors

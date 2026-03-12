@@ -26,13 +26,13 @@
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
-use crate::iter;
 use ark_ec::CurveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
 use ark_ff::PrimeField;
 use ark_ff::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use salt_macros::iter;
 use std::{vec, vec::Vec};
 
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.

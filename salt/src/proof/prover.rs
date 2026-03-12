@@ -14,7 +14,7 @@ use crate::{
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
-use banderwagon::{chunks, iter, num_threads, sort_unstable, Element, Fr};
+use banderwagon::{Element, Fr};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap as FxHashMap;
 use ipa_multipoint::{
@@ -27,6 +27,7 @@ use ipa_multipoint::{
 use rayon::prelude::*;
 #[cfg(feature = "std")]
 use rustc_hash::FxHashMap;
+use salt_macros::{chunks, iter, num_threads, sort_unstable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};

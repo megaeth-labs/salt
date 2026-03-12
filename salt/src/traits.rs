@@ -5,15 +5,11 @@ use crate::{
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
-
-#[cfg(not(feature = "std"))]
-use core::error::Error;
 use core::{
+    error::Error,
     fmt::Debug,
     ops::{Range, RangeInclusive},
 };
-#[cfg(feature = "std")]
-use std::error::Error;
 use std::vec::Vec;
 
 /// Provides read-only access to SALT state storage.
