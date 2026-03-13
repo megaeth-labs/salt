@@ -20,13 +20,13 @@ pub enum CrsError {
     #[error("Empty input: CRS requires at least one point")]
     EmptyInput,
 
-    #[error("Invalid hex encoding")]
+    #[error("Invalid hex encoding: {0}")]
     HexDecode(hex::FromHexError),
 
     #[error("Invalid byte length: expected 32 bytes, got {0}")]
     InvalidLength(usize),
 
-    #[error("Point deserialization failed")]
+    #[error("Point deserialization failed: {0}")]
     Deserialization(SerializationError),
 }
 

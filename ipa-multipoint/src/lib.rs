@@ -13,17 +13,10 @@ pub mod transcript;
 pub mod lagrange_basis;
 
 /// A custom error type for serialization and deserialization errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SerdeError {
+    #[error("invalid data")]
     InvalidData,
-}
-
-impl core::fmt::Display for SerdeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            SerdeError::InvalidData => f.write_str("invalid data"),
-        }
-    }
 }
 
 pub type IOResult<T> = Result<T, SerdeError>;
