@@ -65,6 +65,39 @@ jobs:
           RANDOM_OPS: 100
           RANDOM_LOOKUPS: 50
 
+  test-no-std:
+    name: Test no_std
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Install nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          target: riscv64imac-unknown-none-elf
+
+      - name: Run cargo check for no_std target
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: -p salt --target riscv64imac-unknown-none-elf --no-default-features
+
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --no-default-features
+
+      - name: Run cargo test with bucket resize feature
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --no-default-features --features test-bucket-resize
+
   lints:
     name: Lints
     runs-on: ubuntu-latest
