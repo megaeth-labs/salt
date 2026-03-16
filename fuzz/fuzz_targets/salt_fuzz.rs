@@ -1,19 +1,22 @@
-//! End-to-end fuzz testing for SALT blockchain state management.
+#![no_main]
 
-use crate::constant::{NUM_BUCKETS, NUM_META_BUCKETS};
-use crate::traits::StateReader;
-use crate::types::{BucketId, SaltKey};
-use crate::{
-    EphemeralSaltState, MemStore, SaltValue, SaltWitness, StateRoot, StateUpdates, Witness,
+use libfuzzer_sys::fuzz_target;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use salt::{
+    constant::{NUM_BUCKETS, NUM_META_BUCKETS},
+    traits::StateReader,
+    BucketId, EphemeralSaltState, MemStore, SaltKey, SaltValue, SaltWitness, StateRoot,
+    StateUpdates, Witness,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 /// A state modification resulting from transaction execution.
 ///
 /// Operations reference keys via indices into a pre-generated KV pool,
 /// allowing the fuzzer to focus on operation sequences rather than key generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Operation {
     /// Inserts or updates the key at pool index with a new single-byte value.
     ///
@@ -33,7 +36,7 @@ pub enum Operation {
 /// After transaction execution produces state modifications, these changes are
 /// applied to the state trie in small batches to enable pipelining of operations
 /// like state trie updates and block propagation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Block {
     /// Small batches of state modifications to apply incrementally.
     ///
@@ -48,6 +51,94 @@ pub struct Block {
     /// All lookup keys must be included in the witness so a stateless validator
     /// has sufficient data to re-execute the block and verify state transitions.
     pub lookups: Vec<u16>,
+}
+
+static STORE: OnceLock<MemStore> = OnceLock::new();
+
+fuzz_target!(|data: &[u8]| {
+    // fuzzed code goes here
+    if data.len() < 1024 {
+        return;
+    }
+
+    let seed: u64 = u64::from_le_bytes(data[0..8].try_into().unwrap());
+    let blocks = generate_blocks(seed, data);
+    e2e_test(&blocks);
+});
+
+/// Reads an environment variable and parses it, falling back to default if missing or invalid.
+fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Generates a sequence of test blocks from fuzzer input data.
+///
+/// Converts raw fuzzer bytes into structured blocks containing mini-blocks and lookups.
+/// Each byte is interpreted as an operation: values < 180 become Insert operations,
+/// others become Delete operations. The function divides the input data into blocks,
+/// then further subdivides each block into mini-blocks to simulate pipelined execution.
+///
+/// # Arguments
+/// * `seed` - Random seed for deterministic key/value generation
+/// * `data` - Raw fuzzer input bytes to convert into operations
+///
+/// # Returns
+/// A vector of blocks, each containing mini-blocks of operations and lookup keys
+fn generate_blocks(seed: u64, data: &[u8]) -> Vec<Block> {
+    let total_size = data.len();
+    let blocks_per_run = total_size.div_ceil(env("RANDOM_BLOCKS", 3));
+    let mini_blocks_per_block = blocks_per_run.div_ceil(env("RANDOM_MINI_BLOCKS", 10));
+    let lookups_per_block = env("RANDOM_LOOKUPS", 50);
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let blocks: Vec<Block> = data
+        .chunks(blocks_per_run)
+        .map(|chunk| Block {
+            mini_blocks: chunk
+                .chunks(mini_blocks_per_block)
+                .map(|mini_chucks| {
+                    mini_chucks
+                        .iter()
+                        .map(|op| {
+                            if *op < 180 {
+                                Operation::Insert(rng.random(), rng.random())
+                            } else {
+                                Operation::Delete(rng.random())
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            lookups: (0..lookups_per_block).map(|_| rng.random()).collect(),
+        })
+        .collect();
+    blocks
+}
+
+/// Converts test operations into plain key-value updates.
+///
+/// Maps operation indices to actual keys via the KV pool, producing
+/// the key-value pairs that will be applied to the state.
+fn get_plain_kv_updates(
+    operations: &[Operation],
+    kv_pool: &[(Vec<u8>, Vec<u8>)],
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    operations
+        .iter()
+        .map(|op| match op {
+            Operation::Insert(idx, new_value) => {
+                let (key, _) = &kv_pool[*idx as usize % kv_pool.len()];
+                (key.clone(), Some(vec![*new_value]))
+            }
+            Operation::Delete(idx) => {
+                let (key, _) = &kv_pool[*idx as usize % kv_pool.len()];
+                (key.clone(), None)
+            }
+        })
+        .collect()
 }
 
 /// End-to-end test validating SALT blockchain state management correctness.
@@ -74,7 +165,6 @@ pub struct Block {
 ///
 /// # Panics
 /// Panics if any consistency check fails, indicating a bug in SALT's implementation.
-#[cfg(test)]
 fn e2e_test(blocks: &Vec<Block>) {
     // Generate the plain key-value pairs to be used in testing beforehand
     let kv_pool_size = env("RANDOM_KV_POOL_SIZE", 4096);
@@ -87,15 +177,26 @@ fn e2e_test(blocks: &Vec<Block>) {
         .collect();
 
     // Create the mock database and BTreeMap-based reference state implementation.
-    let db = MemStore::new();
-    let mut ref_state = BTreeMap::new();
-    let mut pre_state_root = StateRoot::rebuild(&db)
+    let db = STORE.get_or_init(MemStore::default);
+    let mut ref_state: BTreeMap<Vec<u8>, Vec<u8>> = db
+        .entries(SaltKey::bucket_range(
+            NUM_META_BUCKETS as BucketId,
+            (NUM_BUCKETS - 1) as BucketId,
+        ))
+        .expect("Failed to enumerate entries")
+        .iter()
+        .map(|(_, v)| (v.key().to_vec(), v.value().to_vec()))
+        .collect();
+    let mut pre_state_root = StateRoot::rebuild(db)
         .expect("Failed to get initial state root")
         .0;
 
+    let mut revert_state_updates = StateUpdates::default();
+    let expected_revert_state_root = pre_state_root;
+
     for block in blocks {
-        let mut state = EphemeralSaltState::new(&db);
-        let mut trie = StateRoot::new(&db);
+        let mut state = EphemeralSaltState::new(db);
+        let mut trie = StateRoot::new(db);
         let mut state_updates = StateUpdates::default();
 
         // Block producer: Process read-only lookups that occur during transaction execution.
@@ -153,8 +254,13 @@ fn e2e_test(blocks: &Vec<Block>) {
         state_updates.merge(canon_updates);
 
         // Block producer: Generate witness containing all data needed for stateless validation
-        let witness = Witness::create([], &lookups, &all_modifications, &db)
+        let witness = Witness::create([], &lookups, &all_modifications, db)
             .expect("Failed to create witness");
+
+        // Save revert information for post-test verification: stores the
+        // inverse updates to enable rolling back all blocks to initial state later.
+        // This validates that state updates are correctly invertible.
+        revert_state_updates.merge(state_updates.clone());
 
         // Block producer: persist to database
         db.update_state(state_updates);
@@ -257,162 +363,20 @@ fn e2e_test(blocks: &Vec<Block>) {
         ))
         .expect("Failed to enumerate entries");
     assert_eq!(entries.len(), ref_state.len(), "Entry count mismatch");
-}
 
-/// Converts test operations into plain key-value updates.
-///
-/// Maps operation indices to actual keys via the KV pool, producing
-/// the key-value pairs that will be applied to the state.
-fn get_plain_kv_updates(
-    operations: &[Operation],
-    kv_pool: &[(Vec<u8>, Vec<u8>)],
-) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-    operations
-        .iter()
-        .map(|op| match op {
-            Operation::Insert(idx, new_value) => {
-                let (key, _) = &kv_pool[*idx as usize % kv_pool.len()];
-                (key.clone(), Some(vec![*new_value]))
-            }
-            Operation::Delete(idx) => {
-                let (key, _) = &kv_pool[*idx as usize % kv_pool.len()];
-                (key.clone(), None)
-            }
-        })
-        .collect()
-}
-
-/// Reads an environment variable and parses it, falling back to default if missing or invalid.
-#[cfg(test)]
-fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Stress test validating SALT correctness with randomly generated operation sequences.
-    ///
-    /// Performs property-based stress testing by running multiple iterations with different
-    /// random seeds, validating that state consistency and trie consistency properties hold
-    /// across diverse operation sequences. Each iteration:
-    /// - Generates random blocks with operations (70% Insert, 30% Delete)
-    /// - Validates via [`e2e_test`] (state oracle matching + trie root consistency)
-    /// - Uses iteration number as RNG seed for deterministic reproduction
-    /// - On failure, saves input to `random_stress_failure_{timestamp}.json` for replay via
-    ///   [`replay_test_failure`]
-    ///
-    /// Configuration via environment variables (with defaults):
-    /// - `RANDOM_KV_POOL_SIZE=4096` - Size of the key-value pool
-    /// - `RANDOM_ITERATIONS=100` - Number of test iterations
-    /// - `RANDOM_BLOCKS=3` - Blocks per iteration
-    /// - `RANDOM_MINI_BLOCKS=10` - Mini-blocks per block
-    /// - `RANDOM_OPS=100` - Operations per mini-block
-    /// - `RANDOM_LOOKUPS=50` - Lookups per block
-    #[test]
-    #[ignore]
-    fn test_e2e_random_stress() {
-        use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
-        use std::panic;
-
-        let (
-            iterations,
-            blocks_per_iter,
-            mini_blocks_per_block,
-            ops_per_mini_block,
-            lookups_per_block,
-        ) = (
-            env("RANDOM_ITERATIONS", 100),
-            env("RANDOM_BLOCKS", 3),
-            env("RANDOM_MINI_BLOCKS", 10),
-            env("RANDOM_OPS", 100),
-            env("RANDOM_LOOKUPS", 50),
-        );
-
-        println!("\nStarting deterministic random loop test:");
-        println!(
-            "  {} iterations x {} blocks x {} mini-blocks x {} ops",
-            iterations, blocks_per_iter, mini_blocks_per_block, ops_per_mini_block
-        );
-        println!(
-            "  Total operations: {}\n",
-            iterations * blocks_per_iter * mini_blocks_per_block * ops_per_mini_block
-        );
-
-        for iteration in 0..iterations {
-            println!("Iteration {}/{}...", iteration + 1, iterations);
-
-            let mut rng = StdRng::seed_from_u64(iteration as u64);
-            let blocks: Vec<Block> = (0..blocks_per_iter)
-                .map(|_| Block {
-                    mini_blocks: (0..mini_blocks_per_block)
-                        .map(|_| {
-                            (0..ops_per_mini_block)
-                                .map(|_| {
-                                    if rng.random_bool(0.7) {
-                                        Operation::Insert(rng.random(), rng.random())
-                                    } else {
-                                        Operation::Delete(rng.random())
-                                    }
-                                })
-                                .collect()
-                        })
-                        .collect(),
-                    lookups: (0..lookups_per_block).map(|_| rng.random()).collect(),
-                })
-                .collect();
-
-            if let Err(err) = panic::catch_unwind(panic::AssertUnwindSafe(|| e2e_test(&blocks))) {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let filename = format!("random_stress_failure_{}.json", timestamp);
-                if let Ok(json) = serde_json::to_string_pretty(&blocks) {
-                    let _ = std::fs::write(&filename, json);
-                    eprintln!(
-                        "\nTest failed at iteration {} (seed: {})",
-                        iteration, iteration
-                    );
-                    eprintln!("Failing input saved to: {}", filename);
-                    eprintln!(
-                        "Replay with: TEST_FAILURE={} cargo test replay_test_failure -- --ignored",
-                        filename
-                    );
-                }
-                panic::resume_unwind(err);
-            }
-        }
-
-        println!("\nAll {} tests passed!", iterations);
-    }
-
-    /// Debugging utility to replay a saved test failure from a JSON file.
-    ///
-    /// This is not a standalone test - it reproduces failures by re-running
-    /// the exact operation sequence that caused a previous test failure.
-    ///
-    /// Usage:
-    /// ```bash
-    /// TEST_FAILURE=random_stress_failure_1234567890.json cargo test replay_test_failure -- --nocapture --ignored
-    /// ```
-    #[test]
-    #[ignore]
-    fn replay_test_failure() {
-        let filename =
-            std::env::var("TEST_FAILURE").expect("TEST_FAILURE environment variable must be set");
-        let json = std::fs::read_to_string(&filename)
-            .unwrap_or_else(|e| panic!("Failed to read {}: {}", filename, e));
-        let blocks: Vec<Block> = serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", filename, e));
-
-        println!("Replaying from {} ({} blocks)", filename, blocks.len());
-        e2e_test(&blocks);
-        println!("Replay passed!");
-    }
+    // Post-test verification: Revert blocks back to initial state to validate state reconstruction.
+    //
+    // This section tests the system's ability to correctly undo state changes by applying
+    // inverse state updates in reverse order. This validates that:
+    // 1. State updates are correctly invertible (can be undone)
+    // 2. The trie correctly computes intermediate state roots during reversion
+    //
+    // When bucket expansion occurs, this also validates the correctness of bucket contraction
+    let (revert_state_root, _) = StateRoot::new(&db)
+        .update_fin(&revert_state_updates.inverse())
+        .expect("Failed to compute state root during reversion");
+    assert_eq!(
+        revert_state_root, expected_revert_state_root,
+        "State root mismatch during reversion"
+    );
 }
