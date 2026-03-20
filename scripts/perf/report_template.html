@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SALT Performance Report</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #f7f4ef;
+      --panel: #fffdfa;
+      --ink: #1c1815;
+      --muted: #6c655d;
+      --line: #d8d0c7;
+      --baseline: #87a8d0;
+      --current: #d48b54;
+      --regression: #a1362e;
+      --improvement: #136a3d;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #f7f4ef 0%, #f1ede6 100%);
+      color: var(--ink);
+    }
+
+    .shell {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+
+    .hero {
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 34px;
+      line-height: 1.1;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 14px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin: 24px 0;
+    }
+
+    .card, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 8px 30px rgba(53, 42, 29, 0.06);
+    }
+
+    .card {
+      padding: 18px;
+    }
+
+    .card-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .card-value {
+      margin-top: 10px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .panel {
+      padding: 22px;
+      margin-top: 20px;
+    }
+
+    .panel h2 {
+      margin: 0 0 16px;
+      font-size: 20px;
+    }
+
+    .note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .regression {
+      color: var(--regression);
+      font-weight: 700;
+    }
+
+    .improvement {
+      color: var(--improvement);
+      font-weight: 700;
+    }
+
+    @media (max-width: 720px) {
+      h1 {
+        font-size: 28px;
+      }
+
+      .panel {
+        padding: 16px;
+      }
+
+      table, thead, tbody, th, td, tr {
+        display: block;
+      }
+
+      thead {
+        display: none;
+      }
+
+      tr {
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      td {
+        border: 0;
+        padding: 6px 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>SALT Benchmark Report</h1>
+      <div class="meta">
+        <div>Report generated: <code>__GENERATED_AT__</code></div>
+        <div>Main baseline generated: <code>__BASELINE_GENERATED_AT__</code></div>
+        <div>Current PR generated: <code>__CURRENT_GENERATED_AT__</code></div>
+      </div>
+    </section>
+
+    <section class="cards">
+      <div class="card">
+        <div class="card-label">Time Regressions</div>
+        <div class="card-value">__TIME_REGRESSION_COUNT__</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Time Improvements</div>
+        <div class="card-value">__TIME_IMPROVEMENT_COUNT__</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Throughput Regressions</div>
+        <div class="card-value">__THROUGHPUT_REGRESSION_COUNT__</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Throughput Improvements</div>
+        <div class="card-value">__THROUGHPUT_IMPROVEMENT_COUNT__</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Time Comparison</h2>
+      <canvas id="timeChart" height="120"></canvas>
+      <div class="note">Positive time delta means the PR is slower than the latest published main baseline.</div>
+      <div class="note">__OVERLAP_NOTE__</div>
+    </section>
+
+    <section class="panel">
+      <h2>Throughput Comparison</h2>
+      <canvas id="throughputChart" height="120"></canvas>
+      <div class="note">Positive throughput delta means the PR processes more work per second than the latest published main baseline.</div>
+      <div class="note">__OVERLAP_NOTE__</div>
+    </section>
+
+    <section class="panel">
+      <h2>Detailed Comparison</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Benchmark</th>
+            <th>Main time</th>
+            <th>PR time</th>
+            <th>Time delta</th>
+            <th>Main throughput</th>
+            <th>PR throughput</th>
+            <th>Throughput delta</th>
+          </tr>
+        </thead>
+        <tbody>
+          __TABLE_ROWS__
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    const rows = __CHART_ROWS_JSON__;
+    new Chart(document.getElementById("timeChart"), {
+      type: "bar",
+      data: {
+        labels: rows.map((row) => row.name),
+        datasets: [
+          {
+            label: "Main baseline (ns)",
+            data: rows.map((row) => row.baseline_time),
+            backgroundColor: "rgba(135, 168, 208, 0.8)",
+            borderColor: "rgba(135, 168, 208, 1)",
+            borderWidth: 1,
+          },
+          {
+            label: "Current PR (ns)",
+            data: rows.map((row) => row.current_time),
+            backgroundColor: "rgba(212, 139, 84, 0.8)",
+            borderColor: "rgba(212, 139, 84, 1)",
+            borderWidth: 1,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        scales: {
+          y: {
+            beginAtZero: true,
+            title: {
+              display: true,
+              text: "time (ns)"
+            }
+          }
+        }
+      }
+    });
+
+    const throughputRows = rows.filter((row) => row.baseline_throughput !== null && row.current_throughput !== null);
+    new Chart(document.getElementById("throughputChart"), {
+      type: "bar",
+      data: {
+        labels: throughputRows.map((row) => row.name),
+        datasets: [
+          {
+            label: "Main throughput",
+            data: throughputRows.map((row) => row.baseline_throughput),
+            backgroundColor: "rgba(19, 106, 61, 0.75)",
+            borderColor: "rgba(19, 106, 61, 1)",
+            borderWidth: 1,
+          },
+          {
+            label: "Current PR throughput",
+            data: throughputRows.map((row) => row.current_throughput),
+            backgroundColor: "rgba(246, 175, 76, 0.85)",
+            borderColor: "rgba(246, 175, 76, 1)",
+            borderWidth: 1,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        scales: {
+          y: {
+            beginAtZero: true,
+            title: {
+              display: true,
+              text: "throughput (elem/s)"
+            }
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

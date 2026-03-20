@@ -1,0 +1,77 @@
+name: perf-regression
+
+on:
+  pull_request:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  perf-pr:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: perf-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo bench
+        run: cargo bench -- "update 10000 KVs" | tee output.txt
+
+      - name: Parse current PR benchmark
+        run: python3 scripts/perf/parse_cargo_bench.py output.txt current-pr.json
+
+      - name: Download latest main baseline
+        run: |
+          BASELINE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/dev/bench/latest-main.json"
+          curl -fsSL "$BASELINE_URL" -o latest-main.json
+
+      - name: Render PR benchmark report
+        run: python3 scripts/perf/render_pr_report.py latest-main.json current-pr.json report
+
+      - name: Upload PR benchmark report
+        id: upload_pr_benchmark_report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-benchmark-report
+          path: report
+
+      - name: Publish step summary
+        run: cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment PR with artifact link
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("fs");
+            const summary = fs.readFileSync("report/summary.md", "utf8");
+            const artifactUrl = "${{ steps.upload_pr_benchmark_report.outputs.artifact-url }}";
+            const body = [
+              summary.trim(),
+              "",
+              `- Download the [pr-benchmark-report artifact](${artifactUrl}) to inspect the HTML comparison chart.`
+            ].join("\n");
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
