@@ -4,6 +4,7 @@ on:
   pull_request:
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
@@ -41,7 +42,7 @@ jobs:
       - name: Download latest main baseline
         run: |
           git fetch origin gh-pages
-          git show origin/gh-pages:dev/bench/latest-main.json > latest-main.json
+          git show origin/gh-pages:benchmarks/latest-main.json > latest-main.json
           python3 -m json.tool latest-main.json >/dev/null
 
       - name: Render PR benchmark report
