@@ -22,7 +22,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: nightly-2026-03-20
           override: true
 
       - name: Cache cargo
@@ -103,3 +103,8 @@ jobs:
           git add dev/bench/latest-main.json
           git commit -m "Update latest main baseline for ${GITHUB_SHA}" || exit 0
           git push origin gh-pages:gh-pages
+
+      - name: Print benchmark dashboard link
+        run: |
+          PAGES_BASE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/dev/bench"
+          echo "- [Benchmark dashboard](${PAGES_BASE_URL}/)" >> "$GITHUB_STEP_SUMMARY"

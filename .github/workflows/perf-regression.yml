@@ -20,7 +20,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: nightly-2026-03-20
           override: true
 
       - name: Cache cargo
@@ -40,8 +40,9 @@ jobs:
 
       - name: Download latest main baseline
         run: |
-          BASELINE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/dev/bench/latest-main.json"
-          curl -fsSL "$BASELINE_URL" -o latest-main.json
+          git fetch origin gh-pages
+          git show origin/gh-pages:dev/bench/latest-main.json > latest-main.json
+          python3 -m json.tool latest-main.json >/dev/null
 
       - name: Render PR benchmark report
         run: python3 scripts/perf/render_pr_report.py latest-main.json current-pr.json report
