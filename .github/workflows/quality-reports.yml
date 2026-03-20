@@ -163,14 +163,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: coverage-html
           path: ./public
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Publish coverage report to gh-pages
         run: |
