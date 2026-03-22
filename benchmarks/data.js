@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774006839282,
+  "lastUpdate": 1774183079602,
   "repoUrl": "https://github.com/megaeth-labs/salt",
   "entries": {
     "salt-benchmark-time": [
@@ -146,6 +146,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "update 10000 KVs/16 threads",
             "value": 24800000,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yunlong@megaeth.technology",
+            "name": "yunlonggao-mega",
+            "username": "yunlonggao-mega"
+          },
+          "committer": {
+            "email": "yunlong@megaeth.technology",
+            "name": "yunlonggao-mega",
+            "username": "yunlonggao-mega"
+          },
+          "distinct": true,
+          "id": "0ff10bbaef48b51a0d4f5115b958dd8ce3265fcb",
+          "message": "remove threshold config",
+          "timestamp": "2026-03-22T20:32:04+08:00",
+          "tree_id": "7a215f4eacacdbb1dd26ab4c9cc137ae8a0d7a33",
+          "url": "https://github.com/megaeth-labs/salt/commit/0ff10bbaef48b51a0d4f5115b958dd8ce3265fcb"
+        },
+        "date": 1774183078246,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "update 10000 KVs/1 threads",
+            "value": 136770000,
+            "unit": "ns"
+          },
+          {
+            "name": "update 10000 KVs/2 threads",
+            "value": 67922000,
+            "unit": "ns"
+          },
+          {
+            "name": "update 10000 KVs/4 threads",
+            "value": 41668000,
+            "unit": "ns"
+          },
+          {
+            "name": "update 10000 KVs/8 threads",
+            "value": 28001000,
+            "unit": "ns"
+          },
+          {
+            "name": "update 10000 KVs/16 threads",
+            "value": 22601000,
             "unit": "ns"
           }
         ]
