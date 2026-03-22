@@ -58,7 +58,6 @@ jobs:
 
   perf-benchmark:
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/gao/perf-ci'
-    needs: coverage
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
@@ -110,7 +109,6 @@ jobs:
           benchmark-data-dir-path: benchmarks
           max-items-in-chart: 30
           summary-always: true
-          alert-threshold: "105%"
           comment-on-alert: false
           fail-on-alert: false
 
@@ -135,7 +133,6 @@ jobs:
           benchmark-data-dir-path: benchmarks
           max-items-in-chart: 30
           summary-always: true
-          alert-threshold: "95%"
           comment-on-alert: false
           fail-on-alert: false
 
