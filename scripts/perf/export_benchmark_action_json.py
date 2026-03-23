@@ -28,8 +28,8 @@ def main() -> int:
             entries.append(
                 {
                     "name": benchmark["name"],
-                    "unit": "ns",
-                    "value": value,
+                    "unit": "ms",
+                    "value": value / 1_000_000,
                 }
             )
             continue

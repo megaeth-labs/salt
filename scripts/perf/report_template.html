@@ -228,15 +228,15 @@
         labels: rows.map((row) => row.name),
         datasets: [
           {
-            label: "Main baseline (ns)",
-            data: rows.map((row) => row.baseline_time),
+            label: "Main baseline (ms)",
+            data: rows.map((row) => row.baseline_time / 1_000_000),
             backgroundColor: "rgba(135, 168, 208, 0.8)",
             borderColor: "rgba(135, 168, 208, 1)",
             borderWidth: 1,
           },
           {
-            label: "Current PR (ns)",
-            data: rows.map((row) => row.current_time),
+            label: "Current PR (ms)",
+            data: rows.map((row) => row.current_time / 1_000_000),
             backgroundColor: "rgba(212, 139, 84, 0.8)",
             borderColor: "rgba(212, 139, 84, 1)",
             borderWidth: 1,
@@ -251,7 +251,7 @@
             beginAtZero: true,
             title: {
               display: true,
-              text: "time (ns)"
+              text: "time (ms)"
             }
           }
         }
