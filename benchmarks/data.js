@@ -27,28 +27,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 137240000,
-            "unit": "ns"
+            "value": 137.24,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 74123000,
-            "unit": "ns"
+            "value": 74.123,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 39935000,
-            "unit": "ns"
+            "value": 39.935,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 23671000,
-            "unit": "ns"
+            "value": 23.671,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 19000000,
-            "unit": "ns"
+            "value": 19.0,
+            "unit": "ms"
           }
         ]
       },
@@ -76,28 +76,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 131889999.99999999,
-            "unit": "ns"
+            "value": 131.89,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 69933000,
-            "unit": "ns"
+            "value": 69.933,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 37287000,
-            "unit": "ns"
+            "value": 37.287,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 22606000,
-            "unit": "ns"
+            "value": 22.606,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 17839000,
-            "unit": "ns"
+            "value": 17.839,
+            "unit": "ms"
           }
         ]
       },
@@ -125,28 +125,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 148440000,
-            "unit": "ns"
+            "value": 148.44,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 70254000,
-            "unit": "ns"
+            "value": 70.254,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 42683000,
-            "unit": "ns"
+            "value": 42.683,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 27237000,
-            "unit": "ns"
+            "value": 27.237,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 24800000,
-            "unit": "ns"
+            "value": 24.8,
+            "unit": "ms"
           }
         ]
       },
@@ -174,28 +174,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 136770000,
-            "unit": "ns"
+            "value": 136.77,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 67922000,
-            "unit": "ns"
+            "value": 67.922,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 41668000,
-            "unit": "ns"
+            "value": 41.668,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 28001000,
-            "unit": "ns"
+            "value": 28.001,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 22601000,
-            "unit": "ns"
+            "value": 22.601,
+            "unit": "ms"
           }
         ]
       },
@@ -223,28 +223,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 130750000,
-            "unit": "ns"
+            "value": 130.75,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 72962000,
-            "unit": "ns"
+            "value": 72.962,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 42865000,
-            "unit": "ns"
+            "value": 42.865,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 29002000,
-            "unit": "ns"
+            "value": 29.002,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 25181000,
-            "unit": "ns"
+            "value": 25.181,
+            "unit": "ms"
           }
         ]
       },
@@ -272,28 +272,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 144290000,
-            "unit": "ns"
+            "value": 144.29,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 71484000,
-            "unit": "ns"
+            "value": 71.484,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 40445000,
-            "unit": "ns"
+            "value": 40.445,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 28789000,
-            "unit": "ns"
+            "value": 28.789,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 19291000,
-            "unit": "ns"
+            "value": 19.291,
+            "unit": "ms"
           }
         ]
       }

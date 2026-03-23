@@ -27,28 +27,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 129970000,
-            "unit": "ns"
+            "value": 129.97,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 71333000,
-            "unit": "ns"
+            "value": 71.333,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 42928000,
-            "unit": "ns"
+            "value": 42.928,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 23273000,
-            "unit": "ns"
+            "value": 23.273,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 18998000,
-            "unit": "ns"
+            "value": 18.998,
+            "unit": "ms"
           }
         ]
       },
@@ -76,28 +76,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 124300000,
-            "unit": "ns"
+            "value": 124.3,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 66269000.00000001,
-            "unit": "ns"
+            "value": 66.269,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 37451000,
-            "unit": "ns"
+            "value": 37.451,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 24955000,
-            "unit": "ns"
+            "value": 24.955,
+            "unit": "ms"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 24261000,
-            "unit": "ns"
+            "value": 24.261,
+            "unit": "ms"
           }
         ]
       }
