@@ -30,10 +30,14 @@ use salt::{
     trie::trie::StateRoot,
     types::*,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hint::black_box;
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const STABILITY_WINDOW: usize = 5;
+const STABILITY_THRESHOLD: f64 = 0.02;
+const MAX_WARMUP_ITERS: usize = 50;
 
 /// Generates synthetic state updates for benchmarking SALT trie operations.
 ///
@@ -85,6 +89,58 @@ fn gen_state_updates(num: usize, l: usize, rng: &mut StdRng) -> Vec<StateUpdates
         .collect()
 }
 
+fn is_stable(samples: &VecDeque<Duration>) -> bool {
+    if samples.len() < STABILITY_WINDOW {
+        return false;
+    }
+
+    let min = samples
+        .iter()
+        .map(|duration| duration.as_secs_f64())
+        .fold(f64::INFINITY, f64::min);
+    let max = samples
+        .iter()
+        .map(|duration| duration.as_secs_f64())
+        .fold(0.0, f64::max);
+
+    min.is_finite() && min > 0.0 && ((max / min) - 1.0) <= STABILITY_THRESHOLD
+}
+
+fn warm_until_stable<F>(bench_name: &str, mut f: F)
+where
+    F: FnMut(),
+{
+    let mut recent = VecDeque::with_capacity(STABILITY_WINDOW);
+
+    for iteration in 1..=MAX_WARMUP_ITERS {
+        let start = Instant::now();
+        f();
+        let elapsed = start.elapsed();
+
+        if recent.len() == STABILITY_WINDOW {
+            recent.pop_front();
+        }
+        recent.push_back(elapsed);
+
+        if is_stable(&recent) {
+            eprintln!(
+                "Warmup stabilized for {bench_name} after {iteration} iterations (latest {:.3} ms)",
+                elapsed.as_secs_f64() * 1_000.0
+            );
+            return;
+        }
+    }
+
+    let latest_ms = recent
+        .back()
+        .map(|duration| duration.as_secs_f64() * 1_000.0)
+        .unwrap_or_default();
+    eprintln!(
+        "Warmup did not stabilize for {bench_name} within {MAX_WARMUP_ITERS} iterations (latest {:.3} ms)",
+        latest_ms
+    );
+}
+
 /// Comprehensive benchmark suite for SALT trie state root computation performance.
 ///
 /// Tests five different update patterns to identify optimal usage strategies and
@@ -104,13 +160,30 @@ fn benchmark_trie_updates(c: &mut Criterion) {
 
         // Test with different thread counts
         for num_threads in [1, 2, 4, 8, 16] {
-            group.bench_function(format!("{num_threads} threads"), |b| {
-                // Create thread pool for this specific thread count
-                let pool = ThreadPoolBuilder::new()
-                    .num_threads(num_threads)
-                    .build()
-                    .unwrap();
+            // Create thread pool for this specific thread count
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap();
 
+            if batch_size == 10_000 {
+                warm_until_stable(
+                    &format!("update {batch_size} KVs/{num_threads} threads"),
+                    || {
+                        let inputs = gen_state_updates(1, batch_size, &mut rng);
+                        pool.install(|| {
+                            black_box(
+                                StateRoot::new(&EmptySalt)
+                                    .with_deferred_levels(3)
+                                    .update_fin(&inputs.into_iter().next().unwrap())
+                                    .unwrap(),
+                            )
+                        });
+                    },
+                );
+            }
+
+            group.bench_function(format!("{num_threads} threads"), |b| {
                 b.iter_batched(
                     || gen_state_updates(1, batch_size, &mut rng),
                     |inputs| {
