@@ -131,7 +131,7 @@ def render_table(rows: list[dict]) -> str:
         return "_No overlapping benchmarks found._"
 
     lines = [
-        "| Benchmark | Main Time | PR Time | Time Delta | Main Throughput | PR Throughput | Throughput Delta |",
+        "| Benchmark | Baseline Time | PR Time | Time Change | Baseline Throughput | PR Throughput | Throughput Change |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
