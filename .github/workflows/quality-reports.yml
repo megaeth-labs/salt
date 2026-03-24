@@ -57,8 +57,8 @@ jobs:
           fail_ci_if_error: true
 
   perf-benchmark:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/gao/perf-ci'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: write
@@ -142,7 +142,7 @@ jobs:
 
   # Publish the coverage report to gh-pages only from main
   deploy-pages:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/gao/perf-ci'
     needs:
       - coverage
       - perf-benchmark
