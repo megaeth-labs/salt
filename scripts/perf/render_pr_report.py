@@ -45,8 +45,6 @@ def format_count(value: float) -> str:
 def render_rows(rows: list[dict]) -> str:
     rendered = []
     for row in rows:
-        time_status_class = row["time_status_class"]
-        throughput_status_class = row["throughput_status_class"]
         baseline_throughput = "-"
         current_throughput = "-"
         throughput_delta = "-"
@@ -59,10 +57,10 @@ def render_rows(rows: list[dict]) -> str:
             f"<td>{html.escape(row['name'])}</td>"
             f"<td>{html.escape(format_ns(row['baseline_time']))}</td>"
             f"<td>{html.escape(format_ns(row['current_time']))}</td>"
-            f"<td class=\"{time_status_class}\">{html.escape(format_pct(row['time_delta_pct']))}</td>"
+            f"<td>{html.escape(format_pct(row['time_delta_pct']))}</td>"
             f"<td>{html.escape(baseline_throughput)}</td>"
             f"<td>{html.escape(current_throughput)}</td>"
-            f"<td class=\"{throughput_status_class}\">{html.escape(throughput_delta)}</td>"
+            f"<td>{html.escape(throughput_delta)}</td>"
             "</tr>"
         )
     return "\n".join(rendered)
@@ -89,20 +87,11 @@ def main() -> int:
     names = sorted(set(baseline_map) & set(current_map))
 
     rows = []
-    time_regression_count = 0
-    time_improvement_count = 0
-    throughput_regression_count = 0
-    throughput_improvement_count = 0
 
     for name in names:
         baseline_value = float(baseline_map[name].get("time_ns", baseline_map[name]["value"]))
         current_value = float(current_map[name].get("time_ns", current_map[name]["value"]))
         delta_pct = ((current_value - baseline_value) / baseline_value * 100.0) if baseline_value else 0.0
-        time_status_class = "regression" if delta_pct > 0 else "improvement"
-        if delta_pct > 0:
-            time_regression_count += 1
-        elif delta_pct < 0:
-            time_improvement_count += 1
 
         baseline_throughput = baseline_map[name].get("throughput_value")
         current_throughput = current_map[name].get("throughput_value")
@@ -113,7 +102,6 @@ def main() -> int:
         if current_throughput_normalized is None and current_throughput is not None:
             current_throughput_normalized = current_throughput
         throughput_delta_pct = None
-        throughput_status_class = ""
         if (
             baseline_throughput_normalized is not None
             and current_throughput_normalized is not None
@@ -124,11 +112,6 @@ def main() -> int:
                 / baseline_throughput_normalized
                 * 100.0
             )
-            throughput_status_class = "improvement" if throughput_delta_pct > 0 else "regression"
-            if throughput_delta_pct > 0:
-                throughput_improvement_count += 1
-            elif throughput_delta_pct < 0:
-                throughput_regression_count += 1
 
         rows.append(
             {
@@ -136,11 +119,9 @@ def main() -> int:
                 "baseline_time": baseline_value,
                 "current_time": current_value,
                 "time_delta_pct": delta_pct,
-                "time_status_class": time_status_class,
                 "baseline_throughput": baseline_throughput_normalized,
                 "current_throughput": current_throughput_normalized,
                 "throughput_delta_pct": throughput_delta_pct if throughput_delta_pct is not None else 0.0,
-                "throughput_status_class": throughput_status_class,
             }
         )
 
@@ -161,10 +142,6 @@ def main() -> int:
         "__GENERATED_AT__": rendered_generated_at,
         "__BASELINE_GENERATED_AT__": baseline_generated,
         "__CURRENT_GENERATED_AT__": current_generated,
-        "__TIME_REGRESSION_COUNT__": str(time_regression_count),
-        "__TIME_IMPROVEMENT_COUNT__": str(time_improvement_count),
-        "__THROUGHPUT_REGRESSION_COUNT__": str(throughput_regression_count),
-        "__THROUGHPUT_IMPROVEMENT_COUNT__": str(throughput_improvement_count),
         "__OVERLAP_NOTE__": html.escape(overlap_note),
         "__TABLE_ROWS__": render_rows(rows),
         "__CHART_ROWS_JSON__": json.dumps(rows),
@@ -176,14 +153,10 @@ def main() -> int:
     (output_dir / "index.html").write_text(template, encoding="utf-8")
 
     summary_lines = [
-        "## Performance Regression Report",
+        "## Performance Benchmark Report",
         "",
         f"- Main baseline generated at: `{baseline_generated}`",
         f"- Current PR generated at: `{current_generated}`",
-        f"- Time regressions: `{time_regression_count}`",
-        f"- Time improvements: `{time_improvement_count}`",
-        f"- Throughput regressions: `{throughput_regression_count}`",
-        f"- Throughput improvements: `{throughput_improvement_count}`",
     ]
     if overlap_note:
         summary_lines.extend(["", overlap_note])
