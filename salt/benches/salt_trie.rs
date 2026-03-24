@@ -36,7 +36,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 const STABILITY_WINDOW: usize = 5;
-const STABILITY_THRESHOLD: f64 = 0.02;
+const STABILITY_THRESHOLD: f64 = 0.05;
 const MAX_WARMUP_ITERS: usize = 50;
 
 /// Generates synthetic state updates for benchmarking SALT trie operations.
