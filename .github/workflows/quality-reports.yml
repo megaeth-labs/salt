@@ -121,6 +121,9 @@ jobs:
         run: python3 scripts/perf/export_benchmark_action_json.py latest-main.json throughput benchmark-throughput.json
 
       - name: Reset local gh-pages branch before throughput chart update
+        # benchmark-action/github-action-benchmark checks out gh-pages locally after pushing.
+        # We must delete the local branch before the next benchmark-action call so it can
+        # re-fetch a clean copy; otherwise it fails with a non-fast-forward error.
         run: |
           git branch -D gh-pages 2>/dev/null || true
           git checkout -- .

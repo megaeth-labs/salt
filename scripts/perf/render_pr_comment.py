@@ -41,7 +41,10 @@ def format_count(value: float) -> str:
 
 def get_benchmark_time_ns(item: dict) -> float:
     """Read a benchmark's normalized time."""
-    return float(item["time_ns"])
+    value = item.get("time_ns", item.get("value"))
+    if value is None:
+        raise KeyError(f"benchmark entry has no 'time_ns' or 'value' field: {item.get('name')}")
+    return float(value)
 
 
 def get_benchmark_throughput(item: dict) -> float | None:
@@ -96,33 +99,10 @@ def build_rows(baseline: dict, current: dict) -> list[dict]:
 
 
 def summarize_rows(rows: list[dict]) -> list[str]:
-    """Build a short, human-readable summary for the comment header."""
+    """Build a short summary for the comment header."""
     if not rows:
         return ["This PR run did not match any benchmark entries from the latest `main` baseline."]
-
-    slowdowns = [row for row in rows if row["time_delta_pct"] > 0]
-    speedups = [row for row in rows if row["time_delta_pct"] < 0]
-
-    if not slowdowns and not speedups:
-        return [f"No meaningful change showed up across the `{len(rows)}` benchmark entries compared with the latest `main` baseline."]
-
-    lines = ["This PR is compared with the most recent benchmark results from the main branch."]
-    if slowdowns:
-        slowest = max(slowdowns, key=lambda row: row["time_delta_pct"])
-        lines.append(
-            f"The biggest slowdown was `{slowest['name']}` at `{format_pct(slowest['time_delta_pct'])}`."
-        )
-    else:
-        lines.append("No slowdowns were detected.")
-
-    if speedups:
-        fastest = min(speedups, key=lambda row: row["time_delta_pct"])
-        lines.append(
-            f"The biggest speedup was `{fastest['name']}` at `{format_pct(fastest['time_delta_pct'])}`."
-        )
-    else:
-        lines.append("No speedups were detected.")
-    return lines
+    return [f"Compared `{len(rows)}` benchmark(s) against the latest `main` baseline."]
 
 
 def render_table(rows: list[dict]) -> str:
