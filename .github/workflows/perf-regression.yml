@@ -50,32 +50,19 @@ jobs:
           git show origin/gh-pages:benchmarks/latest-main.json > latest-main.json
           python3 -m json.tool latest-main.json >/dev/null
 
-      - name: Render PR benchmark report
-        run: python3 scripts/perf/render_pr_report.py latest-main.json current-pr.json report
-
-      - name: Upload PR benchmark report
-        id: upload_pr_benchmark_report
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-benchmark-report
-          path: report
+      - name: Render PR benchmark comment
+        run: python3 scripts/perf/render_pr_comment.py latest-main.json current-pr.json report
 
       - name: Publish step summary
         run: cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment PR with artifact link
+      - name: Comment PR with detailed comparison
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require("fs");
-            const summary = fs.readFileSync("report/summary.md", "utf8");
-            const artifactUrl = "${{ steps.upload_pr_benchmark_report.outputs.artifact-url }}";
-            const body = [
-              summary.trim(),
-              "",
-              `- Download the [pr-benchmark-report artifact](${artifactUrl}) to inspect the HTML comparison chart.`
-            ].join("\n");
+            const body = fs.readFileSync("report/comment.md", "utf8").trim();
 
             const marker = "<!-- perf-regression-report -->";
             const markedBody = marker + "\n" + body;
