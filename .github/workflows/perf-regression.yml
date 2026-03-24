@@ -17,6 +17,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Print CPU info
+        shell: bash
+        run: |
+          echo "=== nproc ==="
+          nproc
+          echo
+          echo "=== lscpu ==="
+          lscpu
+          echo
+          echo "=== /proc/cpuinfo model name ==="
+          grep -m 1 "model name" /proc/cpuinfo
+          echo
+          echo "=== /proc/cpuinfo MHz ==="
+          grep -m 1 "cpu MHz" /proc/cpuinfo || true
+
       - name: Install nightly toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
