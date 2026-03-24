@@ -1,62 +1,62 @@
 {
   "schema": 1,
-  "generated_at": "2026-03-24T02:19:47.143895+00:00",
+  "generated_at": "2026-03-24T02:27:30.297680+00:00",
   "source_file": "output.txt",
   "benchmarks": [
     {
       "name": "update 10000 KVs/1 threads",
       "unit": "ns",
-      "value": 125290000.0,
-      "time_ns": 125290000.0,
+      "value": 127020000.0,
+      "time_ns": 127020000.0,
       "source": "criterion",
       "source_unit": "ms",
-      "throughput_value": 79.816,
+      "throughput_value": 78.727,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 79816.0
+      "throughput_elem_per_sec": 78727.0
     },
     {
       "name": "update 10000 KVs/2 threads",
       "unit": "ns",
-      "value": 66242999.99999999,
-      "time_ns": 66242999.99999999,
+      "value": 66078000.0,
+      "time_ns": 66078000.0,
       "source": "criterion",
       "source_unit": "ms",
-      "throughput_value": 150.96,
+      "throughput_value": 151.34,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 150960.0
+      "throughput_elem_per_sec": 151340.0
     },
     {
       "name": "update 10000 KVs/4 threads",
       "unit": "ns",
-      "value": 37061000.0,
-      "time_ns": 37061000.0,
+      "value": 38542000.0,
+      "time_ns": 38542000.0,
       "source": "criterion",
       "source_unit": "ms",
-      "throughput_value": 269.83,
+      "throughput_value": 259.46,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 269830.0
+      "throughput_elem_per_sec": 259459.99999999997
     },
     {
       "name": "update 10000 KVs/8 threads",
       "unit": "ns",
-      "value": 22907000.0,
-      "time_ns": 22907000.0,
+      "value": 24934000.0,
+      "time_ns": 24934000.0,
       "source": "criterion",
       "source_unit": "ms",
-      "throughput_value": 436.55,
+      "throughput_value": 401.06,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 436550.0
+      "throughput_elem_per_sec": 401060.0
     },
     {
       "name": "update 10000 KVs/16 threads",
       "unit": "ns",
-      "value": 20676000.0,
-      "time_ns": 20676000.0,
+      "value": 21865000.0,
+      "time_ns": 21865000.0,
       "source": "criterion",
       "source_unit": "ms",
-      "throughput_value": 483.66,
+      "throughput_value": 457.35,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 483660.0
+      "throughput_elem_per_sec": 457350.0
     }
   ]
 }
