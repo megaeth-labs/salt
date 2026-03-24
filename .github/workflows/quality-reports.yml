@@ -1,0 +1,198 @@
+name: quality-reports
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: quality-reports-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nightly toolchain + llvm-tools (needed by cargo-llvm-cov)
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      # Speed up builds by caching Cargo registry/git/target
+      - uses: Swatinem/rust-cache@v2
+
+      # Fast install of cargo-llvm-cov (prebuilt) instead of building from source
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Run instrumented tests once (produces .profraw data)
+      - name: Run instrumented tests
+        run: cargo llvm-cov --features test-bucket-resize --workspace --branch --doctests --no-report
+
+      # Generate LCOV report for Codecov
+      - name: Generate LCOV report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      # Generate HTML report for GitHub Pages
+      - name: Generate HTML report
+        run: cargo llvm-cov report --html
+
+      # Make the browsable HTML available as a build artifact (useful for PRs)
+      - name: Upload HTML report (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html
+
+      # Upload LCOV to Codecov
+      - name: Upload LCOV to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+  perf-benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, perf]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print CPU info
+        shell: bash
+        run: |
+          echo "=== nproc ==="
+          nproc
+          echo
+          echo "=== lscpu ==="
+          lscpu
+          echo
+          echo "=== /proc/cpuinfo model name ==="
+          grep -m 1 "model name" /proc/cpuinfo
+          echo
+          echo "=== /proc/cpuinfo MHz ==="
+          grep -m 1 "cpu MHz" /proc/cpuinfo || true
+
+      - name: Install nightly toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-03-20
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo bench
+        run: cargo bench -- "update 10000 KVs" | tee output.txt
+
+      - name: Generate latest main baseline
+        run: python3 scripts/perf/parse_cargo_bench.py output.txt latest-main.json
+
+      - name: Upload latest main baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-main-baseline
+          path: latest-main.json
+
+      - name: Build time chart input
+        run: python3 scripts/perf/export_benchmark_action_json.py latest-main.json time benchmark-time.json
+
+      - name: Update time benchmark history on GitHub Pages
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: salt-benchmark-time
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-time.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: benchmarks
+          max-items-in-chart: 30
+          summary-always: true
+          comment-on-alert: false
+          fail-on-alert: false
+
+      - name: Build throughput chart input
+        run: python3 scripts/perf/export_benchmark_action_json.py latest-main.json throughput benchmark-throughput.json
+
+      - name: Reset local gh-pages branch before throughput chart update
+        run: |
+          git branch -D gh-pages 2>/dev/null || true
+          git checkout -- .
+        shell: bash
+
+      - name: Update throughput benchmark history on GitHub Pages
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: salt-benchmark-throughput
+          tool: customBiggerIsBetter
+          output-file-path: benchmark-throughput.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: benchmarks
+          max-items-in-chart: 30
+          summary-always: true
+          comment-on-alert: false
+          fail-on-alert: false
+
+      - name: Publish latest main baseline to GitHub Pages
+        run: |
+          cp latest-main.json /tmp/latest-main.json
+          git branch -D gh-pages 2>/dev/null || true
+          git fetch origin gh-pages:gh-pages
+          git switch gh-pages
+          mkdir -p benchmarks
+          cp /tmp/latest-main.json benchmarks/latest-main.json
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add benchmarks/latest-main.json
+          git commit -m "Update latest main baseline for ${GITHUB_SHA}" || exit 0
+          git push origin gh-pages:gh-pages
+
+  # Publish the coverage report to gh-pages only from main
+  deploy-pages:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs:
+      - coverage
+      - perf-benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-html
+          path: ./public
+
+      - name: Publish coverage report to gh-pages
+        run: |
+          git fetch origin gh-pages
+          git switch --create gh-pages --track origin/gh-pages || git switch gh-pages
+          rm -rf coverage
+          mkdir -p coverage
+          cp -R public/. coverage/
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add coverage
+          git commit -m "Update coverage report for ${GITHUB_SHA}" || exit 0
+          git push origin gh-pages:gh-pages
+
+      - name: Print Pages links
+        run: |
+          SITE_BASE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          {
+            echo "## Pages Links"
+            echo
+            echo "- [Coverage report](${SITE_BASE_URL}/coverage/)"
+            echo "- [Benchmark dashboard](${SITE_BASE_URL}/benchmarks/)"
+          } >> "$GITHUB_STEP_SUMMARY"
