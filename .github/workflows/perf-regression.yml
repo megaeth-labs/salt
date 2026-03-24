@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Print CPU info
+      - name: Verify benchmark host
         shell: bash
         run: |
           echo "=== nproc ==="
