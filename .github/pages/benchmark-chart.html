@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SALT Benchmark — Throughput</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: #0d1117;
+      color: #e6edf3;
+      padding: 32px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: #f0f6fc;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #8b949e;
+      margin-bottom: 28px;
+    }
+    .chart-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 24px;
+      max-width: 900px;
+    }
+    .chart-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #c9d1d9;
+      margin-bottom: 16px;
+    }
+    .chart-wrap {
+      position: relative;
+      height: 340px;
+    }
+    #error {
+      color: #f78166;
+      font-size: 13px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>SALT Benchmark Dashboard</h1>
+  <p class="subtitle">update 10000 KVs throughput</p>
+
+  <div class="chart-card">
+    <div class="chart-title">Throughput over commits</div>
+    <p id="error"></p>
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const COLORS = {
+      t1:  { line: "#58a6ff", fill: "rgba(88,166,255,0.08)"  },
+      t2:  { line: "#3fb950", fill: "rgba(63,185,80,0.08)"   },
+      t4:  { line: "#d29922", fill: "rgba(210,153,34,0.08)"  },
+      t8:  { line: "#f78166", fill: "rgba(247,129,102,0.08)" },
+      t16: { line: "#bc8cff", fill: "rgba(188,140,255,0.08)" },
+    };
+
+    function makeDataset(label, key, color, data) {
+      return {
+        label,
+        data: data.map(d => d[key] ?? null),
+        borderColor: color.line,
+        backgroundColor: color.fill,
+        borderWidth: 2,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        pointBackgroundColor: color.line,
+        tension: 0.3,
+        fill: false,
+        spanGaps: true,
+      };
+    }
+
+    function renderChart(data) {
+      // Two-line x-axis: commit hash on first line, date on second
+      const labels = data.map(d => [d.commit, d.date]);
+      const ctx = document.getElementById("chart").getContext("2d");
+
+      new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            makeDataset("1 thread",   "t1",  COLORS.t1,  data),
+            makeDataset("2 threads",  "t2",  COLORS.t2,  data),
+            makeDataset("4 threads",  "t4",  COLORS.t4,  data),
+            makeDataset("8 threads",  "t8",  COLORS.t8,  data),
+            makeDataset("16 threads", "t16", COLORS.t16, data),
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: {
+              position: "top",
+              labels: {
+                color: "#8b949e",
+                font: { size: 12 },
+                boxWidth: 16,
+                padding: 16,
+              },
+            },
+            tooltip: {
+              backgroundColor: "#1c2128",
+              borderColor: "#30363d",
+              borderWidth: 1,
+              titleColor: "#c9d1d9",
+              bodyColor: "#8b949e",
+              padding: 12,
+              callbacks: {
+                title(items) {
+                  const i = items[0].dataIndex;
+                  return `${data[i].commit}  ${data[i].date}`;
+                },
+                label(item) {
+                  if (item.parsed.y === null) return null;
+                  return `  ${item.dataset.label}: ${item.parsed.y.toLocaleString()} Kelem/s`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: {
+                color: "#8b949e",
+                font: { size: 11, family: "monospace" },
+                maxRotation: 0,
+              },
+              grid: { color: "#21262d" },
+            },
+            y: {
+              title: {
+                display: true,
+                text: "Throughput (Kelem/s)",
+                color: "#8b949e",
+                font: { size: 12 },
+              },
+              ticks: { color: "#8b949e", font: { size: 11 } },
+              grid: { color: "#21262d" },
+              beginAtZero: false,
+            },
+          },
+        },
+      });
+    }
+
+    fetch("./data.json")
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(data => {
+        if (!Array.isArray(data) || data.length === 0) {
+          throw new Error("data.json is empty or invalid");
+        }
+        renderChart(data);
+      })
+      .catch(err => {
+        const el = document.getElementById("error");
+        el.textContent = `Failed to load benchmark data: ${err.message}`;
+        el.style.display = "block";
+      });
+  </script>
+</body>
+</html>

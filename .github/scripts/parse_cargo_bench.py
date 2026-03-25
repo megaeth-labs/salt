@@ -6,8 +6,7 @@ into this script. The output format is a small JSON document consumed by later
 reporting steps:
 
 - `render_pr_comment.py` compares a PR run against the published main baseline.
-- `export_benchmark_action_json.py` emits the shape expected by
-  `benchmark-action/github-action-benchmark`.
+- `append_benchmark_history.py` appends per-thread throughput to the gh-pages history.
 
 The parser supports both Criterion-style output and libtest benchmark lines.
 Whenever possible we normalize times to nanoseconds and throughput to

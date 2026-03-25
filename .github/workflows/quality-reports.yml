@@ -101,37 +101,35 @@ jobs:
           name: latest-main-baseline
           path: latest-main.json
 
-      - name: Build throughput chart input
-        run: python3 .github/scripts/export_benchmark_action_json.py latest-main.json throughput benchmark-throughput.json
-
-      - name: Update throughput benchmark history on GitHub Pages
-        uses: benchmark-action/github-action-benchmark@v1
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
         with:
-          name: salt-kv-update-throughput
-          tool: customBiggerIsBetter
-          output-file-path: benchmark-throughput.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: benchmarks
-          max-items-in-chart: 30
-          summary-always: true
-          comment-on-alert: false
-          fail-on-alert: false
+          ref: gh-pages
+          path: gh-pages-dir
 
-      - name: Publish latest main baseline to GitHub Pages
+      - name: Publish benchmark history and chart to GitHub Pages
+        shell: bash
         run: |
-          cp latest-main.json /tmp/latest-main.json
-          git branch -D gh-pages 2>/dev/null || true
-          git fetch origin gh-pages:gh-pages
-          git switch gh-pages
-          mkdir -p benchmarks
-          cp /tmp/latest-main.json benchmarks/latest-main.json
+          COMMIT_SHORT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          COMMIT_DATE=$(git log -1 --format=%as)
+
+          mkdir -p gh-pages-dir/benchmarks
+
+          python3 .github/scripts/append_benchmark_history.py \
+            latest-main.json \
+            gh-pages-dir/benchmarks/data.json \
+            "$COMMIT_SHORT" \
+            "$COMMIT_DATE"
+
+          cp .github/pages/benchmark-chart.html gh-pages-dir/benchmarks/index.html
+          cp latest-main.json gh-pages-dir/benchmarks/latest-main.json
+
+          cd gh-pages-dir
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add benchmarks/latest-main.json
-          git commit -m "Update latest main baseline for ${GITHUB_SHA}" || exit 0
-          git push origin gh-pages:gh-pages
+          git add benchmarks/
+          git commit -m "Update benchmark for ${GITHUB_SHA}" || exit 0
+          git push origin gh-pages
 
   # Publish the coverage report to gh-pages only from main
   deploy-pages:
