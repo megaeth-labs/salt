@@ -48,8 +48,14 @@ def build_rows(baseline: dict, current: dict) -> list[dict]:
         baseline_throughput = get_benchmark_throughput(baseline_map[name])
         current_throughput = get_benchmark_throughput(current_map[name])
         throughput_delta_pct = None
-        if baseline_throughput is not None and current_throughput is not None and baseline_throughput:
-            throughput_delta_pct = ((current_throughput - baseline_throughput) / baseline_throughput) * 100.0
+        if (
+            baseline_throughput is not None
+            and current_throughput is not None
+            and baseline_throughput
+        ):
+            throughput_delta_pct = (
+                (current_throughput - baseline_throughput) / baseline_throughput
+            ) * 100.0
 
         rows.append(
             {
@@ -66,7 +72,9 @@ def build_rows(baseline: dict, current: dict) -> list[dict]:
 def summarize_rows(rows: list[dict]) -> list[str]:
     """Build a short summary for the comment header."""
     if not rows:
-        return ["This PR run did not match any benchmark entries from the latest `main` baseline."]
+        return [
+            "This PR run did not match any benchmark entries from the latest `main` baseline."
+        ]
     return [f"Compared `{len(rows)}` benchmark(s) against the latest `main` baseline."]
 
 
@@ -76,14 +84,17 @@ def render_table(rows: list[dict]) -> str:
         return "_No overlapping benchmarks found._"
 
     lines = [
-        "| Benchmark | Baseline (Kelem/s) | PR (Kelem/s) | Change |",
+        "| Benchmark | Baseline Throughput (Kelem/s) | New Throughput (Kelem/s) | Change |",
         "| --- | ---: | ---: | ---: |",
     ]
     for row in rows:
         baseline_throughput = "-"
         current_throughput = "-"
         throughput_delta = "-"
-        if row["baseline_throughput"] is not None and row["current_throughput"] is not None:
+        if (
+            row["baseline_throughput"] is not None
+            and row["current_throughput"] is not None
+        ):
             baseline_throughput = f"{row['baseline_throughput'] / 1_000:.2f}"
             current_throughput = f"{row['current_throughput'] / 1_000:.2f}"
             throughput_delta = format_pct(row["throughput_delta_pct"])
@@ -148,7 +159,9 @@ def main() -> int:
     ]
 
     (output_dir / "comment.md").write_text(comment, encoding="utf-8")
-    (output_dir / "summary.md").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+    (output_dir / "summary.md").write_text(
+        "\n".join(summary_lines) + "\n", encoding="utf-8"
+    )
     return 0
 
 
