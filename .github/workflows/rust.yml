@@ -1,4 +1,9 @@
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
 
 name: Rust
 
@@ -9,12 +14,10 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo check
         uses: actions-rs/cargo@v1
@@ -29,12 +32,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v2
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo test
         uses: actions-rs/cargo@v1
@@ -72,13 +73,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v2
 
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
-          components: rustfmt, clippy
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo fmt
         uses: actions-rs/cargo@v1
