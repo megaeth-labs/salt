@@ -27,28 +27,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 49023,
-            "unit": "elem/s"
+            "value": 49.023,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 89558,
-            "unit": "elem/s"
+            "value": 89.558,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 159570,
-            "unit": "elem/s"
+            "value": 159.57,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 274620,
-            "unit": "elem/s"
+            "value": 274.62,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 400860,
-            "unit": "elem/s"
+            "value": 400.86,
+            "unit": "Kelem/s"
           }
         ]
       },
@@ -76,28 +76,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 48489,
-            "unit": "elem/s"
+            "value": 48.489,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 88974,
-            "unit": "elem/s"
+            "value": 88.974,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 158770,
-            "unit": "elem/s"
+            "value": 158.77,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 275530,
-            "unit": "elem/s"
+            "value": 275.53,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 397940,
-            "unit": "elem/s"
+            "value": 397.94,
+            "unit": "Kelem/s"
           }
         ]
       },
@@ -125,28 +125,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 48905,
-            "unit": "elem/s"
+            "value": 48.905,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 88542,
-            "unit": "elem/s"
+            "value": 88.542,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 158410,
-            "unit": "elem/s"
+            "value": 158.41,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 275360,
-            "unit": "elem/s"
+            "value": 275.36,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 394710,
-            "unit": "elem/s"
+            "value": 394.71,
+            "unit": "Kelem/s"
           }
         ]
       },
@@ -174,28 +174,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 49699,
-            "unit": "elem/s"
+            "value": 49.699,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 89953,
-            "unit": "elem/s"
+            "value": 89.953,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 159700,
-            "unit": "elem/s"
+            "value": 159.7,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 277390,
-            "unit": "elem/s"
+            "value": 277.39,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 404630,
-            "unit": "elem/s"
+            "value": 404.63,
+            "unit": "Kelem/s"
           }
         ]
       },
@@ -223,28 +223,28 @@ window.BENCHMARK_DATA = {
         "benches": [
           {
             "name": "update 10000 KVs/1 threads",
-            "value": 49423,
-            "unit": "elem/s"
+            "value": 49.423,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/2 threads",
-            "value": 90774,
-            "unit": "elem/s"
+            "value": 90.774,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/4 threads",
-            "value": 161030,
-            "unit": "elem/s"
+            "value": 161.03,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/8 threads",
-            "value": 277630,
-            "unit": "elem/s"
+            "value": 277.63,
+            "unit": "Kelem/s"
           },
           {
             "name": "update 10000 KVs/16 threads",
-            "value": 405790,
-            "unit": "elem/s"
+            "value": 405.79,
+            "unit": "Kelem/s"
           }
         ]
       }
