@@ -20,13 +20,9 @@ def format_pct(value: float) -> str:
 
 
 def get_benchmark_throughput(item: dict) -> float | None:
-    """Read normalized throughput, falling back to the original parsed value."""
+    """Read normalized throughput in elem/s."""
     normalized = item.get("throughput_elem_per_sec")
-    if normalized is not None:
-        return float(normalized)
-
-    raw_value = item.get("throughput_value")
-    return None if raw_value is None else float(raw_value)
+    return float(normalized) if normalized is not None else None
 
 
 def benchmark_sort_key(name: str) -> tuple[str, int, str]:
