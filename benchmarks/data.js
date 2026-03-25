@@ -2,7 +2,7 @@ window.BENCHMARK_DATA = {
   "lastUpdate": 1774402560020,
   "repoUrl": "https://github.com/megaeth-labs/salt",
   "entries": {
-    "salt-benchmark-throughput": [
+    "salt-kv-update-throughput": [
       {
         "commit": {
           "author": {
