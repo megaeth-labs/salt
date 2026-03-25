@@ -12,6 +12,13 @@
       background: #0d1117;
       color: #e6edf3;
       padding: 32px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 28px;
     }
     h1 {
       font-size: 18px;
@@ -22,13 +29,15 @@
     .subtitle {
       font-size: 13px;
       color: #8b949e;
-      margin-bottom: 28px;
     }
     .chart-card {
       background: #161b22;
       border: 1px solid #30363d;
       border-radius: 8px;
       padding: 24px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
     }
     .chart-title {
       font-size: 14px;
@@ -38,7 +47,7 @@
     }
     .chart-wrap {
       position: relative;
-      height: 340px;
+      flex: 1;
     }
     #error {
       color: #f78166;
@@ -48,8 +57,10 @@
   </style>
 </head>
 <body>
-  <h1>SALT Benchmark Dashboard</h1>
-  <p class="subtitle">update 10000 KVs throughput</p>
+  <header>
+    <h1>SALT Benchmark Dashboard</h1>
+    <p class="subtitle">update 10000 KVs throughput</p>
+  </header>
 
   <div class="chart-card">
     <div class="chart-title">Throughput over commits</div>
