@@ -1,0 +1,91 @@
+name: perf-regression
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  perf-pr:
+    runs-on: [self-hosted, Linux, X64, perf]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify benchmark host
+        shell: bash
+        run: |
+          echo "=== nproc ==="
+          nproc
+          echo
+          echo "=== lscpu ==="
+          lscpu
+          echo
+          echo "=== /proc/cpuinfo model name ==="
+          grep -m 1 "model name" /proc/cpuinfo
+          echo
+          echo "=== /proc/cpuinfo MHz ==="
+          grep -m 1 "cpu MHz" /proc/cpuinfo || true
+
+      - name: Install nightly toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-03-20
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo bench
+        run: cargo bench -- "update 10000 KVs" | tee output.txt
+
+      - name: Parse current PR benchmark
+        run: python3 .github/scripts/parse_cargo_bench.py output.txt current-pr.json
+
+      - name: Download latest main baseline
+        run: |
+          git fetch origin gh-pages
+          git show origin/gh-pages:benchmarks/latest-main.json > latest-main.json
+          python3 -m json.tool latest-main.json >/dev/null
+
+      - name: Render PR benchmark comment
+        run: python3 .github/scripts/render_pr_comment.py latest-main.json current-pr.json report
+
+      - name: Publish step summary
+        run: cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment PR with detailed comparison
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("report/comment.md", "utf8").trim();
+
+            const marker = "<!-- perf-regression-report -->";
+            const markedBody = marker + "\n" + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: markedBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: markedBody,
+              });
+            }
