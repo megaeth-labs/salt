@@ -610,8 +610,8 @@ mod tests {
 
         let mut related_keys: Vec<SaltKey> = proof_state
             .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .keys()
+            .filter_map(|k| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
             .collect();
 
         related_keys.sort_unstable();
@@ -754,8 +754,8 @@ mod tests {
 
         let mut related_keys: Vec<SaltKey> = proof_state
             .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .keys()
+            .filter_map(|k| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
             .collect();
 
         related_keys.sort_unstable();
@@ -804,8 +804,8 @@ mod tests {
 
         let mut related_keys: Vec<SaltKey> = proof_state
             .cache
-            .iter()
-            .filter_map(|(k, _)| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
+            .keys()
+            .filter_map(|k| (k.bucket_id() > NUM_META_BUCKETS as u32).then_some(*k))
             .collect();
 
         related_keys.sort_unstable();
