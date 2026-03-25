@@ -107,7 +107,7 @@ jobs:
       - name: Update throughput benchmark history on GitHub Pages
         uses: benchmark-action/github-action-benchmark@v1
         with:
-          name: salt-benchmark-throughput
+          name: salt-kv-update-throughput
           tool: customBiggerIsBetter
           output-file-path: benchmark-throughput.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
