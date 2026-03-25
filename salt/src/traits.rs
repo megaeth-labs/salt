@@ -5,11 +5,12 @@ use crate::{
     types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId,
 };
-use std::error::Error;
-use std::{
+use core::{
+    error::Error,
     fmt::Debug,
     ops::{Range, RangeInclusive},
 };
+use std::vec::Vec;
 
 /// Provides read-only access to SALT state storage.
 ///

@@ -10,8 +10,13 @@ use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
 use banderwagon::{trait_defs::*, Element, Fr};
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+
+use salt_macros::prelude::*;
+use salt_macros::{chunks, chunks_mut, into_iter, iter, num_threads, reduce};
+use std::vec::Vec;
 
 pub struct MultiPoint;
 
@@ -81,13 +86,12 @@ impl MultiPoint {
 
         let grouped_queries = group_prover_queries(&queries, &powers_of_r);
 
-        let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
+        let grouped_queries: Vec<_> = into_iter!(grouped_queries).collect();
 
-        let chunk_size = grouped_queries.len().div_ceil(rayon::current_num_threads());
+        let chunk_size = grouped_queries.len().div_ceil(num_threads!());
 
         // aggregate all of the queries evaluated at the same point
-        let aggregated_queries: Vec<_> = grouped_queries
-            .par_chunks(chunk_size)
+        let aggregated_queries: Vec<_> = chunks!(grouped_queries, chunk_size)
             .flat_map(|chunk| {
                 chunk
                     .iter()
@@ -106,10 +110,12 @@ impl MultiPoint {
 
         // Compute g(X)
         //
-        let g_x: LagrangeBasis = aggregated_queries
-            .par_iter()
-            .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point))
-            .reduce(LagrangeBasis::zero, |a, b| a + b);
+        let g_x: LagrangeBasis = reduce!(
+            iter!(aggregated_queries)
+                .map(|(point, agg_f_x)| (agg_f_x).divide_by_linear_vanishing(precomp, *point)),
+            LagrangeBasis::zero,
+            |a, b| a + b
+        );
 
         let g_x_comm = crs.commit_lagrange_poly(&g_x);
 
@@ -120,26 +126,27 @@ impl MultiPoint {
         //
         let t = transcript.challenge_scalar(b"t");
 
-        let mut g1_den: Vec<_> = aggregated_queries
-            .par_iter()
+        let mut g1_den: Vec<_> = iter!(aggregated_queries)
             .map(|(z_i, _)| t - Fr::from(*z_i as u128))
             .collect();
 
         serial_batch_inversion_and_mul(&mut g1_den, &Fr::one());
 
-        let g1_x = aggregated_queries
-            .into_par_iter()
-            .zip(g1_den)
-            .map(|((_, agg_f_x), den_inv)| {
-                let term: Vec<_> = agg_f_x
-                    .values()
-                    .iter()
-                    .map(|coeff| den_inv * coeff)
-                    .collect();
+        let g1_x = reduce!(
+            into_iter!(aggregated_queries)
+                .zip(g1_den)
+                .map(|((_, agg_f_x), den_inv)| {
+                    let term: Vec<_> = agg_f_x
+                        .values()
+                        .iter()
+                        .map(|coeff| den_inv * coeff)
+                        .collect();
 
-                LagrangeBasis::new(term)
-            })
-            .reduce(LagrangeBasis::zero, |a, b| a + b);
+                    LagrangeBasis::new(term)
+                }),
+            LagrangeBasis::zero,
+            |a, b| a + b
+        );
 
         let g1_comm = crs.commit_lagrange_poly(&g1_x);
 
@@ -206,9 +213,8 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
     let state_slice = &mut transcript.state[origin..];
 
     // Process chunks in parallel
-    state_slice
-        .par_chunks_mut(BYTES_PER_QUERY)
-        .zip(queries.par_iter())
+    chunks_mut!(state_slice, BYTES_PER_QUERY)
+        .zip(iter!(queries))
         .for_each(|(chunk_res, p)| {
             // Commitment
             chunk_res[0] = b'C';
@@ -237,12 +243,12 @@ pub struct MultiPointProof {
 
 impl MultiPointProof {
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
-        use crate::{IOError, IOErrorKind};
+        use crate::SerdeError;
 
         let g_x_comm_bytes = &bytes[0..32];
         let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
         let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
-            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+            .map_err(|_| SerdeError::InvalidData)?;
         let g_x_comm = point;
 
         let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;
@@ -283,24 +289,22 @@ impl MultiPointProof {
 
         // 3. Compute g_2(t)
         //
-        let mut g2_den: Vec<_> = queries.par_iter().map(|query| t - query.point).collect();
+        let mut g2_den: Vec<_> = iter!(queries).map(|query| t - query.point).collect();
 
         batch_inversion(&mut g2_den);
 
-        let helper_scalars: Vec<_> = powers_of_r
-            .into_par_iter()
+        let helper_scalars: Vec<_> = into_iter!(powers_of_r)
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
 
-        let g2_t: Fr = helper_scalars
-            .par_iter()
-            .zip(queries.par_iter())
+        let g2_t: Fr = iter!(helper_scalars)
+            .zip(iter!(queries))
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
         //4. Compute [g_1(X)] = E
-        let comms: Vec<_> = queries.par_iter().map(|query| query.commitment).collect();
+        let comms: Vec<_> = iter!(queries).map(|query| query.commitment).collect();
 
         let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
 
@@ -339,6 +343,7 @@ pub(crate) fn open_point_outside_of_domain(
 mod tests {
     use super::*;
     use ark_std::{test_rng, UniformRand};
+    use std::vec;
 
     #[test]
     fn open_multiproof_lagrange() {

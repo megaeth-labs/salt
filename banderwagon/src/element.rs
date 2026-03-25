@@ -3,11 +3,12 @@ use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Edward
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 
-use std::{
-    hash::Hash,
+use core::{
+    hash::{Hash, Hasher},
     iter::Sum,
     ops::{Add, AddAssign, Mul, Neg, Sub},
 };
+use std::vec::Vec;
 
 pub use ark_ed_on_bls12_381_bandersnatch::Fr;
 
@@ -506,7 +507,7 @@ impl Sum for Element {
 /// Uses the canonical byte representation via `to_bytes()` to ensure consistent
 /// hashing. This allows `Element` to be used as a key in `HashMap` and `HashSet`.
 impl Hash for Element {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.to_bytes().hash(state)
     }
 }
@@ -516,6 +517,7 @@ mod tests {
     use super::*;
     use ark_ff::AdditiveGroup;
     use ark_serialize::CanonicalSerialize;
+    use std::vec;
 
     #[test]
     fn consistent_group_to_field() {

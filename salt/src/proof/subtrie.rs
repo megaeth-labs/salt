@@ -30,9 +30,15 @@ use crate::{
 };
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
-use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+
+use salt_macros::prelude::*;
+use salt_macros::{chunks, into_iter, num_threads};
 use std::collections::{BTreeMap, BTreeSet};
+use std::{format, string::ToString, vec, vec::Vec};
+
+use hashbrown::HashMap;
+use rustc_hash::FxBuildHasher;
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 // Constants for improved code readability
 const METADATA_BUCKET_LEVEL: u8 = 1;
@@ -266,8 +272,8 @@ where
 
     // Step 5: Generate IPA prover queries for each node in internal nodes
     let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let mut queries = in_nodes
-        .par_chunks(in_nodes.len().div_ceil(rayon::current_num_threads()))
+    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let mut queries = chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             let children_scalars = multi_commitments_to_scalars(store, nodes)?;
 
@@ -301,8 +307,7 @@ where
         .collect::<Vec<_>>();
 
     // Step 6: Generate IPA prover queries for each node in leaf nodes
-    let leaf_queries = leaf_nodes
-        .into_par_iter()
+    let leaf_queries = into_iter!(leaf_nodes)
         .map(|(parent, points)| {
             let physical_parent = connect_parent_id(parent);
             let parent_commitment = store
@@ -394,15 +399,15 @@ mod tests {
     };
     use ark_ff::BigInt;
     use banderwagon::{Fr, Zero};
+    use hashbrown::HashMap;
     use ipa_multipoint::{crs::CRS, multiproof::MultiPoint, transcript::Transcript};
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
 
     fn setup_test_store() -> (MemStore, SaltKey) {
         let mut rng = StdRng::seed_from_u64(42);
         let key = mock_data(&mut rng, 52);
         let value = mock_data(&mut rng, 32);
-        let kvs = HashMap::from([(key, Some(value))]);
+        let kvs: HashMap<_, _> = [(key, Some(value))].iter().cloned().collect();
 
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);

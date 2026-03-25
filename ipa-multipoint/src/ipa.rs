@@ -3,12 +3,14 @@ use crate::crs::CRS;
 use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
-use crate::{IOError, IOErrorKind, IOResult};
+use crate::{IOResult, SerdeError};
 use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
+use core::iter;
 use itertools::Itertools;
-use rayon::prelude::*;
 
-use std::iter;
+use salt_macros::prelude::*;
+use salt_macros::{chunks, join, num_threads};
+use std::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
@@ -36,21 +38,21 @@ impl IPAProof {
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
             let point: Element = Element::from_bytes(chunk.try_into().unwrap())
-                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+                .map_err(|_| SerdeError::InvalidData)?;
             L_vec.push(point)
         }
 
         for _ in 0..num_points {
             let chunk = chunks.next().unwrap();
             let point: Element = Element::from_bytes(chunk.try_into().unwrap())
-                .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+                .map_err(|_| SerdeError::InvalidData)?;
             R_vec.push(point)
         }
 
         let last_32_bytes = chunks.next().unwrap();
 
         let a: Fr = CanonicalDeserialize::deserialize_compressed(last_32_bytes)
-            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+            .map_err(|_| SerdeError::InvalidData)?;
 
         Ok(IPAProof { L_vec, R_vec, a })
     }
@@ -68,7 +70,7 @@ impl IPAProof {
 
         self.a
             .serialize_compressed(&mut bytes)
-            .map_err(|_| IOError::from(IOErrorKind::InvalidData))?;
+            .map_err(|_| SerdeError::InvalidData)?;
         Ok(bytes)
     }
 }
@@ -141,7 +143,7 @@ pub fn create(
             R
         };
 
-        let (L, R) = rayon::join(left_compute, right_compute);
+        let (L, R) = join!(left_compute, right_compute);
 
         transcript.append_point(b"L", &L);
 
@@ -268,11 +270,10 @@ pub fn slow_vartime_multiscalar_mul<'a>(
 }
 
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    let chunk_size = bases.len().div_ceil(rayon::current_num_threads());
+    let chunk_size = bases.len().div_ceil(num_threads!());
 
-    bases
-        .par_chunks(chunk_size)
-        .zip(scalars.par_chunks(chunk_size))
+    chunks!(bases, chunk_size)
+        .zip(chunks!(scalars, chunk_size))
         .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
         .sum()
 }

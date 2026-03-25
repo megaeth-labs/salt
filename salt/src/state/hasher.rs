@@ -9,7 +9,7 @@
 use super::ahash::fallback::RandomState;
 use crate::constant::NUM_META_BUCKETS;
 use crate::types::BucketId;
-use std::hash::{BuildHasher, Hasher};
+use core::hash::{BuildHasher, Hasher};
 
 /// Fixed seeds derived from the lower 32 bytes of keccak256("Make Ethereum Great Again").
 const HASHER_SEEDS: [u64; 4] = [0x921321f4, 0x2ccb667e, 0x60d68842, 0x077ada9d];
@@ -48,10 +48,13 @@ pub fn bucket_id(key: &[u8]) -> BucketId {
 #[cfg(feature = "test-bucket-resize")]
 #[inline(always)]
 pub fn bucket_id(key: &[u8]) -> BucketId {
+    #[cfg(feature = "std")]
     let num_buckets = std::env::var("NUM_DATA_BUCKETS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+    #[cfg(not(feature = "std"))]
+    let num_buckets = 2;
     (hash(key) % num_buckets + NUM_META_BUCKETS as u64) as BucketId
 }
 
@@ -82,6 +85,7 @@ pub fn hash_with_nonce(plain_key: &[u8], nonce: u32) -> u64 {
 pub mod tests {
     use super::*;
     use crate::constant::NUM_KV_BUCKETS;
+    use std::{vec, vec::Vec};
 
     /// Test data: 260 20-byte keys that all hash to the same bucket.
     /// These are Ethereum address-like values specifically chosen to collide in bucket assignment.

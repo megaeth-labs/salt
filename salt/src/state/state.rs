@@ -45,11 +45,11 @@ use crate::{
     traits::StateReader,
     types::*,
 };
+use core::cmp::Ordering;
+use hashbrown::{hash_map::Entry, HashMap, HashSet};
 use hex;
-use std::{
-    cmp::Ordering,
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
-};
+use std::collections::BTreeMap;
+use std::{format, string::String, vec::Vec};
 
 /// A non-persistent SALT state snapshot that buffers modifications in memory.
 ///
@@ -341,7 +341,7 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     pub fn canonicalize(&mut self) -> Result<StateUpdates, Store::Error> {
         let mut updates = StateUpdates::default();
 
-        for bucket_id in std::mem::take(&mut self.rehashed_buckets) {
+        for bucket_id in core::mem::take(&mut self.rehashed_buckets) {
             let old_metadata = self.metadata(bucket_id, false)?;
 
             // Collect plain kv pairs and clear the bucket slots
@@ -999,10 +999,20 @@ fn get_bucket_resize_threshold() -> u64 {
 #[cfg(feature = "test-bucket-resize")]
 #[inline(always)]
 fn get_bucket_resize_threshold() -> u64 {
-    std::env::var("BUCKET_RESIZE_LOAD_FACTOR_PCT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
+    const DEFAULT_THRESHOLD: u64 = 1;
+
+    #[cfg(feature = "std")]
+    {
+        std::env::var("BUCKET_RESIZE_LOAD_FACTOR_PCT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_THRESHOLD)
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        DEFAULT_THRESHOLD
+    }
 }
 
 /// Computes the minimum bucket capacity needed to satisfy the load factor constraint.
@@ -1025,7 +1035,7 @@ fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, vec, vec::Vec};
 
     use crate::{
         constant::{MIN_BUCKET_SIZE, NUM_META_BUCKETS},
@@ -2405,7 +2415,7 @@ mod tests {
     /// keys, and different termination conditions.
     #[test]
     fn test_shi_find() {
-        use std::collections::HashSet;
+        use hashbrown::HashSet;
         let mut state = EphemeralSaltState::new(&EmptySalt);
         let mut updates = StateUpdates::default();
         state

@@ -9,12 +9,11 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use rayon::prelude::*;
+use core::ops::{Range, RangeInclusive};
+
+use salt_macros::{iter, prelude::*};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    ops::{Range, RangeInclusive},
-};
+use std::{collections::BTreeMap, format, vec::Vec};
 
 /// Salt witness for stateless validation with security guarantees.
 ///
@@ -84,8 +83,7 @@ impl SaltWitness {
     where
         Store: StateReader + TrieReader,
     {
-        let kvs = keys
-            .par_iter()
+        let kvs = iter!(keys)
             .map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
                     // Handle metadata keys
@@ -362,8 +360,9 @@ mod tests {
         trie::trie::StateRoot,
     };
     use banderwagon::{Element, Fr};
+    use hashbrown::HashMap;
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::HashMap;
+    use std::vec;
 
     #[test]
     fn get_mini_trie() {

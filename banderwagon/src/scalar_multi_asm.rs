@@ -29,7 +29,7 @@
 //! code assumes x86_64 architecture and may not work on other platforms.
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::asm;
+use core::arch::asm;
 
 /// Multiplies a field element by 5 in Montgomery form using optimized assembly.
 ///
