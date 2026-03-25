@@ -2,6 +2,9 @@ name: quality-reports
 
 on:
   push:
+    branches:
+      - main
+      - gao/perf-ci
   pull_request:
   workflow_dispatch:
 
@@ -57,7 +60,7 @@ jobs:
           fail_ci_if_error: true
 
   perf-benchmark:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: [self-hosted, Linux, X64, perf]
     timeout-minutes: 30
     permissions:
@@ -91,7 +94,7 @@ jobs:
         run: cargo bench -- "update 10000 KVs" | tee output.txt
 
       - name: Generate latest main baseline
-        run: python3 scripts/perf/parse_cargo_bench.py output.txt latest-main.json
+        run: python3 .github/scripts/parse_cargo_bench.py output.txt latest-main.json
 
       - name: Upload latest main baseline
         uses: actions/upload-artifact@v4
@@ -99,35 +102,8 @@ jobs:
           name: latest-main-baseline
           path: latest-main.json
 
-      - name: Build time chart input
-        run: python3 scripts/perf/export_benchmark_action_json.py latest-main.json time benchmark-time.json
-
-      - name: Update time benchmark history on GitHub Pages
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: salt-benchmark-time
-          tool: customSmallerIsBetter
-          output-file-path: benchmark-time.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: benchmarks
-          max-items-in-chart: 30
-          summary-always: true
-          comment-on-alert: false
-          fail-on-alert: false
-
       - name: Build throughput chart input
-        run: python3 scripts/perf/export_benchmark_action_json.py latest-main.json throughput benchmark-throughput.json
-
-      - name: Reset local gh-pages branch before throughput chart update
-        # benchmark-action/github-action-benchmark checks out gh-pages locally after pushing.
-        # We must delete the local branch before the next benchmark-action call so it can
-        # re-fetch a clean copy; otherwise it fails with a non-fast-forward error.
-        run: |
-          git branch -D gh-pages 2>/dev/null || true
-          git checkout -- .
-        shell: bash
+        run: python3 .github/scripts/export_benchmark_action_json.py latest-main.json throughput benchmark-throughput.json
 
       - name: Update throughput benchmark history on GitHub Pages
         uses: benchmark-action/github-action-benchmark@v1
@@ -160,7 +136,7 @@ jobs:
 
   # Publish the coverage report to gh-pages only from main
   deploy-pages:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     needs:
       - coverage
       - perf-benchmark

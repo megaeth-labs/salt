@@ -14,37 +14,9 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def format_ns(value: float) -> str:
-    """Render a time value in the most readable unit."""
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.2f} ms"
-    if value >= 1_000:
-        return f"{value / 1_000:.2f} us"
-    return f"{value:.2f} ns"
-
-
 def format_pct(value: float) -> str:
     """Render a percentage delta with an explicit sign."""
     return f"{value:+.2f}%"
-
-
-def format_count(value: float) -> str:
-    """Render a throughput value using SI-style element units."""
-    if value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.2f} Gelem/s"
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.2f} Melem/s"
-    if value >= 1_000:
-        return f"{value / 1_000:.2f} Kelem/s"
-    return f"{value:.2f} elem/s"
-
-
-def get_benchmark_time_ns(item: dict) -> float:
-    """Read a benchmark's normalized time."""
-    value = item.get("time_ns", item.get("value"))
-    if value is None:
-        raise KeyError(f"benchmark entry has no 'time_ns' or 'value' field: {item.get('name')}")
-    return float(value)
 
 
 def get_benchmark_throughput(item: dict) -> float | None:
@@ -73,10 +45,6 @@ def build_rows(baseline: dict, current: dict) -> list[dict]:
 
     rows = []
     for name in names:
-        baseline_time = get_benchmark_time_ns(baseline_map[name])
-        current_time = get_benchmark_time_ns(current_map[name])
-        time_delta_pct = ((current_time - baseline_time) / baseline_time * 100.0) if baseline_time else 0.0
-
         baseline_throughput = get_benchmark_throughput(baseline_map[name])
         current_throughput = get_benchmark_throughput(current_map[name])
         throughput_delta_pct = None
@@ -86,9 +54,6 @@ def build_rows(baseline: dict, current: dict) -> list[dict]:
         rows.append(
             {
                 "name": name,
-                "baseline_time": baseline_time,
-                "current_time": current_time,
-                "time_delta_pct": time_delta_pct,
                 "baseline_throughput": baseline_throughput,
                 "current_throughput": current_throughput,
                 "throughput_delta_pct": throughput_delta_pct,
@@ -111,16 +76,16 @@ def render_table(rows: list[dict]) -> str:
         return "_No overlapping benchmarks found._"
 
     lines = [
-        "| Benchmark | Baseline Time | PR Time | Time Change | Baseline Throughput | PR Throughput | Throughput Change |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Benchmark | Baseline (Kelem/s) | PR (Kelem/s) | Change |",
+        "| --- | ---: | ---: | ---: |",
     ]
     for row in rows:
         baseline_throughput = "-"
         current_throughput = "-"
         throughput_delta = "-"
         if row["baseline_throughput"] is not None and row["current_throughput"] is not None:
-            baseline_throughput = format_count(row["baseline_throughput"])
-            current_throughput = format_count(row["current_throughput"])
+            baseline_throughput = f"{row['baseline_throughput'] / 1_000:.2f}"
+            current_throughput = f"{row['current_throughput'] / 1_000:.2f}"
             throughput_delta = format_pct(row["throughput_delta_pct"])
 
         lines.append(
@@ -128,9 +93,6 @@ def render_table(rows: list[dict]) -> str:
             + " | ".join(
                 [
                     f"`{row['name']}`",
-                    f"`{format_ns(row['baseline_time'])}`",
-                    f"`{format_ns(row['current_time'])}`",
-                    f"`{format_pct(row['time_delta_pct'])}`",
                     f"`{baseline_throughput}`" if baseline_throughput != "-" else "-",
                     f"`{current_throughput}`" if current_throughput != "-" else "-",
                     f"`{throughput_delta}`" if throughput_delta != "-" else "-",

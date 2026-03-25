@@ -5,7 +5,6 @@ The perf workflows run `cargo bench`, capture stdout, and then feed that text
 into this script. The output format is a small JSON document consumed by later
 reporting steps:
 
-- `render_pr_report.py` compares a PR run against the published main baseline.
 - `render_pr_comment.py` compares a PR run against the published main baseline.
 - `export_benchmark_action_json.py` emits the shape expected by
   `benchmark-action/github-action-benchmark`.
@@ -78,13 +77,11 @@ def parse_time_ns(raw_value: str, raw_unit: str) -> float:
     return parse_number(raw_value) * TIME_UNIT_TO_NS[raw_unit]
 
 
-def build_time_benchmark(name: str, source: str, time_ns: float, source_unit: str) -> dict:
+def build_time_benchmark(name: str, time_ns: float) -> dict:
     """Build the normalized benchmark shape shared by Criterion and libtest."""
     return {
         "name": name.strip(),
         "time_ns": time_ns,
-        "source": source,
-        "source_unit": source_unit,
     }
 
 
@@ -126,12 +123,7 @@ def main() -> int:
             benchmarks.append(
                 build_time_benchmark(
                     name=criterion_match.group("name"),
-                    source="criterion",
-                    time_ns=parse_time_ns(
-                        criterion_match.group("mid"),
-                        criterion_match.group("mid_unit"),
-                    ),
-                    source_unit=criterion_match.group("mid_unit"),
+                    time_ns=parse_time_ns(criterion_match.group("mid"), criterion_match.group("mid_unit")),
                 )
             )
             last_criterion_benchmark = benchmarks[-1]
@@ -145,12 +137,7 @@ def main() -> int:
             benchmarks.append(
                 build_time_benchmark(
                     name=current_benchmark_name,
-                    source="criterion",
-                    time_ns=parse_time_ns(
-                        criterion_time_only_match.group("mid"),
-                        criterion_time_only_match.group("mid_unit"),
-                    ),
-                    source_unit=criterion_time_only_match.group("mid_unit"),
+                    time_ns=parse_time_ns(criterion_time_only_match.group("mid"), criterion_time_only_match.group("mid_unit")),
                 )
             )
             last_criterion_benchmark = benchmarks[-1]
@@ -175,15 +162,9 @@ def main() -> int:
             benchmarks.append(
                 build_time_benchmark(
                     name=libtest_match.group("name"),
-                    source="libtest",
-                    time_ns=parse_time_ns(
-                        libtest_match.group("value"),
-                        libtest_match.group("unit"),
-                    ),
-                    source_unit=libtest_match.group("unit"),
+                    time_ns=parse_time_ns(libtest_match.group("value"), libtest_match.group("unit")),
                 )
             )
-            current_benchmark_name = None
             last_criterion_benchmark = None
             continue
 

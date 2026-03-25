@@ -42,7 +42,7 @@ jobs:
         run: cargo bench -- "update 10000 KVs" | tee output.txt
 
       - name: Parse current PR benchmark
-        run: python3 scripts/perf/parse_cargo_bench.py output.txt current-pr.json
+        run: python3 .github/scripts/parse_cargo_bench.py output.txt current-pr.json
 
       - name: Download latest main baseline
         run: |
@@ -51,7 +51,7 @@ jobs:
           python3 -m json.tool latest-main.json >/dev/null
 
       - name: Render PR benchmark comment
-        run: python3 scripts/perf/render_pr_comment.py latest-main.json current-pr.json report
+        run: python3 .github/scripts/render_pr_comment.py latest-main.json current-pr.json report
 
       - name: Publish step summary
         run: cat report/summary.md >> "$GITHUB_STEP_SUMMARY"
