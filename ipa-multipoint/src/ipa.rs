@@ -27,8 +27,17 @@ impl IPAProof {
         let mut L_vec = Vec::with_capacity(num_points as usize);
         let mut R_vec = Vec::with_capacity(num_points as usize);
 
-        assert_eq!(((num_points * 2) + 1) * 32, bytes.len() as u32);
-        assert!(bytes.len().is_multiple_of(32));
+        let expected_len = ((num_points * 2) + 1) * 32;
+        if bytes.len() != expected_len as usize {
+            return Err(IOError::new(
+                IOErrorKind::InvalidData,
+                format!(
+                    "invalid proof length, expected {} bytes, got {} bytes",
+                    expected_len,
+                    bytes.len()
+                ),
+            ));
+        }
 
         // Chunk the byte slice into 32 bytes
         let mut chunks = bytes.chunks_exact(32);
