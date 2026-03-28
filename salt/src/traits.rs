@@ -2,7 +2,9 @@
 use crate::trie::node_utils::subtree_root_level;
 use crate::{
     constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
-    types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
+    types::{
+        is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue, SaltVersion,
+    },
     BucketId,
 };
 use std::error::Error;
@@ -46,6 +48,31 @@ pub trait StateReader: Debug + Send + Sync {
     /// - `Ok(None)` if the key doesn't exist
     /// - `Err(_)` on storage errors
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
+
+    /// Retrieves a state value and its version by key.
+    ///
+    /// Returns the state value and version associated with the given key, or `None`
+    /// if the key doesn't exist. The default implementation returns version 0 for
+    /// implementations that don't track versions.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The state key to look up
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some((value, version)))` if the key exists
+    /// - `Ok(None)` if the key doesn't exist
+    /// - `Err(_)` on storage errors
+    fn value_with_version(
+        &self,
+        key: SaltKey,
+    ) -> Result<Option<(SaltValue, SaltVersion)>, Self::Error> {
+        match self.value(key)? {
+            Some(value) => Ok(Some((value, 0))), // Default version to 0 if not tracked
+            None => Ok(None),
+        }
+    }
 
     /// Retrieves all non-empty entries within the specified range of SaltKeys.
     ///
