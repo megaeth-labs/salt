@@ -48,7 +48,8 @@ fn group_prover_queries<'a>(
     challenges: &'a [Fr],
 ) -> FxHashMap<usize, Vec<(&'a ProverQuery, &'a Fr)>> {
     // We want to group all of the polynomials which are evaluated at the same point together
-    let mut res = FxHashMap::default();
+    let mut res: FxHashMap<usize, Vec<(&ProverQuery, &Fr)>> =
+        FxHashMap::with_capacity_and_hasher(prover_queries.len(), Default::default());
 
     prover_queries
         .iter()
@@ -81,26 +82,17 @@ impl MultiPoint {
 
         let grouped_queries = group_prover_queries(&queries, &powers_of_r);
 
-        let grouped_queries: Vec<_> = grouped_queries.into_par_iter().collect();
-
-        let chunk_size = grouped_queries.len().div_ceil(rayon::current_num_threads());
-
         // aggregate all of the queries evaluated at the same point
         let aggregated_queries: Vec<_> = grouped_queries
-            .par_chunks(chunk_size)
-            .flat_map(|chunk| {
-                chunk
+            .into_par_iter()
+            .map(|(point, queries_challenges)| {
+                let aggregated_polynomial = queries_challenges
                     .iter()
-                    .map(|(point, queries_challenges)| {
-                        let aggregated_polynomial = queries_challenges
-                            .iter()
-                            .map(|(query, challenge)| query.poly.clone() * *challenge)
-                            .reduce(|acc, x| acc + x)
-                            .expect("Failed to aggregate polynomial");
+                    .map(|(query, challenge)| query.poly.clone() * *challenge)
+                    .reduce(|acc, x| acc + x)
+                    .expect("Failed to aggregate polynomial");
 
-                        (*point, aggregated_polynomial)
-                    })
-                    .collect::<Vec<_>>()
+                (point, aggregated_polynomial)
             })
             .collect::<Vec<_>>();
 
