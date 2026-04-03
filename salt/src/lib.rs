@@ -1,4 +1,8 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc as std;
 
 pub mod constant;
 pub mod empty_salt;
@@ -26,20 +30,26 @@ pub mod fuzz;
 mod tests {
     use super::*;
     use crate::trie::trie::StateRoot;
-    use std::collections::{BTreeMap, HashMap};
+    use core::error;
+    use hashbrown::HashMap;
+    use std::collections::BTreeMap;
+    use std::{boxed::Box, vec};
 
     #[test]
     /// A simple end-to-end test demonstrating the complete SALT workflow.
-    fn basic_integration_test() -> Result<(), Box<dyn std::error::Error>> {
+    fn basic_integration_test() -> Result<(), Box<dyn error::Error>> {
         // Create a PoC in-memory SALT instance
         let store = MemStore::new();
         let mut state = EphemeralSaltState::new(&store);
 
         // Prepare plain key-value updates (EVM account/storage data)
-        let kvs = HashMap::from([
+        let kvs: HashMap<_, _> = [
             (b"account1".to_vec(), Some(b"balance100".to_vec())),
             (b"storage_key".to_vec(), Some(b"storage_value".to_vec())),
-        ]);
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         // Apply kv updates and get SALT-encoded state changes
         let state_updates = state.update_fin(&kvs)?;

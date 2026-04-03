@@ -5,6 +5,7 @@
 //! full state. It acts as an abstraction layer over the lower-level `SaltWitness`
 //! proof system.
 
+use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
 use crate::{
     proof::salt_witness::SaltWitness,
     proof::ProofError,
@@ -12,12 +13,9 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    ops::{Range, RangeInclusive},
-};
-
-use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
+use core::ops::{Range, RangeInclusive};
+use hashbrown::HashMap;
+use std::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 /// A cryptographic witness enabling stateless validation and execution.
 ///
@@ -333,8 +331,10 @@ mod tests {
         trie::trie::StateRoot,
         types::{bucket_metadata_key, BucketMeta, SaltKey, SaltValue},
     };
+    use hashbrown::{HashMap, HashSet};
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::BTreeMap;
+    use std::vec::Vec;
 
     /// Extracts all values from a witness in the order of its lookup table keys.
     #[cfg(not(feature = "test-bucket-resize"))]
@@ -443,7 +443,10 @@ mod tests {
     fn test_witness_serde() {
         // Create test account data
         let mut rng = StdRng::seed_from_u64(42);
-        let kvs = HashMap::from([(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)))]);
+        let kvs: HashMap<_, _> = [(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)))]
+            .iter()
+            .cloned()
+            .collect();
 
         // Insert into Salt storage and update the trie
         let store = MemStore::new();
@@ -979,7 +982,7 @@ mod tests {
 
         // Create witness from initial state BEFORE any mutations
         let updates: BTreeMap<_, _> = kvs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let witness = Witness::create([], std::iter::empty(), &updates, &store).unwrap();
+        let witness = Witness::create([], core::iter::empty(), &updates, &store).unwrap();
 
         // Pass 1: MemStore-based insertion (mutates store)
         let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
@@ -1017,7 +1020,7 @@ mod tests {
             .chain(deletes.iter())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let witness = Witness::create([], std::iter::empty(), &combined, &EmptySalt).unwrap();
+        let witness = Witness::create([], core::iter::empty(), &combined, &EmptySalt).unwrap();
 
         // Verify no keys should exist in witness
         let mut witness_state = EphemeralSaltState::new(&witness);

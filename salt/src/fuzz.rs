@@ -1,4 +1,5 @@
 //! End-to-end fuzz testing for SALT blockchain state management.
+#![cfg(feature = "std")]
 
 use crate::constant::{NUM_BUCKETS, NUM_META_BUCKETS};
 use crate::traits::StateReader;

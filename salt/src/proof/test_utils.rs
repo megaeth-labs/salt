@@ -6,6 +6,7 @@ use crate::proof::SerdeCommitment;
 use crate::types::SaltValue;
 use banderwagon::{Element, Fr};
 use rand::{rngs::StdRng, Rng};
+use std::vec::Vec;
 
 /// Generates random test data of specified length.
 ///

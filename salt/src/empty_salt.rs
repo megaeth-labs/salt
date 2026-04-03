@@ -9,7 +9,8 @@ use crate::{
     traits::{StateReader, TrieReader},
     types::*,
 };
-use std::ops::{Range, RangeInclusive};
+use core::ops::{Range, RangeInclusive};
+use std::vec::Vec;
 
 /// Represents an empty SALT structure that contains no account or storage.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -54,7 +55,7 @@ impl TrieReader for EmptySalt {
         &self,
         _range: Range<NodeId>,
     ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
-        Ok(vec![])
+        Ok(Vec::new())
     }
 }
 
