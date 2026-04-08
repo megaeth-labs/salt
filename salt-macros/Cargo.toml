@@ -3,9 +3,9 @@ name = "salt-macros"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+rayon = { version = "*", optional = true }
+
 [features]
 default = ["parallel"]
 parallel = ["dep:rayon"]
-
-[dependencies]
-rayon = { version = "*", optional = true }

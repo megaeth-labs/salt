@@ -1,6 +1,6 @@
 [workspace]
 
-members = ["ipa-multipoint", "banderwagon", "salt", "salt-macros"]
+members = ["banderwagon", "ipa-multipoint", "salt", "salt-macros"]
 resolver = "2"
 
 [profile.release]

@@ -3,22 +3,10 @@ name = "salt"
 version = "1.0.1"
 edition = "2021"
 
-[features]
-default = ["parallel"]
-std = [
-    "banderwagon/std",
-    "ipa-multipoint/std",
-    "blake3/std",
-    "serde/std",
-]
-parallel = ["std", "dep:rayon", "salt-macros/parallel", "ipa-multipoint/parallel", "banderwagon/parallel", "hashbrown/rayon"]
-test-bucket-resize = []
-enable-hugepages = ["std", "banderwagon/enable-hugepages"]
-
 [dependencies]
-salt-macros = { path = "../salt-macros", default-features = false }
 banderwagon = { path = "../banderwagon", default-features = false }
 ipa-multipoint = { path = "../ipa-multipoint", default-features = false }
+salt-macros = { path = "../salt-macros", default-features = false }
 
 # standard dependencies
 auto_impl = { version = "1", default-features = false }
@@ -40,6 +28,20 @@ bincode = { version = "2.0", features = ["serde"] }
 criterion = "0.7"
 rand = "0.9"
 serde_json = "1.0.94"
+
+[features]
+default = ["parallel"]
+std = ["banderwagon/std", "ipa-multipoint/std", "blake3/std", "serde/std"]
+parallel = [
+    "std",
+    "dep:rayon",
+    "salt-macros/parallel",
+    "ipa-multipoint/parallel",
+    "banderwagon/parallel",
+    "hashbrown/rayon",
+]
+test-bucket-resize = []
+enable-hugepages = ["std", "banderwagon/enable-hugepages"]
 
 [[bench]]
 name = "salt_trie"
