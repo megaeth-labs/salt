@@ -64,7 +64,7 @@ pub trait StateReader: Debug + Send + Sync {
     /// - `Ok((Some(value), version))` if the key exists
     /// - `Ok((None, version))` if the key doesn't exist
     /// - `Err(_)` on storage errors
-    fn value_with_version(
+    fn value_and_version(
         &self,
         key: SaltKey,
     ) -> Result<(Option<SaltValue>, SaltVersion), Self::Error> {

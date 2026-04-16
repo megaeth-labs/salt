@@ -894,25 +894,23 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
     ///   that bucket will be searched. Otherwise, the bucket_id will be computed from the key.
     ///
     /// # Returns
-    /// * `Ok(Some((value, version)))` - The plain value and its version if the key exists
-    /// * `Ok(None)` - If the key does not exist
+    /// * `Ok((Some(value), version))` - The plain value and its version if the key exists
+    /// * `Ok((None, version))` - If the key does not exist
     /// * `Err(error)` - If there was an error accessing the underlying storage
     pub fn plain_value(
         &self,
         plain_key: &[u8],
         hint: Option<BucketId>,
-    ) -> Result<Option<(SaltValue, SaltVersion)>, S::Error> {
+    ) -> Result<(Option<SaltValue>, SaltVersion), S::Error> {
         // Use the hint if provided, otherwise compute the bucket_id
         let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
         let meta = self.store.metadata(bucket_id)?;
 
-        match shi_search_with_version(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
-            let (value, version) = self.store.value_with_version(key)?;
-            Ok(value.map(|v| (v, version)))
-        })? {
-            Some((_, salt_val, version)) => Ok(Some((salt_val, version))),
-            None => Ok(None),
-        }
+        let (found, version) =
+            shi_search_with_version(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
+                self.store.value_and_version(key)
+            })?;
+        Ok((found.map(|(_, salt_val)| salt_val), version))
     }
 }
 
@@ -943,32 +941,32 @@ fn shi_search<E>(
     mut get_value: impl FnMut(SaltKey) -> Result<Option<SaltValue>, E>,
 ) -> Result<Option<(SlotId, SaltValue)>, E> {
     shi_search_with_version(bucket_id, nonce, capacity, plain_key, |key| {
-        Ok(get_value(key)?.map(|v| (v, ())))
+        Ok((get_value(key)?, 0))
     })
-    .map(|opt| opt.map(|(slot, val, _)| (slot, val)))
+    .map(|(opt, _)| opt)
 }
 
-fn shi_search_with_version<E, T>(
+fn shi_search_with_version<E>(
     bucket_id: BucketId,
     nonce: u32,
     capacity: u64,
     plain_key: &[u8],
-    mut get_value_with_extra: impl FnMut(SaltKey) -> Result<Option<(SaltValue, T)>, E>,
-) -> Result<Option<(SlotId, SaltValue, T)>, E> {
+    mut get_value: impl FnMut(SaltKey) -> Result<(Option<SaltValue>, SaltVersion), E>,
+) -> Result<(Option<(SlotId, SaltValue)>, SaltVersion), E> {
     let hashed_key = hasher::hash_with_nonce(plain_key, nonce);
     for step in 0..capacity {
         let slot = probe(hashed_key, step, capacity);
-        if let Some((salt_val, extra)) = get_value_with_extra((bucket_id, slot).into())? {
-            match salt_val.key().cmp(plain_key) {
-                Ordering::Less => return Ok(None),
-                Ordering::Equal => return Ok(Some((slot, salt_val, extra))),
+        let (value, version) = get_value((bucket_id, slot).into())?;
+        match value {
+            Some(salt_val) => match salt_val.key().cmp(plain_key) {
+                Ordering::Less => return Ok((None, version)),
+                Ordering::Equal => return Ok((Some((slot, salt_val)), version)),
                 Ordering::Greater => (),
-            }
-        } else {
-            return Ok(None);
+            },
+            None => return Ok((None, version)),
         }
     }
-    Ok(None)
+    Ok((None, 0))
 }
 
 /// Computes the i-th slot in the linear probe sequence for a hashed key.
@@ -1481,27 +1479,32 @@ mod tests {
         let bucket_id = hasher::bucket_id(key);
 
         // Test successful retrieval (version is 0 from default implementation)
-        let result = provider.plain_value(key, None).unwrap();
-        assert!(result.is_some());
-        let (salt_val, version) = result.unwrap();
-        assert_eq!(salt_val.value(), value.as_ref().unwrap().as_slice());
+        let (salt_val, version) = provider.plain_value(key, None).unwrap();
+        assert!(salt_val.is_some());
+        assert_eq!(
+            salt_val.unwrap().value(),
+            value.as_ref().unwrap().as_slice()
+        );
         assert_eq!(version, 0);
 
         // Test with correct hint
-        let result = provider.plain_value(key, Some(bucket_id)).unwrap();
-        assert!(result.is_some());
-        let (salt_val, version) = result.unwrap();
-        assert_eq!(salt_val.value(), value.as_ref().unwrap().as_slice());
+        let (salt_val, version) = provider.plain_value(key, Some(bucket_id)).unwrap();
+        assert!(salt_val.is_some());
+        assert_eq!(
+            salt_val.unwrap().value(),
+            value.as_ref().unwrap().as_slice()
+        );
         assert_eq!(version, 0);
 
         // Test with wrong hint
-        assert_eq!(
-            provider.plain_value(key, Some(bucket_id + 1)).unwrap(),
-            None
-        );
+        let (salt_val, version) = provider.plain_value(key, Some(bucket_id + 1)).unwrap();
+        assert!(salt_val.is_none());
+        assert_eq!(version, 0);
 
         // Test non-existent key
-        assert_eq!(provider.plain_value(b"missing", None).unwrap(), None);
+        let (salt_val, version) = provider.plain_value(b"missing", None).unwrap();
+        assert!(salt_val.is_none());
+        assert_eq!(version, 0);
     }
 
     /// Tests cache hit and miss behavior in the value() method.
