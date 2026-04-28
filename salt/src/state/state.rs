@@ -902,16 +902,38 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         plain_key: &[u8],
         hint: Option<BucketId>,
     ) -> Result<Option<Vec<u8>>, S::Error> {
+        Ok(self
+            .plain_value_and_slot(plain_key, hint)?
+            .map(|(_, salt_val)| salt_val.value().to_vec()))
+    }
+
+    /// Retrieves a plain value together with the slot it occupies.
+    ///
+    /// Same lookup as [`Self::plain_value`], but exposes the underlying
+    /// [`SlotId`] and full [`SaltValue`] for callers that need them
+    /// (e.g. to read the original encoded record or perform follow-up
+    /// slot-addressed operations) without paying for the `Vec<u8>` copy.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    /// * `hint` - Optional bucket_id hint; if provided only that bucket is searched
+    ///
+    /// # Returns
+    /// * `Ok(Some((slot_id, salt_value)))` - Slot and encoded value when the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - On underlying storage errors
+    pub fn plain_value_and_slot(
+        &self,
+        plain_key: &[u8],
+        hint: Option<BucketId>,
+    ) -> Result<Option<(SlotId, SaltValue)>, S::Error> {
         // Use the hint if provided, otherwise compute the bucket_id
         let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
         let meta = self.store.metadata(bucket_id)?;
 
-        match shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
+        shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
             self.store.value(key)
-        })? {
-            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
-            None => Ok(None),
-        }
+        })
     }
 }
 
@@ -1492,6 +1514,42 @@ mod tests {
 
         // Test non-existent key
         assert_eq!(provider.plain_value(b"missing", None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_plain_state_provider_plain_value_and_slot() {
+        let store = MemStore::new();
+        let kvs = create_same_bucket_test_data(1);
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let provider = PlainStateProvider::new(&store);
+        let (key, value) = &kvs[0];
+        let bucket_id = hasher::bucket_id(key);
+
+        // Successful lookup returns the slot and a SaltValue whose value() matches.
+        let (slot, salt_val) = provider.plain_value_and_slot(key, None).unwrap().unwrap();
+        assert_eq!(salt_val.value(), value.as_deref().unwrap());
+
+        // Returned slot must be the slot the entry was actually stored at.
+        let stored = store.value((bucket_id, slot).into()).unwrap().unwrap();
+        assert_eq!(stored, salt_val);
+
+        // Wrong hint short-circuits to None without touching the right bucket.
+        assert_eq!(
+            provider
+                .plain_value_and_slot(key, Some(bucket_id + 1))
+                .unwrap(),
+            None
+        );
+
+        // Non-existent key returns None.
+        assert_eq!(
+            provider.plain_value_and_slot(b"missing", None).unwrap(),
+            None
+        );
     }
 
     /// Tests cache hit and miss behavior in the value() method.

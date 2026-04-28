@@ -270,7 +270,12 @@ pub const MAX_SALT_VALUE_BYTES: usize = 94;
 ///
 /// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
 /// Supports Account, Storage, and BucketMeta types.
+///
+/// `repr(align(8))` so hot paths (PartialEq / clone) can access `data`
+/// as u64 chunks without unaligned-load fixups. Costs 2 bytes of trailing
+/// padding per value (size 94 → 96).
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(align(8))]
 pub struct SaltValue {
     /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
@@ -287,13 +292,15 @@ impl SaltValue {
         let key_len = key.len();
         let value_len = value.len();
 
-        let mut data = [0u8; MAX_SALT_VALUE_BYTES];
-        data[0] = key_len as u8;
-        data[1] = value_len as u8;
-        data[2..2 + key_len].copy_from_slice(key);
-        data[2 + key_len..2 + key_len + value_len].copy_from_slice(value);
+        let mut result = Self {
+            data: [0u8; MAX_SALT_VALUE_BYTES],
+        };
+        result.data[0] = key_len as u8;
+        result.data[1] = value_len as u8;
+        result.data[2..2 + key_len].copy_from_slice(key);
+        result.data[2 + key_len..2 + key_len + value_len].copy_from_slice(value);
 
-        Self { data }
+        result
     }
 
     /// Extract the key portion from the encoded data.
