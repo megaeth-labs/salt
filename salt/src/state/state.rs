@@ -902,16 +902,38 @@ impl<'a, S: StateReader> PlainStateProvider<'a, S> {
         plain_key: &[u8],
         hint: Option<BucketId>,
     ) -> Result<Option<Vec<u8>>, S::Error> {
+        Ok(self
+            .plain_value_and_slot(plain_key, hint)?
+            .map(|(_, salt_val)| salt_val.value().to_vec()))
+    }
+
+    /// Retrieves a plain value together with the slot it occupies.
+    ///
+    /// Same lookup as [`Self::plain_value`], but exposes the underlying
+    /// [`SlotId`] and full [`SaltValue`] for callers that need them
+    /// (e.g. to read the original encoded record or perform follow-up
+    /// slot-addressed operations) without paying for the `Vec<u8>` copy.
+    ///
+    /// # Arguments
+    /// * `plain_key` - The plain key to look up
+    /// * `hint` - Optional bucket_id hint; if provided only that bucket is searched
+    ///
+    /// # Returns
+    /// * `Ok(Some((slot_id, salt_value)))` - Slot and encoded value when the key exists
+    /// * `Ok(None)` - If the key does not exist
+    /// * `Err(error)` - On underlying storage errors
+    pub fn plain_value_and_slot(
+        &self,
+        plain_key: &[u8],
+        hint: Option<BucketId>,
+    ) -> Result<Option<(SlotId, SaltValue)>, S::Error> {
         // Use the hint if provided, otherwise compute the bucket_id
         let bucket_id = hint.unwrap_or_else(|| hasher::bucket_id(plain_key));
         let meta = self.store.metadata(bucket_id)?;
 
-        match shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
+        shi_search(bucket_id, meta.nonce, meta.capacity, plain_key, |key| {
             self.store.value(key)
-        })? {
-            Some((_, salt_val)) => Ok(Some(salt_val.value().to_vec())),
-            None => Ok(None),
-        }
+        })
     }
 }
 

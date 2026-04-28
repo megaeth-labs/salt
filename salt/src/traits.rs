@@ -2,7 +2,10 @@
 use crate::trie::node_utils::subtree_root_level;
 use crate::{
     constant::{BUCKET_SLOT_ID_MASK, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS},
-    types::{is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue},
+    types::{
+        is_valid_data_bucket, BucketMeta, CommitmentBytes, NodeId, SaltKey, SaltValue, SaltVersion,
+        SlotId,
+    },
     BucketId,
 };
 use core::{
@@ -47,6 +50,29 @@ pub trait StateReader: Debug + Send + Sync {
     /// - `Ok(None)` if the key doesn't exist
     /// - `Err(_)` on storage errors
     fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error>;
+
+    /// Retrieves the version for the value stored at a given (bucket, slot).
+    ///
+    /// The version is a monotonically increasing counter that tracks how many times
+    /// the slot has been written. Implementations that don't track versions should
+    /// rely on the default implementation, which returns 0.
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_id` - The bucket containing the slot
+    /// * `slot_id` - The slot within the bucket
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(version)` - The current version of the slot (0 if not tracked)
+    /// - `Err(_)` - On storage errors
+    fn version(
+        &self,
+        _bucket_id: BucketId,
+        _slot_id: SlotId,
+    ) -> Result<SaltVersion, Self::Error> {
+        Ok(0)
+    }
 
     /// Retrieves all non-empty entries within the specified range of SaltKeys.
     ///
