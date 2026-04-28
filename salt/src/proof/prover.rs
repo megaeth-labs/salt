@@ -24,11 +24,16 @@ use ipa_multipoint::{
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, iter, num_threads, sort_unstable};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    de::{MapAccess, Visitor},
+    ser::SerializeMap,
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, vec::Vec};
 
+use core::fmt;
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
@@ -109,7 +114,56 @@ pub struct SaltProof {
 
     /// the level of the buckets trie
     /// used to let verifier determine the bucket trie level
+    #[serde(with = "fx_hashmap_serde")]
     pub levels: FxHashMap<BucketId, u8>,
+}
+
+// Hand-written (de)serialization for `levels` so the salt crate doesn't need
+// to enable `hashbrown/serde` (which transitively pulls in serde_core 1.0.221+
+// and breaks downstream alloy-tx-macros 1.0.23). Entries are emitted in
+// ascending key order to keep proof bytes deterministic across provers.
+mod fx_hashmap_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(
+        map: &FxHashMap<BucketId, u8>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut entries: Vec<(&BucketId, &u8)> = map.iter().collect();
+        entries.sort_unstable_by_key(|(k, _)| **k);
+        let mut m = s.serialize_map(Some(entries.len()))?;
+        for (k, v) in entries {
+            m.serialize_entry(k, v)?;
+        }
+        m.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<FxHashMap<BucketId, u8>, D::Error> {
+        struct LevelsVisitor;
+
+        impl<'de> Visitor<'de> for LevelsVisitor {
+            type Value = FxHashMap<BucketId, u8>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a map of BucketId to u8")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut map = HashMap::with_capacity_and_hasher(
+                    access.size_hint().unwrap_or(0),
+                    FxBuildHasher,
+                );
+                while let Some((k, v)) = access.next_entry::<BucketId, u8>()? {
+                    map.insert(k, v);
+                }
+                Ok(map)
+            }
+        }
+
+        d.deserialize_map(LevelsVisitor)
+    }
 }
 
 /// Converts a bucket slot entry into a field element for IPA polynomial commitments.
@@ -1211,6 +1265,88 @@ mod tests {
         // Verify query structure
         assert_eq!(queries[0].point, Fr::from(0u64));
         assert_eq!(queries[1].point, Fr::from(5u64));
+    }
+
+    /// Round-trip + determinism tests for the hand-rolled `fx_hashmap_serde`
+    /// module. The module exists so we can drop the `hashbrown/serde` feature
+    /// (which transitively pulls in `serde_core >= 1.0.221` and breaks
+    /// downstream `alloy-tx-macros 1.0.23`); the sort-on-serialize is what
+    /// keeps proof bytes identical across provers despite `FxHashMap`'s
+    /// non-deterministic iteration order.
+    mod fx_hashmap_serde_tests {
+        use super::*;
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct LevelsWrapper(#[serde(with = "fx_hashmap_serde")] FxHashMap<BucketId, u8>);
+
+        fn levels_wrapper<I: IntoIterator<Item = (BucketId, u8)>>(entries: I) -> LevelsWrapper {
+            let mut map: FxHashMap<BucketId, u8> = HashMap::with_hasher(FxBuildHasher);
+            for (k, v) in entries {
+                map.insert(k, v);
+            }
+            LevelsWrapper(map)
+        }
+
+        /// Serializing then deserializing must yield an equivalent map.
+        #[test]
+        fn round_trip_preserves_entries() {
+            let original =
+                levels_wrapper([(0u32, 0u8), (42, 3), (1_000_000, 7), (BucketId::MAX, 255)]);
+
+            let bytes =
+                bincode::serde::encode_to_vec(&original, bincode::config::legacy()).unwrap();
+            let (decoded, _): (LevelsWrapper, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+
+            assert_eq!(original, decoded);
+        }
+
+        /// Empty map round-trips and serializes to a stable, non-empty map header.
+        #[test]
+        fn round_trip_empty() {
+            let original = levels_wrapper([]);
+            let bytes =
+                bincode::serde::encode_to_vec(&original, bincode::config::legacy()).unwrap();
+            let (decoded, _): (LevelsWrapper, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+            assert_eq!(original, decoded);
+            assert!(decoded.0.is_empty());
+        }
+
+        /// Two maps with identical entries inserted in different orders must
+        /// serialize to identical bytes. Without the ascending-key sort in
+        /// `fx_hashmap_serde::serialize`, `FxHashMap` iteration order would
+        /// leak into proof bytes and silently diverge across provers.
+        #[test]
+        fn serialization_is_order_independent() {
+            let entries: [(BucketId, u8); 6] = [
+                (3, 1),
+                (1, 2),
+                (4, 3),
+                (1_000_000, 4),
+                (5, 5),
+                (BucketId::MAX, 6),
+            ];
+
+            let forward = levels_wrapper(entries);
+            // Reverse insertion order to perturb the FxHashMap's internal layout.
+            let reverse = {
+                let mut rev = entries;
+                rev.reverse();
+                levels_wrapper(rev)
+            };
+
+            // Sanity: the underlying maps are equal as maps...
+            assert_eq!(forward, reverse);
+
+            let forward_bytes =
+                bincode::serde::encode_to_vec(&forward, bincode::config::legacy()).unwrap();
+            let reverse_bytes =
+                bincode::serde::encode_to_vec(&reverse, bincode::config::legacy()).unwrap();
+
+            // ...and serialize to identical bytes regardless of insertion order.
+            assert_eq!(forward_bytes, reverse_bytes);
+        }
     }
 
     /// Tests create_leaf_node_queries with missing key-value data.

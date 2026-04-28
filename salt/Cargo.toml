@@ -12,7 +12,7 @@ salt-macros = { path = "../salt-macros", default-features = false }
 auto_impl = { version = "1", default-features = false }
 blake3 = { version = "1.8", default-features = false }
 derive_more = { version = "2", default-features = false, features = ["full"] }
-hashbrown = { version = "0.16", features = ["serde"] }
+hashbrown = "0.16"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 rayon = { version = "*", optional = true }
 rustc-hash = { version = "2.0", default-features = false }

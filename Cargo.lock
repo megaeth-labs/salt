@@ -634,8 +634,6 @@ dependencies = [
  "equivalent",
  "foldhash",
  "rayon",
- "serde",
- "serde_core",
 ]
 
 [[package]]
