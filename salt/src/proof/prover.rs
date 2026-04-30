@@ -25,7 +25,7 @@ use ipa_multipoint::{
 use salt_macros::prelude::*;
 use salt_macros::{chunks, iter, num_threads, sort_unstable};
 use serde::{
-    de::{MapAccess, Visitor},
+    de::{Error as _, MapAccess, Visitor},
     ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
@@ -151,12 +151,11 @@ mod fx_hashmap_serde {
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-                let mut map = HashMap::with_capacity_and_hasher(
-                    access.size_hint().unwrap_or(0),
-                    FxBuildHasher,
-                );
+                let mut map: FxHashMap<BucketId, u8> = FxHashMap::default();
                 while let Some((k, v)) = access.next_entry::<BucketId, u8>()? {
-                    map.insert(k, v);
+                    if map.insert(k, v).is_some() {
+                        return Err(A::Error::custom("duplicate BucketId in levels"));
+                    }
                 }
                 Ok(map)
             }
@@ -1346,6 +1345,20 @@ mod tests {
 
             // ...and serialize to identical bytes regardless of insertion order.
             assert_eq!(forward_bytes, reverse_bytes);
+        }
+
+        #[test]
+        fn rejects_duplicate_bucket_id() {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&2u64.to_le_bytes());
+            bytes.extend_from_slice(&7u32.to_le_bytes());
+            bytes.push(1u8);
+            bytes.extend_from_slice(&7u32.to_le_bytes());
+            bytes.push(2u8);
+
+            let result: Result<(LevelsWrapper, _), _> =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
+            assert!(result.is_err(), "duplicate BucketId must be rejected");
         }
     }
 
