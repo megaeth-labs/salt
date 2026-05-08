@@ -12,7 +12,7 @@ required-features = ["std"]
 
 [dependencies]
 banderwagon = { path = "../banderwagon", default-features = false }
-hashbrown = { version = "0.16", features = ["serde"] }
+hashbrown = "0.16"
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 itertools = { version = "0.10.1", default-features = false, features = ["use_alloc"] }
 rayon = { version = "*", optional = true }
