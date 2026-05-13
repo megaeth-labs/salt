@@ -118,11 +118,12 @@ pub struct SaltProof {
     pub levels: FxHashMap<BucketId, u8>,
 }
 
-// Hand-written (de)serialization for `levels` so the salt crate doesn't need
-// to enable `hashbrown/serde` (which transitively pulls in serde_core 1.0.221+
-// and breaks downstream alloy-tx-macros 1.0.23). Entries are emitted in
-// ascending key order to keep proof bytes deterministic across provers.
-mod fx_hashmap_serde {
+/// Hand-written (de)serialization for `levels` so the salt crate doesn't need
+/// to enable `hashbrown/serde` (which transitively pulls in serde_core 1.0.221+
+/// and breaks downstream alloy-tx-macros 1.0.23). Entries are emitted in
+/// ascending key order to keep proof bytes deterministic across provers.
+/// Also reused downstream (e.g. `stateless-core::LightWitness`) via `#[serde(with = "salt::fx_hashmap_serde")]`.
+pub mod fx_hashmap_serde {
     use super::*;
 
     pub fn serialize<S: Serializer>(

@@ -76,7 +76,7 @@ pub mod witness;
 #[cfg(test)]
 mod test_utils;
 
-pub use prover::{SaltProof, SerdeCommitment, SerdeMultiPointProof};
+pub use prover::{fx_hashmap_serde, SaltProof, SerdeCommitment, SerdeMultiPointProof};
 pub use salt_witness::SaltWitness;
 pub use witness::Witness;
 
