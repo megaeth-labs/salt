@@ -7,7 +7,7 @@ extern crate alloc as std;
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{ProofError, SaltProof, SaltWitness, Witness};
+pub use proof::{ProofError, SaltProof, SaltWitness, Witness, fx_hashmap_serde};
 pub mod state;
 pub use state::{
     hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,
