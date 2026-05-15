@@ -1,0 +1,117 @@
+name: perf-baseline-bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sha: c8a3289
+            date: "2026-04-08"
+          - sha: 2bb0025
+            date: "2026-04-24"
+          - sha: 6474b3c
+            date: "2026-05-08"
+          - sha: 31d91fc
+            date: "2026-05-11"
+          - sha: a046470
+            date: "2026-05-13"
+    steps:
+      - name: Checkout workflow ref (for scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Stash scripts outside worktree
+        run: cp -r .github/scripts /tmp/scripts
+
+      - name: Checkout target commit
+        run: git -c advice.detachedHead=false checkout ${{ matrix.sha }}
+
+      - name: Verify host + pinning
+        shell: bash
+        run: |
+          echo "=== sha=${{ matrix.sha }} date=${{ matrix.date }} ==="
+          echo "--- nproc ---"
+          nproc
+          echo "--- model name ---"
+          grep -m 1 "model name" /proc/cpuinfo
+          echo "--- lscpu (head) ---"
+          lscpu | head -25
+          echo "--- /proc/self/status Cpus/Mems allowed ---"
+          grep -E "Cpus_allowed_list|Mems_allowed_list" /proc/self/status || true
+          echo "--- taskset of current shell ---"
+          taskset -p $$ || true
+          echo "--- cgroup cpuset ---"
+          cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null \
+            || cat /sys/fs/cgroup/cpuset.cpus 2>/dev/null \
+            || cat /sys/fs/cgroup/cpuset/cpuset.cpus 2>/dev/null \
+            || echo "(no cpuset readable)"
+          echo "--- /proc/cpuinfo MHz (per core, first 5) ---"
+          grep "cpu MHz" /proc/cpuinfo | head -5
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: perf-bootstrap-${{ matrix.sha }}
+
+      - name: Run cargo bench
+        run: cargo bench -- "update 10000 KVs" | tee output.txt
+
+      - name: Parse cargo bench
+        run: python3 /tmp/scripts/parse_cargo_bench.py output.txt result.json
+
+      - name: Upload per-commit result
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.sha }}
+          path: |
+            result.json
+            output.txt
+
+  aggregate:
+    needs: bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: bench-*
+
+      - name: Build fresh data.json
+        shell: bash
+        run: |
+          echo "[]" > data.json
+          # Order oldest → newest, matching the append order on gh-pages today.
+          python3 .github/scripts/append_benchmark_history.py results/bench-c8a3289/result.json data.json c8a3289 2026-04-08
+          python3 .github/scripts/append_benchmark_history.py results/bench-2bb0025/result.json data.json 2bb0025 2026-04-24
+          python3 .github/scripts/append_benchmark_history.py results/bench-6474b3c/result.json data.json 6474b3c 2026-05-08
+          python3 .github/scripts/append_benchmark_history.py results/bench-31d91fc/result.json data.json 31d91fc 2026-05-11
+          python3 .github/scripts/append_benchmark_history.py results/bench-a046470/result.json data.json a046470 2026-05-13
+
+          {
+            echo '## New baseline data.json (Blacksmith)'
+            echo
+            echo '```json'
+            cat data.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo '=== blacksmith data.json ==='
+          cat data.json
+
+      - name: Upload combined data.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-data-json
+          path: data.json
