@@ -15,9 +15,10 @@ permissions:
 jobs:
   bench:
     runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1     # 5 independent Blacksmith schedulings, one at a time
       matrix:
         include:
           - sha: c8a3289
@@ -75,13 +76,15 @@ jobs:
       - name: Parse cargo bench
         run: python3 /tmp/scripts/parse_cargo_bench.py output.txt result.json
 
-      - name: Upload per-commit result
+      # Internal-only handoff to the aggregate job; not a user-facing deliverable.
+      - name: Stash per-commit result for aggregate job
         uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.sha }}
           path: |
             result.json
             output.txt
+          retention-days: 1
 
   aggregate:
     needs: bench
@@ -94,30 +97,30 @@ jobs:
           path: results
           pattern: bench-*
 
-      - name: Build fresh data.json
+      - name: Build & print baseline data.json
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "[]" > data.json
-          # Order oldest → newest, matching the append order on gh-pages today.
+          # Order oldest -> newest, matching the existing gh-pages append order.
           python3 .github/scripts/append_benchmark_history.py results/bench-c8a3289/result.json data.json c8a3289 2026-04-08
           python3 .github/scripts/append_benchmark_history.py results/bench-2bb0025/result.json data.json 2bb0025 2026-04-24
           python3 .github/scripts/append_benchmark_history.py results/bench-6474b3c/result.json data.json 6474b3c 2026-05-08
           python3 .github/scripts/append_benchmark_history.py results/bench-31d91fc/result.json data.json 31d91fc 2026-05-11
           python3 .github/scripts/append_benchmark_history.py results/bench-a046470/result.json data.json a046470 2026-05-13
 
+          echo
+          echo '=================================='
+          echo '=== Final Blacksmith data.json ==='
+          echo '=================================='
+          cat data.json
+          echo
+
           {
-            echo '## New baseline data.json (Blacksmith)'
+            echo '## New baseline data.json (Blacksmith, serial schedulings)'
             echo
             echo '```json'
             cat data.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-          echo '=== blacksmith data.json ==='
-          cat data.json
-
-      - name: Upload combined data.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: baseline-data-json
-          path: data.json
