@@ -2,6 +2,12 @@ name: perf-baseline-bootstrap
 
 on:
   workflow_dispatch:
+  push:
+    branches: [gao/blacksmith]
+    paths:
+      - '.github/workflows/perf-baseline-bootstrap.yml'
+      - '.github/scripts/parse_cargo_bench.py'
+      - '.github/scripts/append_benchmark_history.py'
 
 permissions:
   contents: read
