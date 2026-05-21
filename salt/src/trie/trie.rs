@@ -31,7 +31,7 @@ use crate::{
     trie::node_utils::*,
     types::*,
 };
-use banderwagon::{salt_committer::Committer, Element, Fr, PrimeField};
+use banderwagon::{platform, salt_committer::Committer, Element, Fr, PrimeField};
 use ipa_multipoint::crs::CRS;
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
@@ -43,12 +43,13 @@ use std::{sync::Arc, vec};
 
 use core::{cmp::Ordering, ops::Range};
 
-/// The size of the precomputed window.
-const PRECOMP_WINDOW_SIZE: usize = 11;
-
 /// Global shared instance of the Committer to avoid repeated expensive initialization
-static SHARED_COMMITTER: Lazy<Arc<Committer>> =
-    Lazy::new(|| Arc::new(Committer::new(&CRS::default().G, PRECOMP_WINDOW_SIZE)));
+static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| {
+    Arc::new(Committer::new(
+        &CRS::default().G,
+        platform::DEFAULT_PRECOMP_WINDOW_SIZE,
+    ))
+});
 
 /// Records updates to the internal commitment values of a SALT trie.
 /// Stores the old and new commitment values of the trie nodes,
