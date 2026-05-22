@@ -1,6 +1,7 @@
 [workspace]
 
 members = ["banderwagon", "ipa-multipoint", "salt", "salt-macros"]
+exclude = ["banderwagon/fuzz"]
 resolver = "2"
 
 [profile.release]

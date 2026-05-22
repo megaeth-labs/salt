@@ -3,13 +3,21 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 pub mod msm;
+pub mod platform;
+#[cfg(feature = "zkvm-riscv32-sim")]
+pub mod fuzz_support;
 
+mod curve_ops;
 mod element;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
-pub use element::{multi_scalar_mul, Element, Fr};
+pub use curve_ops::multi_scalar_mul;
+pub use element::{Element, Fr};
 pub mod salt_committer;
 mod scalar_multi_asm;
+
+#[cfg(zkvm_riscv32_backend)]
+mod zkvm_riscv32_primitives;
 
 // Re-export arkworks traits that one may need to use in order to use
 // specific methods on field elements and for serialization.

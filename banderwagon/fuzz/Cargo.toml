@@ -1,0 +1,30 @@
+[package]
+name = "banderwagon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+banderwagon = { path = "..", features = ["zkvm-riscv32-sim"] }
+ipa-multipoint = { path = "../../ipa-multipoint", features = ["std"] }
+
+[[bin]]
+name = "element_bigint_mont_equivalence"
+path = "fuzz_targets/element_bigint_mont_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "committer_mul_index_vs_scalar_mul"
+path = "fuzz_targets/committer_mul_index_vs_scalar_mul.rs"
+test = false
+doc = false
+bench = false

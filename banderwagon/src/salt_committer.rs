@@ -25,9 +25,10 @@
 //! - Typical window size of 11 provides good balance for 256 base points
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
+use crate::curve_ops::{add_affine_point, build_precomp_table, projective_zero, PrecompTableConfig};
 use crate::element::Element;
 use ark_ec::CurveGroup;
-use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};
+use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fr};
 use ark_ff::PrimeField;
 use ark_ff::Zero;
 
@@ -94,46 +95,34 @@ impl Drop for Committer {
 }
 
 impl Committer {
-    #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        use hugepage_rs;
-        use std::alloc::Layout;
-
-        let table_num = bases.len();
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
+        let config = PrecompTableConfig {
+            window_size,
+            win_num,
+            inner_length,
+        };
 
-        let src_tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
-            .map(|base| {
-                let mut table = Vec::with_capacity(inner_length);
-                let mut element = base.0;
-                // Calculate the element values for each window
-                for _ in 0..win_num {
-                    let base = element;
-                    table.push(EdwardsProjective::zero());
-                    table.push(element);
-                    for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
-                        table.push(element);
-                    }
-                    element += element;
-                }
-                EdwardsProjective::normalize_batch(&table)
-            })
-            .collect();
+        let tables: Vec<Vec<EdwardsAffine>> =
+            iter!(bases).map(|base| build_precomp_table(base, &config)).collect();
 
+        #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
         let tables = {
+            use hugepage_rs;
+            use std::alloc::Layout;
+
+            let table_num = bases.len();
             let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
             let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
 
-            for (i, _) in src_tables.iter().enumerate() {
+            for (i, _) in tables.iter().enumerate() {
                 let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
                 let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
                 if tables_ptr.is_null() || dst_ptr.is_null() {
                     panic!("Failed to allocate hugepages for the ECMUL precompute table.");
                 }
-                let src_ptr = src_tables[i].as_ptr();
+                let src_ptr = tables[i].as_ptr();
                 assert!(
                     src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
                     "Source pointer is not aligned"
@@ -150,36 +139,6 @@ impl Committer {
 
             unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) }
         };
-
-        Committer {
-            tables,
-            window_size,
-        }
-    }
-
-    #[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
-    pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
-        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
-
-        let tables: Vec<Vec<EdwardsAffine>> = iter!(bases)
-            .map(|base| {
-                let mut table = Vec::with_capacity(inner_length);
-                let mut element = base.0;
-                // Calculate the element values for each window
-                for _ in 0..win_num {
-                    let base = element;
-                    table.push(EdwardsProjective::zero());
-                    table.push(element);
-                    for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
-                        table.push(element);
-                    }
-                    element += element;
-                }
-                EdwardsProjective::normalize_batch(&table)
-            })
-            .collect();
 
         Committer {
             tables,
@@ -301,7 +260,7 @@ impl Committer {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
-        let mut result = EdwardsProjective::default();
+        let mut result = projective_zero();
         let precom_table = &self.tables[g_i];
         let mut ponits = Vec::with_capacity(chunks.len());
         for i in 0..chunks.len() {
@@ -333,103 +292,6 @@ impl Committer {
             .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
-}
-
-/// Adds an affine point to a projective point using extended Edwards coordinates.
-///
-/// This is the generic implementation using the extended twisted Edwards addition formula.
-/// The formula is optimized for adding an affine point (Z=1) to a projective point.
-///
-/// # Arguments
-///
-/// * `result` - The projective point to update (in-place)
-/// * `p2_x` - X-coordinate of the affine point to add
-/// * `p2_y` - Y-coordinate of the affine point to add
-#[cfg(not(target_arch = "x86_64"))]
-fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
-    use ark_ff::biginteger::BigInt;
-
-    let mut a = result.x * p2_x;
-    let b = result.y * p2_y;
-    let mut c = p2_x * p2_y;
-    let mut d = result.t * c;
-
-    // Multiply by the Edwards curve parameter d = -5
-    // The constant below is -5 in Montgomery form for the Bandersnatch field
-    c = d * Fq::new_unchecked(BigInt::new([
-        12167860994669987632u64,
-        4043113551995129031u64,
-        6052647550941614584u64,
-        3904213385886034240u64,
-    ]));
-
-    d = (result.x + result.y) * (p2_x + p2_y);
-    let e = d - a - b;
-    let f = result.z - c;
-    let g = result.z + c;
-    a *= Fq::from(5u64);
-    let h = b + a;
-
-    result.x = e * f;
-    result.y = g * h;
-    result.t = e * h;
-    result.z = f * g;
-}
-
-/// Adds an affine point to a projective point using extended Edwards coordinates.
-///
-/// This x86_64-optimized version uses hand-written assembly for Montgomery multiplication
-/// to achieve better performance than the generic implementation.
-///
-/// # Arguments
-///
-/// * `result` - The projective point to update (in-place)
-/// * `p2_x` - X-coordinate of the affine point to add
-/// * `p2_y` - Y-coordinate of the affine point to add
-///
-/// # Safety
-///
-/// Uses unsafe assembly operations that are guaranteed correct for the Bandersnatch field.
-#[cfg(target_arch = "x86_64")]
-fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
-    use crate::scalar_multi_asm::*;
-
-    let mut a = Fq::default();
-    let mut b = Fq::default();
-    let mut c = Fq::default();
-    let mut d = Fq::default();
-
-    mont_mul_asm(&mut a.0 .0, &result.x.0 .0, &p2_x.0 .0);
-    mont_mul_asm(&mut b.0 .0, &result.y.0 .0, &p2_y.0 .0);
-    mont_mul_asm(&mut c.0 .0, &p2_x.0 .0, &p2_y.0 .0);
-    mont_mul_asm(&mut d.0 .0, &result.t.0 .0, &c.0 .0);
-
-    // Multiply by the Edwards curve parameter d = -5
-    // The constant is -5 in Montgomery form for the Bandersnatch field
-    mont_mul_asm(
-        &mut c.0 .0,
-        &d.0 .0,
-        &[
-            12167860994669987632u64,
-            4043113551995129031u64,
-            6052647550941614584u64,
-            3904213385886034240u64,
-        ],
-    );
-    mont_mul_asm(
-        &mut d.0 .0,
-        &(result.x + result.y).0 .0,
-        &(p2_x + p2_y).0 .0,
-    );
-    let e = d - a - b;
-    let f = result.z - c;
-    let g = result.z + c;
-    mont_mul_by5_asm(&mut a.0 .0);
-    let h = b + a;
-    mont_mul_asm(&mut result.x.0 .0, &e.0 .0, &f.0 .0);
-    mont_mul_asm(&mut result.y.0 .0, &g.0 .0, &h.0 .0);
-    mont_mul_asm(&mut result.t.0 .0, &e.0 .0, &h.0 .0);
-    mont_mul_asm(&mut result.z.0 .0, &f.0 .0, &g.0 .0);
 }
 
 /// Decomposes a scalar into windows for efficient table lookups.
@@ -620,5 +482,23 @@ mod tests {
                 assert_eq!(affine_correct_result, affine_got_result);
             }
         }
+    }
+
+    #[cfg(feature = "zkvm-riscv32-sim")]
+    #[test]
+    fn mul_index_then_add_matches_mont_reference_serialization() {
+        let bases = vec![Element::prime_subgroup_generator()];
+        let committer = Committer::new(&bases, 11);
+        let scalar = Fr::from(37u64);
+        let old_commitment = Element::prime_subgroup_generator() * Fr::from(91u64);
+
+        let delta_from_mul_index = committer.mul_index(&scalar, 0);
+        let got = old_commitment + delta_from_mul_index;
+
+        let reference_delta = multi_scalar_mul(&bases, &[scalar]);
+        let expected = old_commitment + reference_delta;
+
+        assert_eq!(got.to_bytes(), expected.to_bytes());
+        assert_eq!(got.to_bytes_uncompressed(), expected.to_bytes_uncompressed());
     }
 }

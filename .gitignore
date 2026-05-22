@@ -2,3 +2,7 @@
 .vscode
 Cargo.lock
 .DS_Store
+banderwagon/fuzz/artifacts/
+banderwagon/fuzz/coverage/
+banderwagon/fuzz/corpus/
+banderwagon/fuzz/target/

@@ -1,4 +1,4 @@
-use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -410,18 +410,6 @@ fn subgroup_check(point: &EdwardsProjective) -> bool {
     (Fq::one() - BandersnatchConfig::COEFF_A * point.x.square())
         .legendre()
         .is_qr()
-}
-
-pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
-    let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
-
-    // XXX: Converting all of these to affine hurts performance
-    let bases = EdwardsProjective::batch_convert_to_mul_base(&bases_inner);
-
-    let result = EdwardsProjective::msm(&bases, scalars)
-        .expect("number of bases should equal number of scalars");
-
-    Element(result)
 }
 
 /// Multiplies an `Element` by a scalar field element.
