@@ -605,7 +605,7 @@ mod tests {
 
         let test_round = 100;
         let windows_size = 17;
-        for j in 4..windows_size {
+        for j in 3..windows_size {
             let precompute = Committer::new(&basic_crs, j);
             for _k in 0..test_round {
                 let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
