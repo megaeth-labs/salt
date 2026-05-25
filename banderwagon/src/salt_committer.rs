@@ -52,7 +52,7 @@ use std::{vec, vec::Vec};
 ///
 /// ```ignore
 /// let bases = vec![Element::generator(); 256];
-/// let committer = Committer::new(&bases, 11);
+/// let committer = Committer::new(&bases, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
 /// let scalar = Fr::from(12345u64);
 /// let result = committer.mul_index(&scalar, 0); // Compute scalar * bases[0]
 /// ```
@@ -474,7 +474,7 @@ fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{element::Element, multi_scalar_mul};
+    use crate::{element::Element, multi_scalar_mul, platform};
     use ark_ec::CurveGroup;
     use ark_ed_on_bls12_381_bandersnatch::Fr;
     use ark_ff::UniformRand;
@@ -516,7 +516,7 @@ mod tests {
 
         let result = multi_scalar_mul(&crs, &scalars);
 
-        let extend_precomp = Committer::new(&crs, 11);
+        let extend_precomp = Committer::new(&crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
         let mut got_result = Element::zero();
         scalars.iter().enumerate().for_each(|(i, scalar)| {
             got_result += extend_precomp.mul_index(scalar, i);
@@ -558,7 +558,7 @@ mod tests {
         )
         .unwrap();
 
-        let precompute = Committer::new(&basic_crs, 11);
+        let precompute = Committer::new(&basic_crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
         let got_result = precompute.mul_index(&scalar, 0);
 
         let affine_result = got_result.0.into_affine();
@@ -605,7 +605,7 @@ mod tests {
 
         let test_round = 100;
         let windows_size = 17;
-        for j in 4..windows_size {
+        for j in 3..windows_size {
             let precompute = Committer::new(&basic_crs, j);
             for _k in 0..test_round {
                 let mut rng = ChaCha20Rng::from_seed([2u8; 32]);

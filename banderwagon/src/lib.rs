@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 pub mod msm;
+pub mod platform;
 
 mod element;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;

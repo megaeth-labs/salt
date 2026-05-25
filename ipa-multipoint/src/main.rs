@@ -1,6 +1,6 @@
 #![cfg(feature = "std")]
 
-use banderwagon::{salt_committer::Committer, trait_defs::*, Fr};
+use banderwagon::{platform, salt_committer::Committer, trait_defs::*, Fr};
 use ipa_multipoint::crs::CRS;
 use std::time::Instant;
 
@@ -11,7 +11,7 @@ fn main() {
 
     let crs = CRS::new(256, "eth_verkle_oct_2021".as_bytes());
 
-    let committer = Committer::new(&crs.G, 11);
+    let committer = Committer::new(&crs.G, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
     let mut vec_len = 1;
     while vec_len <= 256 {
         println!("\twith {vec_len} elements... ");
