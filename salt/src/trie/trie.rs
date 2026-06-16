@@ -262,7 +262,92 @@ where
         state_updates: &StateUpdates,
     ) -> Result<(ScalarBytes, TrieUpdates), <Store as TrieReader>::Error> {
         self.update(state_updates)?;
-        self.finalize()
+        let (root, trie_updates) = self.finalize()?;
+
+        // ===== TEMP SALT FULL SELF-CHECK (debug; SALT_VERIFY=1; output -> /tmp/salt_verify.log) =====
+        // trie_updates here is the COMPLETE set (leaves + internal nodes + root). Recompute each
+        // node from scratch and compare to the incremental value; first MATCH=false = the bug.
+        //   * LEAF (node_id >= STARTING[3]): sum over post-state KV slots, G[slot]*kv_hash(value).
+        //   * INTERNAL (node_id < STARTING[3]): sum over children, G[i]*hash(child_commitment).
+        // Gated on a small update set so per-block replay is checked but bulk rebuilds are skipped.
+        if trie_updates.len() <= 64 && std::env::var("SALT_VERIFY").is_ok() {
+            use std::collections::HashMap;
+            use std::io::Write as _;
+            let leaf_start = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+            let mut changed: HashMap<BucketId, Vec<(usize, Option<SaltValue>)>> = HashMap::new();
+            for (k, (_o, new)) in state_updates.data.iter() {
+                if k.bucket_id() >= NUM_META_BUCKETS as BucketId {
+                    changed
+                        .entry(k.bucket_id())
+                        .or_default()
+                        .push(((k.slot_id() as usize) % (TRIE_WIDTH as usize), new.clone()));
+                }
+            }
+            let updated: HashMap<NodeId, CommitmentBytes> =
+                trie_updates.iter().map(|(n, (_, c))| (*n, *c)).collect();
+            let commit_of = |node: NodeId| -> CommitmentBytes {
+                updated.get(&node).copied().unwrap_or_else(|| {
+                    self.commitment(node).unwrap_or_else(|_| default_commitment(node))
+                })
+            };
+            let mut nodes: Vec<NodeId> = updated.keys().copied().collect();
+            nodes.sort_unstable();
+            let mut out = String::new();
+            for node in nodes {
+                let inc_c = updated[&node];
+                if node >= leaf_start {
+                    let bid = (node - leaf_start) as BucketId;
+                    let cap = self.store.metadata(bid).map(|m| m.capacity).unwrap_or(0);
+                    if cap > MIN_BUCKET_SIZE as u64 {
+                        out.push_str(&format!(
+                            "SALT_VERIFY node={} LEAF bucket={} EXPANDED cap={} (skipped)\n",
+                            node, bid, cap
+                        ));
+                        continue;
+                    }
+                    let mut vals: Vec<Option<SaltValue>> = vec![None; TRIE_WIDTH as usize];
+                    if let Ok(entries) = self.store.entries(SaltKey::bucket_range(bid, bid)) {
+                        for (sk, sv) in entries {
+                            vals[(sk.slot_id() as usize) % (TRIE_WIDTH as usize)] = Some(sv);
+                        }
+                    }
+                    if let Some(slots) = changed.get(&bid) {
+                        for (s, v) in slots {
+                            vals[*s] = v.clone();
+                        }
+                    }
+                    let mut acc = Element::zero();
+                    for (i, v) in vals.iter().enumerate() {
+                        acc += self.committer.mul_index(&kv_hash(v), i);
+                    }
+                    let ref_c = Element::batch_to_commitments(&[acc])[0];
+                    out.push_str(&format!(
+                        "SALT_VERIFY node={} LEAF bucket={} MATCH={} ref8={:02x?} inc8={:02x?}\n",
+                        node, bid, ref_c == inc_c, &ref_c[..8], &inc_c[..8]
+                    ));
+                } else {
+                    let mut acc = Element::zero();
+                    for i in 0..(TRIE_WIDTH as usize) {
+                        let child_c = commit_of(get_child_node(&node, i));
+                        let scalar = Element::hash_commitments(&[child_c])[0];
+                        acc += self.committer.mul_index(&scalar, i);
+                    }
+                    let ref_c = Element::batch_to_commitments(&[acc])[0];
+                    out.push_str(&format!(
+                        "SALT_VERIFY node={} INTERNAL MATCH={} ref8={:02x?} inc8={:02x?}\n",
+                        node, ref_c == inc_c, &ref_c[..8], &inc_c[..8]
+                    ));
+                }
+            }
+            eprint!("{}", out);
+            if let Ok(mut f) =
+                std::fs::OpenOptions::new().create(true).append(true).open("/tmp/salt_verify.log")
+            {
+                let _ = f.write_all(out.as_bytes());
+            }
+        }
+
+        Ok((root, trie_updates))
     }
 
     /// Propagates commitment updates through upper trie levels to compute the root.
@@ -666,95 +751,6 @@ where
         }
 
         trie_updates.extend(uncomputed_updates.iter());
-
-        // ===== TEMP SALT FULL SELF-CHECK (debug; set SALT_VERIFY=1; output -> /tmp/salt_verify.log) =====
-        // Recompute EVERY touched node's commitment FROM SCRATCH and compare to the incremental
-        // value, to pinpoint the exact faulty node:
-        //   * main-trie LEAF (bucket, node_id >= STARTING[3]): sum over its TRIE_WIDTH post-state
-        //     KV slots: G[slot] * kv_hash(value).
-        //   * INTERNAL node (node_id < STARTING[3]): sum over its TRIE_WIDTH children:
-        //     G[i] * hash(child_commitment), using freshly-updated child commitments.
-        // The first MATCH=false node is exactly where the incremental update diverges.
-        if std::env::var("SALT_VERIFY").is_ok() {
-            use std::collections::HashMap;
-            use std::io::Write as _;
-            let leaf_start = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
-            let mut changed: HashMap<BucketId, Vec<(usize, Option<SaltValue>)>> = HashMap::new();
-            for (k, (_o, new)) in state_updates.data.iter() {
-                if k.bucket_id() >= NUM_META_BUCKETS as BucketId {
-                    changed
-                        .entry(k.bucket_id())
-                        .or_default()
-                        .push(((k.slot_id() as usize) % (TRIE_WIDTH as usize), new.clone()));
-                }
-            }
-            let updated: HashMap<NodeId, CommitmentBytes> =
-                trie_updates.iter().map(|(n, (_, c))| (*n, *c)).collect();
-            let commit_of = |node: NodeId| -> CommitmentBytes {
-                updated.get(&node).copied().unwrap_or_else(|| {
-                    self.commitment(node).unwrap_or_else(|_| default_commitment(node))
-                })
-            };
-            let mut nodes: Vec<NodeId> = trie_updates.iter().map(|(n, _)| *n).collect();
-            nodes.sort_unstable();
-            let mut out = String::new();
-            for node in nodes {
-                let inc_c = updated[&node];
-                if node >= leaf_start {
-                    // main-trie leaf = a data bucket
-                    let bid = (node - leaf_start) as BucketId;
-                    let cap = self.store.metadata(bid).map(|m| m.capacity).unwrap_or(0);
-                    if cap > MIN_BUCKET_SIZE as u64 {
-                        out.push_str(&format!(
-                            "SALT_VERIFY node={} LEAF bucket={} EXPANDED cap={} (skipped)\n",
-                            node, bid, cap
-                        ));
-                        continue;
-                    }
-                    let mut vals: Vec<Option<SaltValue>> = vec![None; TRIE_WIDTH as usize];
-                    if let Ok(entries) = self.store.entries(SaltKey::bucket_range(bid, bid)) {
-                        for (sk, sv) in entries {
-                            vals[(sk.slot_id() as usize) % (TRIE_WIDTH as usize)] = Some(sv);
-                        }
-                    }
-                    if let Some(slots) = changed.get(&bid) {
-                        for (s, v) in slots {
-                            vals[*s] = v.clone();
-                        }
-                    }
-                    let mut acc = Element::zero();
-                    for (i, v) in vals.iter().enumerate() {
-                        acc += self.committer.mul_index(&kv_hash(v), i);
-                    }
-                    let ref_c = Element::batch_to_commitments(&[acc])[0];
-                    out.push_str(&format!(
-                        "SALT_VERIFY node={} LEAF bucket={} MATCH={} ref8={:02x?} inc8={:02x?}\n",
-                        node, bid, ref_c == inc_c, &ref_c[..8], &inc_c[..8]
-                    ));
-                } else {
-                    // internal main-trie node: recompute from its children's commitments
-                    let mut acc = Element::zero();
-                    for i in 0..(TRIE_WIDTH as usize) {
-                        let child_c = commit_of(get_child_node(&node, i));
-                        let scalar = Element::hash_commitments(&[child_c])[0];
-                        acc += self.committer.mul_index(&scalar, i);
-                    }
-                    let ref_c = Element::batch_to_commitments(&[acc])[0];
-                    out.push_str(&format!(
-                        "SALT_VERIFY node={} INTERNAL MATCH={} ref8={:02x?} inc8={:02x?}\n",
-                        node, ref_c == inc_c, &ref_c[..8], &inc_c[..8]
-                    ));
-                }
-            }
-            eprint!("{}", out);
-            if let Ok(mut f) =
-                std::fs::OpenOptions::new().create(true).append(true).open("/tmp/salt_verify.log")
-            {
-                let _ = f.write_all(out.as_bytes());
-            }
-        }
-        // ===== END SELF-CHECK =====
-
         Ok(trie_updates)
     }
 
