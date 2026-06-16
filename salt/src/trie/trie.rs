@@ -347,6 +347,45 @@ where
             }
         }
 
+        // ===== TEMP ONE-SHOT REBUILD COMPARISON (debug; SALT_REBUILD=1; -> /tmp/salt_verify.log) =====
+        // Recompute the POST-state root FROM SCRATCH (full rebuild over base KVs + this block's
+        // delta) and compare to the incremental root. This is the ground-truth check the
+        // self-consistency check cannot do:
+        //   * post_rebuild == canonical (0x48967…) but incremental == 0xd4ac… => incremental tree
+        //     is corrupt (rebuild is correct; rebuilding the tree is also the recovery).
+        //   * post_rebuild == incremental (0xd4ac…) => the replayer's KV DATA differs from canonical.
+        // Runs once per process (rebuild is a full-state scan — heavy) on a small per-block update.
+        if trie_updates.len() <= 64 && std::env::var("SALT_REBUILD").is_ok() {
+            use std::io::Write as _;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static DONE: AtomicBool = AtomicBool::new(false);
+            if !DONE.swap(true, Ordering::SeqCst) {
+                let mut line = String::new();
+                match StateRoot::rebuild(self.store) {
+                    Ok((base_root, _)) => {
+                        line.push_str(&format!("SALT_REBUILD base_rebuild={:02x?}\n", &base_root[..]))
+                    }
+                    Err(_) => line.push_str("SALT_REBUILD base_rebuild=ERR\n"),
+                }
+                let overlay = PostStateOverlay { base: self.store, updates: state_updates };
+                match StateRoot::rebuild(&overlay) {
+                    Ok((post_root, _)) => line.push_str(&format!(
+                        "SALT_REBUILD incremental={:02x?} post_rebuild={:02x?} match={}\n",
+                        &root[..],
+                        &post_root[..],
+                        root == post_root
+                    )),
+                    Err(_) => line.push_str("SALT_REBUILD post_rebuild=ERR\n"),
+                }
+                eprint!("{}", line);
+                if let Ok(mut f) =
+                    std::fs::OpenOptions::new().create(true).append(true).open("/tmp/salt_verify.log")
+                {
+                    let _ = f.write_all(line.as_bytes());
+                }
+            }
+        }
+
         Ok((root, trie_updates))
     }
 
@@ -1111,6 +1150,59 @@ pub(crate) fn kv_hash(entry: &Option<SaltValue>) -> Fr {
             Fr::from_le_bytes_mod_order(data.finalize().as_bytes())
         },
     )
+}
+
+/// TEMP (debug): read-only overlay = a base StateReader plus a `StateUpdates` delta applied on
+/// top, so `StateRoot::rebuild` can recompute the POST-state root from scratch (ground truth) and
+/// be compared against the incremental result. Only `entries` is used by `rebuild`; the rest
+/// delegate to the base.
+struct PostStateOverlay<'a, S: crate::traits::StateReader> {
+    base: &'a S,
+    updates: &'a StateUpdates,
+}
+
+impl<S: crate::traits::StateReader> core::fmt::Debug for PostStateOverlay<'_, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "PostStateOverlay")
+    }
+}
+
+impl<S: crate::traits::StateReader> crate::traits::StateReader for PostStateOverlay<'_, S> {
+    type Error = S::Error;
+
+    fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+        if let Some((_, new)) = self.updates.get(&key) {
+            return Ok(new.clone());
+        }
+        self.base.value(key)
+    }
+
+    fn entries(
+        &self,
+        range: core::ops::RangeInclusive<SaltKey>,
+    ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+        let mut map: BTreeMap<SaltKey, SaltValue> =
+            self.base.entries(range.clone())?.into_iter().collect();
+        for (k, (_old, new)) in self.updates.range(range) {
+            match new {
+                Some(v) => {
+                    map.insert(*k, v.clone());
+                }
+                None => {
+                    map.remove(k);
+                }
+            }
+        }
+        Ok(map.into_iter().collect())
+    }
+
+    fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+        self.base.metadata(bucket_id)
+    }
+
+    fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+        self.base.plain_value_fast(plain_key)
+    }
 }
 
 // Calculate the bundles needed when contracting (reducing) trie capacity
