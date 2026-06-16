@@ -666,6 +666,67 @@ where
         }
 
         trie_updates.extend(uncomputed_updates.iter());
+
+        // ===== TEMP SALT LEAF SELF-CHECK (debug; set SALT_VERIFY=1, capture stderr) =====
+        // For each touched DATA bucket, recompute the leaf (bucket) vector commitment from
+        // scratch over its TRIE_WIDTH post-state slots (ground truth = actual stored KVs +
+        // this block's change) and compare to the incrementally-updated commitment. A mismatch
+        // means either the incremental delta is wrong OR the stored base leaf commitment is
+        // inconsistent with its slots — pinpointing the faulty bucket. Expanded buckets are
+        // noted (their leaf check needs the subtree, handled separately). If NOTHING mismatches
+        // and none are expanded, the divergence is in main-trie propagation, not the leaves.
+        if std::env::var("SALT_VERIFY").is_ok() {
+            let mut changed: std::collections::BTreeMap<BucketId, Vec<(usize, Option<SaltValue>)>> =
+                std::collections::BTreeMap::new();
+            for (k, (_old, new)) in state_updates.data.iter() {
+                if k.bucket_id() >= NUM_META_BUCKETS as BucketId {
+                    changed
+                        .entry(k.bucket_id())
+                        .or_default()
+                        .push(((k.slot_id() as usize) % (TRIE_WIDTH as usize), new.clone()));
+                }
+            }
+            for (bid, slots) in &changed {
+                let cap = self.store.metadata(*bid).map(|m| m.capacity).unwrap_or(0);
+                if cap > MIN_BUCKET_SIZE as u64 {
+                    eprintln!("SALT_VERIFY bucket={} EXPANDED cap={} (leaf check skipped)", bid, cap);
+                    continue;
+                }
+                let leaf_node = (*bid as NodeId) + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+                let mut vals: Vec<Option<SaltValue>> = vec![None; TRIE_WIDTH as usize];
+                if let Ok(entries) = self.store.entries(SaltKey::bucket_range(*bid, *bid)) {
+                    for (sk, sv) in entries {
+                        vals[(sk.slot_id() as usize) % (TRIE_WIDTH as usize)] = Some(sv);
+                    }
+                }
+                for (s, v) in slots {
+                    vals[*s] = v.clone();
+                }
+                let mut acc = Element::zero();
+                for (i, v) in vals.iter().enumerate() {
+                    acc += self.committer.mul_index(&kv_hash(v), i);
+                }
+                let ref_c = Element::batch_to_commitments(&[acc])[0];
+                let inc_c = trie_updates
+                    .iter()
+                    .find(|(nid, _)| *nid == leaf_node)
+                    .map(|(_, (_, n))| *n)
+                    .unwrap_or_else(|| {
+                        self.commitment(leaf_node).unwrap_or_else(|_| default_commitment(leaf_node))
+                    });
+                eprintln!(
+                    "SALT_VERIFY bucket={} leaf_node={} cap={} MATCH={} ref8={:02x?} inc8={:02x?}",
+                    bid,
+                    leaf_node,
+                    cap,
+                    ref_c == inc_c,
+                    &ref_c[..8],
+                    &inc_c[..8],
+                );
+            }
+        }
+        // ===== END SELF-CHECK =====
+
         Ok(trie_updates)
     }
 
