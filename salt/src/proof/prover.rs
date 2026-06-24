@@ -125,9 +125,7 @@ pub mod parents_commitments_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<BTreeMap<NodeId, SerdeCommitment>, D::Error> {
-        let raw: Vec<(NodeId, [u8; 32])> = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?
-            .into_iter()
-            .collect();
+        let raw = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?;
 
         let commitments: Result<Vec<(NodeId, SerdeCommitment)>, ()> = into_iter!(raw)
             .map(|(id, bytes)| {
