@@ -103,22 +103,12 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
     }
 }
 
-/// Parallel deserialization for [`SaltProof::parents_commitments`].
-///
-/// Serialization stays the derived per-element path; only deserialization is overridden, and the
-/// wire format is unchanged (a map of `NodeId` to a 32-byte compressed point). Deserialization is
-/// the witness-decode hot path: every point costs a modular sqrt (decompression) plus a subgroup
-/// check in [`Element::from_bytes`], and a witness carries one per path node. Since the points are
-/// independent, we read the raw compressed bytes sequentially (cheap) and then validate and
-/// decompress them in parallel via `into_iter!` (rayon under the `parallel` feature, sequential
-/// otherwise). Errors are reduced to `()` inside the parallel section so the closure's error
-/// type stays `Send`, then mapped to the deserializer error sequentially.
-///
-/// (Serialization is intentionally *not* overridden: a proof's commitments are already in
-/// normalized affine form, `Z = 1` — they are loaded via `from_bytes_unchecked_uncompressed` on
-/// the prover and `from_bytes` on the verifier — so `Element::to_bytes` does no field inversion
-/// and batch normalization (Montgomery's trick) would only add overhead. Measured on real
-/// witnesses, batch serialize was slower than the per-point path.)
+/// Parallel deserialization for [`SaltProof::parents_commitments`] — the witness-decode hot path,
+/// since every point pays a modular sqrt (decompression) plus a subgroup check in
+/// [`Element::from_bytes`] and a witness carries one per path node. Wire format is unchanged (a map
+/// of `NodeId` to a 32-byte compressed point); only deserialization is overridden, because
+/// serializing already-normalized commitments (`Z = 1`) is cheap and batch normalization measured
+/// slower on real witnesses.
 pub mod parents_commitments_serde {
     use super::*;
 

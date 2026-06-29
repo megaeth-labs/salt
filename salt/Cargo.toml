@@ -46,3 +46,7 @@ enable-hugepages = ["std", "banderwagon/enable-hugepages"]
 [[bench]]
 name = "salt_trie"
 harness = false
+
+[[bench]]
+name = "parents_commitments_deser"
+harness = false
