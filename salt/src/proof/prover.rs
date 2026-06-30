@@ -23,7 +23,7 @@ use ipa_multipoint::{
 };
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, iter, num_threads, sort_unstable};
+use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable};
 use serde::{
     de::{Error as _, MapAccess, Visitor},
     ser::SerializeMap,
@@ -103,10 +103,39 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
     }
 }
 
+/// Parallel deserialization for [`SaltProof::parents_commitments`] — the witness-decode hot path,
+/// since every point pays a modular sqrt (decompression) plus a subgroup check in
+/// [`Element::from_bytes`] and a witness carries one per path node. Wire format is unchanged (a map
+/// of `NodeId` to a 32-byte compressed point); only deserialization is overridden, because
+/// serializing already-normalized commitments (`Z = 1`) is cheap and batch normalization measured
+/// slower on real witnesses.
+pub mod parents_commitments_serde {
+    use super::*;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<NodeId, SerdeCommitment>, D::Error> {
+        let raw = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?;
+
+        let commitments: Result<Vec<(NodeId, SerdeCommitment)>, ()> = into_iter!(raw)
+            .map(|(id, bytes)| {
+                Element::from_bytes(bytes)
+                    .map(|e| (id, SerdeCommitment(e)))
+                    .map_err(|_| ())
+            })
+            .collect();
+
+        commitments
+            .map_err(|()| serde::de::Error::custom("invalid element bytes"))
+            .map(|c| c.into_iter().collect())
+    }
+}
+
 /// Salt proof.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaltProof {
     /// the node id of nodes in the path => node commitment
+    #[serde(deserialize_with = "parents_commitments_serde::deserialize")]
     pub parents_commitments: BTreeMap<NodeId, SerdeCommitment>,
 
     /// the IPA proof
