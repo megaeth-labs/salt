@@ -1,0 +1,29 @@
+# Canonical cargo-mutants configuration for SALT mutation testing.
+#
+# The mutation-testing pipeline layers diff scoping, suppression metadata, and
+# PR gating on top of this file. See mutants/README.md.
+
+test_tool = "nextest"
+test_package = ["salt"]
+
+# Pin the feature set so local and CI runs generate the same mutant population.
+# Do not use --all-features here: test-bucket-resize is environment-sensitive,
+# and enable-hugepages is not part of the normal CI test path.
+additional_cargo_args = ["--no-default-features", "--features", "parallel"]
+
+# Mutation should measure production behavior. Test-only helpers, ignored fuzz
+# scaffolding, benches, and benchmark fixtures are not useful mutation targets.
+exclude_globs = [
+    "salt/src/fuzz.rs",
+    "salt/src/proof/test_utils.rs",
+    "salt/benches/**",
+    "**/test_utils.rs",
+]
+
+# SALT proof and trie tests do real cryptographic work; give each mutant enough
+# headroom while still treating unsuppressed timeouts as inconclusive failures.
+minimum_test_timeout = 180
+timeout_multiplier = 3.0
+
+# Seed mutant scratch builds from the warm target dir compiled by CI.
+copy_target = true

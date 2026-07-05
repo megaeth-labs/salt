@@ -1069,6 +1069,7 @@ mod tests {
             updates::StateUpdates,
         },
         traits::StateReader,
+        types::SaltError,
     };
 
     const TEST_BUCKET: BucketId = NUM_META_BUCKETS as BucketId + 1;
@@ -1335,6 +1336,39 @@ mod tests {
             .collect()
     }
 
+    #[derive(Debug)]
+    struct FastLookupStore {
+        inner: MemStore,
+        fast_key: SaltKey,
+    }
+
+    impl StateReader for FastLookupStore {
+        type Error = SaltError;
+
+        fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+            self.inner.value(key)
+        }
+
+        fn entries(
+            &self,
+            range: core::ops::RangeInclusive<SaltKey>,
+        ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+            self.inner.entries(range)
+        }
+
+        fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+            self.inner.metadata(bucket_id)
+        }
+
+        fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+            self.inner.bucket_used_slots(bucket_id)
+        }
+
+        fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+            Ok(self.fast_key)
+        }
+    }
+
     // ============================
     // Test Functions
     // ============================
@@ -1440,6 +1474,14 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
+    fn test_compute_resize_capacity_exact_thresholds() {
+        assert_eq!(compute_resize_capacity(256, 204), 256);
+        assert_eq!(compute_resize_capacity(256, 205), 512);
+        assert_eq!(compute_resize_capacity(256, 410), 1024);
+    }
+
     /// Comprehensive test for plain_value() method covering all key scenarios.
     ///
     /// Tests: non-existent keys, successful retrieval with hash collisions,
@@ -1482,6 +1524,59 @@ mod tests {
             cache_state.usage_count_delta.is_empty(),
             "Usage count delta should remain empty"
         );
+    }
+
+    #[test]
+    fn test_direct_find_ignores_mismatched_fast_lookup_key() {
+        let store = MemStore::new();
+        let target_key = b"target-key".to_vec();
+        let target_value = b"target-value".to_vec();
+        let wrong_key = b"wrong-key".to_vec();
+        let wrong_value = b"wrong-value".to_vec();
+        let kvs = BTreeMap::from([
+            (target_key.clone(), Some(target_value.clone())),
+            (wrong_key.clone(), Some(wrong_value)),
+        ]);
+
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        let wrong_salt_key = updates
+            .data
+            .iter()
+            .find_map(|(salt_key, (_, new_value))| {
+                new_value
+                    .as_ref()
+                    .filter(|value| value.key() == wrong_key)
+                    .map(|_| *salt_key)
+            })
+            .expect("wrong key must be inserted");
+        store.update_state(updates);
+
+        let fast_store = FastLookupStore {
+            inner: store,
+            fast_key: wrong_salt_key,
+        };
+        let mut state = EphemeralSaltState::new(&fast_store);
+
+        assert_eq!(state.plain_value(&target_key).unwrap(), Some(target_value));
+    }
+
+    #[test]
+    fn test_deleted_cache_marker_blocks_store_resurrection() {
+        let store = MemStore::new();
+        let plain_key = b"delete-me".to_vec();
+        let plain_value = b"stored-value".to_vec();
+        let kvs = BTreeMap::from([(plain_key.clone(), Some(plain_value))]);
+
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        store.update_state(updates);
+
+        let deletion = BTreeMap::from([(plain_key.clone(), None)]);
+        let mut state = EphemeralSaltState::new(&store);
+        state.update(deletion.iter()).unwrap();
+
+        assert_eq!(state.plain_value(&plain_key).unwrap(), None);
     }
 
     #[test]
@@ -2463,6 +2558,40 @@ mod tests {
                 num_entries,
             );
         }
+    }
+
+    #[test]
+    fn test_shi_rehash_too_small_capacity_has_no_side_effects() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut setup_updates = StateUpdates::default();
+
+        state
+            .shi_rehash(TEST_BUCKET, 0, 4, &mut setup_updates)
+            .unwrap();
+        for i in 0..3 {
+            let key = vec![i as u8; 32];
+            let value = vec![i as u8 + 10; 32];
+            state
+                .shi_upsert(TEST_BUCKET, &key, &value, &mut setup_updates)
+                .unwrap();
+        }
+
+        let metadata_before = state.metadata(TEST_BUCKET, false).unwrap();
+        let cache_before = state.cache.clone();
+        let usage_delta_before = state.usage_count_delta.clone();
+        let rehashed_before = state.rehashed_buckets.clone();
+
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(TEST_BUCKET, 99, 2, &mut rehash_updates)
+            .unwrap();
+
+        assert!(rehash_updates.data.is_empty());
+        assert_eq!(state.metadata(TEST_BUCKET, false).unwrap(), metadata_before);
+        assert_eq!(state.cache, cache_before);
+        assert_eq!(state.usage_count_delta, usage_delta_before);
+        assert_eq!(state.rehashed_buckets, rehashed_before);
     }
 
     /// Comprehensive test for shi_find method with high bucket occupancy.

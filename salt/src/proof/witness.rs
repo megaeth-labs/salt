@@ -476,6 +476,63 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_value_fast_unknown_key_is_not_in_witness() {
+        let witness = Witness {
+            direct_lookup_tbl: HashMap::new(),
+            salt_witness: SaltWitness {
+                kvs: BTreeMap::new(),
+                proof: crate::proof::salt_witness::create_mock_proof(),
+            },
+        };
+
+        assert_eq!(
+            witness.plain_value_fast(b"unknown"),
+            Err(SaltError::NotInWitness { what: "Plain key" })
+        );
+    }
+
+    #[test]
+    fn test_witness_from_salt_witness_excludes_metadata_direct_lookup() {
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let metadata_key = bucket_metadata_key(bucket_id);
+        let data_key = SaltKey::from((bucket_id, 7));
+        let plain_key = b"plain-key".to_vec();
+        let mut kvs = BTreeMap::new();
+        kvs.insert(metadata_key, Some(BucketMeta::default().into()));
+        kvs.insert(data_key, Some(SaltValue::new(&plain_key, b"value")));
+
+        let witness = Witness::from(SaltWitness {
+            kvs,
+            proof: crate::proof::salt_witness::create_mock_proof(),
+        });
+
+        assert_eq!(witness.direct_lookup_tbl.len(), 1);
+        assert_eq!(witness.direct_lookup_tbl[&plain_key], data_key);
+        let metadata_bytes = BucketMeta::default().to_bytes().to_vec();
+        assert!(!witness.direct_lookup_tbl.contains_key(&metadata_bytes));
+    }
+
+    #[test]
+    fn test_verify_rejects_tampered_direct_lookup_slot() {
+        let store = MemStore::new();
+        let plain_key = test_keys_with_known_mappings()[0].clone();
+        setup_state_with_keys(vec![plain_key.clone()], &store);
+        let mut witness =
+            Witness::create([], &[plain_key.clone()], &BTreeMap::new(), &store).unwrap();
+        let salt_key = witness.direct_lookup_tbl[&plain_key];
+
+        witness.direct_lookup_tbl.insert(
+            plain_key,
+            SaltKey::from((salt_key.bucket_id(), salt_key.slot_id() + 1)),
+        );
+
+        assert!(matches!(
+            witness.verify(),
+            Err(ProofError::InvalidLookupTable { .. })
+        ));
+    }
+
+    #[test]
     #[cfg(not(feature = "test-bucket-resize"))]
     fn test_witness_exist_or_not_exist() {
         // Tests three main scenarios for plain key proof generation:

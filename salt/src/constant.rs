@@ -259,3 +259,59 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consensus_constants_are_pinned() {
+        assert_eq!(MIN_BUCKET_SIZE_BITS, 8);
+        assert_eq!(MIN_BUCKET_SIZE, 256);
+        assert_eq!(META_BUCKET_SIZE, 256);
+        assert_eq!(MAIN_TRIE_LEVELS, 4);
+        assert_eq!(MAX_SUBTREE_LEVELS, 5);
+        assert_eq!(TRIE_WIDTH_BITS, 8);
+        assert_eq!(TRIE_WIDTH, 256);
+        assert_eq!(NUM_BUCKETS, 16_777_216);
+        assert_eq!(NUM_META_BUCKETS, 65_536);
+        assert_eq!(NUM_KV_BUCKETS, 16_711_680);
+        assert_eq!(ROOT_NODE_ID, 0);
+        assert_eq!(BUCKET_ID_BITS, 24);
+        assert_eq!(BUCKET_SLOT_BITS, 40);
+        assert_eq!(BUCKET_SLOT_ID_MASK, (1u64 << 40) - 1);
+        assert_eq!(BUCKET_RESIZE_LOAD_FACTOR_PCT, 80);
+        assert_eq!(BUCKET_RESIZE_MULTIPLIER, 2);
+        assert_eq!(DOMAIN_SIZE, 256);
+        assert_eq!(EMPTY_SLOT_HASH, [1u8; 32]);
+        assert_eq!(STARTING_NODE_ID, [0, 1, 257, 65_793, 16_843_009]);
+    }
+
+    #[test]
+    fn test_default_commitment_boundary_selection() {
+        assert_eq!(default_commitment(ROOT_NODE_ID), default_commitment(0));
+
+        assert_ne!(
+            default_commitment(STARTING_NODE_ID[1] as NodeId),
+            default_commitment((STARTING_NODE_ID[1] + 1) as NodeId)
+        );
+        assert_ne!(
+            default_commitment((STARTING_NODE_ID[2] + MIN_BUCKET_SIZE - 1) as NodeId),
+            default_commitment((STARTING_NODE_ID[2] + MIN_BUCKET_SIZE) as NodeId)
+        );
+        assert_ne!(
+            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS - 1) as NodeId),
+            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS) as NodeId)
+        );
+
+        let first_data_bucket = (NUM_META_BUCKETS as NodeId) << BUCKET_SLOT_BITS;
+        assert_ne!(
+            default_commitment(first_data_bucket | STARTING_NODE_ID[0] as NodeId),
+            default_commitment(first_data_bucket | STARTING_NODE_ID[4] as NodeId)
+        );
+        assert_eq!(
+            default_commitment(first_data_bucket | STARTING_NODE_ID[4] as NodeId),
+            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS) as NodeId)
+        );
+    }
+}
