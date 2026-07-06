@@ -35,6 +35,16 @@ struct ParallelMap {
     inner: BTreeMap<NodeId, SerdeCommitment>,
 }
 
+/// Routes through the chunked-parallel batch-inversion path (`deserialize_batch_parallel`) — the
+/// production deserializer for `SaltProof::parents_commitments`.
+#[derive(serde::Deserialize)]
+struct BatchParallelMap {
+    #[serde(
+        deserialize_with = "salt::proof::prover::parents_commitments_serde::deserialize_batch_parallel"
+    )]
+    inner: BTreeMap<NodeId, SerdeCommitment>,
+}
+
 /// A loaded fixture: the parsed proof, its on-wire bytes, and its `parents_commitments` map bytes.
 struct Case {
     label: String,
@@ -106,6 +116,18 @@ fn bench(c: &mut Criterion) {
             |b, bytes| {
                 b.iter(|| {
                     let (wrapped, _): (ParallelMap, usize) =
+                        bincode::serde::decode_from_slice(black_box(bytes), legacy())
+                            .expect("decode");
+                    black_box(wrapped.inner)
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("batch_parallel", &case.label),
+            &case.map_wire,
+            |b, bytes| {
+                b.iter(|| {
+                    let (wrapped, _): (BatchParallelMap, usize) =
                         bincode::serde::decode_from_slice(black_box(bytes), legacy())
                             .expect("decode");
                     black_box(wrapped.inner)

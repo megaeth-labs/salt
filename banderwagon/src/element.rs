@@ -117,6 +117,64 @@ impl Element {
             .ok_or(SerializationError::InvalidData)
     }
 
+    /// Batch-decompresses many 32-byte compressed banderwagon elements, amortizing the single
+    /// field inversion inside [`get_point_from_x`](Element::get_point_from_x) across the whole
+    /// batch with Montgomery's trick (the same primitive as
+    /// [`batch_map_to_scalar_field`](Element::batch_map_to_scalar_field)).
+    ///
+    /// The result is bit-identical to calling [`from_bytes`](Element::from_bytes) on each input
+    /// individually: same `y`-sign canonicalization and the same subgroup check. The call fails if
+    /// *any* input is invalid, mirroring the map-level deserialize which rejects the whole map on a
+    /// single bad element.
+    ///
+    /// Only the field inversion is batched — the per-element modular sqrt and the subgroup-check
+    /// Legendre symbol are two independent field exponentiations that dominate the cost and cannot
+    /// be batched away.
+    ///
+    /// # Why this is exact (and panic-free) on Bandersnatch
+    ///
+    /// The denominators `d·x² − 1` are inverted with [`serial_batch_inversion_and_mul`], which maps
+    /// `0 → 0` instead of panicking. On this curve the denominator is never zero (`d·x² = 1` needs
+    /// `x² = 1/d`, but `1/d` is a quadratic non-residue), so the `0 → 0` branch is never taken and
+    /// every inverse is exact. (The per-element `/` in [`from_bytes`](Element::from_bytes) would
+    /// instead panic on a zero denominator.)
+    pub fn batch_from_bytes(inputs: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
+        let n = inputs.len();
+        let mut xs = Vec::with_capacity(n);
+        let mut nums = Vec::with_capacity(n);
+        let mut dens = Vec::with_capacity(n);
+
+        // Pass 1: recover x and form y² = num/den, num = a·x² − 1, den = d·x² − 1.
+        for bytes in inputs {
+            let mut le = *bytes;
+            le.reverse(); // big-endian on the wire -> little-endian for arkworks
+            let x = Fq::deserialize_compressed(&le[..])?;
+            let x_sq = x.square();
+            xs.push(x);
+            nums.push(BandersnatchConfig::COEFF_A * x_sq - Fq::one());
+            dens.push(BandersnatchConfig::COEFF_D * x_sq - Fq::one());
+        }
+
+        // Pass 2: a single inversion for the whole batch; dens[i] becomes den_i⁻¹.
+        serial_batch_inversion_and_mul(&mut dens, &Fq::ONE);
+
+        // Pass 3: per-element sqrt + canonicalization + subgroup check.
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let y_squared = nums[i] * dens[i];
+            let mut y = y_squared.sqrt().ok_or(SerializationError::InvalidData)?;
+            if !is_positive(y) {
+                y = -y;
+            }
+            // Subgroup check: 1 − a·x² = −num must be a quadratic residue.
+            if !(-nums[i]).legendre().is_qr() {
+                return Err(SerializationError::InvalidData);
+            }
+            out.push(Element(EdwardsAffine::new_unchecked(xs[i], y).into()));
+        }
+        Ok(out)
+    }
+
     /// Serializes this element to a 64-byte uncompressed representation.
     ///
     /// This format stores both x and y coordinates, enabling faster deserialization.
@@ -573,6 +631,33 @@ mod tests {
         for (element, commitment) in elements.iter().zip(batch_result.iter()) {
             assert_eq!(element.to_bytes_uncompressed(), *commitment);
         }
+    }
+
+    #[test]
+    fn batch_from_bytes_matches_from_bytes() {
+        // A spread of valid, distinct elements plus the identity.
+        let mut inputs: Vec<[u8; 32]> = (0..257u64)
+            .map(|i| (Element::prime_subgroup_generator() * Fr::from(i * 7 + 1)).to_bytes())
+            .collect();
+        inputs.push(Element::zero().to_bytes());
+
+        let batched = Element::batch_from_bytes(&inputs).expect("all valid");
+        assert_eq!(batched.len(), inputs.len());
+        for (bytes, got) in inputs.iter().zip(&batched) {
+            let want = Element::from_bytes(*bytes).expect("valid");
+            // Compare the canonical serialization, i.e. bit-identical decompression.
+            assert_eq!(got.to_bytes(), want.to_bytes());
+            assert_eq!(got.to_bytes_uncompressed(), want.to_bytes_uncompressed());
+        }
+
+        // A single invalid element must fail the whole batch, like the map-level deserialize.
+        let bad = {
+            let mut v = inputs.clone();
+            v[100] = [0xff; 32]; // not a valid x / not on curve
+            v
+        };
+        assert!(Element::from_bytes(bad[100]).is_err());
+        assert!(Element::batch_from_bytes(&bad).is_err());
     }
 
     // Two torsion point, *not*  point at infinity {0,-1,0,1}
