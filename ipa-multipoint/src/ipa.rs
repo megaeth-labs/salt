@@ -9,7 +9,7 @@ use core::iter;
 use itertools::Itertools;
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, join, num_threads};
+use salt_macros::{chunks, chunks_mut, join, num_threads};
 use std::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,10 +152,17 @@ pub fn create(
         let x = transcript.challenge_scalar(b"x");
         let x_inv = x.inverse().unwrap();
 
+        let chunk_size = G_L.len().div_ceil(num_threads!());
+        chunks_mut!(G_L, chunk_size)
+            .zip(chunks!(G_R, chunk_size))
+            .for_each(|(g_l_chunk, g_r_chunk)| {
+                for (g_l, g_r) in g_l_chunk.iter_mut().zip(g_r_chunk.iter()) {
+                    *g_l += *g_r * x_inv;
+                }
+            });
         for i in 0..a_L.len() {
             a_L[i] += x * a_R[i];
             b_L[i] += x_inv * b_R[i];
-            G_L[i] += G_R[i] * x_inv;
         }
 
         a = a_L;
