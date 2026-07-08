@@ -1,0 +1,23 @@
+# Family E - canonicalization removal (issue #141).
+#
+# The proof path sorts and deduplicates to reach canonical form. Deleting
+# those calls (or flipping comparator direction) is a soundness mutation:
+# duplicates or unordered elements should be rejected or change the root.
+# Statement deletion is not in cargo-mutants' repertoire.
+#
+# Known gap: multi-line sort_unstable_by!/by_key! macro invocations are not
+# matched by these line-based rules (e.g. trie.rs update_leaf_nodes).
+
+# Delete single-line sort/dedup statements, keeping the indentation.
+^(\s*).*\.sort\(\); ==> \1
+^(\s*).*\.sort_unstable\(\); ==> \1
+^(\s*).*\.sort_unstable_by\(.*\); ==> \1
+^(\s*).*\.sort_unstable_by_key\(.*\); ==> \1
+^(\s*).*\.dedup\(\); ==> \1
+^(\s*).*\.dedup_by\(.*\); ==> \1
+^(\s*)sort_unstable!\([A-Za-z_0-9]+\); ==> \1
+
+# Flip comparator direction inside sort closures.
+b\.cmp\(a\) ==> a.cmp(b)
+a\.cmp\(b\) ==> b.cmp(a)
+a\.cmp\(&b\) ==> b.cmp(&a)

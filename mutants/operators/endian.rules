@@ -1,0 +1,10 @@
+# Family B - endianness / byte-order (issue #141).
+#
+# Explicit byte packing in the hasher and codecs; flipping endianness
+# silently breaks determinism and cross-platform reproducibility (see
+# issue #127), and no generic operator flips it.
+
+to_le_bytes ==> to_be_bytes
+to_be_bytes ==> to_le_bytes
+from_le_bytes ==> from_be_bytes
+from_be_bytes ==> from_le_bytes
