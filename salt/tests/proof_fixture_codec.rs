@@ -4,7 +4,7 @@ use salt::{
     types::NodeId,
     SaltProof,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(serde::Deserialize)]
 struct ParentsCommitmentsFixture {
@@ -40,13 +40,6 @@ fn committed_proof_fixtures_decode_and_reencode_deterministically() {
         assert!(
             !proof.levels.is_empty(),
             "{name} should contain bucket level metadata"
-        );
-
-        let level_keys = proof.levels.keys().copied().collect::<BTreeSet<_>>();
-        assert_eq!(
-            level_keys.len(),
-            proof.levels.len(),
-            "{name} has duplicate level keys after decode"
         );
 
         let encoded = bincode::serde::encode_to_vec(&proof, legacy())

@@ -15,7 +15,6 @@ additional_cargo_args = ["--no-default-features", "--features", "parallel"]
 # scaffolding, benches, and benchmark fixtures are not useful mutation targets.
 exclude_globs = [
     "salt/src/fuzz.rs",
-    "salt/src/proof/test_utils.rs",
     "salt/benches/**",
     "**/test_utils.rs",
 ]
