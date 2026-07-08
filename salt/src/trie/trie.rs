@@ -1217,7 +1217,13 @@ mod tests {
     /// Beyond root/rebuild equality, every persisted node must match a store
     /// built from scratch with the same final state — stale intermediate
     /// commitments are invisible to the root but not to this comparison.
+    ///
+    /// Gated out of test-bucket-resize: under that feature the plain inserts
+    /// already resize buckets, so the cycle's minimum-capacity baseline does
+    /// not hold (that configuration exercises the same machinery through its
+    /// own load-factor driven tests).
     #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
     fn test_manual_capacity_cycle_preserves_node_exactness() {
         let kvs = create_random_kvs(6);
         let store = MemStore::new();
