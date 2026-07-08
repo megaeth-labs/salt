@@ -252,7 +252,68 @@ pub trait TrieReader: Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{constant::NUM_META_BUCKETS, mem_store::MemStore, types::BucketMeta};
+    use crate::{
+        constant::{NUM_BUCKETS, NUM_META_BUCKETS},
+        mem_store::MemStore,
+        types::{BucketMeta, SaltError},
+    };
+    // `std` is `alloc` in no_std builds, which has no `sync::Mutex`; spin is
+    // already a dependency and its RwLock is Sync, as StateReader requires.
+    use spin::RwLock;
+    use std::vec;
+
+    #[derive(Debug)]
+    struct DefaultReaderMock {
+        entries_result: Vec<(SaltKey, SaltValue)>,
+        entries_ranges: RwLock<Vec<RangeInclusive<SaltKey>>>,
+        metadata_result: Result<BucketMeta, SaltError>,
+    }
+
+    impl DefaultReaderMock {
+        fn with_entries(entries_result: Vec<(SaltKey, SaltValue)>) -> Self {
+            Self {
+                entries_result,
+                entries_ranges: RwLock::new(Vec::new()),
+                metadata_result: Ok(BucketMeta::default()),
+            }
+        }
+
+        fn with_metadata_error() -> Self {
+            Self {
+                entries_result: Vec::new(),
+                entries_ranges: RwLock::new(Vec::new()),
+                metadata_result: Err(SaltError::InvalidFormat {
+                    message: "metadata failed",
+                }),
+            }
+        }
+    }
+
+    impl StateReader for DefaultReaderMock {
+        type Error = SaltError;
+
+        fn value(&self, _key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+            Ok(None)
+        }
+
+        fn entries(
+            &self,
+            range: RangeInclusive<SaltKey>,
+        ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+            self.entries_ranges.write().push(range);
+            Ok(self.entries_result.clone())
+        }
+
+        fn metadata(&self, _bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+            self.metadata_result.clone()
+        }
+
+        fn plain_value_fast(&self, _plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+            Err(SaltError::UnsupportedOperation {
+                operation: "DefaultReaderMock::plain_value_fast",
+            })
+        }
+    }
 
     #[test]
     fn test_get_subtree_levels_meta_buckets() {
@@ -325,5 +386,62 @@ mod tests {
             levels, 1,
             "Bucket with default capacity should have 1 level"
         );
+    }
+
+    #[test]
+    fn test_bucket_used_slots_skips_invalid_and_metadata_buckets() {
+        let store = DefaultReaderMock::with_entries(Vec::new());
+
+        assert_eq!(store.bucket_used_slots(0).unwrap(), 0);
+        assert_eq!(
+            store
+                .bucket_used_slots((NUM_META_BUCKETS - 1) as BucketId)
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.bucket_used_slots(NUM_BUCKETS as BucketId).unwrap(), 0);
+        assert!(store.entries_ranges.read().is_empty());
+    }
+
+    #[test]
+    fn test_bucket_used_slots_scans_exact_data_bucket_range() {
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let entries = vec![
+            (
+                SaltKey::from((bucket_id, 1)),
+                SaltValue::new(&[1; 20], &[1; 32]),
+            ),
+            (
+                SaltKey::from((bucket_id, 2)),
+                SaltValue::new(&[2; 20], &[2; 32]),
+            ),
+            (
+                SaltKey::from((bucket_id, 3)),
+                SaltValue::new(&[3; 20], &[3; 32]),
+            ),
+        ];
+        let store = DefaultReaderMock::with_entries(entries);
+
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 3);
+        let ranges = store.entries_ranges.read();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(*ranges[0].start(), SaltKey::from((bucket_id, 0)));
+        assert_eq!(
+            *ranges[0].end(),
+            SaltKey::from((bucket_id, BUCKET_SLOT_ID_MASK))
+        );
+    }
+
+    #[test]
+    fn test_get_subtree_levels_propagates_metadata_error() {
+        let store = DefaultReaderMock::with_metadata_error();
+        let result = store.get_subtree_levels(NUM_META_BUCKETS as BucketId);
+
+        assert!(matches!(
+            result,
+            Err(SaltError::InvalidFormat {
+                message: "metadata failed"
+            })
+        ));
     }
 }

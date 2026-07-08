@@ -177,3 +177,25 @@ impl core::hash::BuildHasher for RandomState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_small_length_classes() {
+        let cases: &[(&[u8], [u64; 2])] = &[
+            (&[], [0, 0]),
+            (&[0xab], [0xab, 0xab]),
+            (&[1, 2], [0x0201, 2]),
+            (&[1, 2, 3], [0x0201, 3]),
+            (&[1, 2, 3, 4], [0x0403_0201, 0x0403_0201]),
+            (&[1, 2, 3, 4, 5, 6, 7], [0x0403_0201, 0x0706_0504]),
+            (&[1, 2, 3, 4, 5, 6, 7, 8], [0x0403_0201, 0x0807_0605]),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(read_small(input), *expected, "input={input:?}");
+        }
+    }
+}

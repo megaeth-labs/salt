@@ -601,6 +601,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_bucket_root_boundary_node_ids() {
+        let starting_l3_node = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+        let cases = [
+            (0, starting_l3_node),
+            (
+                crate::constant::NUM_META_BUCKETS as BucketId - 1,
+                starting_l3_node + crate::constant::NUM_META_BUCKETS as NodeId - 1,
+            ),
+            (
+                crate::constant::NUM_META_BUCKETS as BucketId,
+                starting_l3_node + crate::constant::NUM_META_BUCKETS as NodeId,
+            ),
+            (
+                crate::constant::NUM_BUCKETS as BucketId - 1,
+                starting_l3_node + crate::constant::NUM_BUCKETS as NodeId - 1,
+            ),
+        ];
+
+        for (bucket_id, expected) in cases {
+            assert_eq!(bucket_root_node_id(bucket_id), expected);
+        }
+    }
+
     /// Tests the subtree_leaf_for_key function for various key patterns.
     ///
     /// Verifies that SaltKeys are correctly mapped to their subtree leaf nodes
@@ -644,6 +668,28 @@ mod tests {
                 result, expected,
                 "Failed for {}: key=({}, {}), expected={}, got={}",
                 description, bucket_id, slot_id, expected, result
+            );
+        }
+    }
+
+    #[test]
+    fn test_subtree_leaf_for_key_segment_boundaries() {
+        let bucket_id = crate::constant::NUM_META_BUCKETS as BucketId;
+        let base = ((bucket_id as NodeId) << BUCKET_SLOT_BITS)
+            + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId;
+        let cases = [
+            (0, base),
+            (255, base),
+            (256, base + 1),
+            (511, base + 1),
+            (65_535, base + 255),
+            (65_536, base + 256),
+        ];
+
+        for (slot_id, expected) in cases {
+            assert_eq!(
+                subtree_leaf_for_key(&SaltKey::from((bucket_id, slot_id))),
+                expected
             );
         }
     }

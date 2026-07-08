@@ -544,4 +544,61 @@ mod tests {
         // Empty range should return empty vec
         assert!(store.node_entries(100..200).unwrap().is_empty());
     }
+
+    #[test]
+    fn test_delete_absent_value_does_not_create_bucket_usage_delta() {
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let key = SaltKey::from((bucket_id, 7));
+        let old_value = SaltValue::new(&[1; 20], &[2; 32]);
+
+        store.update_state(StateUpdates {
+            data: [(key, (Some(old_value), None))].into(),
+        });
+
+        assert_eq!(store.value(key).unwrap(), None);
+        assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 0);
+        assert_eq!(store.metadata(bucket_id).unwrap().used, Some(0));
+    }
+
+    #[test]
+    fn test_clone_is_snapshot_not_shared() {
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let key = SaltKey::from((bucket_id, 9));
+        let old_value = SaltValue::new(&[1; 20], &[1; 32]);
+        let new_value = SaltValue::new(&[2; 20], &[2; 32]);
+        let node_id = 99;
+
+        store.update_state(StateUpdates {
+            data: [(key, (None, Some(old_value.clone())))].into(),
+        });
+        store.update_trie(vec![(node_id, ([0; 64], [3; 64]))]);
+
+        let snapshot = store.clone();
+
+        store.update_state(StateUpdates {
+            data: [(key, (Some(old_value.clone()), Some(new_value.clone())))].into(),
+        });
+        store.update_trie(vec![(node_id, ([3; 64], [4; 64]))]);
+
+        assert_eq!(snapshot.value(key).unwrap(), Some(old_value));
+        assert_eq!(snapshot.commitment(node_id).unwrap(), [3; 64]);
+        assert_eq!(store.value(key).unwrap(), Some(new_value));
+        assert_eq!(store.commitment(node_id).unwrap(), [4; 64]);
+    }
+
+    #[test]
+    fn test_update_trie_last_write_wins() {
+        let store = MemStore::new();
+        let node_id = 123;
+
+        store.update_trie(vec![
+            (node_id, ([0; 64], [1; 64])),
+            (node_id, ([1; 64], [2; 64])),
+        ]);
+
+        assert_eq!(store.commitment(node_id).unwrap(), [2; 64]);
+        assert_eq!(store.node_entries(node_id..node_id + 1).unwrap().len(), 1);
+    }
 }

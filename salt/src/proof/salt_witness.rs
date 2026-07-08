@@ -674,6 +674,91 @@ mod tests {
         assert!(witness_meta.metadata(bucket_unknown).is_err());
     }
 
+    #[test]
+    fn test_state_root_missing_root_commitment_errors() {
+        let bucket_id = 100000;
+        let mut witness = create_witness(
+            bucket_id,
+            Some(BucketMeta::default()),
+            vec![(0, None), (1, None)],
+        );
+        witness.proof.parents_commitments.remove(&ROOT_NODE_ID);
+
+        assert!(matches!(
+            witness.state_root(),
+            Err(ProofError::MissingRootCommitment)
+        ));
+    }
+
+    #[test]
+    fn test_get_subtree_levels_missing_bucket_errors() {
+        let witness = SaltWitness {
+            kvs: BTreeMap::new(),
+            proof: create_mock_proof(),
+        };
+
+        assert_eq!(
+            witness
+                .get_subtree_levels(NUM_META_BUCKETS as BucketId)
+                .unwrap_err(),
+            SaltError::NotInWitness {
+                what: "Bucket root"
+            }
+        );
+    }
+
+    #[test]
+    fn test_bucket_used_slots_meta_bucket_returns_zero_without_metadata() {
+        let witness = SaltWitness {
+            kvs: BTreeMap::new(),
+            proof: create_mock_proof(),
+        };
+
+        assert_eq!(
+            witness
+                .bucket_used_slots(NUM_META_BUCKETS as BucketId - 1)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Metadata should never be stored as None")]
+    fn test_metadata_none_entry_panics() {
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let mut kvs = BTreeMap::new();
+        kvs.insert(bucket_metadata_key(bucket_id), None);
+        let witness = SaltWitness {
+            kvs,
+            proof: create_mock_proof(),
+        };
+
+        let _ = witness.metadata(bucket_id);
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_tampered_kv_value() {
+        let mut rng = StdRng::seed_from_u64(99);
+        let kvs: HashMap<_, _> = [(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)))]
+            .iter()
+            .cloned()
+            .collect();
+
+        let store = MemStore::new();
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let salt_key = *updates.data.keys().next().unwrap();
+        let mut witness = SaltWitness::create(&[salt_key], &store).unwrap();
+        witness
+            .kvs
+            .insert(salt_key, Some(SaltValue::new(&[0xaa; 20], &[0xbb; 40])));
+
+        assert!(witness.verify_proof().is_err());
+    }
+
     /// Comprehensive tests for the bucket_used_slots method.
     ///
     /// Tests all scenarios:

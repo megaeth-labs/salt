@@ -371,6 +371,30 @@ pub mod tests {
         assert_eq!(hash(b"hash test"), 2116618212096523432);
     }
 
+    #[test]
+    fn test_hash_length_class_boundaries_are_pinned() {
+        let cases = [
+            (0usize, 4_972_614_686_478_438_145),
+            (1, 4_496_987_394_587_359_887),
+            (2, 1_215_112_587_451_856_460),
+            (3, 16_219_421_332_863_341_888),
+            (4, 5_134_559_730_993_604_666),
+            (7, 11_156_702_560_271_332_467),
+            (8, 9_645_053_392_275_396_808),
+            (9, 4_536_020_801_879_879_229),
+            (16, 12_746_440_629_750_494_044),
+            (17, 2_278_129_512_817_388_598),
+            (32, 18_422_011_039_243_098_119),
+            (64, 17_325_896_078_891_115_385),
+            (65, 8_480_342_239_016_890_399),
+        ];
+
+        for (len, expected) in cases {
+            let input = (0..len).map(|i| i as u8).collect::<Vec<_>>();
+            assert_eq!(hash(&input), expected, "len={len}");
+        }
+    }
+
     /// Tests that different nonces produce different hashes for probe sequence generation.
     #[test]
     fn test_hash_with_nonce() {
@@ -387,6 +411,21 @@ pub mod tests {
 
         // Same key and nonce should always produce same hash
         assert_eq!(hash_with_nonce(key, 42), hash_with_nonce(key, 42));
+    }
+
+    #[test]
+    fn test_hash_with_nonce_stack_heap_boundary_is_pinned() {
+        let cases = [
+            (60usize, 12_477_923_349_957_982_158),
+            (61, 6_599_818_881_207_944_209),
+            (64, 5_826_510_289_099_311_106),
+            (65, 7_267_467_440_731_606_995),
+        ];
+
+        for (len, expected) in cases {
+            let key = vec![0xa5; len];
+            assert_eq!(hash_with_nonce(&key, 0x0102_0304), expected, "len={len}");
+        }
     }
 
     /// Verifies bucket_id returns valid range [NUM_META_BUCKETS, NUM_BUCKETS) for various keys.
@@ -409,6 +448,22 @@ pub mod tests {
                 key,
                 id
             );
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
+    fn test_bucket_id_known_values_are_pinned() {
+        let cases: &[(&[u8], BucketId)] = &[
+            (b"", 13_438_721),
+            (b"hello", 614_399),
+            (b"world", 9_684_160),
+            (&[0u8; 32], 10_401_393),
+            (&[255u8; 32], 3_118_719),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(bucket_id(key), *expected, "key={key:?}");
         }
     }
 

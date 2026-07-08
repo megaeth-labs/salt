@@ -391,7 +391,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constant::META_BUCKET_SIZE;
+    use crate::constant::{META_BUCKET_SIZE, ROOT_NODE_ID};
     use crate::proof::test_utils::*;
     use crate::{
         mem_store::MemStore, proof::prover::PRECOMPUTED_WEIGHTS, state::state::EphemeralSaltState,
@@ -530,6 +530,38 @@ mod tests {
     }
 
     #[test]
+    fn process_leaf_node_uses_metadata_default_for_meta_bucket() {
+        let store = MemStore::new();
+        let parent_node = STARTING_NODE_ID[3] as NodeId;
+        let commitment =
+            Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
+        let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
+        let metadata_default = slot_to_field(&Some(BucketMeta::default().into()));
+
+        assert_eq!(
+            queries.iter().map(|q| q.point).collect::<Vec<_>>(),
+            vec![0, 255]
+        );
+        assert!(queries.iter().all(|q| q.result == metadata_default));
+    }
+
+    #[test]
+    fn process_leaf_node_uses_empty_default_for_data_bucket() {
+        let store = MemStore::new();
+        let parent_node = STARTING_NODE_ID[3] as NodeId + NUM_META_BUCKETS as NodeId;
+        let commitment =
+            Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
+        let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
+        let empty_default = slot_to_field(&None);
+
+        assert_eq!(
+            queries.iter().map(|q| q.point).collect::<Vec<_>>(),
+            vec![0, 255]
+        );
+        assert!(queries.iter().all(|q| q.result == empty_default));
+    }
+
+    #[test]
     fn multi_commitments_to_scalars_empty_and_single_node() {
         let store = MemStore::new();
 
@@ -540,6 +572,26 @@ mod tests {
         let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
         let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
         assert_eq!(scalars.len(), DOMAIN_SIZE);
+    }
+
+    #[test]
+    fn multi_commitments_to_scalars_root_defaults_are_pinned() {
+        let store = MemStore::new();
+        let scalars =
+            multi_commitments_to_scalars(&store, &[(ROOT_NODE_ID, [0, 1, 255].into())]).unwrap();
+        let expected = Element::batch_map_to_scalar_field(&[
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[1] as NodeId,
+            )),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(
+                STARTING_NODE_ID[1] as NodeId + 1,
+            )),
+        ]);
+
+        assert_eq!(scalars.len(), DOMAIN_SIZE);
+        assert_eq!(scalars[0], expected[0]);
+        assert!(scalars[1..].iter().all(|scalar| *scalar == expected[1]));
+        assert_ne!(scalars[0], scalars[1]);
     }
 
     #[test]

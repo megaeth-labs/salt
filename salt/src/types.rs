@@ -660,6 +660,24 @@ mod tests {
         assert_eq!(salt_value.data[1], value.len() as u8);
     }
 
+    #[test]
+    fn salt_value_max_layout_lengths() {
+        let account = SaltValue::new(&[0x11; 20], &[0x22; 72]);
+        assert_eq!(account.data_len(), MAX_SALT_VALUE_BYTES);
+        assert_eq!(account.key(), &[0x11; 20]);
+        assert_eq!(account.value(), &[0x22; 72]);
+
+        let storage = SaltValue::new(&[0x33; 52], &[0x44; 32]);
+        assert_eq!(storage.data_len(), 86);
+        assert_eq!(storage.key(), &[0x33; 52]);
+        assert_eq!(storage.value(), &[0x44; 32]);
+
+        let metadata = SaltValue::new(&[0x55; 12], &[]);
+        assert_eq!(metadata.data_len(), 14);
+        assert_eq!(metadata.key(), &[0x55; 12]);
+        assert!(metadata.value().is_empty());
+    }
+
     /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
     /// contains the 12-byte serialized BucketMeta and the value is empty. Verifies
     /// bidirectional conversion preserves nonce and capacity correctly.
@@ -804,6 +822,25 @@ mod tests {
         // Even bucket root addressing for data buckets should return true
         let bucket_root_65536 = 65536u64 << BUCKET_SLOT_BITS;
         assert!(is_subtree_node(bucket_root_65536));
+    }
+
+    #[test]
+    #[should_panic(expected = "metadata buckets cannot have subtrees")]
+    fn is_subtree_node_panics_for_metadata_namespace() {
+        is_subtree_node(1u64 << BUCKET_SLOT_BITS);
+    }
+
+    #[test]
+    fn bucket_range_spans_exact_full_slot_range() {
+        let start_bucket = NUM_META_BUCKETS as BucketId;
+        let end_bucket = start_bucket + 2;
+        let range = SaltKey::bucket_range(start_bucket, end_bucket);
+
+        assert_eq!(*range.start(), SaltKey::from((start_bucket, 0)));
+        assert_eq!(
+            *range.end(),
+            SaltKey::from((end_bucket, BUCKET_SLOT_ID_MASK))
+        );
     }
 
     /// Tests the leftmost_node function which calculates the NodeId of the leftmost node at a given level.

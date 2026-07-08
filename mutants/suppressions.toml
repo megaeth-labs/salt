@@ -1,0 +1,35 @@
+# Mutation-testing suppressions for SALT.
+#
+# Prefer killing tests. Add entries here only after manually proving a survivor
+# is equivalent or dead. Every entry must be reviewed and justified.
+#
+# For `kind = "line"`, use the mutant description from missed.txt/timeout.txt
+# with the leading `file:line:col:` locator stripped. Locator-free entries keep
+# matching when unrelated edits shift line numbers; matching is scoped to
+# `file`, so identical mutant text in another module is not suppressed.
+#
+# Example:
+#
+# [[suppress]]
+# kind = "line"
+# category = "equivalent"
+# file = "salt/src/example.rs"
+# mutant = "replace < with <= in example::function"
+# justification = "The boundary is unreachable because callers validate x > 0."
+# reviewer = "reviewer name or PR"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/empty_salt.rs"
+mutant = "replace <impl StateReader for EmptySalt>::entries -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> with Ok(vec![])"
+justification = "EmptySalt represents an empty state backend; entries() is specified to return an empty vector for every range, so replacing the body with Ok(vec![]) is behaviorally identical."
+reviewer = "krabat/feat/mutation-testing review 2026-07-05"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/empty_salt.rs"
+mutant = "replace <impl TrieReader for EmptySalt>::node_entries -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> with Ok(vec![])"
+justification = "EmptySalt has no stored trie nodes; node_entries() is specified to return an empty vector for every range, so replacing the body with Ok(vec![]) is behaviorally identical."
+reviewer = "krabat/feat/mutation-testing review 2026-07-05"

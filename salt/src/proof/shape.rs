@@ -306,7 +306,7 @@ pub const fn logic_parent_id(maybe_encoded_node: NodeId) -> NodeId {
 mod tests {
     use super::*;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     #[test]
     fn test_parents_and_points() {
@@ -372,6 +372,69 @@ mod tests {
             .for_each(|&(node, level)| {
                 assert!(!internal_nodes[&encode_parent(node, level)].is_empty());
             });
+    }
+
+    #[test]
+    fn test_parents_and_points_deduplicates_duplicate_keys() {
+        let bucket_id = crate::constant::NUM_META_BUCKETS as BucketId;
+        let keys = [
+            SaltKey::from((bucket_id, 1)),
+            SaltKey::from((bucket_id, 1)),
+            SaltKey::from((bucket_id, 2)),
+        ];
+        let mut levels = FxHashMap::default();
+        levels.insert(bucket_id, 1);
+
+        let (_, slot_position_nodes) = parents_and_points(&keys, &levels);
+        let bucket_root = crate::trie::node_utils::bucket_root_node_id(bucket_id);
+        let positions: Vec<_> = slot_position_nodes[&bucket_root].iter().copied().collect();
+
+        assert_eq!(positions, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_parents_and_points_exact_for_expanded_bucket_bridge() {
+        let bucket_id = crate::constant::NUM_META_BUCKETS as BucketId + 4;
+        let key = SaltKey::from((bucket_id, 256));
+        let mut levels = FxHashMap::default();
+        levels.insert(bucket_id, 2);
+
+        let (internal_nodes, slot_position_nodes) = parents_and_points(&[key], &levels);
+        let bucket_root = crate::trie::node_utils::bucket_root_node_id(bucket_id);
+        let leaf = crate::trie::node_utils::subtree_leaf_for_key(&key);
+        let encoded_bridge = encode_parent(bucket_root, 2);
+
+        assert!(internal_nodes[&encoded_bridge].contains(&1));
+        assert_eq!(
+            slot_position_nodes[&leaf]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn test_encoded_parent_round_trip_boundaries() {
+        let buckets = [
+            crate::constant::NUM_META_BUCKETS as BucketId,
+            crate::constant::NUM_BUCKETS as BucketId - 1,
+        ];
+
+        for bucket_id in buckets {
+            let parent = crate::trie::node_utils::bucket_root_node_id(bucket_id);
+            for level in 1..=MAX_SUBTREE_LEVELS as u8 {
+                let encoded = encode_parent(parent, level);
+                let logic = logic_parent_id(encoded);
+
+                assert_eq!(connect_parent_id(encoded), parent);
+                assert_eq!(logic >> BUCKET_SLOT_BITS, bucket_id as u64);
+                assert_eq!(
+                    logic & ((1u64 << BUCKET_SLOT_BITS) - 1),
+                    STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize] as u64
+                );
+            }
+        }
     }
 
     #[test]

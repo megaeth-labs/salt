@@ -310,6 +310,20 @@ mod tests {
         assert_eq!(updates.data[&key], (None, Some(v3.clone())));
     }
 
+    #[test]
+    #[should_panic(expected = "Invalid State Transition")]
+    fn test_merge_panics_on_non_chaining_other() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let key = SaltKey(0);
+
+        updates.add(key, None, Some(v1.clone()));
+        let mut other = StateUpdates::default();
+        other.add(key, Some(v2), Some(v3));
+
+        updates.merge(other);
+    }
+
     /// Tests inverse operations.
     ///
     /// Scenarios tested:
@@ -330,6 +344,23 @@ mod tests {
         assert_eq!(inverse.data[&key], (Some(v2.clone()), None));
 
         // Test double inverse equals original
+        assert_eq!(updates, inverse.inverse());
+    }
+
+    #[test]
+    fn test_inverse_preserves_transition_count_and_keys() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let key1 = SaltKey(1);
+        let key2 = SaltKey(2);
+
+        updates.add(key1, None, Some(v1.clone()));
+        updates.add(key2, Some(v2.clone()), Some(v3.clone()));
+
+        let inverse = updates.clone().inverse();
+        assert_eq!(inverse.data.len(), 2);
+        assert_eq!(inverse.data[&key1], (Some(v1), None));
+        assert_eq!(inverse.data[&key2], (Some(v3), Some(v2)));
         assert_eq!(updates, inverse.inverse());
     }
 }

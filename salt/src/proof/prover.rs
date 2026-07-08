@@ -584,7 +584,7 @@ mod tests {
         hasher::tests::get_same_bucket_test_keys,
         mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
-        trie::trie::StateRoot,
+        trie::{node_utils::subtree_leaf_for_key, trie::StateRoot},
         types::SlotId,
         BucketMeta,
     };
@@ -601,6 +601,35 @@ mod tests {
     }
 
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
+
+    fn setup_single_key_proof_case() -> (MemStore, SaltKey, Option<SaltValue>, ScalarBytes) {
+        let mut rng = StdRng::seed_from_u64(7);
+        let key = mock_data(&mut rng, 52);
+        let value = mock_data(&mut rng, 32);
+        let initial_key_values: FxHashMap<_, _> = [(key, Some(value))].into_iter().collect();
+
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(&initial_key_values).unwrap();
+        store.update_state(updates.clone());
+
+        let mut trie = StateRoot::new(&store);
+        let (trie_root, trie_updates) = trie.update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let salt_key = *updates.data.keys().next().unwrap();
+        let value = store.value(salt_key).unwrap();
+        (store, salt_key, value, trie_root)
+    }
+
+    #[test]
+    fn test_slot_to_field_none_is_empty_slot_hash() {
+        let empty = slot_to_field(&None);
+        let value = slot_to_field(&Some(SaltValue::new(&[1; 20], &[2; 32])));
+
+        assert_eq!(empty, crate::trie::trie::kv_hash(&None));
+        assert_ne!(empty, value);
+    }
 
     /// Tests proof generation and verification for an empty trie.
     /// Manually computes commitments at each trie level (L0-L4) and verifies
@@ -1156,6 +1185,84 @@ mod tests {
         assert!(get_commitment_safe(&commitments, 2).is_err());
     }
 
+    #[test]
+    fn test_check_rejects_tampered_root_commitment() {
+        let (store, salt_key, value, root) = setup_single_key_proof_case();
+        let mut proof = SaltProof::create([salt_key], &store).unwrap();
+        proof.parents_commitments.insert(0, mock_commitment());
+
+        let data = [(salt_key, value)].into();
+        assert!(matches!(
+            proof.check(&data, root),
+            Err(ProofError::RootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_check_rejects_extra_parent_commitment() {
+        let (store, salt_key, value, root) = setup_single_key_proof_case();
+        let mut proof = SaltProof::create([salt_key], &store).unwrap();
+        proof
+            .parents_commitments
+            .insert(NodeId::MAX, mock_commitment());
+
+        let data = [(salt_key, value)].into();
+        assert!(matches!(
+            proof.check(&data, root),
+            Err(ProofError::StateReadError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_check_rejects_missing_bucket_level() {
+        let (store, salt_key, value, root) = setup_single_key_proof_case();
+        let mut proof = SaltProof::create([salt_key], &store).unwrap();
+        proof.levels.remove(&salt_key.bucket_id());
+
+        let data = [(salt_key, value)].into();
+        assert!(matches!(
+            proof.check(&data, root),
+            Err(ProofError::StateReadError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_create_sorts_and_deduplicates_keys() {
+        let (store, salt_key, value, root) = setup_single_key_proof_case();
+        let neighbor_slot = if salt_key.slot_id() == 0 {
+            1
+        } else {
+            salt_key.slot_id() - 1
+        };
+        let neighbor_key = SaltKey::from((salt_key.bucket_id(), neighbor_slot));
+
+        let unordered =
+            SaltProof::create([neighbor_key, salt_key, neighbor_key, salt_key], &store).unwrap();
+        let sorted = SaltProof::create([neighbor_key, salt_key], &store).unwrap();
+        let data = [
+            (neighbor_key, store.value(neighbor_key).unwrap()),
+            (salt_key, value),
+        ]
+        .into();
+
+        assert_eq!(unordered.parents_commitments, sorted.parents_commitments);
+        assert_eq!(unordered.levels, sorted.levels);
+        assert_eq!(
+            unordered.create_verifier_queries(&data).unwrap().len(),
+            sorted.create_verifier_queries(&data).unwrap().len()
+        );
+        assert!(unordered.check(&data, root).is_ok());
+    }
+
+    #[test]
+    fn test_serde_commitment_rejects_invalid_compressed_point() {
+        let bytes = [0xffu8; 32];
+        let result: Result<(SerdeCommitment, usize), _> =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
+
+        assert!(result.is_err());
+    }
+
     /// Tests main function behavior with empty inputs (edge case).
     #[test]
     fn test_create_verifier_queries_empty() {
@@ -1294,6 +1401,36 @@ mod tests {
         // Verify query structure
         assert_eq!(queries[0].point, Fr::from(0u64));
         assert_eq!(queries[1].point, Fr::from(5u64));
+    }
+
+    #[test]
+    fn test_create_leaf_node_queries_subtree_leaf_start() {
+        let start_key = SaltKey::from((NUM_META_BUCKETS as BucketId, MIN_BUCKET_SIZE as SlotId));
+        let parent_node = subtree_leaf_for_key(&start_key);
+        let first_key = subtree_leaf_start_key(&parent_node);
+        let last_key = SaltKey(first_key.0 + 255);
+        let value = mock_salt_value();
+
+        let mut leaf_nodes = BTreeMap::new();
+        leaf_nodes.insert(parent_node, [0usize, 255usize].into());
+
+        let mut path_commitments = BTreeMap::new();
+        path_commitments.insert(connect_parent_id(parent_node), mock_commitment());
+
+        let mut kvs = BTreeMap::new();
+        kvs.insert(first_key, None);
+        kvs.insert(last_key, Some(value.clone()));
+
+        let queries: Vec<_> = create_leaf_node_queries(&leaf_nodes, &path_commitments, &kvs)
+            .unwrap()
+            .collect();
+
+        assert_eq!(first_key, start_key);
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].point, Fr::from(0u64));
+        assert_eq!(queries[0].result, slot_to_field(&None));
+        assert_eq!(queries[1].point, Fr::from(255u64));
+        assert_eq!(queries[1].result, slot_to_field(&Some(value)));
     }
 
     /// Round-trip + determinism tests for the hand-rolled `fx_hashmap_serde`

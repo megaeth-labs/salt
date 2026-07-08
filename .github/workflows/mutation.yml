@@ -1,0 +1,232 @@
+name: Mutation Testing
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-mutants:
+    name: cargo-mutants gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # This job runs code from the PR head, so never leave the token in the
+      # git config; the comment upsert receives github.token as an action
+      # input instead.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Diffing against the merge base (three-dot) keeps the gate scoped to
+      # this PR's own changes even when the base branch has moved on.
+      - name: Check mutation scope
+        id: scope
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if git diff --quiet "origin/${BASE_REF}...HEAD" -- 'salt/src/**'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.scope.outputs.changed == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-nextest
+        if: steps.scope.outputs.changed == 'true'
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-mutants
+        if: steps.scope.outputs.changed == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Warm test binaries
+        if: steps.scope.outputs.changed == 'true'
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+
+      # With no salt/src changes this only records an explicit empty result
+      # set, so it needs neither the Rust toolchain nor cargo-mutants.
+      - name: Run mutation testing
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: scripts/mutation_test.sh diff "origin/${BASE_REF}"
+
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants/mutants.out \
+            --suppressions mutants/suppressions.toml \
+            --comment mutation-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert PR comment
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            let body;
+            try {
+              body = fs.readFileSync("mutation-report.md", "utf8");
+            } catch {
+              body = "## Mutation testing\n\nNo report produced.";
+            }
+            const marker = "<!-- salt-mutation-testing-report -->";
+            body = `${marker}\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salt-mutation-results
+          path: |
+            target/mutants/mutants.out
+            target/mutants.diff
+            mutation-report.md
+          if-no-files-found: ignore
+
+  # Full-crate runs are far too large for one hosted runner within the job
+  # timeout, so scheduled/manual runs shard the mutant universe. Keep the
+  # shard denominator in sync with the matrix size.
+  # GitHub appends the matrix value to the job name, e.g. "cargo-mutants full (3)".
+  cargo-mutants-full:
+    name: cargo-mutants full
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Warm test binaries
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+
+      - name: Run mutation testing
+        run: scripts/mutation_test.sh full --shard ${{ matrix.shard }}/8
+
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants/mutants.out \
+            --suppressions mutants/suppressions.toml \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salt-mutation-results-shard-${{ matrix.shard }}
+          path: |
+            target/mutants/mutants.out
+            mutation-report.md
+          if-no-files-found: ignore
+
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      hygiene: ${{ steps.filter.outputs.hygiene }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            hygiene:
+              - 'mutants/suppressions.toml'
+              - 'scripts/mutation_*.py'
+              - 'scripts/mutation_*.sh'
+              - '.cargo/mutants.toml'
+              - 'salt/src/**'
+
+  orphan-suppressions:
+    name: suppression hygiene
+    needs: changes
+    if: |
+      always() &&
+      (github.event_name != 'pull_request' || needs.changes.outputs.hygiene == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Build full mutant universe
+        run: cargo mutants --list --package salt --colors never > universe.txt
+
+      - name: Check for orphan suppressions
+        run: |
+          python3 scripts/mutation_gate.py orphans \
+            --suppressions mutants/suppressions.toml \
+            --universe universe.txt

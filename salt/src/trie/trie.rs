@@ -1111,10 +1111,13 @@ mod tests {
     use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
     use crate::{
-        constant::{default_commitment, MAIN_TRIE_LEVELS, MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID},
+        constant::{
+            default_commitment, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, MIN_BUCKET_SIZE_BITS,
+            STARTING_NODE_ID,
+        },
         empty_salt::EmptySalt,
     };
-    use banderwagon::Zero;
+    use banderwagon::{Fr, PrimeField, Zero};
     use std::{format, vec, vec::Vec};
     const KV_BUCKET_OFFSET: NodeId = NUM_META_BUCKETS as NodeId;
 
@@ -1131,6 +1134,121 @@ mod tests {
             old += committer.mul_index(&(new_fr - old_fr), tb_i)
         });
         old
+    }
+
+    #[test]
+    #[should_panic(expected = "deferred_levels must be in")]
+    fn test_with_deferred_levels_rejects_zero() {
+        let _ = StateRoot::new(&EmptySalt).with_deferred_levels(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "deferred_levels must be in")]
+    fn test_with_deferred_levels_rejects_main_trie_levels() {
+        let _ = StateRoot::new(&EmptySalt).with_deferred_levels(MAIN_TRIE_LEVELS);
+    }
+
+    #[test]
+    fn test_drop_updates_below_level_exact_threshold() {
+        let level = 2;
+        let threshold = STARTING_NODE_ID[level] as NodeId;
+        let updates = vec![
+            (threshold - 1, ([0; 64], [1; 64])),
+            (threshold, ([0; 64], [2; 64])),
+            (threshold + 1, ([0; 64], [3; 64])),
+        ];
+
+        assert_eq!(
+            StateRoot::<EmptySalt>::drop_updates_below_level(&updates, level),
+            vec![(threshold - 1, ([0; 64], [1; 64]))]
+        );
+    }
+
+    #[test]
+    fn test_apply_updates_to_caches_chains_original_old_value() {
+        let mut trie = StateRoot::new(&EmptySalt);
+        let node_id = 42;
+
+        trie.apply_updates_to_caches(vec![
+            (node_id, ([1; 64], [2; 64])),
+            (node_id, ([2; 64], [3; 64])),
+        ]);
+
+        assert_eq!(trie.cache[&node_id], [3; 64]);
+        assert_eq!(trie.updates[&node_id], ([1; 64], [3; 64]));
+    }
+
+    #[test]
+    fn test_create_node_aligned_chunks_never_splits_duplicate_node() {
+        let trie = StateRoot::new(&EmptySalt);
+        let zero = Element::zero();
+        let deltas = vec![
+            (1, zero),
+            (1, zero),
+            (2, zero),
+            (2, zero),
+            (2, zero),
+            (3, zero),
+        ];
+
+        assert_eq!(
+            trie.create_node_aligned_chunks(&deltas, 2),
+            vec![0..2, 2..5, 5..6]
+        );
+        assert_eq!(trie.create_node_aligned_chunks(&Vec::new(), 2), vec![0..0]);
+    }
+
+    #[test]
+    fn test_par_batch_size_respects_minimum() {
+        let trie = StateRoot::new(&EmptySalt).with_min_par_batch_size(7);
+
+        assert_eq!(trie.par_batch_size(0), 7);
+        assert_eq!(trie.par_batch_size(1), 7);
+        assert_eq!(trie.par_batch_size(7), 7);
+        assert!(trie.par_batch_size(100_000) >= 7);
+    }
+
+    #[test]
+    fn test_kv_hash_empty_is_pinned_and_distinct() {
+        let empty_hash = kv_hash(&None);
+        let value_hash = kv_hash(&Some(SaltValue::new(&[1; 20], &[2; 32])));
+
+        assert_eq!(empty_hash, Fr::from_le_bytes_mod_order(&EMPTY_SLOT_HASH));
+        assert_ne!(empty_hash, Fr::zero());
+        assert_ne!(empty_hash, value_hash);
+    }
+
+    #[test]
+    fn test_subtrie_change_info_capacity_boundaries() {
+        fn assert_change(
+            old_capacity: u64,
+            new_capacity: u64,
+            old_top_level: usize,
+            new_top_level: usize,
+        ) {
+            let bucket_id = NUM_META_BUCKETS as BucketId + 7;
+            let bucket_prefix = (bucket_id as NodeId) << BUCKET_SLOT_BITS;
+            let change = SubtrieChangeInfo::new(bucket_id, old_capacity, new_capacity);
+
+            assert_eq!(change.old_capacity, old_capacity);
+            assert_eq!(change.new_capacity, new_capacity);
+            assert_eq!(change.old_top_level, old_top_level);
+            assert_eq!(change.new_top_level, new_top_level);
+            assert_eq!(
+                change.old_top_id,
+                bucket_prefix + STARTING_NODE_ID[old_top_level] as NodeId
+            );
+            assert_eq!(
+                change.new_top_id,
+                bucket_prefix + STARTING_NODE_ID[new_top_level] as NodeId
+            );
+            assert_eq!(change.root_id, bucket_root_node_id(bucket_id));
+        }
+
+        assert_change(256, 512, 4, 3);
+        assert_change(512, 256, 3, 4);
+        assert_change(65_536, 65_792, 3, 2);
+        assert_change(65_537, 65_536, 2, 3);
     }
 
     /// Rebuilds a main trie node commitment from storage for testing purposes.

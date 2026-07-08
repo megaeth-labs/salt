@@ -102,4 +102,32 @@ mod tests {
         // Test node_entries() returns empty Vec
         assert!(empty_salt.node_entries(0..10).unwrap().is_empty());
     }
+
+    #[test]
+    fn test_plain_value_fast_returns_unsupported_operation() {
+        let empty_salt = EmptySalt;
+        let result = empty_salt.plain_value_fast(b"missing");
+
+        assert_eq!(
+            result,
+            Err(SaltError::UnsupportedOperation {
+                operation: "EmptySalt::plain_value_fast"
+            })
+        );
+    }
+
+    #[test]
+    fn test_metadata_and_used_slots_are_default_for_data_bucket() {
+        let empty_salt = EmptySalt;
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+
+        assert_eq!(empty_salt.bucket_used_slots(bucket_id).unwrap(), 0);
+        assert_eq!(
+            empty_salt.metadata(bucket_id).unwrap(),
+            BucketMeta {
+                used: Some(0),
+                ..BucketMeta::default()
+            }
+        );
+    }
 }
