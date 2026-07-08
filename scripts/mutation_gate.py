@@ -8,6 +8,8 @@ Commands:
   report --results <mutants.out> [--suppressions <toml>]
       Score cargo-mutants output, apply line suppressions, write an optional
       Markdown report, and fail if unsuppressed survivors or timeouts remain.
+      A missing results directory fails closed: scripts/mutation_test.sh always
+      materializes a result set, even when there is nothing to mutate.
 
   orphans --suppressions <toml> --universe <file>
       Fail if any suppression no longer matches a live mutant.
@@ -116,10 +118,19 @@ def read_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def mutant_body(line: str) -> str:
-    """Strip a leading cargo-mutants file:line:col locator when present."""
-    parts = line.split(": ", 1)
-    return parts[1] if len(parts) == 2 else line
+MUTANT_LOCATOR = re.compile(r"^(?P<file>[^\s:]+):\d+:\d+: (?P<body>.*)$")
+
+
+def split_mutant(line: str) -> tuple[str | None, str]:
+    """Split a cargo-mutants result line into (file, body).
+
+    Returns (None, line) unchanged when the line carries no file:line:col
+    locator, e.g. a locator-free suppression entry.
+    """
+    match = MUTANT_LOCATOR.match(line)
+    if match:
+        return match.group("file"), match.group("body")
+    return None, line
 
 
 def write_report(report: str, comment: str | None, summary: str | None) -> None:
@@ -143,13 +154,14 @@ def cmd_exclude_re(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
     if not results.exists():
-        report = (
-            "## Mutation testing - PASS\n\n"
-            f"No results at `{results}`. Nothing was mutated, usually because "
-            "the diff had no mutatable production-code changes.\n"
+        print(
+            f"ERROR: no mutation results at {results}. scripts/mutation_test.sh "
+            "records an explicit empty result set when there is nothing to "
+            "mutate, so a missing directory means the mutation run misfired. "
+            "Refusing to report a passing gate.",
+            file=sys.stderr,
         )
-        write_report(report, args.comment, args.summary)
-        return 0
+        return 2
 
     for required in ("caught.txt", "missed.txt"):
         if not (results / required).exists():
@@ -166,13 +178,17 @@ def cmd_report(args: argparse.Namespace) -> int:
     unviable = read_lines(results / "unviable.txt")
 
     _, line_scoped = load_suppressions(Path(args.suppressions) if args.suppressions else None)
-    suppressed_text = {entry.mutant for entry in line_scoped if entry.mutant}
+    # A line suppression only covers its own file: identical mutant text can
+    # exist in several modules, and reviewing one does not review the others.
+    suppressed_lines = {
+        (entry.file, split_mutant(entry.mutant)[1]) for entry in line_scoped if entry.mutant
+    }
 
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
         suppressed: list[str] = []
         real: list[str] = []
         for item in items:
-            if item in suppressed_text or mutant_body(item) in suppressed_text:
+            if split_mutant(item) in suppressed_lines:
                 suppressed.append(item)
             else:
                 real.append(item)
@@ -253,8 +269,8 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         print(f"ERROR: empty mutant universe at {args.universe}", file=sys.stderr)
         return 2
 
-    bodies = {mutant_body(line) for line in universe}
-    full = set(universe)
+    universe_mutants = {split_mutant(line) for line in universe}
+    bodies = {body for _, body in universe_mutants}
 
     orphans: list[str] = []
     for entry in function_scoped:
@@ -267,9 +283,10 @@ def cmd_orphans(args: argparse.Namespace) -> int:
             orphans.append(f"[function] {entry.file}: {entry.pattern}")
 
     for entry in line_scoped:
-        mutant = entry.mutant or ""
-        if mutant and mutant not in bodies and mutant not in full:
-            orphans.append(f"[line] {entry.file}: {mutant[:100]}")
+        if not entry.mutant:
+            continue
+        if (entry.file, split_mutant(entry.mutant)[1]) not in universe_mutants:
+            orphans.append(f"[line] {entry.file}: {entry.mutant[:100]}")
 
     total = len(function_scoped) + len(line_scoped)
     if orphans:

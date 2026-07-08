@@ -14,7 +14,11 @@ Target: production code in the `salt` crate.
 | `scripts/mutation_test.sh` | Driver for diff, full, and file-scoped runs. |
 | `scripts/mutation_gate.py` | Scores results, validates suppression metadata, and enforces suppressions. |
 | `mutants/suppressions.toml` | Reviewed equivalent/dead mutants. |
-| `.github/workflows/mutation.yml` | PR gate, manual full run, and suppression hygiene. |
+| `.github/workflows/mutation.yml` | PR gate, sharded scheduled/manual full runs, and suppression hygiene. |
+
+Scheduled and manual full runs shard the mutant universe across a job matrix
+(`cargo mutants --shard`) because a full crate run does not fit one hosted
+runner within the job timeout.
 
 ## Local use
 
@@ -39,7 +43,8 @@ Useful environment overrides:
 - `SUPPRESS`: suppression file, default `mutants/suppressions.toml`.
 - `JOBS`: cargo-mutants worker count. Defaults to `nproc`, `sysctl -n hw.ncpu`,
   or `1`.
-- `PYTHON`: Python executable used by the driver, default `python3`.
+- `PYTHON`: Python executable used by the driver, default `python3`. The gate
+  script needs Python 3.11+ (it uses `tomllib`).
 
 ## Gate policy
 
@@ -47,7 +52,10 @@ The PR gate is diff-scoped and uses "no new survivors":
 
 - unsuppressed missed mutants fail the gate;
 - unsuppressed timeouts fail the gate because they are inconclusive;
-- equivalent or dead-code mutants require a reviewed suppression.
+- equivalent or dead-code mutants require a reviewed suppression;
+- a missing results directory fails the gate. The driver always materializes a
+  result set — an explicit empty one when there is nothing to mutate — so a
+  missing directory means the mutation run misfired rather than "no findings".
 
 The score is useful, but the blocking rule is simpler: every changed-line mutant
 must be killed or intentionally suppressed.
@@ -59,7 +67,10 @@ mutant is not a real test gap.
 
 Two supported forms:
 
-- `kind = "line"`: exact mutant text from `missed.txt` or `timeout.txt`.
+- `kind = "line"`: mutant text from `missed.txt` or `timeout.txt`, with the
+  leading `file:line:col:` locator stripped. Locator-free entries keep matching
+  when unrelated edits shift line numbers. Matching is scoped to the entry's
+  `file`, so identical mutant text in another module is not suppressed.
 - `kind = "function"`: regex passed to cargo-mutants as `--exclude-re`.
 
 Function suppressions are broad and can hide future behavior. Prefer `line`
