@@ -1196,6 +1196,182 @@ mod tests {
             vec![0..2, 2..5, 5..6]
         );
         assert_eq!(trie.create_node_aligned_chunks(&Vec::new(), 2), vec![0..0]);
+
+        // A duplicate-node run extending exactly to the end: the boundary
+        // check must not emit a trailing empty range.
+        let run_to_end = vec![(1, zero), (2, zero), (2, zero)];
+        assert_eq!(trie.create_node_aligned_chunks(&run_to_end, 2), vec![0..3]);
+
+        // Distinct nodes with task size 3: the stride must advance
+        // additively (3, 6), not multiplicatively (3, 9).
+        let eight: Vec<_> = (1..=8).map(|i| (i as NodeId, zero)).collect();
+        assert_eq!(
+            trie.create_node_aligned_chunks(&eight, 3),
+            vec![0..3, 3..6, 6..8]
+        );
+    }
+
+    /// Drives the manual capacity machinery under the default feature set:
+    /// nonce-only rehash at minimum capacity, expansion to a three-level
+    /// subtree, nonce-only rehash while expanded, and contraction back.
+    /// Beyond root/rebuild equality, every persisted node must match a store
+    /// built from scratch with the same final state — stale intermediate
+    /// commitments are invisible to the root but not to this comparison.
+    #[test]
+    fn test_manual_capacity_cycle_preserves_node_exactness() {
+        let kvs = create_random_kvs(6);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates.clone());
+        let (root0, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let bid = crate::hasher::bucket_id(&kvs[0].0);
+        let nonce = store.metadata(bid).unwrap().nonce;
+        let mut apply_rehash = |new_nonce: u32, capacity: u64| {
+            let mut rehash = StateUpdates::default();
+            state
+                .shi_rehash(bid, new_nonce, capacity, &mut rehash)
+                .unwrap();
+            store.update_state(rehash.clone());
+            let (root, trie_updates) = StateRoot::new(&store).update_fin(&rehash).unwrap();
+            store.update_trie(trie_updates);
+            assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
+            root
+        };
+
+        // Nonce-only metadata change at minimum capacity (capacity-equal
+        // branch on an unexpanded bucket).
+        apply_rehash(nonce + 1, MIN_BUCKET_SIZE as u64);
+        // Expand to a three-level subtree.
+        apply_rehash(nonce + 1, MIN_BUCKET_SIZE as u64 * 257);
+        // Nonce-only metadata change while expanded.
+        apply_rehash(nonce + 2, MIN_BUCKET_SIZE as u64 * 257);
+        // Contract back to the original shape.
+        let root3 = apply_rehash(nonce, MIN_BUCKET_SIZE as u64);
+        assert_eq!(root3, root0);
+
+        // Node-exact comparison against a store built from scratch.
+        let fresh = MemStore::new();
+        let mut fresh_state = EphemeralSaltState::new(&fresh);
+        let fresh_updates = fresh_state
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        fresh.update_state(fresh_updates.clone());
+        let (fresh_root, fresh_trie) = StateRoot::new(&fresh).update_fin(&fresh_updates).unwrap();
+        fresh.update_trie(fresh_trie);
+        assert_eq!(root3, fresh_root);
+        for (node_id, _) in store.node_entries(0..NodeId::MAX).unwrap() {
+            assert_eq!(
+                store.commitment(node_id).unwrap(),
+                fresh.commitment(node_id).unwrap(),
+                "stale commitment at node {node_id}"
+            );
+        }
+    }
+
+    /// A TrieReader that refuses to invent default commitments: every read
+    /// must hit a node that was actually persisted or explicitly warmed.
+    /// MemStore silently falls back to defaults, which hides bugs in the
+    /// expansion cache-warming logic; this wrapper makes them fatal.
+    #[derive(Debug)]
+    struct StrictStore<'a> {
+        inner: &'a MemStore,
+        nodes: HashMap<NodeId, CommitmentBytes>,
+    }
+
+    impl<'a> StrictStore<'a> {
+        fn snapshot(inner: &'a MemStore) -> Self {
+            let nodes = inner
+                .node_entries(0..NodeId::MAX)
+                .unwrap()
+                .into_iter()
+                .collect();
+            Self { inner, nodes }
+        }
+    }
+
+    impl StateReader for StrictStore<'_> {
+        type Error = SaltError;
+
+        fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+            self.inner.value(key)
+        }
+
+        fn entries(
+            &self,
+            range: core::ops::RangeInclusive<SaltKey>,
+        ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+            self.inner.entries(range)
+        }
+
+        fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+            self.inner.metadata(bucket_id)
+        }
+
+        fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+            self.inner.bucket_used_slots(bucket_id)
+        }
+
+        fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+            self.inner.plain_value_fast(plain_key)
+        }
+    }
+
+    impl TrieReader for StrictStore<'_> {
+        type Error = SaltError;
+
+        fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+            self.nodes.get(&node_id).copied().ok_or(SaltError::NotInWitness {
+                what: "strict trie node",
+            })
+        }
+
+        fn node_entries(
+            &self,
+            range: core::ops::Range<NodeId>,
+        ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+            self.inner.node_entries(range)
+        }
+    }
+
+    /// Expansion must warm every default commitment it later reads: against
+    /// a reader without default fallbacks, a skipped or misaddressed warmup
+    /// becomes an error instead of a silently absorbed default.
+    #[test]
+    fn test_expansion_never_reads_unwarmed_nodes() {
+        let kvs = create_random_kvs(4);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates.clone());
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let bid = crate::hasher::bucket_id(&kvs[0].0);
+        let nonce = store.metadata(bid).unwrap().nonce;
+
+        // Persist the metadata leaf's path first (a nonce-only rehash), so
+        // the only unpersisted nodes the expansion may read are the ones it
+        // is expected to warm itself.
+        let mut pre = StateUpdates::default();
+        state
+            .shi_rehash(bid, nonce + 1, MIN_BUCKET_SIZE as u64, &mut pre)
+            .unwrap();
+        store.update_state(pre.clone());
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&pre).unwrap();
+        store.update_trie(trie_updates);
+
+        let mut rehash = StateUpdates::default();
+        state
+            .shi_rehash(bid, nonce + 1, MIN_BUCKET_SIZE as u64 * 257, &mut rehash)
+            .unwrap();
+
+        let strict = StrictStore::snapshot(&store);
+        let (strict_root, _) = StateRoot::new(&strict).update_fin(&rehash).unwrap();
+        let (root, _) = StateRoot::new(&store).update_fin(&rehash).unwrap();
+        assert_eq!(strict_root, root);
     }
 
     #[test]

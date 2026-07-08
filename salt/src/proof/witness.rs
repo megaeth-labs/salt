@@ -491,6 +491,48 @@ mod tests {
         );
     }
 
+    /// A witness built for a block whose replay itself expands a bucket must
+    /// carry everything the stateless re-execution needs: the old-capacity
+    /// filter on recorded reads has to keep exactly the pre-state slots.
+    #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
+    fn test_witness_replay_across_replay_triggered_expansion() {
+        use crate::state::hasher::tests::get_same_bucket_test_keys;
+
+        let keys = get_same_bucket_test_keys();
+        let store = MemStore::new();
+        let initial: BTreeMap<_, _> = keys[..200]
+            .iter()
+            .map(|k| (k.clone(), Some(k.clone())))
+            .collect();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(&initial).unwrap();
+        store.update_state(updates.clone());
+        let mut trie = StateRoot::new(&store);
+        let (_, trie_updates) = trie.update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        // 60 more inserts push the bucket past the 80% load factor, so the
+        // replay performed during witness creation expands it to 512 slots.
+        let block_updates: BTreeMap<_, _> = keys[200..]
+            .iter()
+            .map(|k| (k.clone(), Some(k.clone())))
+            .collect();
+        let lookups = vec![keys[0].clone(), b"witness-missing-key".to_vec()];
+        let witness = Witness::create([], &lookups, &block_updates, &store).unwrap();
+        witness.verify().unwrap();
+
+        let mut full_state = EphemeralSaltState::new(&store).cache_read();
+        let full_updates = full_state.update_fin(block_updates.iter()).unwrap();
+        let mut witness_state = EphemeralSaltState::new(&witness).cache_read();
+        let witness_updates = witness_state.update_fin(block_updates.iter()).unwrap();
+        assert_eq!(witness_updates, full_updates);
+
+        let (full_root, _) = StateRoot::new(&store).update_fin(&full_updates).unwrap();
+        let (witness_root, _) = StateRoot::new(&witness).update_fin(&witness_updates).unwrap();
+        assert_eq!(witness_root, full_root);
+    }
+
     #[test]
     fn test_witness_from_salt_witness_excludes_metadata_direct_lookup() {
         let bucket_id = NUM_META_BUCKETS as BucketId;
