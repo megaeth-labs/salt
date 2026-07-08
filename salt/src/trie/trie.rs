@@ -1422,6 +1422,23 @@ mod tests {
         assert!(trie.par_batch_size(100_000) >= 7);
     }
 
+    /// Runs inside a pool wider than the batch factor of 10: corrupting
+    /// `10 * threads` into `10 / threads` zeroes the batch count there (a
+    /// div_ceil-by-zero panic on any wide-enough worker), so the formula
+    /// must be pinned rather than treated as a free heuristic.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn test_par_batch_size_scales_with_thread_count() {
+        let trie = StateRoot::new(&EmptySalt);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap();
+
+        let batch_size = pool.install(|| trie.par_batch_size(100_000));
+        assert_eq!(batch_size, 100_000usize.div_ceil(10 * 16));
+    }
+
     #[test]
     fn test_kv_hash_empty_is_pinned_and_distinct() {
         let empty_hash = kv_hash(&None);

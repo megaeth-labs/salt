@@ -25,7 +25,7 @@ from pathlib import Path
 
 MAX_SURVIVORS_SHOWN = 20
 VALID_KINDS = {"function", "line"}
-VALID_CATEGORIES = {"equivalent", "dead"}
+VALID_CATEGORIES = {"equivalent", "dead", "timeout"}
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class Suppression:
     reviewer: str
     mutant: str | None = None
     pattern: str | None = None
+    line: int | None = None
 
 
 def _required_string(entry: dict, field: str, idx: int, errors: list[str]) -> str | None:
@@ -88,6 +89,21 @@ def load_suppressions(path: Path | None) -> tuple[list[Suppression], list[Suppre
         elif kind == "line":
             mutant = _required_string(entry, "mutant", idx, errors)
 
+        if category == "timeout" and kind == "function":
+            errors.append(
+                f"suppression #{idx}: category `timeout` requires kind `line`; "
+                "function suppressions exclude mutants from generation entirely"
+            )
+
+        line_no = entry.get("line")
+        if line_no is not None:
+            if kind != "line":
+                errors.append(f"suppression #{idx}: `line` is only valid for kind `line`")
+                line_no = None
+            elif isinstance(line_no, bool) or not isinstance(line_no, int) or line_no <= 0:
+                errors.append(f"suppression #{idx}: `line` must be a positive integer")
+                line_no = None
+
         if all((kind, category, file, justification, reviewer)) and (
             (kind == "function" and pattern) or (kind == "line" and mutant)
         ):
@@ -100,6 +116,7 @@ def load_suppressions(path: Path | None) -> tuple[list[Suppression], list[Suppre
                     reviewer=reviewer,
                     mutant=mutant,
                     pattern=pattern,
+                    line=line_no,
                 )
             )
 
@@ -118,19 +135,19 @@ def read_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-MUTANT_LOCATOR = re.compile(r"^(?P<file>[^\s:]+):\d+:\d+: (?P<body>.*)$")
+MUTANT_LOCATOR = re.compile(r"^(?P<file>[^\s:]+):(?P<line>\d+):\d+: (?P<body>.*)$")
 
 
-def split_mutant(line: str) -> tuple[str | None, str]:
-    """Split a cargo-mutants result line into (file, body).
+def split_mutant(entry: str) -> tuple[str | None, int | None, str]:
+    """Split a cargo-mutants result line into (file, line, body).
 
-    Returns (None, line) unchanged when the line carries no file:line:col
-    locator, e.g. a locator-free suppression entry.
+    Returns (None, None, entry) unchanged when the line carries no
+    file:line:col locator, e.g. a locator-free suppression entry.
     """
-    match = MUTANT_LOCATOR.match(line)
+    match = MUTANT_LOCATOR.match(entry)
     if match:
-        return match.group("file"), match.group("body")
-    return None, line
+        return match.group("file"), int(match.group("line")), match.group("body")
+    return None, None, entry
 
 
 def write_report(report: str, comment: str | None, summary: str | None) -> None:
@@ -178,24 +195,45 @@ def cmd_report(args: argparse.Namespace) -> int:
     unviable = read_lines(results / "unviable.txt")
 
     _, line_scoped = load_suppressions(Path(args.suppressions) if args.suppressions else None)
-    # A line suppression only covers its own file: identical mutant text can
-    # exist in several modules, and reviewing one does not review the others.
-    suppressed_lines = {
-        (entry.file, split_mutant(entry.mutant)[1]) for entry in line_scoped if entry.mutant
-    }
 
-    def partition(items: list[str]) -> tuple[list[str], list[str]]:
+    # A line suppression only covers its own file (and its own line, when
+    # pinned): identical mutant text can exist at several sites, and reviewing
+    # one does not review the others. Categories are matched asymmetrically:
+    # `equivalent`/`dead` prove the mutant cannot change observable behavior,
+    # so they cover survivors and (flaky) timeouts alike; `timeout` only
+    # proves non-termination, so it never excuses a mutant that ran to
+    # completion and survived.
+    def matchers(entries: list[Suppression]) -> tuple[set, set]:
+        pinned: set[tuple[str, int, str]] = set()
+        loose: set[tuple[str, str]] = set()
+        for entry in entries:
+            if not entry.mutant:
+                continue
+            body = split_mutant(entry.mutant)[2]
+            if entry.line is not None:
+                pinned.add((entry.file, entry.line, body))
+            else:
+                loose.add((entry.file, body))
+        return pinned, loose
+
+    behavior_pinned, behavior_loose = matchers(
+        [entry for entry in line_scoped if entry.category != "timeout"]
+    )
+    timeout_pinned, timeout_loose = matchers(line_scoped)
+
+    def partition(items: list[str], pinned: set, loose: set) -> tuple[list[str], list[str]]:
         suppressed: list[str] = []
         real: list[str] = []
         for item in items:
-            if split_mutant(item) in suppressed_lines:
+            file, line_no, body = split_mutant(item)
+            if (file, body) in loose or (file, line_no, body) in pinned:
                 suppressed.append(item)
             else:
                 real.append(item)
         return suppressed, real
 
-    suppressed_missed, real_survivors = partition(missed)
-    suppressed_timeouts, real_timeouts = partition(timeout)
+    suppressed_missed, real_survivors = partition(missed, behavior_pinned, behavior_loose)
+    suppressed_timeouts, real_timeouts = partition(timeout, timeout_pinned, timeout_loose)
 
     viable = len(caught) + len(missed)
     scored = viable - len(suppressed_missed)
@@ -270,7 +308,8 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         return 2
 
     universe_mutants = {split_mutant(line) for line in universe}
-    bodies = {body for _, body in universe_mutants}
+    universe_sites = {(file, body) for file, _, body in universe_mutants}
+    bodies = {body for _, _, body in universe_mutants}
 
     orphans: list[str] = []
     for entry in function_scoped:
@@ -285,7 +324,11 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     for entry in line_scoped:
         if not entry.mutant:
             continue
-        if (entry.file, split_mutant(entry.mutant)[1]) not in universe_mutants:
+        body = split_mutant(entry.mutant)[2]
+        if entry.line is not None:
+            if (entry.file, entry.line, body) not in universe_mutants:
+                orphans.append(f"[line] {entry.file}:{entry.line}: {entry.mutant[:100]}")
+        elif (entry.file, body) not in universe_sites:
             orphans.append(f"[line] {entry.file}: {entry.mutant[:100]}")
 
     total = len(function_scoped) + len(line_scoped)
