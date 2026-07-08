@@ -74,10 +74,11 @@ for pack in $packs; do
 
         mdir="$OUT_DIR/mutants/$pack/$(basename "$src" .rs)"
         mkdir -p "$mdir"
-        # mutate exits nonzero when a file yields no mutants; that is a normal
-        # outcome for scoped packs (e.g. no production match in this file).
+        # mutate exits 0 when a file simply yields no mutants; a nonzero exit
+        # is a real invocation error (missing file, unreadable rules/lines)
+        # and must fail the run rather than produce a partial manifest.
         mutate "$src" --only "$rules" --noCheck --lines "$lines_file" \
-            --mutantDir "$mdir" > /dev/null || true
+            --mutantDir "$mdir" > /dev/null
 
         for m in "$mdir"/*.rs; do
             [ -e "$m" ] || continue
