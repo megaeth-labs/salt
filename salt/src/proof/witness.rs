@@ -529,7 +529,9 @@ mod tests {
         assert_eq!(witness_updates, full_updates);
 
         let (full_root, _) = StateRoot::new(&store).update_fin(&full_updates).unwrap();
-        let (witness_root, _) = StateRoot::new(&witness).update_fin(&witness_updates).unwrap();
+        let (witness_root, _) = StateRoot::new(&witness)
+            .update_fin(&witness_updates)
+            .unwrap();
         assert_eq!(witness_root, full_root);
     }
 

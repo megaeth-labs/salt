@@ -190,7 +190,10 @@ mod tests {
             finish(&|h| h.write_u128(0xa5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5)),
             5_605_269_915_146_111_207
         );
-        assert_eq!(finish(&|h| h.write_usize(0x1234)), 3_213_796_315_339_447_371);
+        assert_eq!(
+            finish(&|h| h.write_usize(0x1234)),
+            3_213_796_315_339_447_371
+        );
     }
 
     #[test]

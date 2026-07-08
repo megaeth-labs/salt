@@ -1250,18 +1250,46 @@ mod tests {
         apply_rehash(nonce + 2, MIN_BUCKET_SIZE as u64 * 257);
         // Contract back to the original shape.
         let root3 = apply_rehash(nonce, MIN_BUCKET_SIZE as u64);
-        assert_eq!(root3, root0);
 
-        // Node-exact comparison against a store built from scratch.
+        // Build a from-scratch reference store holding the same final state.
         let fresh = MemStore::new();
         let mut fresh_state = EphemeralSaltState::new(&fresh);
         let fresh_updates = fresh_state
             .update_fin(kvs.iter().map(|(k, v)| (k, v)))
             .unwrap();
         fresh.update_state(fresh_updates.clone());
-        let (fresh_root, fresh_trie) = StateRoot::new(&fresh).update_fin(&fresh_updates).unwrap();
+        let (root0_fresh, fresh_trie) = StateRoot::new(&fresh).update_fin(&fresh_updates).unwrap();
         fresh.update_trie(fresh_trie);
-        assert_eq!(root3, fresh_root);
+        assert_eq!(root0, root0_fresh, "virgin baselines disagree");
+
+        // The cycled state must return exactly to the pre-cycle content,
+        // modulo the explicitly written (default-valued) metadata entry.
+        let meta_key = bucket_metadata_key(bid);
+        let cycled_entries: Vec<_> = store
+            .entries(SaltKey(0)..=SaltKey(u64::MAX))
+            .unwrap()
+            .into_iter()
+            .filter(|(key, _)| *key != meta_key)
+            .collect();
+        let fresh_entries = fresh.entries(SaltKey(0)..=SaltKey(u64::MAX)).unwrap();
+        assert_eq!(cycled_entries, fresh_entries, "state did not return");
+        assert_eq!(
+            store.value(meta_key).unwrap(),
+            Some(
+                BucketMeta {
+                    nonce,
+                    capacity: MIN_BUCKET_SIZE as u64,
+                    used: None,
+                }
+                .into()
+            ),
+            "final metadata is not the default"
+        );
+
+        // Node-exact comparison: every persisted commitment must match the
+        // from-scratch store (which answers unset nodes with defaults), so a
+        // stale intermediate node names itself even though the roots below
+        // would also catch it.
         for (node_id, _) in store.node_entries(0..NodeId::MAX).unwrap() {
             assert_eq!(
                 store.commitment(node_id).unwrap(),
@@ -1269,6 +1297,7 @@ mod tests {
                 "stale commitment at node {node_id}"
             );
         }
+        assert_eq!(root3, root0, "cycle did not return to the virgin root");
     }
 
     /// A TrieReader that refuses to invent default commitments: every read
@@ -1323,9 +1352,12 @@ mod tests {
         type Error = SaltError;
 
         fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-            self.nodes.get(&node_id).copied().ok_or(SaltError::NotInWitness {
-                what: "strict trie node",
-            })
+            self.nodes
+                .get(&node_id)
+                .copied()
+                .ok_or(SaltError::NotInWitness {
+                    what: "strict trie node",
+                })
         }
 
         fn node_entries(
