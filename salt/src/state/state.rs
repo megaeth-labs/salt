@@ -1579,6 +1579,60 @@ mod tests {
         assert_eq!(state.plain_value(&plain_key).unwrap(), None);
     }
 
+    /// The metadata read-cache must preserve non-default metadata: caching a
+    /// "default" marker for a re-nonced or resized bucket would make every
+    /// later lookup probe with the wrong nonce or capacity. The two keys are
+    /// chosen so that the wrong metadata provably probes a different slot.
+    #[test]
+    fn test_cached_metadata_keeps_non_default_meta() {
+        // Nonce case: set_nonce(7), then read twice through a cache_read
+        // state; the second read is served from the metadata cache.
+        let store = MemStore::new();
+        let plain_key = b"nonce-case-0".to_vec();
+        let plain_value = b"nonce-value".to_vec();
+        let kvs = BTreeMap::from([(plain_key.clone(), Some(plain_value.clone()))]);
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        store.update_state(updates);
+        let bucket_id = hasher::bucket_id(&plain_key);
+        let mut admin = EphemeralSaltState::new(&store);
+        let updates = admin.set_nonce(bucket_id, 7).unwrap();
+        store.update_state(updates);
+
+        let mut state = EphemeralSaltState::new(&store).cache_read();
+        for _ in 0..2 {
+            assert_eq!(
+                state.plain_value(&plain_key).unwrap(),
+                Some(plain_value.clone())
+            );
+        }
+
+        // Capacity case: rehash to 512 slots with nonce 0; the key's probe
+        // position differs between capacity 512 and the default 256.
+        let store = MemStore::new();
+        let plain_key = b"capacity-case-0".to_vec();
+        let plain_value = b"capacity-value".to_vec();
+        let kvs = BTreeMap::from([(plain_key.clone(), Some(plain_value.clone()))]);
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        store.update_state(updates);
+        let bucket_id = hasher::bucket_id(&plain_key);
+        let mut admin = EphemeralSaltState::new(&store);
+        let mut rehash_updates = StateUpdates::default();
+        admin
+            .shi_rehash(bucket_id, 0, 512, &mut rehash_updates)
+            .unwrap();
+        store.update_state(rehash_updates);
+
+        let mut state = EphemeralSaltState::new(&store).cache_read();
+        for _ in 0..2 {
+            assert_eq!(
+                state.plain_value(&plain_key).unwrap(),
+                Some(plain_value.clone())
+            );
+        }
+    }
+
     #[test]
     fn test_plain_state_provider_plain_value() {
         let store = MemStore::new();

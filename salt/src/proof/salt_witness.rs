@@ -707,6 +707,23 @@ mod tests {
         );
     }
 
+    /// Contract pin: a witness must never claim direct-lookup ability; the
+    /// caller falls back to the SHI search over witnessed slots.
+    #[test]
+    fn test_plain_value_fast_is_unsupported() {
+        let witness = SaltWitness {
+            kvs: BTreeMap::new(),
+            proof: create_mock_proof(),
+        };
+
+        assert_eq!(
+            witness.plain_value_fast(b"any-key"),
+            Err(SaltError::UnsupportedOperation {
+                operation: "SaltWitness::plain_value_fast"
+            })
+        );
+    }
+
     #[test]
     fn test_bucket_used_slots_meta_bucket_returns_zero_without_metadata() {
         let witness = SaltWitness {
