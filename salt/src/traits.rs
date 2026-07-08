@@ -257,12 +257,15 @@ mod tests {
         mem_store::MemStore,
         types::{BucketMeta, SaltError},
     };
-    use std::sync::Mutex;
+    // `std` is `alloc` in no_std builds, which has no `sync::Mutex`; spin is
+    // already a dependency and its RwLock is Sync, as StateReader requires.
+    use spin::RwLock;
+    use std::vec;
 
     #[derive(Debug)]
     struct DefaultReaderMock {
         entries_result: Vec<(SaltKey, SaltValue)>,
-        entries_ranges: Mutex<Vec<RangeInclusive<SaltKey>>>,
+        entries_ranges: RwLock<Vec<RangeInclusive<SaltKey>>>,
         metadata_result: Result<BucketMeta, SaltError>,
     }
 
@@ -270,7 +273,7 @@ mod tests {
         fn with_entries(entries_result: Vec<(SaltKey, SaltValue)>) -> Self {
             Self {
                 entries_result,
-                entries_ranges: Mutex::new(Vec::new()),
+                entries_ranges: RwLock::new(Vec::new()),
                 metadata_result: Ok(BucketMeta::default()),
             }
         }
@@ -278,7 +281,7 @@ mod tests {
         fn with_metadata_error() -> Self {
             Self {
                 entries_result: Vec::new(),
-                entries_ranges: Mutex::new(Vec::new()),
+                entries_ranges: RwLock::new(Vec::new()),
                 metadata_result: Err(SaltError::InvalidFormat {
                     message: "metadata failed",
                 }),
@@ -297,7 +300,7 @@ mod tests {
             &self,
             range: RangeInclusive<SaltKey>,
         ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-            self.entries_ranges.lock().unwrap().push(range);
+            self.entries_ranges.write().push(range);
             Ok(self.entries_result.clone())
         }
 
@@ -397,7 +400,7 @@ mod tests {
             0
         );
         assert_eq!(store.bucket_used_slots(NUM_BUCKETS as BucketId).unwrap(), 0);
-        assert!(store.entries_ranges.lock().unwrap().is_empty());
+        assert!(store.entries_ranges.read().is_empty());
     }
 
     #[test]
@@ -420,7 +423,7 @@ mod tests {
         let store = DefaultReaderMock::with_entries(entries);
 
         assert_eq!(store.bucket_used_slots(bucket_id).unwrap(), 3);
-        let ranges = store.entries_ranges.lock().unwrap();
+        let ranges = store.entries_ranges.read();
         assert_eq!(ranges.len(), 1);
         assert_eq!(*ranges[0].start(), SaltKey::from((bucket_id, 0)));
         assert_eq!(

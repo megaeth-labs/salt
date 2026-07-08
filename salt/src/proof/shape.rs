@@ -306,7 +306,7 @@ pub const fn logic_parent_id(maybe_encoded_node: NodeId) -> NodeId {
 mod tests {
     use super::*;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     #[test]
     fn test_parents_and_points() {
