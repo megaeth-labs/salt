@@ -88,9 +88,13 @@ run_mutants() {
         exit 1
     fi
 
+    # Portable across bash 3.2 (stock macOS): no mapfile, and expand the
+    # possibly-empty array with the nounset-safe ${arr[@]+...} idiom below.
     local exclude_args=()
     if [[ -n "$exclude_re_output" ]]; then
-        mapfile -t exclude_args <<< "$exclude_re_output"
+        while IFS= read -r line; do
+            exclude_args+=("$line")
+        done <<< "$exclude_re_output"
     fi
 
     rm -rf "$OUT_DIR"
@@ -103,7 +107,7 @@ run_mutants() {
         --output "$OUT_DIR" \
         --no-shuffle \
         -vV \
-        "${exclude_args[@]}" \
+        ${exclude_args[@]+"${exclude_args[@]}"} \
         "$@" || rc=$?
 
     # cargo-mutants exit codes: 0 all caught, 2 missed mutants, 3 timeouts.
