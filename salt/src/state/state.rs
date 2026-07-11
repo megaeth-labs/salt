@@ -1617,6 +1617,19 @@ mod tests {
         let updates = seed_state.update_fin(&kvs).unwrap();
         store.update_state(updates);
         let bucket_id = hasher::bucket_id(&plain_key);
+        // Guard against the test silently becoming a tautology: the capacity
+        // case only discriminates the `is_default -> false` mutant if the key
+        // probes a *different* slot at capacity 512 than at the default 256.
+        // If a future hash-seed change made the two collide, the second cached
+        // read would succeed under either metadata and the mutant would survive
+        // here unnoticed. probe(hk, 0, cap) == hk % cap, and the bucket is
+        // rehashed with nonce 0. (Troublor, PR #145)
+        let probe_key = hasher::hash_with_nonce(&plain_key, 0);
+        debug_assert_ne!(
+            probe(probe_key, 0, 256),
+            probe(probe_key, 0, 512),
+            "capacity-case key must probe different slots at 256 vs 512 for this test to discriminate"
+        );
         let mut admin = EphemeralSaltState::new(&store);
         let mut rehash_updates = StateUpdates::default();
         admin
@@ -1631,6 +1644,41 @@ mod tests {
                 Some(plain_value.clone())
             );
         }
+    }
+
+    /// Load-bearing check for the two `shi_upsert` equivalence suppressions
+    /// (`> with >=` and `/ with %`), both of which assume a same-capacity +
+    /// same-nonce `shi_rehash` produces no net observable state change. Pinning
+    /// that invariant here means a future drift in `shi_rehash` internals turns
+    /// this test red instead of being silently absorbed by those suppressions.
+    /// (Troublor, PR #145)
+    #[test]
+    fn same_cap_same_nonce_rehash_is_observably_net_empty() {
+        let store = MemStore::new();
+        let kvs = create_same_bucket_test_data(3);
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let bucket_id = hasher::bucket_id(&kvs[0].0);
+        let meta = store.metadata(bucket_id).unwrap();
+
+        // Full observable-state snapshot (state kvs + trie) before the rehash.
+        let before = format!("{store:?}");
+
+        let mut state = EphemeralSaltState::new(&store);
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(bucket_id, meta.nonce, meta.capacity, &mut rehash_updates)
+            .unwrap();
+        store.update_state(rehash_updates);
+
+        assert_eq!(
+            before,
+            format!("{store:?}"),
+            "same-cap same-nonce shi_rehash must leave observable state unchanged"
+        );
     }
 
     #[test]

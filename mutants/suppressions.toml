@@ -191,7 +191,7 @@ kind = "line"
 category = "equivalent"
 file = "salt/src/types.rs"
 mutant = "replace - with + in leftmost_node"
-justification = "256^level = 255k + 1, so (pow+1)/255 and (pow-1)/255 share the same quotient k for every level; the mutation never changes the returned node id."
+justification = "Both `-` sites are on the same source line `(pow_result - 1) / (width - 1)`, so this body cannot be line-pinned to one. It only ever covers the `pow_result - 1 -> + 1` survivor, which is equivalent: 256^level = 255k + 1, so (pow+1)/255 and (pow-1)/255 share the same quotient k for every level. The other site, `width - 1 -> + 1` (denominator 257), is NOT equivalent and is killed by `leftmost_node_calculation` (level 1 becomes 255/257 = 0 != 1), so it never reaches this suppression as a survivor."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
 
 [[suppress]]
@@ -199,7 +199,7 @@ kind = "line"
 category = "equivalent"
 file = "salt/src/types.rs"
 mutant = "replace - with / in leftmost_node"
-justification = "pow/1 keeps pow, and floor(pow/255) equals (pow-1)/255 because 256^level = 255k + 1; the quotient is unchanged for every level."
+justification = "Same-line ambiguity as the `- with +` entry above: both `-` sites share one line, so no line pin can isolate them. This only covers the equivalent `pow_result - 1 -> / 1` survivor (pow/1 keeps pow, and floor(pow/255) equals (pow-1)/255 because 256^level = 255k + 1). The `width - 1 -> / 1` site (denominator 256) is NOT equivalent and is killed by `leftmost_node_calculation` (level 1 becomes 255/256 = 0 != 1), so it never survives to reach this suppression."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
 
 [[suppress]]
