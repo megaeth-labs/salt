@@ -156,7 +156,15 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        # Lint-tolerant mutant analysis: a valid mutant can trip a warning (e.g.
+        # deleting a sort leaves its `let mut` binding unused), and under the
+        # action's default RUSTFLAGS="-D warnings" that testable mutant would
+        # fail `cargo check` and be miscounted unviable instead of exercised.
+        # Empty rustflags keeps warnings non-fatal; genuine type/scope errors
+        # still fail, so real unviable mutants are still caught. (flyq, PR #143)
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -258,7 +266,10 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        # Lint-tolerant mutant analysis; see the spec-gate job. (flyq, PR #143)
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
