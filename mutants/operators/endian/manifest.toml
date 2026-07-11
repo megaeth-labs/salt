@@ -1,0 +1,20 @@
+# Operator pack: endian (Family B, issue #141)
+#
+# Run through universalmutator + comby, scored by the shared gate
+# (scripts/mutation_gate.py). See mutants/operators/README.md.
+
+name = "endian"
+description = "Byte-order flips on explicit to/from_*_bytes packing (determinism / cross-platform reproducibility)"
+
+# Mutation engine mode: "comby" (structural) or "regex".
+mode = "comby"
+
+# Candidate source files (matched from the repo root).
+targets = [
+    "salt/src/state/ahash/convert.rs",
+    "salt/src/state/hasher.rs",
+    "salt/src/types.rs",
+]
+
+rules = "endian.rules"
+test_cmd = "cargo nextest run -p salt --no-default-features --features parallel"

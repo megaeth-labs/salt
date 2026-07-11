@@ -1,0 +1,17 @@
+# Operator pack: canon (Family E, issue #141)
+#
+# Run through universalmutator + comby, scored by the shared gate
+# (scripts/mutation_gate.py). See mutants/operators/README.md.
+
+name = "canon"
+description = "Canonicalization removal: delete sort/dedup calls and flip comparator direction on the proof path"
+
+mode = "comby"
+
+targets = [
+    "salt/src/proof/prover.rs",
+    "salt/src/proof/salt_witness.rs",
+]
+
+rules = "canon.rules"
+test_cmd = "cargo nextest run -p salt --no-default-features --features parallel"

@@ -126,6 +126,171 @@ jobs:
             mutation-report.md
           if-no-files-found: ignore
 
+  # ── spec-gate: universalmutator + comby custom operators, diff-scoped on PRs ─
+  # The domain-specific complement to cargo-mutants: comby structural operators
+  # for trie arithmetic, canonicalization, and endianness (mutants/operators/).
+  # Only files+lines the PR changed are mutated, so most PRs generate zero
+  # spec-gate mutants and this is near-instant. Shares the scorer with
+  # cargo-mutants (scripts/mutation_gate.py) via the umutate.py results contract.
+  spec-gate:
+    name: spec-gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need base history for the diff
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install universalmutator
+        # Pin the version: a new release can change generated mutants and shift
+        # the gate baseline.
+        run: pip install universalmutator==1.14.1
+
+      - name: Install comby
+        # Pin the version (reproducible mutant generation). The prebuilt binary
+        # links against libev/libpcre, which are not on the runner by default.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+
+      - name: Warm test binaries
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+
+      - name: Run diff-scoped spec-gate mutation
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          python3 scripts/umutate.py run \
+            --diff "origin/${BASE_REF}" \
+            --output target/umutate
+
+      - name: Score and gate
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results target/umutate \
+            --suppressions mutants/suppressions.toml \
+            --comment spec-gate-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upsert PR comment
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            let body;
+            try {
+              body = fs.readFileSync("spec-gate-report.md", "utf8");
+            } catch {
+              body = "## Spec-gate mutation\n\nNo report produced.";
+            }
+            const marker = "<!-- salt-spec-gate-mutation-report -->";
+            body = `${marker}\n${body}`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Upload spec-gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salt-spec-gate-results
+          path: |
+            target/umutate
+            spec-gate-report.md
+          if-no-files-found: ignore
+
+  # ── spec-gate: nightly full sweep, sharded by pack (informational) ──────────
+  # Each pack stays bounded (analyze is sequential). Surfaces survivors but does
+  # not fail the workflow — triage into suppressions or killing tests.
+  spec-gate-sweep:
+    name: spec-gate sweep (${{ matrix.pack }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        pack: [trie, canon, endian]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install universalmutator
+        run: pip install universalmutator==1.14.1
+
+      - name: Install comby
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+
+      - name: Warm test binaries
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+
+      - name: Run spec-gate mutation (${{ matrix.pack }})
+        run: |
+          python3 scripts/umutate.py run --packs ${{ matrix.pack }} \
+            --output "target/umutate/${{ matrix.pack }}"
+
+      - name: Score (informational)
+        run: |
+          python3 scripts/mutation_gate.py report \
+            --results "target/umutate/${{ matrix.pack }}" \
+            --suppressions mutants/suppressions.toml \
+            --summary "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload spec-gate sweep artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salt-spec-gate-sweep-${{ matrix.pack }}
+          path: target/umutate/${{ matrix.pack }}
+          if-no-files-found: ignore
+
   # Full-crate runs are far too large for one hosted runner within the job
   # timeout, so scheduled/manual runs shard the mutant universe. Keep the
   # shard denominator in sync with the matrix size.
@@ -196,8 +361,10 @@ jobs:
           filters: |
             hygiene:
               - 'mutants/suppressions.toml'
+              - 'mutants/operators/**'
               - 'scripts/mutation_*.py'
               - 'scripts/mutation_*.sh'
+              - 'scripts/umutate*'
               - '.cargo/mutants.toml'
               - 'salt/src/**'
 
@@ -222,8 +389,27 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
-      - name: Build full mutant universe
-        run: cargo mutants --list --package salt --colors never > universe.txt
+      - name: Install universalmutator
+        run: pip install universalmutator==1.14.1
+
+      - name: Install comby
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcre3 libev4
+          sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
+          sudo chmod +x /usr/local/bin/comby
+          comby -version
+
+      - name: Build the full mutant universe (both engines)
+        run: |
+          # --package salt: match the driver scope so a stale suppression can't
+          #   be kept alive by a same-named mutant in another crate.
+          # --colors never: CI forces color, which would embed ANSI codes and
+          #   break exact suppression matching.
+          cargo mutants --list --package salt --colors never > universe.txt
+          python3 scripts/umutate.py plan \
+            | grep -oE 'salt/src/[^:]+:[0-9]+:[0-9]+: .*' >> universe.txt
+          echo "universe: $(wc -l < universe.txt) mutants"
 
       - name: Check for orphan suppressions
         run: |
