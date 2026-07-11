@@ -1690,6 +1690,11 @@ mod tests {
     /// far too early. Filling a bucket to exactly the threshold with `update()`
     /// (no canonicalize, which would clear the set) must leave it unmarked.
     /// (codex, PR #145)
+    // Depends on the production load-factor threshold (80%); the
+    // `test-bucket-resize` feature swaps it for a 1% env-driven value, so gate
+    // it out there, matching the other threshold-sensitive tests. The mutation
+    // gate runs with `--features parallel`, so this still kills the mutants.
+    #[cfg(not(feature = "test-bucket-resize"))]
     #[test]
     fn shi_upsert_does_not_rehash_at_the_load_factor_threshold() {
         use crate::constant::BUCKET_RESIZE_LOAD_FACTOR_PCT;
@@ -1711,6 +1716,10 @@ mod tests {
     /// `is_default -> false` mutation caches a materialized Some and makes a
     /// later raw `value(metadata_key)` return a value the store never stored.
     /// (codex, PR #145)
+    // The `test-bucket-resize` feature drops the load factor to 1%, so the few
+    // inserts here would resize the bucket and it would no longer be default;
+    // gate it out there (the mutation gate runs with `--features parallel`).
+    #[cfg(not(feature = "test-bucket-resize"))]
     #[test]
     fn default_bucket_metadata_caches_as_absent() {
         use crate::types::bucket_metadata_key;
