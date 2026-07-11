@@ -9,9 +9,11 @@ description = "Byte-order flips on explicit to/from_*_bytes packing (determinism
 # Mutation engine mode: "comby" (structural) or "regex".
 mode = "comby"
 
-# Candidate source files (matched from the repo root).
+# Candidate source files (matched from the repo root). These rules match explicit
+# `to/from_*_bytes` calls; `state/ahash/convert.rs` is intentionally not a target
+# because its hash readers go through `zerocopy::transmute!` / `.convert()`, which
+# has no to/from_*_bytes call to flip (tracked for a future transmute operator).
 targets = [
-    "salt/src/state/ahash/convert.rs",
     "salt/src/state/hasher.rs",
     "salt/src/types.rs",
 ]

@@ -35,7 +35,7 @@ Each pack is a directory `mutants/operators/<name>/` with:
 | --- | --- | --- |
 | `trie` | `trie/node_utils.rs`, `trie/trie.rs`, `constant.rs`, `types.rs`, `proof/shape.rs` | Level-base and bit-width arithmetic of the two-tier trie (`STARTING_NODE_ID`, 8/24/40 splits, 256-way fanout, ceil rounding) |
 | `canon` | `proof/prover.rs`, `proof/salt_witness.rs` | Canonical form: sort/dedup on the proof path must not be removable or reversible |
-| `endian` | `state/ahash/convert.rs`, `state/hasher.rs`, `types.rs` | Byte-order determinism of the consensus hash and 12-byte metadata codec (see issue #127) |
+| `endian` | `state/hasher.rs`, `types.rs` | Byte-order determinism of the consensus hash and 12-byte metadata codec (see issue #127) |
 
 ## Why comby
 

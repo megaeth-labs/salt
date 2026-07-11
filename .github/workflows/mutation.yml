@@ -172,7 +172,7 @@ jobs:
       - name: Install universalmutator
         # Pin the version: a new release can change generated mutants and shift
         # the gate baseline.
-        run: pip install universalmutator==1.14.1
+        run: pipx install universalmutator==1.14.1
 
       - name: Install comby
         # Pin the version (reproducible mutant generation). The prebuilt binary
@@ -275,7 +275,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Install universalmutator
-        run: pip install universalmutator==1.14.1
+        run: pipx install universalmutator==1.14.1
 
       - name: Install comby
         run: |
@@ -404,7 +404,7 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       - name: Install universalmutator
-        run: pip install universalmutator==1.14.1
+        run: pipx install universalmutator==1.14.1
 
       - name: Install comby
         run: |
@@ -416,6 +416,9 @@ jobs:
 
       - name: Build the full mutant universe (both engines)
         run: |
+          # pipefail so a failing `umutate.py plan` fails the step instead of
+          # grep swallowing it and the orphan check running on a partial universe.
+          set -o pipefail
           # --package salt: match the driver scope so a stale suppression can't
           #   be kept alive by a same-named mutant in another crate.
           # --colors never: CI forces color, which would embed ANSI codes and
