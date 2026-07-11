@@ -17,7 +17,8 @@
 ^(\s*).*\.dedup_by\(.*\); ==> \1
 ^(\s*)sort_unstable!\([A-Za-z_0-9]+\); ==> \1
 
-# Flip comparator direction inside sort closures.
-b\.cmp\(a\) ==> a.cmp(b)
-a\.cmp\(b\) ==> b.cmp(a)
-a\.cmp\(&b\) ==> b.cmp(&a)
+# Flip comparator direction inside sort closures. Name-agnostic: matches any
+# `<ident>.cmp(<ident>)` / `.cmp(&<ident>)` and swaps the operands, so a
+# comparator written with `left`/`right`, `x`/`y`, etc. is covered too — not
+# just the `a`/`b` the current call sites happen to use (Troublor, PR #143).
+([A-Za-z_][A-Za-z_0-9]*)\.cmp\((&?)([A-Za-z_][A-Za-z_0-9]*)\) ==> \3.cmp(\2\1)

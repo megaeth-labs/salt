@@ -24,7 +24,9 @@ relative_position >> TRIE_WIDTH_BITS ==> relative_position << TRIE_WIDTH_BITS
 
 # A4. Segment granularity (256 slots per leaf).
 >> MIN_BUCKET_SIZE_BITS ==> >> (MIN_BUCKET_SIZE_BITS + 1)
-% TRIE_WIDTH ==> % (TRIE_WIDTH - 1)
+# Trailing word boundary: `TRIE_WIDTH` is a prefix of `TRIE_WIDTH_BITS`, so
+# without `\b` this rewrites `% TRIE_WIDTH_BITS` into garbage (flyq/Troublor, PR #143).
+% TRIE_WIDTH\b ==> % (TRIE_WIDTH - 1)
 
 # A5. Ceil-division rounding in the subtree-root climb (subtree_root_level).
 \(capacity \+ MIN_BUCKET_SIZE as u64 - 1\) ==> (capacity + MIN_BUCKET_SIZE as u64)

@@ -53,6 +53,10 @@ mkdir -p "$OUT_DIR/mutants"
 manifest="$OUT_DIR/manifest.txt"
 : > "$manifest"
 
+# Count of mutants dropped because they only rewrote comment lines (reported
+# below, never silently discarded).
+comment_only=0
+
 for pack in $packs; do
     targets="$(targets_for "$pack")"
     if [ -z "$targets" ]; then
@@ -82,6 +86,17 @@ for pack in $packs; do
 
         for m in "$mdir"/*.rs; do
             [ -e "$m" ] || continue
+            # Drop mutants that only alter comment lines. universalmutator
+            # rewrites inside `//`, `///` and `//!` too (e.g. a `<< BITS` token
+            # in a doc comment), and such a mutant compiles to an identical
+            # binary — every test passes, so it always reports SURVIVED as a
+            # false positive that reddens the first run (flyq, PR #143). If no
+            # differing line is anything but a comment, skip it.
+            changed="$(diff "$src" "$m" | grep -E '^[<>]' || true)"
+            if ! printf '%s\n' "$changed" | grep -qvE '^[<>] [[:space:]]*//'; then
+                comment_only=$((comment_only + 1))
+                continue
+            fi
             printf '%s\t%s\t%s\n' "$pack" "$src" "$m" >> "$manifest"
         done
     done
@@ -92,7 +107,7 @@ if [ "$total" -eq 0 ]; then
     echo "no mutants generated at all - check the rules files and targets" >&2
     exit 2
 fi
-echo "generated $total mutants (packs: $packs)"
+echo "generated $total mutants (packs: $packs); skipped $comment_only comment-only mutant(s)"
 
 if [ "$GEN_ONLY" = "1" ]; then
     echo "GEN_ONLY=1: skipping analysis; mutants are in $OUT_DIR/mutants/"
@@ -121,10 +136,24 @@ while IFS="$(printf '\t')" read -r pack src mutant; do
     cp "$mutant" "$src"
     label="[$i/$total] $pack/$(basename "$mutant")"
 
-    if ! cargo check $CARGO_ARGS > /dev/null 2>&1; then
+    # Cap lints to `allow` for the mutant build. CI's setup-rust-toolchain sets
+    # RUSTFLAGS="-D warnings", so a mutant that merely trips a lint — e.g.
+    # deleting the sole use of a `mut` binding turns `unused_mut` into a hard
+    # error — would be miscounted "invalid" instead of tested (only in CI; a
+    # local run without -D warnings tests it). Capping matches cargo-mutants;
+    # genuine type/borrow errors still fail, so real invalid mutants still count
+    # (flyq, PR #143).
+    mutant_rustflags="${RUSTFLAGS:-} --cap-lints=allow"
+    if ! RUSTFLAGS="$mutant_rustflags" cargo check $CARGO_ARGS > /dev/null 2>&1; then
         invalid=$((invalid + 1))
         echo "$label: invalid (does not compile)"
-    elif ! cargo nextest run $CARGO_ARGS > /dev/null 2>&1; then
+    # Per-mutant timeout: a mutant can introduce an infinite loop (a flipped
+    # decrement, a `>`→`>=` boundary), which would otherwise hang nextest until
+    # the job wall-clock kill and lose the whole report. `timeout` exits 124,
+    # which — like any nonzero here — counts the mutant as killed: a hang is a
+    # failure the suite detected (flyq, PR #143).
+    elif ! RUSTFLAGS="$mutant_rustflags" timeout "${MUTANT_TIMEOUT:-900}" \
+            cargo nextest run $CARGO_ARGS > /dev/null 2>&1; then
         killed=$((killed + 1))
         echo "$label: killed"
     else
@@ -153,6 +182,7 @@ report="$OUT_DIR/report.md"
     echo "Packs: \`$packs\`"
     echo
     echo "- generated: $total"
+    echo "- skipped (comment-only): $comment_only"
     echo "- killed: $killed"
     echo "- invalid (did not compile): $invalid"
     echo "- survived: $survived"
