@@ -16,5 +16,10 @@ targets = [
     "salt/src/types.rs",
 ]
 
+# Compile check: a mutant that fails this is unviable (e.g. a constant
+# swapped for one not imported in that file), classified separately rather
+# than miscounted as caught.
+build_cmd = "cargo check -p salt --no-default-features --features parallel"
+
 rules = "endian.rules"
 test_cmd = "cargo nextest run -p salt --no-default-features --features parallel"

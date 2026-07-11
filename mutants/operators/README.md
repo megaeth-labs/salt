@@ -22,8 +22,10 @@ Each pack is a directory `mutants/operators/<name>/` with:
 
 - `manifest.toml` — pack config: `name`, `description`, `mode` (`comby` or
   `regex`), `targets` (source globs), optional `match` (a regex file-content
-  filter), the `rules` filename, and the `test_cmd` whose non-zero exit means a
-  mutant was killed.
+  filter), the `rules` filename, the `test_cmd` whose non-zero exit means a
+  mutant was killed, and an optional `build_cmd` (a `cargo check`) — a mutant
+  that fails it is classified *unviable* rather than counted as caught (a
+  constant-swap operator can reference a symbol not imported in every file).
 - `<name>.rules` — the operator rules. `PATTERN ==> REPLACEMENT` per line, `#`
   for comments. In `comby` mode the pattern is a
   [comby template](https://comby.dev/docs/syntax-reference); in `regex` mode a

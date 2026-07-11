@@ -1,5 +1,14 @@
 name: Mutation Testing
 
+# All mutation-testing CI lives here. Three concerns, one file:
+#   * cargo-mutants  — generic structural operators (diff-scoped on PRs, sharded
+#                      full-crate run nightly)
+#   * spec-gate      — universalmutator + comby custom operators for SALT's trie
+#                      arithmetic / canonicalization / endianness invariants
+#                      (diff-scoped blocking gate on PRs, per-pack sweep nightly)
+#   * suppression hygiene — flag suppressions that no longer match a live mutant
+# All three share the scorer scripts/mutation_gate.py. See mutants/operators/.
+
 on:
   pull_request:
   workflow_dispatch:
@@ -167,9 +176,6 @@ jobs:
           sudo chmod +x /usr/local/bin/comby
           comby -version
 
-      - name: Warm test binaries
-        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
-
       - name: Run diff-scoped spec-gate mutation
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -267,9 +273,6 @@ jobs:
           sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
           sudo chmod +x /usr/local/bin/comby
           comby -version
-
-      - name: Warm test binaries
-        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
 
       - name: Run spec-gate mutation (${{ matrix.pack }})
         run: |

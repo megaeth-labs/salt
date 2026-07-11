@@ -178,8 +178,8 @@ def _test_line_ranges(text: str) -> set[int]:
     """1-based line numbers inside `#[cfg(test)]` / `#[test]` blocks.
 
     A heuristic brace counter (it does not parse strings/comments), which is
-    sufficient to keep spec-gate mutation off test code; production gates live
-    far from test modules."""
+    sufficient to keep operator-pack mutation off test code; the production
+    sites these packs target live far from test modules."""
     lines = text.splitlines()
     n = len(lines)
     test: set[int] = set()
@@ -261,30 +261,52 @@ def _run_test(test_cmd: str) -> str:
         return "timeout"
 
 
+def _compiles(build_cmd: str) -> bool:
+    """True if the mutated tree builds. A mutant that fails to compile is
+    *unviable* (an out-of-scope symbol swap, a type error) — not a killed test —
+    the same distinction cargo-mutants draws. Comby operators readily produce
+    these: e.g. `<< BUCKET_SLOT_BITS ==> << BUCKET_ID_BITS` is unviable in a file
+    that doesn't import BUCKET_ID_BITS. Packs opt in by declaring `build_cmd`;
+    without it the check is skipped, so a build failure would instead surface as
+    a non-zero test exit and be miscounted as caught."""
+    return subprocess.run(build_cmd, cwd=ROOT, shell=True,
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
 def baseline_ok(test_cmd: str) -> bool:
     """The test command must pass on the UNMUTATED tree; otherwise every mutant
     looks 'caught' (non-zero) and the run is meaningless."""
     return _run_test(test_cmd) == "ok"
 
 
-def analyze(pack: dict, src: str, mutant_dir: Path) -> tuple[list, list, list]:
-    """Swap each mutant into `src`, run the pack's test command, and classify it
-    as caught / survived / timed-out. The original file is always restored.
+def analyze(pack: dict, src: str, mutant_dir: Path) -> tuple[list, list, list, list]:
+    """Swap each mutant into `src`, classify it as caught / survived / timed-out
+    / unviable, and always restore the original file.
 
-    We run this ourselves rather than via `analyze_mutants` so we (a) control the
-    baseline and (b) separate timeouts (which it would record as 'killed')."""
+    When the pack declares a `build_cmd`, a mutant that fails it is unviable and
+    its test run is skipped (it would only fail the test command's own build
+    phase and be miscounted as caught). Otherwise the `test_cmd` exit decides:
+    non-zero is caught, zero is a survivor, a hang is a timeout. We run this
+    ourselves rather than via `analyze_mutants` so we (a) control the baseline
+    and (b) separate timeouts and unviables, which it would both fold into
+    'killed'."""
     src_path = ROOT / src
     original = src_path.read_text()
     test_cmd = pack.get("test_cmd", DEFAULT_TEST_CMD)
-    caught, survived, timed_out = [], [], []
+    build_cmd = pack.get("build_cmd")
+    caught, survived, timed_out, unviable = [], [], [], []
     bucket = {"fail": caught, "ok": survived, "timeout": timed_out}
     try:
         for m in sorted(p for p in mutant_dir.glob("*") if p.is_file()):
             src_path.write_text(m.read_text())
+            if build_cmd and not _compiles(build_cmd):
+                unviable.append(m.name)
+                continue
             bucket[_run_test(test_cmd)].append(m.name)
     finally:
         src_path.write_text(original)
-    return caught, survived, timed_out
+    return caught, survived, timed_out, unviable
 
 
 def cmd_plan(args) -> int:
@@ -322,7 +344,7 @@ def cmd_run(args) -> int:
     require_tools()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    caught, missed, timeouts = [], [], []
+    caught, missed, timeouts, unviable = [], [], [], []
     packs = load_packs(args.packs)
     changed_files = changed_lines = None
     if args.diff:
@@ -354,8 +376,8 @@ def cmd_run(args) -> int:
                 if not any(p.is_file() for p in md.glob("*")):
                     continue
                 ensure_baseline(pack.get("test_cmd", DEFAULT_TEST_CMD))
-                c, s, t = analyze(pack, src, md)
-                for names, sink in ((c, caught), (s, missed), (t, timeouts)):
+                c, s, t, u = analyze(pack, src, md)
+                for names, sink in ((c, caught), (s, missed), (t, timeouts), (u, unviable)):
                     for name in names:
                         a = _adapt(pack, src, name, md, allowed)
                         if a:
@@ -367,10 +389,9 @@ def cmd_run(args) -> int:
     write("caught.txt", caught)
     write("missed.txt", missed)
     write("timeout.txt", timeouts)
-    # Spec-gate mutants are valid Rust by construction, so there is no unviable
-    # bucket; write an empty file so the gate's reader is happy.
-    write("unviable.txt", [])
-    print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  -> {out}")
+    write("unviable.txt", unviable)
+    print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  "
+          f"unviable: {len(unviable)}  -> {out}")
     print(f"score with: python3 scripts/mutation_gate.py report --results {out} "
           f"--suppressions mutants/suppressions.toml")
     return 0

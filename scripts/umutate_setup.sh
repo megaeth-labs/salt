@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the custom-operator mutation toolchain: universalmutator + comby.
 #
-# These back the spec-gate packs under mutants/operators/ (scripts/umutate.py),
+# These back the operator packs under mutants/operators/ (scripts/umutate.py),
 # the domain-specific complement to cargo-mutants. comby is intentionally NOT
 # pip-managed: its prebuilt binary links against libev/libpcre sonames.
 set -euo pipefail
