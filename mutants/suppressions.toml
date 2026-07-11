@@ -134,8 +134,9 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "equivalent"
 file = "salt/src/state/ahash/fallback.rs"
+line = 120
 mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
-justification = "At len == 16 both branches feed large_update the identical little-endian u128: front | (back << 64) over the same 16 bytes equals read_last_u128 of them."
+justification = "Pinned to the `data.len() > 16` split (line 120): at len == 16 both branches feed large_update the identical little-endian u128 (front | (back << 64) over the same 16 bytes equals read_last_u128 of them). The other `>` sites in write — `> 8` and the `while > 16` loop — are non-equivalent and are killed by tests (verified by a cargo-mutants run: only line 120 survives), so the pin cannot mask them."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
 
 [[suppress]]
@@ -150,8 +151,9 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "equivalent"
 file = "salt/src/state/hasher.rs"
+line = 71
 mutant = "replace + with * in hash_with_nonce"
-justification = "key_len + 4 <= 64 vs key_len * 4 <= 64 only moves the stack/heap buffer split; both paths hash the identical byte sequence, as the pinned boundary tests document."
+justification = "Pinned to the buffer-selection guard (line 71): key_len + 4 <= 64 vs key_len * 4 <= 64 only moves the stack/heap buffer split; both paths hash the identical byte sequence. The `key_len + 4` slice-length sites (lines 74-75) are non-equivalent and are killed by tests (verified by a cargo-mutants run: only line 71 survives), so the pin cannot mask them."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
 
 [[suppress]]
@@ -160,30 +162,6 @@ category = "equivalent"
 file = "salt/src/state/state.rs"
 mutant = "replace >= with < in <impl std::fmt::Debug for EphemeralSaltState<'a, Store>>::fmt"
 justification = "Chooses the sign prefix in a Debug dump; display-only."
-reviewer = "full-run triage 2026-07-08 (issue #144)"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "salt/src/state/state.rs"
-mutant = "replace > with >= in EphemeralSaltState<'a, Store>::shi_upsert"
-justification = "Fires the resize check additionally only at used == threshold, where compute_resize_capacity still returns the unchanged capacity; a same-capacity rehash canonicalizes to a net-empty update."
-reviewer = "full-run triage 2026-07-08 (issue #144)"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "salt/src/state/state.rs"
-mutant = "replace / with % in EphemeralSaltState<'a, Store>::shi_upsert"
-justification = "capacity * PCT % 100 lowers the trigger, but for every reachable usage compute_resize_capacity still returns the unchanged capacity, and a same-capacity rehash canonicalizes to a net-empty update."
-reviewer = "full-run triage 2026-07-08 (issue #144)"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "salt/src/types.rs"
-mutant = "replace BucketMeta::is_default -> bool with false"
-justification = "Callers only use is_default to choose between caching None and caching the encoded meta; both cache states decode to the same BucketMeta when the meta is default."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
 
 [[suppress]]
