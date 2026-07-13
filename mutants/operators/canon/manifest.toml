@@ -6,8 +6,6 @@
 name = "canon"
 description = "Canonicalization removal: delete sort/dedup calls and flip comparator direction on the proof path"
 
-mode = "comby"
-
 targets = [
     "salt/src/proof/prover.rs",
     "salt/src/proof/salt_witness.rs",

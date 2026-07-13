@@ -20,16 +20,15 @@ workflow, `.github/workflows/mutation.yml`.
 
 Each pack is a directory `mutants/operators/<name>/` with:
 
-- `manifest.toml` — pack config: `name`, `description`, `mode` (`comby` or
-  `regex`), `targets` (source globs), optional `match` (a regex file-content
-  filter), the `rules` filename, the `test_cmd` whose non-zero exit means a
-  mutant was killed, and an optional `build_cmd` (a `cargo check`) — a mutant
-  that fails it is classified *unviable* rather than counted as caught (a
-  constant-swap operator can reference a symbol not imported in every file).
+- `manifest.toml` — pack config: `name`, `description`, `targets` (source
+  globs), optional `match` (a regex file-content filter), the `rules` filename,
+  the `test_cmd` whose non-zero exit means a mutant was killed, and an optional
+  `build_cmd` (a `cargo check`) — a mutant that fails it is classified
+  *unviable* rather than counted as caught (a constant-swap operator can
+  reference a symbol not imported in every file).
 - `<name>.rules` — the operator rules. `PATTERN ==> REPLACEMENT` per line, `#`
-  for comments. In `comby` mode the pattern is a
-  [comby template](https://comby.dev/docs/syntax-reference); in `regex` mode a
-  Python regex.
+  for comments; the pattern is a
+  [comby template](https://comby.dev/docs/syntax-reference).
 
 | Pack | Scope | Invariant guarded |
 | --- | --- | --- |
@@ -97,8 +96,14 @@ Every **survivor** is either:
 
 1. a missing test — add a killing test (preferred), or
 2. an equivalent mutant — record it in `mutants/suppressions.toml` with a
-   justification (prefer a `line = <n>` pin; note that same-line twins cannot
-   be pinned apart — rely on a killing test there instead).
+   justification. Use a `kind = "line"` entry whose `mutant` is the survivor's
+   description (from `missed.txt`/`timeout.txt`) with the leading
+   `file:line:col:` locator stripped: matching is scoped to `file` but
+   deliberately drops the line number, so the suppression keeps matching when
+   unrelated edits shift the code. The trade-off is that two mutants with
+   identical text in one file cannot be pinned apart — rely on a killing test
+   there instead. To exclude a whole equivalent-by-construction function, use a
+   `kind = "function"` entry with a `pattern` regex.
 
 **Unviable** (non-compiling) mutants are fine in moderation; if a rule mostly
 produces unviable mutants, tighten its template.

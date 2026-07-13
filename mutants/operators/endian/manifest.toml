@@ -6,9 +6,6 @@
 name = "endian"
 description = "Byte-order flips on explicit to/from_*_bytes packing (determinism / cross-platform reproducibility)"
 
-# Mutation engine mode: "comby" (structural) or "regex".
-mode = "comby"
-
 # Candidate source files (matched from the repo root). These rules match explicit
 # `to/from_*_bytes` calls; `state/ahash/convert.rs` is intentionally not a target
 # because its hash readers go through `zerocopy::transmute!` / `.convert()`, which

@@ -19,7 +19,7 @@ else
     echo "universalmutator already installed: $(command -v mutate)"
 fi
 
-# --- comby (structural matcher for `mode = "comby"` packs) --------------------
+# --- comby (structural matcher used by every operator pack) -------------------
 if ! command -v comby >/dev/null 2>&1; then
     echo "Installing comby..."
     if command -v paru >/dev/null 2>&1; then

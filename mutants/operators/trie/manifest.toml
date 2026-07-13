@@ -6,8 +6,6 @@
 name = "trie"
 description = "Trie-structure operators: level-index base, bit-width split, fanout shift, granularity, ceil-division"
 
-mode = "comby"
-
 targets = [
     "salt/src/trie/node_utils.rs",
     "salt/src/trie/trie.rs",
