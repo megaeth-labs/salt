@@ -1,14 +1,14 @@
-//! Regression test for issue #146: the shared committer's one-time
-//! initialization must complete even when its first touch happens inside
-//! global-rayon-pool jobs racing with OS threads. This shape guards the
-//! initiator-steals-while-waiting channel: a pool worker that wins the
-//! initialization must not block on the pool via a work-stealing wait,
-//! or it re-enters the lazy on its own stack (caught a broken intermediate
-//! version of the fix). The original deadlock channel is covered by
-//! `shared_committer_init_os_winner.rs`.
+//! Regression test for issue #146 — the original deadlock channel: an OS
+//! thread wins the committer initialization, so (pre-fix) its parallel table
+//! build was injected into the global rayon pool, whose workers stole flood
+//! jobs dereferencing the initializing static at their join points and froze
+//! unfinished build fragments beneath them — a circular wait. This shape
+//! reproduced the pre-fix deadlock 5/5 on a 14-core host.
 //!
-//! Kept as the only test in this binary so the process starts with the
-//! committer uninitialized.
+//! Complements `shared_committer_init.rs`, which covers first touch from
+//! inside pool jobs (the initiator-steals-while-waiting channel). Kept as
+//! the only test in this binary so the process starts with the committer
+//! uninitialized.
 #![cfg(feature = "parallel")]
 
 use salt::empty_salt::EmptySalt;
@@ -19,7 +19,7 @@ use std::time::Duration;
 static DONE: AtomicBool = AtomicBool::new(false);
 
 #[test]
-fn concurrent_first_touch_from_pool_jobs_and_threads() {
+fn os_thread_wins_init_while_pool_jobs_race() {
     // A regression manifests as a hang, not a failure; convert it into one.
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(120));
@@ -36,6 +36,16 @@ fn concurrent_first_touch_from_pool_jobs_and_threads() {
         }
     });
 
+    // Give an OS thread a head start into the initializer so the table
+    // build's parallelism reaches the global pool (pre-fix) rather than
+    // running inline on a pool worker.
+    let winner = std::thread::spawn(|| {
+        let _ = StateRoot::new(&EmptySalt);
+    });
+    std::thread::sleep(Duration::from_millis(30));
+
+    // Flood the global pool with jobs that dereference the initializing
+    // static, so workers helping the build can steal them at join points.
     let threads: Vec<_> = (0..8)
         .map(|_| {
             std::thread::spawn(|| {
@@ -46,10 +56,10 @@ fn concurrent_first_touch_from_pool_jobs_and_threads() {
                         });
                     }
                 });
-                let _ = StateRoot::new(&EmptySalt);
             })
         })
         .collect();
+    winner.join().unwrap();
     for t in threads {
         t.join().unwrap();
     }
