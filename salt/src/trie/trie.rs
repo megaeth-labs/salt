@@ -73,10 +73,9 @@ fn build_shared_committer() -> Committer {
             .name("salt-committer-init".into())
             .spawn(move || pool.install(build))
             .expect("failed to spawn the committer-init thread");
-        match handle.join() {
-            Ok(committer) => committer,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
     #[cfg(not(feature = "parallel"))]
     {
@@ -990,9 +989,10 @@ impl StateRoot<'_, EmptySalt> {
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
     /// * `Err(S::Error)` - If reading from storage fails
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
-        // Initialize the shared committer before entering the parallel region:
-        // the per-chunk closures below run on rayon workers, which must not be
-        // the first to touch SHARED_COMMITTER (issue #146).
+        // Warm up the shared committer before fanning out. Not required for
+        // correctness — build_shared_committer is safe to force from any
+        // thread, including pool workers — but it keeps the first wave of
+        // chunk jobs from all parking on the one-time initialization.
         Lazy::force(&SHARED_COMMITTER);
 
         // Process data buckets in chunks (chunk size must be multiples of 256)
