@@ -1579,6 +1579,175 @@ mod tests {
         assert_eq!(state.plain_value(&plain_key).unwrap(), None);
     }
 
+    /// The metadata read-cache must preserve non-default metadata: caching a
+    /// "default" marker for a re-nonced or resized bucket would make every
+    /// later lookup probe with the wrong nonce or capacity. The two keys are
+    /// chosen so that the wrong metadata provably probes a different slot.
+    #[test]
+    fn test_cached_metadata_keeps_non_default_meta() {
+        // Nonce case: set_nonce(7), then read twice through a cache_read
+        // state; the second read is served from the metadata cache.
+        let store = MemStore::new();
+        let plain_key = b"nonce-case-0".to_vec();
+        let plain_value = b"nonce-value".to_vec();
+        let kvs = BTreeMap::from([(plain_key.clone(), Some(plain_value.clone()))]);
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        store.update_state(updates);
+        let bucket_id = hasher::bucket_id(&plain_key);
+        let mut admin = EphemeralSaltState::new(&store);
+        let updates = admin.set_nonce(bucket_id, 7).unwrap();
+        store.update_state(updates);
+
+        let mut state = EphemeralSaltState::new(&store).cache_read();
+        for _ in 0..2 {
+            assert_eq!(
+                state.plain_value(&plain_key).unwrap(),
+                Some(plain_value.clone())
+            );
+        }
+
+        // Capacity case: rehash to 512 slots with nonce 0; the key's probe
+        // position differs between capacity 512 and the default 256.
+        let store = MemStore::new();
+        let plain_key = b"capacity-case-0".to_vec();
+        let plain_value = b"capacity-value".to_vec();
+        let kvs = BTreeMap::from([(plain_key.clone(), Some(plain_value.clone()))]);
+        let mut seed_state = EphemeralSaltState::new(&store);
+        let updates = seed_state.update_fin(&kvs).unwrap();
+        store.update_state(updates);
+        let bucket_id = hasher::bucket_id(&plain_key);
+        // Guard against the test silently becoming a tautology: the capacity
+        // case only discriminates the `is_default -> false` mutant if the key
+        // probes a *different* slot at capacity 512 than at the default 256.
+        // If a future hash-seed change made the two collide, the second cached
+        // read would succeed under either metadata and the mutant would survive
+        // here unnoticed. probe(hk, 0, cap) == hk % cap, and the bucket is
+        // rehashed with nonce 0. (Troublor, PR #145)
+        let probe_key = hasher::hash_with_nonce(&plain_key, 0);
+        debug_assert_ne!(
+            probe(probe_key, 0, 256),
+            probe(probe_key, 0, 512),
+            "capacity-case key must probe different slots at 256 vs 512 for this test to discriminate"
+        );
+        let mut admin = EphemeralSaltState::new(&store);
+        let mut rehash_updates = StateUpdates::default();
+        admin
+            .shi_rehash(bucket_id, 0, 512, &mut rehash_updates)
+            .unwrap();
+        store.update_state(rehash_updates);
+
+        let mut state = EphemeralSaltState::new(&store).cache_read();
+        for _ in 0..2 {
+            assert_eq!(
+                state.plain_value(&plain_key).unwrap(),
+                Some(plain_value.clone())
+            );
+        }
+    }
+
+    /// Load-bearing check for the two `shi_upsert` equivalence suppressions
+    /// (`> with >=` and `/ with %`), both of which assume a same-capacity +
+    /// same-nonce `shi_rehash` produces no net observable state change. Pinning
+    /// that invariant here means a future drift in `shi_rehash` internals turns
+    /// this test red instead of being silently absorbed by those suppressions.
+    /// (Troublor, PR #145)
+    #[test]
+    fn same_cap_same_nonce_rehash_is_observably_net_empty() {
+        let store = MemStore::new();
+        let kvs = create_same_bucket_test_data(3);
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let bucket_id = hasher::bucket_id(&kvs[0].0);
+        let meta = store.metadata(bucket_id).unwrap();
+
+        // Full observable-state snapshot (state kvs + trie) before the rehash.
+        let before = format!("{store:?}");
+
+        let mut state = EphemeralSaltState::new(&store);
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(bucket_id, meta.nonce, meta.capacity, &mut rehash_updates)
+            .unwrap();
+        store.update_state(rehash_updates);
+
+        assert_eq!(
+            before,
+            format!("{store:?}"),
+            "same-cap same-nonce shi_rehash must leave observable state unchanged"
+        );
+    }
+
+    /// The shi_upsert resize trigger `used > capacity * PCT / 100` must fire only
+    /// *strictly above* the load factor. At/below it, `compute_resize_capacity`
+    /// keeps the same capacity, so the committed state is unchanged either way —
+    /// but a spurious `shi_rehash` still marks the bucket in the public
+    /// `rehashed_buckets` set. `> -> >=` fires it at exactly the threshold, and
+    /// `/ -> %` collapses the threshold (to `capacity * PCT % 100`) so it fires
+    /// far too early. Filling a bucket to exactly the threshold with `update()`
+    /// (no canonicalize, which would clear the set) must leave it unmarked.
+    /// (codex, PR #145)
+    // Depends on the production load-factor threshold (80%); the
+    // `test-bucket-resize` feature swaps it for a 1% env-driven value, so gate
+    // it out there, matching the other threshold-sensitive tests. The mutation
+    // gate runs with `--features parallel`, so this still kills the mutants.
+    #[cfg(not(feature = "test-bucket-resize"))]
+    #[test]
+    fn shi_upsert_does_not_rehash_at_the_load_factor_threshold() {
+        use crate::constant::BUCKET_RESIZE_LOAD_FACTOR_PCT;
+        let threshold = MIN_BUCKET_SIZE as u64 * BUCKET_RESIZE_LOAD_FACTOR_PCT / 100;
+        let kvs = create_same_bucket_test_data(threshold as usize);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        state.update(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+
+        assert!(
+            state.rehashed_buckets.is_empty(),
+            "a bucket at exactly the load-factor threshold must not be rehashed"
+        );
+    }
+
+    /// A default bucket (nonce 0, MIN_BUCKET_SIZE capacity) persists no metadata
+    /// slot, so `is_default()` gates its read cache entry to the missing-key
+    /// marker (None). Because `value()` serves from the same cache, an
+    /// `is_default -> false` mutation caches a materialized Some and makes a
+    /// later raw `value(metadata_key)` return a value the store never stored.
+    /// (codex, PR #145)
+    // The `test-bucket-resize` feature drops the load factor to 1%, so the few
+    // inserts here would resize the bucket and it would no longer be default;
+    // gate it out there (the mutation gate runs with `--features parallel`).
+    #[cfg(not(feature = "test-bucket-resize"))]
+    #[test]
+    fn default_bucket_metadata_caches_as_absent() {
+        use crate::types::bucket_metadata_key;
+        let kvs = create_same_bucket_test_data(2);
+        let store = MemStore::new();
+        let updates = EphemeralSaltState::new(&store)
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        store.update_state(updates);
+
+        let bucket_id = hasher::bucket_id(&kvs[0].0);
+        assert!(
+            store.metadata(bucket_id).unwrap().is_default(),
+            "precondition: the bucket must be default"
+        );
+
+        // An update in cache_read mode calls self.metadata(), which caches the
+        // default bucket's metadata as the None marker (is_default => None).
+        let mut state = EphemeralSaltState::new(&store).cache_read();
+        let more = create_same_bucket_test_data(3);
+        state.update(more.iter().map(|(k, v)| (k, v))).unwrap();
+
+        // The store persists no metadata slot for a default bucket, so a raw
+        // read must stay None — not the Some(default) cached under
+        // is_default -> false.
+        assert_eq!(state.value(bucket_metadata_key(bucket_id)).unwrap(), None);
+    }
+
     #[test]
     fn test_plain_state_provider_plain_value() {
         let store = MemStore::new();

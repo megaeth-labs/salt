@@ -6,7 +6,16 @@
 # For `kind = "line"`, use the mutant description from missed.txt/timeout.txt
 # with the leading `file:line:col:` locator stripped. Locator-free entries keep
 # matching when unrelated edits shift line numbers; matching is scoped to
-# `file`, so identical mutant text in another module is not suppressed.
+# `file`, so identical mutant text in another module is not suppressed. When
+# the same mutant text appears at several sites in one file and only some are
+# reviewed, add `line = <n>` (from the locator) to pin the entry to its site;
+# the hygiene check fails when the pinned line drifts, forcing a re-review.
+#
+# Categories are matched asymmetrically:
+# - `equivalent`/`dead` prove the mutant cannot change observable behavior,
+#   so they cover survivors and (flaky) timeouts alike.
+# - `timeout` only proves the mutant hangs the suite; it covers timeout.txt
+#   findings and never excuses a mutant that ran to completion and survived.
 #
 # Example:
 #
@@ -33,3 +42,309 @@ file = "salt/src/empty_salt.rs"
 mutant = "replace <impl TrieReader for EmptySalt>::node_entries -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> with Ok(vec![])"
 justification = "EmptySalt has no stored trie nodes; node_entries() is specified to return an empty vector for every range, so replacing the body with Ok(vec![]) is behaviorally identical."
 reviewer = "krabat/feat/mutation-testing review 2026-07-05"
+
+# ---------------------------------------------------------------------------
+# Full-run baseline triage, 2026-07-08 (issue #144). Categories:
+# equivalent = proven no observable behavior change; dead = code not compiled
+# under the canonical mutation feature set; timeout = observed non-terminating.
+# ---------------------------------------------------------------------------
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/constant.rs"
+line = 221
+mutant = "replace + with * in default_commitment"
+justification = "Turns the level-0 boundary from STARTING_NODE_ID[0]+1 into STARTING_NODE_ID[0]*1 = 0, but the level-0 tuple carries identical left/right commitments, so the selected value is unchanged for every node id. Pinned to the level-0 site; the level 1-3 boundary additions are killed by test_default_commitment_boundary_selection."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace > with < in SaltProof::create"
+justification = "The needs_sorting probe is precondition hygiene: create_sub_trie aggregates keys into BTreeMap/BTreeSet structures, so proof shape and queries are independent of input key order and duplication. A contract-pinning test (descending vs ascending construction) documents this."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace > with == in SaltProof::create"
+justification = "Same reasoning as the > with < variant: downstream structures are order- and duplicate-insensitive."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace > with >= in SaltProof::create"
+justification = "Only additionally sorts when adjacent keys are equal; re-sorting a sorted-with-duplicates sequence is a no-op."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace < with <= in create_leaf_node_queries"
+justification = "parent_node == BUCKET_SLOT_ID_MASK is unreachable: main-trie ids are < 2^25 and subtree ids carry a data bucket id (>= 65536) in the top 24 bits, so they exceed the mask."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/shape.rs"
+mutant = "replace | with ^ in encode_parent"
+justification = "parent is a level-3 main-trie id (< 2^25) and the level tag occupies bits 33-35; the operands are disjoint, so OR equals XOR."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/shape.rs"
+mutant = "replace | with ^ in logic_parent_id"
+justification = "STARTING_NODE_ID[level] < 2^25 and bucket_id << BUCKET_SLOT_BITS occupy disjoint bit ranges, so OR equals XOR."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/subtrie.rs"
+mutant = "replace * with + in multi_commitments_to_scalars"
+justification = "total_capacity only sizes Vec::with_capacity, a performance hint with no behavioral effect."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/subtrie.rs"
+mutant = "replace * with / in multi_commitments_to_scalars"
+justification = "total_capacity only sizes Vec::with_capacity, a performance hint with no behavioral effect."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/subtrie.rs"
+mutant = "replace < with <= in process_leaf_node"
+justification = "parent == BUCKET_SLOT_ID_MASK is unreachable for the same reason as in create_leaf_node_queries: neither addressing scheme can produce that value."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/state/ahash/fallback.rs"
+line = 120
+mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Pinned to the `data.len() > 16` split (line 120): at len == 16 both branches feed large_update the identical little-endian u128 (front | (back << 64) over the same 16 bytes equals read_last_u128 of them). The other `>` sites in write — `> 8` and the `while > 16` loop — are non-equivalent and are killed by tests (verified by a cargo-mutants run: only line 120 survives), so the pin cannot mask them."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/state/ahash/fallback.rs"
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Both sites combine a low-64-bit value with a value shifted left by 64; the operands are disjoint, so OR equals XOR. Covers the identical mutant on both combine lines."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/state/hasher.rs"
+line = 71
+mutant = "replace + with * in hash_with_nonce"
+justification = "Pinned to the buffer-selection guard (line 71): key_len + 4 <= 64 vs key_len * 4 <= 64 only moves the stack/heap buffer split; both paths hash the identical byte sequence. The `key_len + 4` slice-length sites (lines 74-75) are non-equivalent and are killed by tests (verified by a cargo-mutants run: only line 71 survives), so the pin cannot mask them."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/state/state.rs"
+mutant = "replace >= with < in <impl std::fmt::Debug for EphemeralSaltState<'a, Store>>::fmt"
+justification = "Chooses the sign prefix in a Debug dump; display-only."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/types.rs"
+mutant = "replace - with + in leftmost_node"
+justification = "Both `-` sites are on the same source line `(pow_result - 1) / (width - 1)`, so this body cannot be line-pinned to one. It only ever covers the `pow_result - 1 -> + 1` survivor, which is equivalent: 256^level = 255k + 1, so (pow+1)/255 and (pow-1)/255 share the same quotient k for every level. The other site, `width - 1 -> + 1` (denominator 257), is NOT equivalent and is killed by `leftmost_node_calculation` (level 1 becomes 255/257 = 0 != 1), so it never reaches this suppression as a survivor."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/types.rs"
+mutant = "replace - with / in leftmost_node"
+justification = "Same-line ambiguity as the `- with +` entry above: both `-` sites share one line, so no line pin can isolate them. This only covers the equivalent `pow_result - 1 -> / 1` survivor (pow/1 keeps pow, and floor(pow/255) equals (pow-1)/255 because 256^level = 255k + 1). The `width - 1 -> / 1` site (denominator 256) is NOT equivalent and is killed by `leftmost_node_calculation` (level 1 becomes 255/256 = 0 != 1), so it never survives to reach this suppression."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/types.rs"
+mutant = "replace > with >= in leftmost_node"
+justification = "Equality would require 256^level - 1 == 255 * u64::MAX, which no power of 256 satisfies; the branch outcome never differs."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/types.rs"
+mutant = "replace | with ^"
+justification = "METADATA_KEYS_RANGE combines (NUM_META_BUCKETS-1) << BUCKET_SLOT_BITS with the low-40-bit mask; the operands are disjoint, so OR equals XOR."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "salt/src/state/hasher.rs"
+line = 51
+mutant = "replace bucket_id -> BucketId with Default::default()"
+justification = "The test-bucket-resize cfg variant is not compiled under the canonical mutation feature set. Pinned to that variant's site so the production bucket_id, whose function-replacement mutant is killed by the pinned bucket-id tests, can never be covered by this entry."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "salt/src/state/hasher.rs"
+line = 58
+mutant = "replace % with + in bucket_id"
+justification = "test-bucket-resize cfg variant, not compiled under the canonical mutation feature set; line-pinned so the production arithmetic is never covered."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "salt/src/state/hasher.rs"
+line = 58
+mutant = "replace % with / in bucket_id"
+justification = "test-bucket-resize cfg variant, not compiled under the canonical mutation feature set; line-pinned so the production arithmetic is never covered."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "salt/src/state/hasher.rs"
+line = 58
+mutant = "replace + with * in bucket_id"
+justification = "test-bucket-resize cfg variant, not compiled under the canonical mutation feature set; line-pinned so the production arithmetic is never covered."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "salt/src/state/hasher.rs"
+line = 58
+mutant = "replace + with - in bucket_id"
+justification = "test-bucket-resize cfg variant, not compiled under the canonical mutation feature set; line-pinned so the production arithmetic is never covered."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/proof/witness.rs"
+mutant = "replace match guard new_value.is_some() with true in Witness::create"
+justification = "Observed non-terminating in the full run: misrouting deletions into the insertion arm makes the pre-state replay spin; the mutant hangs the suite and can never pass."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/proof/witness.rs"
+mutant = "replace match guard new_value.is_some() with false in Witness::create"
+justification = "Observed non-terminating in the full run: misrouting insertions into the deletion arm makes the pre-state replay spin; the mutant hangs the suite and can never pass."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/node_utils.rs"
+mutant = "replace - with / in get_parent_node"
+justification = "Observed non-terminating: corrupting the bucket-id/local-number split sends every parent walk into ids that never reach the root, so trie updates spin. Covers the identical mutant on both subtraction sites, both observed hanging."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+line = 852
+mutant = "replace < with <= in StateRoot<'a, Store>::create_node_aligned_chunks"
+justification = "The outer-loop variant re-enters with next_boundary == len and never advances (observed hang). Pinned to the outer-loop site; the boundary-check twin terminates and is killed by the exact-chunks test."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+mutant = "replace < with > in StateRoot<'a, Store>::create_node_aligned_chunks"
+justification = "Observed non-terminating: the loop guard inverts and the boundary stops advancing for small delta lists. Observed at both the outer-loop and boundary-check sites; this entry deliberately covers both."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+line = 861
+mutant = "replace < with == in StateRoot<'a, Store>::create_node_aligned_chunks"
+justification = "Observed non-terminating: the boundary check never fires, so next_boundary stops advancing inside the outer loop. Pinned to the boundary-check site."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+line = 858
+mutant = "replace += with *= in StateRoot<'a, Store>::create_node_aligned_chunks"
+justification = "The inner-scan variant multiplies by one and never advances past an equal-node run (observed hang). Pinned to the inner-scan site; the stride twin terminates and is killed by the exact-chunks test."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+line = 863
+mutant = "replace += with -= in StateRoot<'a, Store>::create_node_aligned_chunks"
+justification = "Observed non-terminating: the boundary marches backwards and the loop never completes. Pinned to the stride site."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+mutant = "replace + with * in StateRoot<'_, EmptySalt>::rebuild"
+justification = "Observed non-terminating: rebuild scans 16.7M buckets and the broken chunk stride prevents the scan from completing within any timeout."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+mutant = "replace + with - in StateRoot<'_, EmptySalt>::rebuild"
+justification = "Observed non-terminating: rebuild scans 16.7M buckets and the broken chunk stride prevents the scan from completing within any timeout."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+mutant = "replace / with * in StateRoot<'_, EmptySalt>::rebuild"
+justification = "Observed non-terminating: the metadata chunk arithmetic degenerates and the full-trie scan cannot complete within any timeout."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/trie/trie.rs"
+mutant = "replace / with % in StateRoot<'_, EmptySalt>::rebuild"
+justification = "Observed non-terminating: the metadata chunk arithmetic degenerates and the full-trie scan cannot complete within any timeout."
+reviewer = "full-run triage 2026-07-08 (issue #144)"
+
+[[suppress]]
+kind = "line"
+category = "timeout"
+file = "salt/src/types.rs"
+mutant = "replace + with - in <impl From<(BucketId, SlotId)> for SaltKey>::from"
+justification = "Observed non-terminating in the full run: every constructed key is corrupted, sending SHI probes and range scans into layouts they can never resolve; the suite hangs rather than passes."
+reviewer = "full-run triage 2026-07-08 (issue #144)"

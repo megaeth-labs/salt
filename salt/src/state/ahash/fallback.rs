@@ -20,11 +20,6 @@ fn read_small(data: &[u8]) -> [u64; 2] {
     }
 }
 
-const PI: [u128; 2] = [
-    0x243f6a8885a308d313198a2e03707344,
-    0xa4093822299f31d0082efa98ec4e6c89,
-];
-
 const PI2: [u64; 4] = [
     0x4528_21e6_38d0_1377,
     0xbe54_66cf_34e9_0c6c,
@@ -69,21 +64,6 @@ pub struct DeterministicHasher {
 }
 
 impl DeterministicHasher {
-    #[inline]
-    pub fn new_with_keys(key1: u128, key2: u128) -> Self {
-        let key1 = key1 ^ PI[0];
-        let key2 = key2 ^ PI[1];
-
-        let key1_parts: [u64; 2] = [key1 as u64, (key1 >> 64) as u64];
-        let key2_parts: [u64; 2] = [key2 as u64, (key2 >> 64) as u64];
-
-        Self {
-            buffer: key1_parts[0],
-            pad: key1_parts[1],
-            extra_keys: key2_parts,
-        }
-    }
-
     #[inline(always)]
     fn update(&mut self, new_data: u64) {
         self.buffer = folded_multiply(new_data ^ self.buffer, MULTIPLE);
@@ -181,6 +161,40 @@ impl core::hash::BuildHasher for RandomState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::hash::{BuildHasher, Hasher};
+
+    /// The integer `write_*` overrides are what keep integer hashing
+    /// endian-independent (the core::hash defaults go through native-endian
+    /// bytes); pin their exact outputs so mutations to `update` and
+    /// `large_update` cannot survive.
+    #[test]
+    fn write_integer_outputs_are_pinned() {
+        let build = RandomState::with_seeds(1, 2, 3, 4);
+        let finish = |f: &dyn Fn(&mut DeterministicHasher)| {
+            let mut hasher = build.build_hasher();
+            f(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_eq!(finish(&|h| h.write_u8(0xa5)), 18_003_160_624_292_972_093);
+        assert_eq!(finish(&|h| h.write_u16(0xa5a5)), 13_293_305_771_500_139_834);
+        assert_eq!(
+            finish(&|h| h.write_u32(0xa5a5_a5a5)),
+            1_920_462_131_907_294_801
+        );
+        assert_eq!(
+            finish(&|h| h.write_u64(0xa5a5_a5a5_a5a5_a5a5)),
+            3_694_995_219_585_681_531
+        );
+        assert_eq!(
+            finish(&|h| h.write_u128(0xa5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5)),
+            5_605_269_915_146_111_207
+        );
+        assert_eq!(
+            finish(&|h| h.write_usize(0x1234)),
+            3_213_796_315_339_447_371
+        );
+    }
 
     #[test]
     fn read_small_length_classes() {

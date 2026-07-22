@@ -1254,6 +1254,65 @@ mod tests {
         assert!(unordered.check(&data, root).is_ok());
     }
 
+    /// Contract pin: proof construction is canonical regardless of key
+    /// order, including strictly descending input with no ascending pair.
+    #[test]
+    fn test_create_canonicalizes_descending_keys() {
+        let (store, salt_key, value, root) = setup_single_key_proof_case();
+        let neighbor_slot = if salt_key.slot_id() == 0 {
+            1
+        } else {
+            salt_key.slot_id() - 1
+        };
+        let neighbor_key = SaltKey::from((salt_key.bucket_id(), neighbor_slot));
+        let (high, low) = if salt_key > neighbor_key {
+            (salt_key, neighbor_key)
+        } else {
+            (neighbor_key, salt_key)
+        };
+
+        let descending = SaltProof::create([high, low], &store).unwrap();
+        let ascending = SaltProof::create([low, high], &store).unwrap();
+
+        assert_eq!(
+            descending.parents_commitments,
+            ascending.parents_commitments
+        );
+        assert_eq!(descending.levels, ascending.levels);
+
+        let data = [
+            (neighbor_key, store.value(neighbor_key).unwrap()),
+            (salt_key, value),
+        ]
+        .into();
+        assert!(descending.check(&data, root).is_ok());
+    }
+
+    /// The first data bucket must be treated as a data bucket: once it is
+    /// expanded, proofs over it need its real subtree level, not the fixed
+    /// metadata-bucket level.
+    #[test]
+    fn test_proof_for_expanded_first_data_bucket_uses_subtree_levels() {
+        let store = MemStore::new();
+        let bucket_id = KV_BUCKET_OFFSET as BucketId;
+        let mut state = EphemeralSaltState::new(&store);
+        let mut rehash_updates = StateUpdates::default();
+        state
+            .shi_rehash(bucket_id, 0, 512, &mut rehash_updates)
+            .unwrap();
+        store.update_state(rehash_updates.clone());
+        let mut trie = StateRoot::new(&store);
+        let (root, trie_updates) = trie.update_fin(&rehash_updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let key = SaltKey::from((bucket_id, 0));
+        let proof = SaltProof::create([key], &store).unwrap();
+        assert_eq!(proof.levels[&bucket_id], 2);
+
+        let data = [(key, None)].into();
+        assert!(proof.check(&data, root).is_ok());
+    }
+
     #[test]
     fn test_serde_commitment_rejects_invalid_compressed_point() {
         let bytes = [0xffu8; 32];
