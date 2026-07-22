@@ -4,6 +4,15 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 
+/// Lazy initializer for global statics: waiters must park under `std` —
+/// busy-spin waiting can starve or (with rayon re-entry) deadlock expensive
+/// initializers (issue #146). `spin` is only for `no_std` targets, which have
+/// no OS blocking primitives and no threads to contend with.
+#[cfg(feature = "std")]
+pub(crate) type Lazy<T> = std::sync::LazyLock<T>;
+#[cfg(not(feature = "std"))]
+pub(crate) type Lazy<T> = spin::Lazy<T>;
+
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;

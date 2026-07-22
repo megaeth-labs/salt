@@ -36,20 +36,53 @@ use ipa_multipoint::crs::CRS;
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
 
+use crate::Lazy;
 use hashbrown::{HashMap, HashSet};
-use spin::Lazy;
 use std::{collections::BTreeMap, vec::Vec};
 use std::{sync::Arc, vec};
 
 use core::{cmp::Ordering, ops::Range};
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
-static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| {
-    Arc::new(Committer::new(
-        &CRS::default().G,
-        platform::DEFAULT_PRECOMP_WINDOW_SIZE,
-    ))
-});
+static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shared_committer()));
+
+/// Builds the shared committer's precomputation tables.
+///
+/// With `parallel` enabled, the construction is fully isolated from the
+/// global rayon pool (issue #146):
+///
+/// - the parallel table build runs in a dedicated short-lived pool, so its
+///   completion never depends on the global pool making progress;
+/// - the wait happens via `thread::join` on a fresh OS thread, never via a
+///   rayon blocking primitive: the caller may itself be a global-pool worker,
+///   and rayon makes blocked workers steal other jobs — stealing a job that
+///   touches `SHARED_COMMITTER` would re-enter this initialization on the
+///   same stack and deadlock.
+fn build_shared_committer() -> Committer {
+    let build = || Committer::new(&CRS::default().G, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+    #[cfg(feature = "parallel")]
+    {
+        // Never fall back to running `build` on the calling thread: with
+        // `parallel` it would par_iter on the global pool and reopen both
+        // deadlock channels. Thread creation failing here means the process
+        // cannot spawn threads at all, so fail fast and loud instead.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("failed to build the dedicated committer-init thread pool");
+        let handle = std::thread::Builder::new()
+            .name("salt-committer-init".into())
+            .spawn(move || pool.install(build))
+            .expect("failed to spawn the committer-init thread");
+        match handle.join() {
+            Ok(committer) => committer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        build()
+    }
+}
 
 /// Records updates to the internal commitment values of a SALT trie.
 /// Stores the old and new commitment values of the trie nodes,
@@ -957,6 +990,11 @@ impl StateRoot<'_, EmptySalt> {
     /// * `Ok((root_commitment, trie_updates))` - Root hash and all node updates
     /// * `Err(S::Error)` - If reading from storage fails
     pub fn rebuild<S: StateReader>(reader: &S) -> Result<(ScalarBytes, TrieUpdates), S::Error> {
+        // Initialize the shared committer before entering the parallel region:
+        // the per-chunk closures below run on rayon workers, which must not be
+        // the first to touch SHARED_COMMITTER (issue #146).
+        Lazy::force(&SHARED_COMMITTER);
+
         // Process data buckets in chunks (chunk size must be multiples of 256)
         const CHUNK_SIZE: usize = META_BUCKET_SIZE;
 
