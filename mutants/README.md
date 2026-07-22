@@ -70,7 +70,10 @@ Two supported forms:
 - `kind = "line"`: mutant text from `missed.txt` or `timeout.txt`, with the
   leading `file:line:col:` locator stripped. Locator-free entries keep matching
   when unrelated edits shift line numbers. Matching is scoped to the entry's
-  `file`, so identical mutant text in another module is not suppressed.
+  `file`, so identical mutant text in another module is not suppressed. When
+  the same mutant text appears at several sites in one file and only some are
+  reviewed, add `line = <n>` (from the locator) to pin the entry to its site;
+  the hygiene check fails when the pinned line drifts, forcing a re-review.
 - `kind = "function"`: regex passed to cargo-mutants as `--exclude-re`.
 
 Function suppressions are broad and can hide future behavior. Prefer `line`
@@ -79,11 +82,17 @@ unless a whole function is genuinely dead or permanently equivalent.
 Every suppression must include:
 
 - `kind = "line"` or `kind = "function"`
-- `category = "equivalent"` or `category = "dead"`
+- `category = "equivalent"`, `category = "dead"`, or `category = "timeout"`
 - `file`
 - `mutant` or `pattern`
 - `justification`
 - `reviewer`
+
+Categories are matched asymmetrically: `equivalent` and `dead` entries prove
+the mutant cannot change observable behavior, so they cover survivors and
+(flaky) timeouts alike; `timeout` entries only prove the mutant hangs the
+suite, so they cover `timeout.txt` findings and never excuse a mutant that ran
+to completion and survived.
 
 The gate validates these fields before scoring. Suppression hygiene is enforced
 by CI with `mutation_gate.py orphans`.

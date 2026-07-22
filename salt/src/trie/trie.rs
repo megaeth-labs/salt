@@ -1234,6 +1234,220 @@ mod tests {
             vec![0..2, 2..5, 5..6]
         );
         assert_eq!(trie.create_node_aligned_chunks(&Vec::new(), 2), vec![0..0]);
+
+        // A duplicate-node run extending exactly to the end: the boundary
+        // check must not emit a trailing empty range.
+        let run_to_end = vec![(1, zero), (2, zero), (2, zero)];
+        assert_eq!(trie.create_node_aligned_chunks(&run_to_end, 2), vec![0..3]);
+
+        // Distinct nodes with task size 3: the stride must advance
+        // additively (3, 6), not multiplicatively (3, 9).
+        let eight: Vec<_> = (1..=8).map(|i| (i as NodeId, zero)).collect();
+        assert_eq!(
+            trie.create_node_aligned_chunks(&eight, 3),
+            vec![0..3, 3..6, 6..8]
+        );
+    }
+
+    /// Drives the manual capacity machinery under the default feature set:
+    /// nonce-only rehash at minimum capacity, expansion to a three-level
+    /// subtree, nonce-only rehash while expanded, and contraction back.
+    /// Beyond root/rebuild equality, every persisted node must match a store
+    /// built from scratch with the same final state — stale intermediate
+    /// commitments are invisible to the root but not to this comparison.
+    ///
+    /// Gated out of test-bucket-resize: under that feature the plain inserts
+    /// already resize buckets, so the cycle's minimum-capacity baseline does
+    /// not hold (that configuration exercises the same machinery through its
+    /// own load-factor driven tests).
+    #[test]
+    #[cfg(not(feature = "test-bucket-resize"))]
+    fn test_manual_capacity_cycle_preserves_node_exactness() {
+        let kvs = create_random_kvs(6);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates.clone());
+        let (root0, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let bid = crate::hasher::bucket_id(&kvs[0].0);
+        let nonce = store.metadata(bid).unwrap().nonce;
+        let mut apply_rehash = |new_nonce: u32, capacity: u64| {
+            let mut rehash = StateUpdates::default();
+            state
+                .shi_rehash(bid, new_nonce, capacity, &mut rehash)
+                .unwrap();
+            store.update_state(rehash.clone());
+            let (root, trie_updates) = StateRoot::new(&store).update_fin(&rehash).unwrap();
+            store.update_trie(trie_updates);
+            assert_eq!(root, StateRoot::rebuild(&store).unwrap().0);
+            root
+        };
+
+        // Nonce-only metadata change at minimum capacity (capacity-equal
+        // branch on an unexpanded bucket).
+        apply_rehash(nonce + 1, MIN_BUCKET_SIZE as u64);
+        // Expand to a three-level subtree.
+        apply_rehash(nonce + 1, MIN_BUCKET_SIZE as u64 * 257);
+        // Nonce-only metadata change while expanded.
+        apply_rehash(nonce + 2, MIN_BUCKET_SIZE as u64 * 257);
+        // Contract back to the original shape.
+        let root3 = apply_rehash(nonce, MIN_BUCKET_SIZE as u64);
+
+        // Build a from-scratch reference store holding the same final state.
+        let fresh = MemStore::new();
+        let mut fresh_state = EphemeralSaltState::new(&fresh);
+        let fresh_updates = fresh_state
+            .update_fin(kvs.iter().map(|(k, v)| (k, v)))
+            .unwrap();
+        fresh.update_state(fresh_updates.clone());
+        let (root0_fresh, fresh_trie) = StateRoot::new(&fresh).update_fin(&fresh_updates).unwrap();
+        fresh.update_trie(fresh_trie);
+        assert_eq!(root0, root0_fresh, "virgin baselines disagree");
+
+        // The cycled state must return exactly to the pre-cycle content,
+        // modulo the explicitly written (default-valued) metadata entry.
+        let meta_key = bucket_metadata_key(bid);
+        let cycled_entries: Vec<_> = store
+            .entries(SaltKey(0)..=SaltKey(u64::MAX))
+            .unwrap()
+            .into_iter()
+            .filter(|(key, _)| *key != meta_key)
+            .collect();
+        let fresh_entries = fresh.entries(SaltKey(0)..=SaltKey(u64::MAX)).unwrap();
+        assert_eq!(cycled_entries, fresh_entries, "state did not return");
+        assert_eq!(
+            store.value(meta_key).unwrap(),
+            Some(
+                BucketMeta {
+                    nonce,
+                    capacity: MIN_BUCKET_SIZE as u64,
+                    used: None,
+                }
+                .into()
+            ),
+            "final metadata is not the default"
+        );
+
+        // Node-exact comparison: every persisted commitment must match the
+        // from-scratch store (which answers unset nodes with defaults), so a
+        // stale intermediate node names itself even though the roots below
+        // would also catch it.
+        for (node_id, _) in store.node_entries(0..NodeId::MAX).unwrap() {
+            assert_eq!(
+                store.commitment(node_id).unwrap(),
+                fresh.commitment(node_id).unwrap(),
+                "stale commitment at node {node_id}"
+            );
+        }
+        assert_eq!(root3, root0, "cycle did not return to the virgin root");
+    }
+
+    /// A TrieReader that refuses to invent default commitments: every read
+    /// must hit a node that was actually persisted or explicitly warmed.
+    /// MemStore silently falls back to defaults, which hides bugs in the
+    /// expansion cache-warming logic; this wrapper makes them fatal.
+    #[derive(Debug)]
+    struct StrictStore<'a> {
+        inner: &'a MemStore,
+        nodes: HashMap<NodeId, CommitmentBytes>,
+    }
+
+    impl<'a> StrictStore<'a> {
+        fn snapshot(inner: &'a MemStore) -> Self {
+            let nodes = inner
+                .node_entries(0..NodeId::MAX)
+                .unwrap()
+                .into_iter()
+                .collect();
+            Self { inner, nodes }
+        }
+    }
+
+    impl StateReader for StrictStore<'_> {
+        type Error = SaltError;
+
+        fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
+            self.inner.value(key)
+        }
+
+        fn entries(
+            &self,
+            range: core::ops::RangeInclusive<SaltKey>,
+        ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
+            self.inner.entries(range)
+        }
+
+        fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
+            self.inner.metadata(bucket_id)
+        }
+
+        fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
+            self.inner.bucket_used_slots(bucket_id)
+        }
+
+        fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
+            self.inner.plain_value_fast(plain_key)
+        }
+    }
+
+    impl TrieReader for StrictStore<'_> {
+        type Error = SaltError;
+
+        fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
+            self.nodes
+                .get(&node_id)
+                .copied()
+                .ok_or(SaltError::NotInWitness {
+                    what: "strict trie node",
+                })
+        }
+
+        fn node_entries(
+            &self,
+            range: core::ops::Range<NodeId>,
+        ) -> Result<Vec<(NodeId, CommitmentBytes)>, Self::Error> {
+            self.inner.node_entries(range)
+        }
+    }
+
+    /// Expansion must warm every default commitment it later reads: against
+    /// a reader without default fallbacks, a skipped or misaddressed warmup
+    /// becomes an error instead of a silently absorbed default.
+    #[test]
+    fn test_expansion_never_reads_unwarmed_nodes() {
+        let kvs = create_random_kvs(4);
+        let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
+        let updates = state.update_fin(kvs.iter().map(|(k, v)| (k, v))).unwrap();
+        store.update_state(updates.clone());
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let bid = crate::hasher::bucket_id(&kvs[0].0);
+        let nonce = store.metadata(bid).unwrap().nonce;
+
+        // Persist the metadata leaf's path first (a nonce-only rehash), so
+        // the only unpersisted nodes the expansion may read are the ones it
+        // is expected to warm itself.
+        let mut pre = StateUpdates::default();
+        state
+            .shi_rehash(bid, nonce + 1, MIN_BUCKET_SIZE as u64, &mut pre)
+            .unwrap();
+        store.update_state(pre.clone());
+        let (_, trie_updates) = StateRoot::new(&store).update_fin(&pre).unwrap();
+        store.update_trie(trie_updates);
+
+        let mut rehash = StateUpdates::default();
+        state
+            .shi_rehash(bid, nonce + 1, MIN_BUCKET_SIZE as u64 * 257, &mut rehash)
+            .unwrap();
+
+        let strict = StrictStore::snapshot(&store);
+        let (strict_root, _) = StateRoot::new(&strict).update_fin(&rehash).unwrap();
+        let (root, _) = StateRoot::new(&store).update_fin(&rehash).unwrap();
+        assert_eq!(strict_root, root);
     }
 
     #[test]
@@ -1244,6 +1458,23 @@ mod tests {
         assert_eq!(trie.par_batch_size(1), 7);
         assert_eq!(trie.par_batch_size(7), 7);
         assert!(trie.par_batch_size(100_000) >= 7);
+    }
+
+    /// Runs inside a pool wider than the batch factor of 10: corrupting
+    /// `10 * threads` into `10 / threads` zeroes the batch count there (a
+    /// div_ceil-by-zero panic on any wide-enough worker), so the formula
+    /// must be pinned rather than treated as a free heuristic.
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn test_par_batch_size_scales_with_thread_count() {
+        let trie = StateRoot::new(&EmptySalt);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap();
+
+        let batch_size = pool.install(|| trie.par_batch_size(100_000));
+        assert_eq!(batch_size, 100_000usize.div_ceil(10 * 16));
     }
 
     #[test]
