@@ -62,17 +62,22 @@ fn build_shared_committer() -> Committer {
     let build = || Committer::new(&CRS::default().G, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
     #[cfg(feature = "parallel")]
     {
-        // Never fall back to running `build` on the calling thread: with
-        // `parallel` it would par_iter on the global pool and reopen both
-        // deadlock channels. Thread creation failing here means the process
-        // cannot spawn threads at all, so fail fast and loud instead.
-        let pool = rayon::ThreadPoolBuilder::new()
-            .build()
-            .expect("failed to build the dedicated committer-init thread pool");
+        // Never run `build` inline here: under `parallel` it would par_iter
+        // on the global pool and reopen both deadlock channels. And never
+        // panic: that would poison the `LazyLock`, turning every later deref
+        // into a cause-less panic — print and abort instead.
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap_or_else(|e| {
+            eprintln!("fatal: failed to build the dedicated committer-init thread pool: {e}");
+            std::process::abort();
+        });
         let handle = std::thread::Builder::new()
             .name("salt-committer-init".into())
             .spawn(move || pool.install(build))
-            .expect("failed to spawn the committer-init thread");
+            .unwrap_or_else(|e| {
+                eprintln!("fatal: failed to spawn the committer-init thread: {e}");
+                std::process::abort();
+            });
+        // Panics out of Committer::new are bugs — propagate them normally.
         handle
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
