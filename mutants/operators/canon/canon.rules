@@ -1,0 +1,24 @@
+# Family E - canonicalization removal (issue #141), comby structural rules.
+#
+# The proof path sorts and dedups to reach canonical form. Deleting those calls
+# (or flipping comparator direction) is a soundness mutation: duplicates or
+# unordered elements should be rejected or change the root. Statement deletion
+# is not in cargo-mutants' repertoire.
+#
+# `:[[word]]` matches a single identifier (comby's whitespace-delimited hole), so
+# a receiver / comparator operand can't swallow a surrounding compound
+# expression the way a bare `:[hole]` would. `:[args]` spans the (possibly
+# multi-line) closure by balanced delimiters.
+# comby rule format: PATTERN ==> REPLACEMENT ('#' lines are comments).
+
+# Delete single sort/dedup statements.
+:[[recv]].sort(); ==>
+:[[recv]].sort_unstable(); ==>
+:[[recv]].sort_unstable_by(:[args]); ==>
+:[[recv]].sort_unstable_by_key(:[args]); ==>
+:[[recv]].dedup(); ==>
+:[[recv]].dedup_by(:[args]); ==>
+sort_unstable!(:[[m]]); ==>
+
+# Flip comparator direction inside sort closures.
+:[[x]].cmp(:[[y]]) ==> :[[y]].cmp(:[[x]])
