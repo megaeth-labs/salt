@@ -9,6 +9,7 @@ description = "Canonicalization removal: delete sort/dedup calls and flip compar
 targets = [
     "salt/src/proof/prover.rs",
     "salt/src/proof/salt_witness.rs",
+    "salt/src/proof/subtrie.rs",
 ]
 
 # Compile check: a mutant that fails this is unviable (e.g. a constant

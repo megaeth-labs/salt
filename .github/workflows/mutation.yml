@@ -184,6 +184,12 @@ jobs:
           sudo chmod +x /usr/local/bin/comby
           comby -version
 
+      - name: Warm test binaries
+        # Build the test binaries once up front so umutate's baseline (the
+        # unmutated test run) is not charged the workspace's cold build and
+        # misreported as a baseline failure on a fresh runner. (flyq, PR #143)
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+
       - name: Run diff-scoped spec-gate mutation
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -284,6 +290,10 @@ jobs:
           sudo curl -fsSL https://github.com/comby-tools/comby/releases/download/1.8.1/comby-1.8.1-x86_64-linux -o /usr/local/bin/comby
           sudo chmod +x /usr/local/bin/comby
           comby -version
+
+      - name: Warm test binaries
+        # See spec-gate: keep umutate's baseline off the cold build. (flyq, PR #143)
+        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
 
       - name: Run spec-gate mutation (${{ matrix.pack }})
         run: |

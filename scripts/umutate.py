@@ -49,6 +49,11 @@ ROOT = Path(__file__).resolve().parent.parent
 OPERATORS_DIR = ROOT / "mutants" / "operators"
 DEFAULT_TEST_CMD = "cargo nextest run -p salt --no-default-features --features parallel"
 ANALYZE_TIMEOUT = "600"  # seconds per mutant; generous for a full nextest run
+# The baseline runs the unmutated test command once; on a cold runner that first
+# run also pays the workspace's uncached build, which can exceed a single mutant's
+# budget. Give it a larger allowance and report a timeout distinctly, so a slow
+# cold build is not misdiagnosed as failing tests. (flyq, PR #143)
+BASELINE_TIMEOUT = "1800"
 
 
 def _run(cmd, **kw):
@@ -247,14 +252,14 @@ def _adapt(pack: dict, src: str, mutant_basename: str, mutant_dir: Path,
     return f"{src}:{line}:1: {pack['name']} {before} -> {after}"
 
 
-def _run_test(test_cmd: str) -> str:
+def _run_test(test_cmd: str, timeout: str = ANALYZE_TIMEOUT) -> str:
     """Run the test command from the repo root; return 'fail' (non-zero exit, the
     mutant is caught), 'ok' (exit 0, the mutant survived), or 'timeout'."""
     p = subprocess.Popen(test_cmd, cwd=ROOT, shell=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     try:
-        return "fail" if p.wait(timeout=float(ANALYZE_TIMEOUT)) != 0 else "ok"
+        return "fail" if p.wait(timeout=float(timeout)) != 0 else "ok"
     except subprocess.TimeoutExpired:
         os.killpg(os.getpgid(p.pid), signal.SIGKILL)  # kill the whole cargo group
         p.wait()
@@ -274,10 +279,13 @@ def _compiles(build_cmd: str) -> bool:
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def baseline_ok(test_cmd: str) -> bool:
-    """The test command must pass on the UNMUTATED tree; otherwise every mutant
-    looks 'caught' (non-zero) and the run is meaningless."""
-    return _run_test(test_cmd) == "ok"
+def baseline_status(test_cmd: str) -> str:
+    """Classify the test command on the UNMUTATED tree as 'ok'/'fail'/'timeout'.
+
+    A non-'ok' baseline makes every mutant look 'caught', so the run is
+    meaningless. Uses the larger BASELINE_TIMEOUT so a cold build times out
+    distinctly instead of being misread as a test failure."""
+    return _run_test(test_cmd, timeout=BASELINE_TIMEOUT)
 
 
 def analyze(pack: dict, src: str, mutant_dir: Path) -> tuple[list, list, list, list]:
@@ -345,6 +353,16 @@ def cmd_run(args) -> int:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     caught, missed, timeouts, unviable = [], [], [], []
+    result_files = (("caught.txt", caught), ("missed.txt", missed),
+                    ("timeout.txt", timeouts), ("unviable.txt", unviable))
+
+    def flush() -> None:
+        # Persist after every source file so a job that hits its wall-clock limit
+        # mid-sweep keeps the results computed so far instead of leaving an empty
+        # directory for the artifact upload. (flyq, PR #143)
+        for name, items in result_files:
+            (out / name).write_text("\n".join(items) + ("\n" if items else ""))
+
     packs = load_packs(args.packs)
     changed_files = changed_lines = None
     if args.diff:
@@ -358,7 +376,14 @@ def cmd_run(args) -> int:
     def ensure_baseline(tc: str) -> None:
         if tc in baselined:
             return
-        if not baseline_ok(tc):
+        status = baseline_status(tc)
+        if status == "timeout":
+            sys.exit(
+                f"baseline timed out after {BASELINE_TIMEOUT}s on the unmutated tree: `{tc}`\n"
+                f"this is a slow/cold build, not a test failure — warm the test "
+                f"binaries (`cargo nextest run ... --no-run`) first, or raise BASELINE_TIMEOUT."
+            )
+        if status != "ok":
             sys.exit(
                 f"baseline failed on the unmutated tree: `{tc}`\n"
                 f"fix the failing tests before running mutation analysis "
@@ -382,14 +407,9 @@ def cmd_run(args) -> int:
                         a = _adapt(pack, src, name, md, allowed)
                         if a:
                             sink.append(a)
+                flush()
 
-    def write(name, items):
-        (out / name).write_text("\n".join(items) + ("\n" if items else ""))
-
-    write("caught.txt", caught)
-    write("missed.txt", missed)
-    write("timeout.txt", timeouts)
-    write("unviable.txt", unviable)
+    flush()  # also emits the (empty) result files when no mutant was produced
     print(f"caught: {len(caught)}  missed: {len(missed)}  timeout: {len(timeouts)}  "
           f"unviable: {len(unviable)}  -> {out}")
     print(f"score with: python3 scripts/mutation_gate.py report --results {out} "
