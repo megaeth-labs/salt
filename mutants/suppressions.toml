@@ -269,7 +269,7 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "timeout"
 file = "salt/src/trie/trie.rs"
-line = 885
+line = 884
 mutant = "replace < with <= in StateRoot<'a, Store>::create_node_aligned_chunks"
 justification = "The outer-loop variant re-enters with next_boundary == len and never advances (observed hang). Pinned to the outer-loop site; the boundary-check twin terminates and is killed by the exact-chunks test."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
@@ -286,7 +286,7 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "timeout"
 file = "salt/src/trie/trie.rs"
-line = 894
+line = 893
 mutant = "replace < with == in StateRoot<'a, Store>::create_node_aligned_chunks"
 justification = "Observed non-terminating: the boundary check never fires, so next_boundary stops advancing inside the outer loop. Pinned to the boundary-check site."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
@@ -295,7 +295,7 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "timeout"
 file = "salt/src/trie/trie.rs"
-line = 891
+line = 890
 mutant = "replace += with *= in StateRoot<'a, Store>::create_node_aligned_chunks"
 justification = "The inner-scan variant multiplies by one and never advances past an equal-node run (observed hang). Pinned to the inner-scan site; the stride twin terminates and is killed by the exact-chunks test."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
@@ -304,7 +304,7 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "timeout"
 file = "salt/src/trie/trie.rs"
-line = 896
+line = 895
 mutant = "replace += with -= in StateRoot<'a, Store>::create_node_aligned_chunks"
 justification = "Observed non-terminating: the boundary marches backwards and the loop never completes. Pinned to the stride site."
 reviewer = "full-run triage 2026-07-08 (issue #144)"
