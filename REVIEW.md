@@ -9,4 +9,4 @@ The centralized `claude-pr-review` action already applies the baseline rubric (r
 
 ## Tooling and scope
 
-- **Documented local flows must run on stock macOS bash 3.2.** The `just`/shell entry points people actually run can't assume bash ≥ 4: no `mapfile`, and always quote empty-array expansions (an unguarded `"${arr[@]}"` throws `unbound variable` under `set -u`).
+- **Documented local flows must run on stock macOS bash 3.2.** The shell entry points people actually run can't assume bash ≥ 4: no `mapfile`, and guard possibly-empty array expansions with the nounset-safe `${arr[@]+"${arr[@]}"}` idiom — under `set -u`, bash ≤ 4.3 treats an empty `"${arr[@]}"` as unbound even when quoted (see `scripts/mutation_test.sh`).
