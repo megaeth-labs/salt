@@ -6,8 +6,10 @@ extern crate alloc as std;
 
 /// Lazy initializer for global statics: waiters must park under `std` —
 /// busy-spin waiting can starve or (with rayon re-entry) deadlock expensive
-/// initializers (issue #146). `spin` is only for `no_std` targets, which have
-/// no OS blocking primitives and no threads to contend with.
+/// initializers (issue #146). `no_std` targets keep `spin`, the only option
+/// without OS blocking primitives: threads may still contend there, but
+/// `parallel` implies `std`, so the initializer never fans out onto a pool
+/// and always completes on its own thread.
 #[cfg(feature = "std")]
 pub(crate) type Lazy<T> = std::sync::LazyLock<T>;
 #[cfg(not(feature = "std"))]

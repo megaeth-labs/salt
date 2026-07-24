@@ -65,18 +65,14 @@ fn build_shared_committer() -> Committer {
         // Never run `build` inline here: under `parallel` it would par_iter
         // on the global pool and reopen both deadlock channels. And never
         // panic: that would poison the `LazyLock`, turning every later deref
-        // into a cause-less panic — print and abort instead.
-        let pool = rayon::ThreadPoolBuilder::new().build().unwrap_or_else(|e| {
-            eprintln!("fatal: failed to build the dedicated committer-init thread pool: {e}");
-            std::process::abort();
-        });
+        // into a cause-less panic — report and abort instead.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .unwrap_or_else(|e| abort_init(format_args!("thread pool build failed: {e}")));
         let handle = std::thread::Builder::new()
             .name("salt-committer-init".into())
             .spawn(move || pool.install(build))
-            .unwrap_or_else(|e| {
-                eprintln!("fatal: failed to spawn the committer-init thread: {e}");
-                std::process::abort();
-            });
+            .unwrap_or_else(|e| abort_init(format_args!("thread spawn failed: {e}")));
         // Panics out of Committer::new are bugs — propagate them normally.
         handle
             .join()
@@ -86,6 +82,16 @@ fn build_shared_committer() -> Committer {
     {
         build()
     }
+}
+
+/// Reports a fatal committer-init failure and aborts, without ever panicking:
+/// `eprintln!` panics on an unwritable stderr (EPIPE), which would poison the
+/// lazy — the failure mode aborting here exists to avoid.
+#[cfg(feature = "parallel")]
+fn abort_init(cause: core::fmt::Arguments<'_>) -> ! {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "fatal: salt committer init: {cause}");
+    std::process::abort()
 }
 
 /// Records updates to the internal commitment values of a SALT trie.
