@@ -22,6 +22,7 @@ use ipa_multipoint::{
     transcript::Transcript,
 };
 
+use crate::Lazy;
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable};
 use serde::{
@@ -29,7 +30,6 @@ use serde::{
     ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use spin::Lazy;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, vec::Vec};
 
