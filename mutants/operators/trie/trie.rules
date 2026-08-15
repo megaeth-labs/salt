@@ -1,0 +1,39 @@
+# Family A - trie-structure operators (issue #141), comby structural rules.
+#
+# The SALT trie's correctness reduces to "right level base and right bit-width":
+# pure integer arithmetic over the STARTING_NODE_ID table and the 8/24/40
+# bit-width split. A wrong constant produces a plausible, compiling, wrong
+# structure that generic operators never generate.
+#
+# comby rule format: PATTERN ==> REPLACEMENT ('#' lines are comments). A
+# trailing `:[b~[^A-Za-z0-9_]]` hole pins a non-identifier boundary (reproduced
+# in the replacement) where a bare constant is a prefix of a longer one — comby
+# literals are NOT word-anchored, so `TRIE_WIDTH` would otherwise rewrite inside
+# `TRIE_WIDTH_BITS`.
+
+# A1. Level-index off-by-one in the STARTING_NODE_ID base table. The index hole
+# is lowercase-only so it targets computed levels (`level`), not the named
+# MAIN_/MAX_ constants (those have dedicated rules below).
+STARTING_NODE_ID[:[i~[a-z_][a-z_0-9]*] + 1] ==> STARTING_NODE_ID[:[i]]
+STARTING_NODE_ID[:[i~[a-z_][a-z_0-9]*] - 1] ==> STARTING_NODE_ID[:[i]]
+MAIN_TRIE_LEVELS - 1 ==> MAIN_TRIE_LEVELS
+MAX_SUBTREE_LEVELS - 1 ==> MAX_SUBTREE_LEVELS - 2
+
+# A2. Bit-width constant confusion (swap one named width for another real one).
+<< BUCKET_SLOT_BITS ==> << BUCKET_ID_BITS
+>> MIN_BUCKET_SIZE_BITS ==> >> BUCKET_SLOT_BITS
+<< BUCKET_SLOT_BITS ==> << (BUCKET_SLOT_BITS - 1)
+
+# A3. Fanout shift direction / amount (the 256-way branching).
+(parent_relative_position << TRIE_WIDTH_BITS) ==> (parent_relative_position >> TRIE_WIDTH_BITS)
+relative_position >> TRIE_WIDTH_BITS ==> relative_position << TRIE_WIDTH_BITS
+<< TRIE_WIDTH_BITS ==> << (TRIE_WIDTH_BITS + 1)
+
+# A4. Segment granularity (256 slots per leaf).
+>> MIN_BUCKET_SIZE_BITS ==> >> (MIN_BUCKET_SIZE_BITS + 1)
+% TRIE_WIDTH:[b~[^A-Za-z0-9_]] ==> % (TRIE_WIDTH - 1):[b]
+
+# A5. Ceil-division rounding in the subtree-root climb (subtree_root_level).
+(capacity + MIN_BUCKET_SIZE as u64 - 1) ==> (capacity + MIN_BUCKET_SIZE as u64)
+capacity > MIN_BUCKET_SIZE as u64 ==> capacity >= MIN_BUCKET_SIZE as u64
+level -= 1 ==> level += 1

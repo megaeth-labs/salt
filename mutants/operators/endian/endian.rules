@@ -1,0 +1,12 @@
+# Family B - endianness / byte-order (issue #141), comby structural rules.
+#
+# Flipping endianness silently breaks determinism and cross-platform
+# reproducibility (issue #127); no generic operator flips it. Structural
+# method-/path-call matching means these can only hit a real `to/from_*_bytes`
+# call, never a substring of an identifier like `serialize_to_le_bytes`.
+# comby rule format: PATTERN ==> REPLACEMENT.
+
+:[recv].to_le_bytes() ==> :[recv].to_be_bytes()
+:[recv].to_be_bytes() ==> :[recv].to_le_bytes()
+:[ty]::from_le_bytes(:[args]) ==> :[ty]::from_be_bytes(:[args])
+:[ty]::from_be_bytes(:[args]) ==> :[ty]::from_le_bytes(:[args])

@@ -1,0 +1,24 @@
+# Operator pack: endian (Family B, issue #141)
+#
+# Run through universalmutator + comby, scored by the shared gate
+# (scripts/mutation_gate.py). See mutants/operators/README.md.
+
+name = "endian"
+description = "Byte-order flips on explicit to/from_*_bytes packing (determinism / cross-platform reproducibility)"
+
+# Candidate source files (matched from the repo root). These rules match explicit
+# `to/from_*_bytes` calls; `state/ahash/convert.rs` is intentionally not a target
+# because its hash readers go through `zerocopy::transmute!` / `.convert()`, which
+# has no to/from_*_bytes call to flip (tracked for a future transmute operator).
+targets = [
+    "salt/src/state/hasher.rs",
+    "salt/src/types.rs",
+]
+
+# Compile check: a mutant that fails this is unviable (e.g. a constant
+# swapped for one not imported in that file), classified separately rather
+# than miscounted as caught.
+build_cmd = "cargo check -p salt --no-default-features --features parallel"
+
+rules = "endian.rules"
+test_cmd = "cargo nextest run -p salt --no-default-features --features parallel"

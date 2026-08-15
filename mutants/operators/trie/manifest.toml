@@ -1,0 +1,23 @@
+# Operator pack: trie (Family A, issue #141)
+#
+# Run through universalmutator + comby, scored by the shared gate
+# (scripts/mutation_gate.py). See mutants/operators/README.md.
+
+name = "trie"
+description = "Trie-structure operators: level-index base, bit-width split, fanout shift, granularity, ceil-division"
+
+targets = [
+    "salt/src/trie/node_utils.rs",
+    "salt/src/trie/trie.rs",
+    "salt/src/constant.rs",
+    "salt/src/types.rs",
+    "salt/src/proof/shape.rs",
+]
+
+# Compile check: a mutant that fails this is unviable (e.g. a constant
+# swapped for one not imported in that file), classified separately rather
+# than miscounted as caught.
+build_cmd = "cargo check -p salt --no-default-features --features parallel"
+
+rules = "trie.rules"
+test_cmd = "cargo nextest run -p salt --no-default-features --features parallel"
