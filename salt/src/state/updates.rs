@@ -1,10 +1,11 @@
 //! Tracks state changes in SALT with before/after values for atomic updates and rollbacks.
-use crate::types::{BucketMeta, SaltKey, SaltValue};
+use crate::types::{BucketMeta, SaltError, SaltKey, SaltValue};
 use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::{
+    boxed::Box,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -42,13 +43,33 @@ impl StateUpdates {
         old_value: Option<SaltValue>,
         new_value: Option<SaltValue>,
     ) {
+        self.try_add(salt_key, old_value, new_value)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Same as [`Self::add`], but reports a transition that does not chain instead of
+    /// panicking.
+    ///
+    /// # Errors
+    /// Returns [`SaltError::UnchainedTransition`] when `old_value` differs from the new value
+    /// already recorded for `salt_key`; `self` is left untouched in that case.
+    pub fn try_add(
+        &mut self,
+        salt_key: SaltKey,
+        old_value: Option<SaltValue>,
+        new_value: Option<SaltValue>,
+    ) -> Result<(), SaltError> {
         match self.data.entry(salt_key) {
             Entry::Occupied(mut change) => {
-                assert!(
-                    old_value == change.get().1,
-                    "{}",
-                    Self::format_transition_error(&salt_key, &change.get().1, &old_value)
-                );
+                if old_value != change.get().1 {
+                    return Err(SaltError::UnchainedTransition(Box::new(
+                        UnchainedTransition {
+                            key: salt_key,
+                            expected: change.get().1.clone(),
+                            actual: old_value,
+                        },
+                    )));
+                }
 
                 if change.get().0 == new_value {
                     change.remove();
@@ -62,6 +83,7 @@ impl StateUpdates {
                 }
             }
         };
+        Ok(())
     }
 
     /// Merges another set of state updates into this one, chaining transitions
@@ -69,9 +91,25 @@ impl StateUpdates {
     ///
     /// Logically equivalent to applying `add()` for each entry in `other`.
     pub fn merge(&mut self, other: Self) {
+        self.try_merge(other).unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Same as [`Self::merge`], but reports a transition that does not chain instead of
+    /// panicking.
+    ///
+    /// Callers accumulating updates that may chain onto different base states (e.g. blocks
+    /// competing at the same height during a reorg) merge through this method and discard the
+    /// accumulation on error.
+    ///
+    /// # Errors
+    /// Returns [`SaltError::UnchainedTransition`] at the first key whose old value in `other`
+    /// differs from the accumulated new value in `self`. Entries before it have already been
+    /// merged, so `self` must be discarded on error.
+    pub fn try_merge(&mut self, other: Self) -> Result<(), SaltError> {
         for (key, (old_val, new_val)) in other.data {
-            self.add(key, old_val, new_val);
+            self.try_add(key, old_val, new_val)?;
         }
+        Ok(())
     }
 
     /// Creates inverse state updates by swapping old and new values for rollback
@@ -89,13 +127,23 @@ impl StateUpdates {
             .for_each(|(old, new)| core::mem::swap(old, new));
         self
     }
+}
 
-    /// Formats a detailed panic message for invalid state transitions.
-    fn format_transition_error(
-        salt_key: &SaltKey,
-        expected: &Option<SaltValue>,
-        actual: &Option<SaltValue>,
-    ) -> String {
+/// A transition that does not chain onto the one already recorded for `key`: the incoming
+/// `actual` old value differs from the accumulated `expected` new value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnchainedTransition {
+    /// Key whose transition failed to chain.
+    pub key: SaltKey,
+    /// New value already recorded for `key`.
+    pub expected: Option<SaltValue>,
+    /// Old value the rejected transition started from.
+    pub actual: Option<SaltValue>,
+}
+
+impl std::fmt::Display for UnchainedTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let salt_key = &self.key;
         let format_value = |val_opt: &Option<SaltValue>| match val_opt {
             Some(val) if salt_key.is_in_meta_bucket() => BucketMeta::try_from(val)
                 .map(|m| {
@@ -119,7 +167,8 @@ impl StateUpdates {
             None => "None".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "\n=== Invalid State Transition ===\n\
              Key: {} (bucket: {}, slot: {}, type: {})\n\
              EXPECTED (existing entry's new_value): {}\n\
@@ -133,8 +182,8 @@ impl StateUpdates {
             } else {
                 "DATA"
             },
-            format_value(expected),
-            format_value(actual)
+            format_value(&self.expected),
+            format_value(&self.actual)
         )
     }
 }
@@ -322,6 +371,46 @@ mod tests {
         other.add(key, Some(v2), Some(v3));
 
         updates.merge(other);
+    }
+
+    /// Tests try_merge operations.
+    ///
+    /// Scenarios tested:
+    /// - Chaining merge collapses None → v1 → v2 into None → v2 and inserts unseen keys
+    /// - Chaining back to the original value removes the entry
+    /// - Non-chaining `other` is rejected with the offending key and both old values
+    #[test]
+    fn test_try_merge_operations() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let [key1, key2] = [SaltKey(1), SaltKey(2)];
+
+        updates.add(key1, None, Some(v1.clone()));
+        let mut chained = StateUpdates::default();
+        chained.add(key1, Some(v1.clone()), Some(v2.clone()));
+        chained.add(key2, Some(v2.clone()), Some(v3.clone()));
+        assert_eq!(updates.try_merge(chained), Ok(()));
+        assert_eq!(updates.data[&key1], (None, Some(v2.clone())));
+        assert_eq!(updates.data[&key2], (Some(v2.clone()), Some(v3.clone())));
+
+        let mut revert = StateUpdates::default();
+        revert.add(key1, Some(v2.clone()), None);
+        assert_eq!(updates.try_merge(revert), Ok(()));
+        assert!(!updates.data.contains_key(&key1));
+
+        // Chains onto v1 while key2 currently holds v3.
+        let mut forked = StateUpdates::default();
+        forked.add(key2, Some(v1.clone()), Some(v2));
+        assert_eq!(
+            updates.try_merge(forked),
+            Err(SaltError::UnchainedTransition(Box::new(
+                UnchainedTransition {
+                    key: key2,
+                    expected: Some(v3),
+                    actual: Some(v1),
+                }
+            )))
+        );
     }
 
     /// Tests inverse operations.

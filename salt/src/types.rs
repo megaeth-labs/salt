@@ -8,11 +8,13 @@
 //! - Cryptographic types: [`CommitmentBytes`] and [`ScalarBytes`]
 
 use core::ops::RangeInclusive;
+use std::boxed::Box;
 
 use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
     NUM_META_BUCKETS, TRIE_WIDTH,
 };
+use crate::state::updates::UnchainedTransition;
 
 use derive_more::{Deref, DerefMut};
 
@@ -50,6 +52,11 @@ pub enum SaltError {
 
     #[error("Operation '{operation}' not supported")]
     UnsupportedOperation { operation: &'static str },
+
+    /// A [`StateUpdates`](crate::StateUpdates) transition that does not chain onto the
+    /// accumulated one. Boxed to keep the error small; it only exists on the failure path.
+    #[error("{0}")]
+    UnchainedTransition(Box<UnchainedTransition>),
 }
 
 /// 24-bit bucket identifier (up to ~16M buckets).
