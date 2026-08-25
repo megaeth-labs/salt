@@ -394,6 +394,57 @@ mod tests {
         );
     }
 
+    /// Tests the diagnostic rendering of [`UnchainedTransition`].
+    ///
+    /// Scenarios tested:
+    /// - A value shorter than the buffer renders as decoded data, not `[MALFORMED]`
+    /// - A value that exactly fills the buffer (`data_len == MAX_SALT_VALUE_BYTES`) is
+    ///   still well-formed and renders its raw bytes
+    /// - A value whose length prefixes overflow the buffer renders as `[MALFORMED]`
+    ///   without panicking
+    /// - `None` renders as `None`
+    #[test]
+    fn test_unchained_transition_display() {
+        let data_key = SaltKey::from((70000, 50));
+        assert!(!data_key.is_in_meta_bucket());
+
+        let render = |expected: Option<SaltValue>, actual: Option<SaltValue>| {
+            UnchainedTransition {
+                key: data_key,
+                expected,
+                actual,
+            }
+            .to_string()
+        };
+
+        // Short value: decoded normally.
+        let short = SaltValue::new(b"key", b"value");
+        let out = render(Some(short), None);
+        assert!(!out.contains("[MALFORMED]"), "{out}");
+        assert!(out.contains("Plain Key: \"key\""), "{out}");
+        assert!(out.contains("Plain Value: \"value\""), "{out}");
+        assert!(out.contains("ACTUAL (incoming old_value): None"), "{out}");
+
+        // Full-length value: exactly MAX_SALT_VALUE_BYTES is still well-formed.
+        let full = SaltValue::new(&[0xAB; 32], &[0xCD; MAX_SALT_VALUE_BYTES - 2 - 32]);
+        assert_eq!(full.data_len(), MAX_SALT_VALUE_BYTES);
+        let out = render(Some(full.clone()), None);
+        assert!(!out.contains("[MALFORMED]"), "{out}");
+        assert!(out.contains(&hex::encode(full.data)), "{out}");
+
+        // Corrupt length prefixes: must be reported as malformed, not panic.
+        let mut malformed = SaltValue::new(b"", b"");
+        malformed.data[0] = 0xFF;
+        malformed.data[1] = 0xFF;
+        assert!(malformed.data_len() > MAX_SALT_VALUE_BYTES);
+        let out = render(None, Some(malformed.clone()));
+        assert!(
+            out.contains("[MALFORMED] key_len: 255, value_len: 255"),
+            "{out}"
+        );
+        assert!(out.contains(&hex::encode(malformed.data)), "{out}");
+    }
+
     /// Tests inverse operations.
     ///
     /// Scenarios tested:
