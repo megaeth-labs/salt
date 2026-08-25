@@ -14,8 +14,6 @@ use crate::constant::{
     BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
     NUM_META_BUCKETS, TRIE_WIDTH,
 };
-use crate::state::updates::UnchainedTransition;
-
 use derive_more::{Deref, DerefMut};
 
 /// 64-byte uncompressed group element for cryptographic commitments.
@@ -57,6 +55,19 @@ pub enum SaltError {
     /// accumulated one. Boxed to keep the error small; it only exists on the failure path.
     #[error("{0}")]
     UnchainedTransition(Box<UnchainedTransition>),
+}
+
+/// A [`StateUpdates`](crate::StateUpdates) transition that does not chain onto the one
+/// already recorded for `key`: the incoming `actual` old value differs from the accumulated
+/// `expected` new value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnchainedTransition {
+    /// Key whose transition failed to chain.
+    pub key: SaltKey,
+    /// New value already recorded for `key`.
+    pub expected: Option<SaltValue>,
+    /// Old value the rejected transition started from.
+    pub actual: Option<SaltValue>,
 }
 
 /// 24-bit bucket identifier (up to ~16M buckets).

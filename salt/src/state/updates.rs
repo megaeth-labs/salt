@@ -1,5 +1,7 @@
 //! Tracks state changes in SALT with before/after values for atomic updates and rollbacks.
-use crate::types::{BucketMeta, SaltError, SaltKey, SaltValue};
+use crate::types::{
+    BucketMeta, SaltError, SaltKey, SaltValue, UnchainedTransition, MAX_SALT_VALUE_BYTES,
+};
 use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
@@ -129,41 +131,43 @@ impl StateUpdates {
     }
 }
 
-/// A transition that does not chain onto the one already recorded for `key`: the incoming
-/// `actual` old value differs from the accumulated `expected` new value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnchainedTransition {
-    /// Key whose transition failed to chain.
-    pub key: SaltKey,
-    /// New value already recorded for `key`.
-    pub expected: Option<SaltValue>,
-    /// Old value the rejected transition started from.
-    pub actual: Option<SaltValue>,
+/// Renders a stored value for diagnostics.
+fn describe_value(key: &SaltKey, val: &SaltValue) -> String {
+    if val.data_len() > MAX_SALT_VALUE_BYTES {
+        return format!(
+            "[MALFORMED] key_len: {}, value_len: {}, Raw: {}",
+            val.data[0],
+            val.data[1],
+            hex::encode(val.data)
+        );
+    }
+
+    if key.is_in_meta_bucket() {
+        match BucketMeta::try_from(val) {
+            Ok(m) => format!(
+                "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
+                m.nonce, m.capacity, m.used
+            ),
+            Err(_) => format!(
+                "[METADATA - DECODE ERROR] Raw: {}",
+                hex::encode(&val.data[..val.data_len()])
+            ),
+        }
+    } else {
+        format!(
+            "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
+            hex::encode(&val.data[..val.data_len()]),
+            String::from_utf8_lossy(val.key()),
+            String::from_utf8_lossy(val.value())
+        )
+    }
 }
 
 impl std::fmt::Display for UnchainedTransition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let salt_key = &self.key;
+        let key = &self.key;
         let format_value = |val_opt: &Option<SaltValue>| match val_opt {
-            Some(val) if salt_key.is_in_meta_bucket() => BucketMeta::try_from(val)
-                .map(|m| {
-                    format!(
-                        "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
-                        m.nonce, m.capacity, m.used
-                    )
-                })
-                .unwrap_or_else(|_| {
-                    format!(
-                        "[METADATA - DECODE ERROR] Raw: {}",
-                        hex::encode(&val.data[..val.data_len()])
-                    )
-                }),
-            Some(val) => format!(
-                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                hex::encode(&val.data[..val.data_len()]),
-                String::from_utf8_lossy(val.key()),
-                String::from_utf8_lossy(val.value())
-            ),
+            Some(val) => describe_value(key, val),
             None => "None".to_string(),
         };
 
@@ -174,10 +178,10 @@ impl std::fmt::Display for UnchainedTransition {
              EXPECTED (existing entry's new_value): {}\n\
              ACTUAL (incoming old_value): {}\n\
              ================================\n",
-            salt_key.0,
-            salt_key.bucket_id(),
-            salt_key.slot_id(),
-            if salt_key.is_in_meta_bucket() {
+            key.0,
+            key.bucket_id(),
+            key.slot_id(),
+            if key.is_in_meta_bucket() {
                 "METADATA"
             } else {
                 "DATA"
@@ -230,30 +234,7 @@ impl std::fmt::Debug for StateUpdates {
             ] {
                 write!(f, "    {}: ", label)?;
                 match value {
-                    Some(val) => {
-                        if key.is_in_meta_bucket() {
-                            match BucketMeta::try_from(val) {
-                                Ok(meta) => writeln!(
-                                    f,
-                                    "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
-                                    meta.nonce, meta.capacity, meta.used
-                                )?,
-                                Err(_) => writeln!(
-                                    f,
-                                    "[METADATA - DECODE ERROR] Raw: {}",
-                                    hex::encode(&val.data[..val.data_len()])
-                                )?,
-                            }
-                        } else {
-                            writeln!(
-                                f,
-                                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                                hex::encode(&val.data[..val.data_len()]),
-                                String::from_utf8_lossy(val.key()),
-                                String::from_utf8_lossy(val.value())
-                            )?;
-                        }
-                    }
+                    Some(val) => writeln!(f, "{}", describe_value(key, val))?,
                     None => writeln!(f, "{}", none_msg)?,
                 }
             }

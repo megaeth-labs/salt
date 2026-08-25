@@ -21,10 +21,7 @@ pub mod proof;
 pub use proof::{fx_hashmap_serde, ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{
-    hasher,
-    state::EphemeralSaltState,
-    state::PlainStateProvider,
-    updates::{StateUpdates, UnchainedTransition},
+    hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,
 };
 pub mod trie;
 pub use trie::{
