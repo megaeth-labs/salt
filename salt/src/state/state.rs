@@ -2741,11 +2741,16 @@ mod tests {
     #[test]
     fn test_max_bucket_capacity_is_a_reachable_power_of_two() {
         // Capacities only ever double up from MIN_BUCKET_SIZE, so 2^40 is reachable:
-        // it is 2^39 resized once more.
-        assert_eq!(
-            compute_resize_capacity(1u64 << 39, 1u64 << 39),
-            MAX_BUCKET_SIZE
-        );
+        // it is 2^39 doubled once more. (Stated via the multiplier rather than a
+        // `compute_resize_capacity` call, because how many doublings a given `used`
+        // triggers depends on the load-factor threshold, which `test-bucket-resize`
+        // overrides.)
+        assert_eq!((1u64 << 39) * BUCKET_RESIZE_MULTIPLIER, MAX_BUCKET_SIZE);
+        assert!(MAX_BUCKET_SIZE.is_power_of_two());
+        // Whatever the threshold, a resize lands on a power of two.
+        let resized = compute_resize_capacity(MIN_BUCKET_SIZE as u64, MIN_BUCKET_SIZE as u64);
+        assert!(resized.is_power_of_two());
+        assert!(resized > MIN_BUCKET_SIZE as u64);
         // The superseded bound was BUCKET_SLOT_ID_MASK, one slot short of 2^40, so the
         // largest power-of-two capacity it admitted was only 2^39.
         assert_eq!(MAX_BUCKET_SIZE, BUCKET_SLOT_ID_MASK + 1);
