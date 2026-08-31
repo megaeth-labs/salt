@@ -70,11 +70,15 @@ pub const MAIN_TRIE_LEVELS: usize = 4;
 /// leaf nodes at the deepest level (level 4) of the MAXIMAL subtree structure. As
 /// bucket capacity increases, the subtree root moves UP to accommodate more leaves.
 ///
-/// Structure evolution by capacity:
+/// Structure evolution by capacity (see `subtree_root_level`):
 /// - 256 slots (1 segment): Single-node subtree, root at level 4
-/// - 512 slots (2 segments): Root at level 3, 2 leaf nodes at level 4
-/// - 768-65536 slots: Root at level 2, internal nodes at level 3, leaves at level 4
-/// - 65537+ slots: Root at higher levels as needed
+/// - 512-65,536 slots: Root at level 3, leaves at level 4
+/// - 65,537-16,777,216 slots: Root at level 2
+/// - 16,777,217-4,294,967,296 slots: Root at level 1
+/// - 4,294,967,297-1,099,511,627,776 slots: Root at level 0, the full 5-level subtree
+///
+/// The last row is the ceiling: the deepest level holds 256^4 = 2^32 segments, so a
+/// bucket tops out at `MAX_BUCKET_SIZE` = 2^32 * 256 = 2^40 slots.
 ///
 /// Example for 512-slot bucket (2 segments):
 /// ```text

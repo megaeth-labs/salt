@@ -102,11 +102,15 @@
 //!     ├─ Up to 65,536 Level 3 nodes
 //!     └─ Up to 16,777,216 Level 4 leaf nodes
 //!
-//! Capacity > 4,294,967,296:
+//! Capacity ≤ 1,099,511,627,776 (2^40 = MAX_BUCKET_SIZE):
 //!     Root at Level 0
 //!     NodeId = (bucket_id << 40) | 0
 //!     Full 5-level subtree structure
+//!     ├─ Up to 256 Level 1 nodes
+//!     └─ Up to 4,294,967,296 Level 4 leaf nodes
 //! ```
+//!
+//! 2^40 is the ceiling: the deepest level holds 256^4 = 2^32 segments of 256 slots.
 //!
 //! ### Key Insights
 //!
