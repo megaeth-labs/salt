@@ -1,10 +1,13 @@
 //! Tracks state changes in SALT with before/after values for atomic updates and rollbacks.
-use crate::types::{BucketMeta, SaltKey, SaltValue};
+use crate::types::{
+    BucketMeta, SaltError, SaltKey, SaltValue, UnchainedTransition, MAX_SALT_VALUE_BYTES,
+};
 use derive_more::Deref;
 use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::{
+    boxed::Box,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -42,13 +45,33 @@ impl StateUpdates {
         old_value: Option<SaltValue>,
         new_value: Option<SaltValue>,
     ) {
+        self.try_add(salt_key, old_value, new_value)
+            .unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Same as [`Self::add`], but reports a transition that does not chain instead of
+    /// panicking.
+    ///
+    /// # Errors
+    /// Returns [`SaltError::UnchainedTransition`] when `old_value` differs from the new value
+    /// already recorded for `salt_key`; `self` is left untouched in that case.
+    pub fn try_add(
+        &mut self,
+        salt_key: SaltKey,
+        old_value: Option<SaltValue>,
+        new_value: Option<SaltValue>,
+    ) -> Result<(), SaltError> {
         match self.data.entry(salt_key) {
             Entry::Occupied(mut change) => {
-                assert!(
-                    old_value == change.get().1,
-                    "{}",
-                    Self::format_transition_error(&salt_key, &change.get().1, &old_value)
-                );
+                if old_value != change.get().1 {
+                    return Err(SaltError::UnchainedTransition(Box::new(
+                        UnchainedTransition {
+                            key: salt_key,
+                            expected: change.get().1.clone(),
+                            actual: old_value,
+                        },
+                    )));
+                }
 
                 if change.get().0 == new_value {
                     change.remove();
@@ -62,6 +85,7 @@ impl StateUpdates {
                 }
             }
         };
+        Ok(())
     }
 
     /// Merges another set of state updates into this one, chaining transitions
@@ -69,9 +93,25 @@ impl StateUpdates {
     ///
     /// Logically equivalent to applying `add()` for each entry in `other`.
     pub fn merge(&mut self, other: Self) {
+        self.try_merge(other).unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    /// Same as [`Self::merge`], but reports a transition that does not chain instead of
+    /// panicking.
+    ///
+    /// Callers accumulating updates that may chain onto different base states (e.g. blocks
+    /// competing at the same height during a reorg) merge through this method and discard the
+    /// accumulation on error.
+    ///
+    /// # Errors
+    /// Returns [`SaltError::UnchainedTransition`] at the first key whose old value in `other`
+    /// differs from the accumulated new value in `self`. Entries before it have already been
+    /// merged, so `self` must be discarded on error.
+    pub fn try_merge(&mut self, other: Self) -> Result<(), SaltError> {
         for (key, (old_val, new_val)) in other.data {
-            self.add(key, old_val, new_val);
+            self.try_add(key, old_val, new_val)?;
         }
+        Ok(())
     }
 
     /// Creates inverse state updates by swapping old and new values for rollback
@@ -89,52 +129,65 @@ impl StateUpdates {
             .for_each(|(old, new)| core::mem::swap(old, new));
         self
     }
+}
 
-    /// Formats a detailed panic message for invalid state transitions.
-    fn format_transition_error(
-        salt_key: &SaltKey,
-        expected: &Option<SaltValue>,
-        actual: &Option<SaltValue>,
-    ) -> String {
-        let format_value = |val_opt: &Option<SaltValue>| match val_opt {
-            Some(val) if salt_key.is_in_meta_bucket() => BucketMeta::try_from(val)
-                .map(|m| {
-                    format!(
-                        "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
-                        m.nonce, m.capacity, m.used
-                    )
-                })
-                .unwrap_or_else(|_| {
-                    format!(
-                        "[METADATA - DECODE ERROR] Raw: {}",
-                        hex::encode(&val.data[..val.data_len()])
-                    )
-                }),
-            Some(val) => format!(
-                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                hex::encode(&val.data[..val.data_len()]),
-                String::from_utf8_lossy(val.key()),
-                String::from_utf8_lossy(val.value())
+/// Renders a stored value for diagnostics.
+fn describe_value(key: &SaltKey, val: &SaltValue) -> String {
+    if val.data_len() > MAX_SALT_VALUE_BYTES {
+        return format!(
+            "[MALFORMED] key_len: {}, value_len: {}, Raw: {}",
+            val.data[0],
+            val.data[1],
+            hex::encode(val.data)
+        );
+    }
+
+    if key.is_in_meta_bucket() {
+        match BucketMeta::try_from(val) {
+            Ok(m) => format!(
+                "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
+                m.nonce, m.capacity, m.used
             ),
+            Err(_) => format!(
+                "[METADATA - DECODE ERROR] Raw: {}",
+                hex::encode(&val.data[..val.data_len()])
+            ),
+        }
+    } else {
+        format!(
+            "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
+            hex::encode(&val.data[..val.data_len()]),
+            String::from_utf8_lossy(val.key()),
+            String::from_utf8_lossy(val.value())
+        )
+    }
+}
+
+impl std::fmt::Display for UnchainedTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = &self.key;
+        let format_value = |val_opt: &Option<SaltValue>| match val_opt {
+            Some(val) => describe_value(key, val),
             None => "None".to_string(),
         };
 
-        format!(
+        write!(
+            f,
             "\n=== Invalid State Transition ===\n\
              Key: {} (bucket: {}, slot: {}, type: {})\n\
              EXPECTED (existing entry's new_value): {}\n\
              ACTUAL (incoming old_value): {}\n\
              ================================\n",
-            salt_key.0,
-            salt_key.bucket_id(),
-            salt_key.slot_id(),
-            if salt_key.is_in_meta_bucket() {
+            key.0,
+            key.bucket_id(),
+            key.slot_id(),
+            if key.is_in_meta_bucket() {
                 "METADATA"
             } else {
                 "DATA"
             },
-            format_value(expected),
-            format_value(actual)
+            format_value(&self.expected),
+            format_value(&self.actual)
         )
     }
 }
@@ -181,30 +234,7 @@ impl std::fmt::Debug for StateUpdates {
             ] {
                 write!(f, "    {}: ", label)?;
                 match value {
-                    Some(val) => {
-                        if key.is_in_meta_bucket() {
-                            match BucketMeta::try_from(val) {
-                                Ok(meta) => writeln!(
-                                    f,
-                                    "[METADATA] Nonce: {}, Capacity: {}, Used: {:?}",
-                                    meta.nonce, meta.capacity, meta.used
-                                )?,
-                                Err(_) => writeln!(
-                                    f,
-                                    "[METADATA - DECODE ERROR] Raw: {}",
-                                    hex::encode(&val.data[..val.data_len()])
-                                )?,
-                            }
-                        } else {
-                            writeln!(
-                                f,
-                                "Raw: {}, Plain Key: {:?}, Plain Value: {:?}",
-                                hex::encode(&val.data[..val.data_len()]),
-                                String::from_utf8_lossy(val.key()),
-                                String::from_utf8_lossy(val.value())
-                            )?;
-                        }
-                    }
+                    Some(val) => writeln!(f, "{}", describe_value(key, val))?,
                     None => writeln!(f, "{}", none_msg)?,
                 }
             }
@@ -322,6 +352,97 @@ mod tests {
         other.add(key, Some(v2), Some(v3));
 
         updates.merge(other);
+    }
+
+    /// Tests try_merge operations.
+    ///
+    /// Scenarios tested:
+    /// - Chaining merge collapses None → v1 → v2 into None → v2 and inserts unseen keys
+    /// - Chaining back to the original value removes the entry
+    /// - Non-chaining `other` is rejected with the offending key and both old values
+    #[test]
+    fn test_try_merge_operations() {
+        let mut updates = StateUpdates::default();
+        let [v1, v2, v3] = [test_salt_value(1), test_salt_value(2), test_salt_value(3)];
+        let [key1, key2] = [SaltKey(1), SaltKey(2)];
+
+        updates.add(key1, None, Some(v1.clone()));
+        let mut chained = StateUpdates::default();
+        chained.add(key1, Some(v1.clone()), Some(v2.clone()));
+        chained.add(key2, Some(v2.clone()), Some(v3.clone()));
+        assert_eq!(updates.try_merge(chained), Ok(()));
+        assert_eq!(updates.data[&key1], (None, Some(v2.clone())));
+        assert_eq!(updates.data[&key2], (Some(v2.clone()), Some(v3.clone())));
+
+        let mut revert = StateUpdates::default();
+        revert.add(key1, Some(v2.clone()), None);
+        assert_eq!(updates.try_merge(revert), Ok(()));
+        assert!(!updates.data.contains_key(&key1));
+
+        // Chains onto v1 while key2 currently holds v3.
+        let mut forked = StateUpdates::default();
+        forked.add(key2, Some(v1.clone()), Some(v2));
+        assert_eq!(
+            updates.try_merge(forked),
+            Err(SaltError::UnchainedTransition(Box::new(
+                UnchainedTransition {
+                    key: key2,
+                    expected: Some(v3),
+                    actual: Some(v1),
+                }
+            )))
+        );
+    }
+
+    /// Tests the diagnostic rendering of [`UnchainedTransition`].
+    ///
+    /// Scenarios tested:
+    /// - A value shorter than the buffer renders as decoded data, not `[MALFORMED]`
+    /// - A value that exactly fills the buffer (`data_len == MAX_SALT_VALUE_BYTES`) is
+    ///   still well-formed and renders its raw bytes
+    /// - A value whose length prefixes overflow the buffer renders as `[MALFORMED]`
+    ///   without panicking
+    /// - `None` renders as `None`
+    #[test]
+    fn test_unchained_transition_display() {
+        let data_key = SaltKey::from((70000, 50));
+        assert!(!data_key.is_in_meta_bucket());
+
+        let render = |expected: Option<SaltValue>, actual: Option<SaltValue>| {
+            UnchainedTransition {
+                key: data_key,
+                expected,
+                actual,
+            }
+            .to_string()
+        };
+
+        // Short value: decoded normally.
+        let short = SaltValue::new(b"key", b"value");
+        let out = render(Some(short), None);
+        assert!(!out.contains("[MALFORMED]"), "{out}");
+        assert!(out.contains("Plain Key: \"key\""), "{out}");
+        assert!(out.contains("Plain Value: \"value\""), "{out}");
+        assert!(out.contains("ACTUAL (incoming old_value): None"), "{out}");
+
+        // Full-length value: exactly MAX_SALT_VALUE_BYTES is still well-formed.
+        let full = SaltValue::new(&[0xAB; 32], &[0xCD; MAX_SALT_VALUE_BYTES - 2 - 32]);
+        assert_eq!(full.data_len(), MAX_SALT_VALUE_BYTES);
+        let out = render(Some(full.clone()), None);
+        assert!(!out.contains("[MALFORMED]"), "{out}");
+        assert!(out.contains(&hex::encode(full.data)), "{out}");
+
+        // Corrupt length prefixes: must be reported as malformed, not panic.
+        let mut malformed = SaltValue::new(b"", b"");
+        malformed.data[0] = 0xFF;
+        malformed.data[1] = 0xFF;
+        assert!(malformed.data_len() > MAX_SALT_VALUE_BYTES);
+        let out = render(None, Some(malformed.clone()));
+        assert!(
+            out.contains("[MALFORMED] key_len: 255, value_len: 255"),
+            "{out}"
+        );
+        assert!(out.contains(&hex::encode(malformed.data)), "{out}");
     }
 
     /// Tests inverse operations.
