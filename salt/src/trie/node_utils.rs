@@ -366,19 +366,33 @@ pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
 /// to accommodate the given capacity.
 ///
 /// # Subtree Level Mapping
+///
+/// The root climbs *upward* as capacity grows: a small bucket is a lone leaf at the
+/// deepest level, while a maximal one is rooted at level 0 over a full 5-level subtree.
+///
 /// ```text
-/// Level 0: Root (capacity = 1)              [root:0]
-/// Level 1: Small (capacity ≤ 256)          [0] [1] ... [256]
-/// Level 2: Medium (capacity ≤ 65,536)      [0]...[256] [257]...[65536]
-/// Level 3: Large (capacity ≤ 16,777,216)   [0]...[65536] [65537]...[16777216]
-/// Level 4: Extra Large (capacity ≤ 2^32)   [0]...[16777216] [16777217]...[2^32]
+/// capacity ≤ 2^8  (256)             → level 4   a lone leaf, no internal nodes
+/// capacity ≤ 2^16 (65,536)          → level 3   over up to 256 leaves
+/// capacity ≤ 2^24 (16,777,216)      → level 2   over up to 65,536 leaves
+/// capacity ≤ 2^32 (4,294,967,296)   → level 1   over up to 16,777,216 leaves
+/// capacity ≤ 2^40 (1,099,511,627,776) → level 0 over up to 4,294,967,296 leaves
 /// ```
+///
+/// Each leaf ("segment") holds `MIN_BUCKET_SIZE` = 256 consecutive slots, so the
+/// deepest level's 2^32 segments cap a bucket at 2^32 * 256 = 2^40 slots, which is
+/// [`MAX_BUCKET_SIZE`](crate::constant::MAX_BUCKET_SIZE).
 ///
 /// # Arguments
 /// * `capacity` - The total number of slots the bucket needs to accommodate
 ///
 /// # Returns
 /// The subtree level (0-4) that should serve as the root for this capacity
+///
+/// # Panics
+///
+/// Panics in debug builds (and wraps `level` in release builds) if `capacity` exceeds
+/// `MAX_BUCKET_SIZE`, since no subtree level can hold it. Callers must bound capacity
+/// first; `EphemeralSaltState::shi_rehash` asserts this.
 pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
@@ -396,6 +410,7 @@ pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::MAX_BUCKET_SIZE;
 
     /// Tests the vc_position_in_parent function for various node types and positions.
     ///
@@ -739,6 +754,11 @@ mod tests {
             (16777217, 1),   // Just over 256^3 → level 1
             (4294967296, 1), // 256^4 slots → still level 1
             (4294967297, 0), // Just over 256^4 → root level
+            // The top of the range: a maximally expanded bucket is rooted at level 0
+            // over 2^32 segments of 256 slots. Anything larger has nowhere to go.
+            (1 << 39, 0),             // largest capacity the old bound allowed
+            (MAX_BUCKET_SIZE - 1, 0), // BUCKET_SLOT_ID_MASK
+            (MAX_BUCKET_SIZE, 0),     // 2^40 — still fits the full subtree
         ];
 
         for (capacity, expected) in cases {

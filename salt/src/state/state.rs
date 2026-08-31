@@ -41,7 +41,7 @@
 
 use super::{hasher, updates::StateUpdates};
 use crate::{
-    constant::{BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
+    constant::{BUCKET_RESIZE_MULTIPLIER, MAX_BUCKET_SIZE},
     traits::StateReader,
     types::*,
 };
@@ -666,6 +666,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// If the new capacity is smaller than the number of existing entries in the bucket,
     /// the function returns early without making any changes to prevent data loss.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `new_capacity` exceeds [`MAX_BUCKET_SIZE`], the largest capacity a
+    /// bucket subtree can address (2^40 slots).
     pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
@@ -674,8 +679,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         assert!(
-            new_capacity <= BUCKET_SLOT_ID_MASK,
-            "Exceeds max bucket capacity: {new_capacity} > {BUCKET_SLOT_ID_MASK}"
+            new_capacity <= MAX_BUCKET_SIZE,
+            "Exceeds max bucket capacity: {new_capacity} > {MAX_BUCKET_SIZE}"
         );
 
         // Step 1: Extract all existing entries (but do not clear the cache yet)
@@ -1057,6 +1062,7 @@ fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::BUCKET_SLOT_ID_MASK;
     use std::{collections::BTreeMap, vec, vec::Vec};
 
     use crate::{
@@ -2727,6 +2733,37 @@ mod tests {
                 num_entries,
             );
         }
+    }
+
+    /// A bucket subtree addresses exactly `MAX_BUCKET_SIZE` = 2^40 slots, so that
+    /// capacity must be accepted. The bound used to be `BUCKET_SLOT_ID_MASK` (2^40 - 1),
+    /// which — since capacities only ever double from 256 — capped buckets at 2^39.
+    #[test]
+    fn test_max_bucket_capacity_is_a_reachable_power_of_two() {
+        // Capacities only ever double up from MIN_BUCKET_SIZE, so 2^40 is reachable:
+        // it is 2^39 resized once more.
+        assert_eq!(
+            compute_resize_capacity(1u64 << 39, 1u64 << 39),
+            MAX_BUCKET_SIZE
+        );
+        // The superseded bound was BUCKET_SLOT_ID_MASK, one slot short of 2^40, so the
+        // largest power-of-two capacity it admitted was only 2^39.
+        assert_eq!(MAX_BUCKET_SIZE, BUCKET_SLOT_ID_MASK + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Exceeds max bucket capacity")]
+    fn test_shi_rehash_rejects_capacity_above_max() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+        // One doubling past the largest addressable capacity.
+        let _ = state.shi_rehash(
+            TEST_BUCKET,
+            0,
+            MAX_BUCKET_SIZE * BUCKET_RESIZE_MULTIPLIER,
+            &mut updates,
+        );
     }
 
     #[test]
