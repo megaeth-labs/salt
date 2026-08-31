@@ -396,7 +396,9 @@ pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
 ///
 /// Panics in debug builds (and wraps `level` in release builds) if `capacity` exceeds
 /// `MAX_BUCKET_SIZE`, since no subtree level can hold it. Callers must bound capacity
-/// first; `EphemeralSaltState::shi_rehash` asserts this.
+/// themselves. `EphemeralSaltState::shi_rehash` asserts it for the capacity it is
+/// asked to resize *to*, but a capacity read back from a stored `BucketMeta` is not
+/// validated anywhere, so callers that source one from a `StateReader` are on their own.
 pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
