@@ -294,36 +294,33 @@ pub const MAX_SALT_VALUE_BYTES: usize = 94;
 ///
 /// The encoded bytes are followed by zero padding out to `MAX_SALT_VALUE_BYTES`, so
 /// `2 + key_len + value_len` never exceeds `MAX_SALT_VALUE_BYTES`. Deserialization
-/// enforces that bound (through `TryFrom<[u8; MAX_SALT_VALUE_BYTES]>`) so that a
-/// decoded value can be sliced by [`SaltValue::key`] and [`SaltValue::value`]
-/// without running past the buffer.
-#[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize)]
+/// enforces that length bound (see `deserialize_checked_data`) so that a decoded
+/// value can be sliced by [`SaltValue::key`] and [`SaltValue::value`] without running
+/// past the buffer. The padding itself is not checked on decode: it never enters the
+/// slot hash, which covers only the trimmed key and value bytes.
+#[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
     /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
     #[deref_mut]
-    #[serde(with = "serde_arrays")]
+    #[serde(
+        serialize_with = "serde_arrays::serialize",
+        deserialize_with = "deserialize_checked_data"
+    )]
     pub data: [u8; MAX_SALT_VALUE_BYTES],
 }
 
-impl<'de> Deserialize<'de> for SaltValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Same wire shape as the derived impl (a `SaltValue` struct with a single
-        // `data` field), so serialized bytes are unchanged; only the bound on the
-        // declared lengths is added.
-        #[derive(Deserialize)]
-        #[serde(rename = "SaltValue")]
-        struct Unchecked {
-            #[serde(with = "serde_arrays")]
-            data: [u8; MAX_SALT_VALUE_BYTES],
-        }
-
-        let Unchecked { data } = Unchecked::deserialize(deserializer)?;
-        SaltValue::try_from(data).map_err(serde::de::Error::custom)
-    }
+/// Deserializes [`SaltValue::data`] through `serde_arrays`, the same wire shape a
+/// plain `#[serde(with = "serde_arrays")]` field has, and applies the
+/// `TryFrom<[u8; MAX_SALT_VALUE_BYTES]>` bound on the declared lengths.
+fn deserialize_checked_data<'de, D>(deserializer: D) -> Result<[u8; MAX_SALT_VALUE_BYTES], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let data: [u8; MAX_SALT_VALUE_BYTES] = serde_arrays::deserialize(deserializer)?;
+    SaltValue::try_from(data)
+        .map(|value| value.data)
+        .map_err(serde::de::Error::custom)
 }
 
 impl TryFrom<[u8; MAX_SALT_VALUE_BYTES]> for SaltValue {
@@ -331,13 +328,13 @@ impl TryFrom<[u8; MAX_SALT_VALUE_BYTES]> for SaltValue {
 
     /// Wrap an already-encoded buffer, rejecting one whose declared lengths overrun it.
     fn try_from(data: [u8; MAX_SALT_VALUE_BYTES]) -> Result<Self, Self::Error> {
-        let declared = 2 + data[0] as usize + data[1] as usize;
-        if declared > MAX_SALT_VALUE_BYTES {
+        let value = Self { data };
+        if value.data_len() > MAX_SALT_VALUE_BYTES {
             return Err(SaltError::InvalidFormat {
                 message: "SaltValue key_len + value_len overruns MAX_SALT_VALUE_BYTES",
             });
         }
-        Ok(Self { data })
+        Ok(value)
     }
 }
 
