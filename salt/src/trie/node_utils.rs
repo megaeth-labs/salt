@@ -218,9 +218,11 @@ pub(crate) fn vc_position_in_parent(node_id: &NodeId) -> usize {
     let local_number = get_local_number(*node_id);
     let trie_level = get_bfs_level(local_number);
 
-    // Calculate relative position from the start of this level
-    let relative_pos = local_number as usize - STARTING_NODE_ID[trie_level];
-    relative_pos % TRIE_WIDTH
+    // Calculate relative position from the start of this level. Stay in u64: at
+    // `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit `usize`
+    // cannot hold it.
+    let relative_pos = local_number - STARTING_NODE_ID[trie_level] as u64;
+    (relative_pos % TRIE_WIDTH as u64) as usize
 }
 
 /// Computes the NodeId of a specific child given its parent and child index.
@@ -280,8 +282,10 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
     // Determine which level this node is on
     let level = get_bfs_level(local_node_id);
 
-    // Calculate relative position from the start of current level
-    let relative_position = local_node_id as usize - STARTING_NODE_ID[level];
+    // Calculate relative position from the start of current level. Stay in u64:
+    // at `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit
+    // `usize` cannot hold it.
+    let relative_position = local_node_id - STARTING_NODE_ID[level] as u64;
 
     // Divide by 256 (right-shift by 8) to get parent's relative position
     // Each parent has 256 children, so child positions 0-255 → parent 0,
@@ -290,7 +294,7 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 
     // Add parent level's starting position to get absolute parent ID
     // and preserve the bucket ID for subtree nodes
-    bucket_id + (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
+    bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId
 }
 
 /// Maps a bucket ID to its subtree root node in the main trie.
@@ -418,6 +422,34 @@ pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
 mod tests {
     use super::*;
     use crate::constant::MAX_BUCKET_SIZE;
+
+    /// The deepest subtree-local node number at `MAX_BUCKET_SIZE` exceeds u32, so
+    /// the level-relative arithmetic has to stay in u64 rather than `usize` to be
+    /// right on 32-bit targets. Pins the values that arithmetic produces there.
+    #[test]
+    fn parent_and_position_at_max_capacity_depth() {
+        use crate::constant::{
+            BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE, NUM_META_BUCKETS,
+            STARTING_NODE_ID, TRIE_WIDTH,
+        };
+        use crate::types::{get_local_number, NodeId};
+
+        let segments = MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64;
+        let deepest_local = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + segments - 1;
+        assert!(deepest_local > u32::MAX as u64);
+
+        let bucket_id = NUM_META_BUCKETS as u64;
+        let node: NodeId = (bucket_id << BUCKET_SLOT_BITS) | deepest_local;
+
+        assert_eq!(vc_position_in_parent(&node), TRIE_WIDTH - 1);
+
+        let parent = get_parent_node(&node);
+        assert_eq!(parent >> BUCKET_SLOT_BITS, bucket_id);
+        assert_eq!(
+            get_local_number(parent),
+            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 2] as u64 + segments / TRIE_WIDTH as u64 - 1
+        );
+    }
 
     /// Tests the vc_position_in_parent function for various node types and positions.
     ///
