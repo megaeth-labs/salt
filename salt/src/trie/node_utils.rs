@@ -294,7 +294,13 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 
     // Add parent level's starting position to get absolute parent ID
     // and preserve the bucket ID for subtree nodes
-    bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId
+    let parent = bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId;
+    debug_assert_eq!(
+        get_bfs_level(get_local_number(parent)),
+        level - 1,
+        "parent of a level-{level} node must sit one level up"
+    );
+    parent
 }
 
 /// Maps a bucket ID to its subtree root node in the main trie.
