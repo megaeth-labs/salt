@@ -11,7 +11,9 @@ use crate::constant::NUM_META_BUCKETS;
 use crate::types::BucketId;
 use core::hash::{BuildHasher, Hasher};
 
-/// Fixed seeds derived from the lower 32 bytes of keccak256("Make Ethereum Great Again").
+/// Fixed seeds: the low 128 bits of keccak256("Make Ethereum Great Again")
+/// (`0xfd3d34b57e26ebb766fefcc2225e73fc921321f42ccb667e60d68842077ada9d`),
+/// read as four big-endian 32-bit words.
 const HASHER_SEEDS: [u64; 4] = [0x921321f4, 0x2ccb667e, 0x60d68842, 0x077ada9d];
 
 /// Computes a deterministic 64-bit hash of the input bytes.

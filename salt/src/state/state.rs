@@ -553,34 +553,39 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 } else {
                     // Bucket usage count is unavailable (metadata.used is None).
                     //
-                    // This can only occur during stateless validation when replaying blocks
-                    // with execution witnesses. The witness may omit the bucket usage count
-                    // to optimize witness size.
+                    // This only occurs during stateless validation, where a bucket's
+                    // count is known only if the witness covers every slot of it. The
+                    // load-factor check is then skipped: neither approximated from the
+                    // slots in view nor treated as an error, leaving the exhaustion
+                    // case below as the only resize trigger.
                     //
-                    // ## Witness Size Trade-off
-                    // Including the usage count would require revealing ALL slots in the
-                    // bucket (to prove the count is correct), significantly increasing
-                    // witness size for every insertion operation.
+                    // ## Why skipping is correct against a complete witness
+                    // A witness builder includes every slot of any bucket the block's
+                    // insertions resize, so the count is available exactly where a
+                    // resize is due and this replay reaches the same decision the
+                    // builder's replay did. An absent count means the builder's replay
+                    // resized nothing here; witnessing the whole bucket for every other
+                    // insertion would only inflate the witness.
                     //
-                    // ## Security Model
-                    // We accept this optimization because:
-                    // 1. Omitting usage count cannot create invalid key-value pairs
-                    // 2. It can only delay bucket resizing (temporary deviation from the
-                    //    canonical state)
-                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal load factor, degrading performance but not correctness
+                    // ## What a skipped resize costs
+                    // Skipping cannot misplace an entry or admit a value that does not
+                    // belong: every placement still follows the probe sequence, and the
+                    // committed root still authenticates the bucket's true contents.
+                    // What it breaks is the layout bound. A sequencer that skips a due
+                    // resize commits the bucket at a capacity the load factor would have
+                    // rejected, and nothing on the delta path corrects it:
+                    // canonicalization rebuilds only buckets actually resized in the
+                    // block, and nodes applying the block's deltas reproduce the
+                    // transmitted layout verbatim without re-running SHI logic. Only
+                    // stateless validation exposes it, and only against a complete
+                    // witness from a builder independent of the sequencer: a witness
+                    // that leaves the bucket's remaining slots uncovered makes the
+                    // validator skip the same check and accept the over-loaded bucket.
                     //
-                    // ## Self-Healing Mechanism
-                    // When a legitimate sequencer performs the next insertion, it will:
-                    // 1. Compute the actual usage count from the full state
-                    // 2. Trigger resize if needed (restoring optimal bucket structure)
-                    // 3. Continue normal operations with proper load factor tracking
-                    // Even a malicious sequencer will be forced to resize the bucket when
-                    // no empty slot can be found for insertion because it has no choice
-                    // but to reveal all slots at this point.
-                    //
-                    // This approach prioritizes witness compactness while maintaining
-                    // eventual consistency of bucket structure.
+                    // The backstops are structural rather than checked: an insertion
+                    // into a completely full bucket forces the exhaustion-case resize
+                    // below, and any later insertion applied with the count available
+                    // triggers the postponed resize at that point.
                 }
                 return Ok(());
             }
