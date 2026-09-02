@@ -582,10 +582,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // that leaves the bucket's remaining slots uncovered makes the
                     // validator skip the same check and accept the over-loaded bucket.
                     //
-                    // The backstops are structural rather than checked: an insertion
-                    // into a completely full bucket forces the exhaustion-case resize
-                    // below, and any later insertion applied with the count available
-                    // triggers the postponed resize at that point.
+                    // The backstops are structural rather than checked, and hold
+                    // below the capacity ceiling: an insertion into a completely full
+                    // bucket forces the exhaustion-case resize below, and any later
+                    // insertion applied with the count available triggers the
+                    // postponed resize at that point. At `MAX_BUCKET_SIZE` there is no
+                    // larger capacity to resize to, and `shi_rehash` asserts instead.
                 }
                 return Ok(());
             }
