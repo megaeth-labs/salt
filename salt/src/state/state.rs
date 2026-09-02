@@ -41,7 +41,7 @@
 
 use super::{hasher, updates::StateUpdates};
 use crate::{
-    constant::{BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
+    constant::{BUCKET_RESIZE_MULTIPLIER, MAX_BUCKET_SIZE},
     traits::StateReader,
     types::*,
 };
@@ -553,34 +553,41 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 } else {
                     // Bucket usage count is unavailable (metadata.used is None).
                     //
-                    // This can only occur during stateless validation when replaying blocks
-                    // with execution witnesses. The witness may omit the bucket usage count
-                    // to optimize witness size.
+                    // This only occurs during stateless validation, where a bucket's
+                    // count is known only if the witness covers every slot of it. The
+                    // load-factor check is then skipped: neither approximated from the
+                    // slots in view nor treated as an error, leaving the exhaustion
+                    // case below as the only resize trigger.
                     //
-                    // ## Witness Size Trade-off
-                    // Including the usage count would require revealing ALL slots in the
-                    // bucket (to prove the count is correct), significantly increasing
-                    // witness size for every insertion operation.
+                    // ## Why skipping is correct against a complete witness
+                    // A witness builder includes every slot of any bucket the block's
+                    // insertions resize, so the count is available exactly where a
+                    // resize is due and this replay reaches the same decision the
+                    // builder's replay did. An absent count means the builder's replay
+                    // resized nothing here; witnessing the whole bucket for every other
+                    // insertion would only inflate the witness.
                     //
-                    // ## Security Model
-                    // We accept this optimization because:
-                    // 1. Omitting usage count cannot create invalid key-value pairs
-                    // 2. It can only delay bucket resizing (temporary deviation from the
-                    //    canonical state)
-                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal load factor, degrading performance but not correctness
+                    // ## What a skipped resize costs
+                    // Skipping cannot misplace an entry or admit a value that does not
+                    // belong: every placement still follows the probe sequence, and the
+                    // committed root still authenticates the bucket's true contents.
+                    // What it breaks is the layout bound. A sequencer that skips a due
+                    // resize commits the bucket at a capacity the load factor would have
+                    // rejected, and nothing on the delta path corrects it:
+                    // canonicalization rebuilds only buckets actually resized in the
+                    // block, and nodes applying the block's deltas reproduce the
+                    // transmitted layout verbatim without re-running SHI logic. Only
+                    // stateless validation exposes it, and only against a complete
+                    // witness from a builder independent of the sequencer: a witness
+                    // that leaves the bucket's remaining slots uncovered makes the
+                    // validator skip the same check and accept the over-loaded bucket.
                     //
-                    // ## Self-Healing Mechanism
-                    // When a legitimate sequencer performs the next insertion, it will:
-                    // 1. Compute the actual usage count from the full state
-                    // 2. Trigger resize if needed (restoring optimal bucket structure)
-                    // 3. Continue normal operations with proper load factor tracking
-                    // Even a malicious sequencer will be forced to resize the bucket when
-                    // no empty slot can be found for insertion because it has no choice
-                    // but to reveal all slots at this point.
-                    //
-                    // This approach prioritizes witness compactness while maintaining
-                    // eventual consistency of bucket structure.
+                    // The backstops are structural rather than checked, and hold
+                    // below the capacity ceiling: an insertion into a completely full
+                    // bucket forces the exhaustion-case resize below, and any later
+                    // insertion applied with the count available triggers the
+                    // postponed resize at that point. At `MAX_BUCKET_SIZE` there is no
+                    // larger capacity to resize to, and `shi_rehash` asserts instead.
                 }
                 return Ok(());
             }
@@ -666,6 +673,11 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// If the new capacity is smaller than the number of existing entries in the bucket,
     /// the function returns early without making any changes to prevent data loss.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `new_capacity` exceeds [`MAX_BUCKET_SIZE`], the largest capacity a
+    /// bucket subtree can address (2^40 slots).
     pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
@@ -674,8 +686,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         assert!(
-            new_capacity <= BUCKET_SLOT_ID_MASK,
-            "Exceeds max bucket capacity: {new_capacity} > {BUCKET_SLOT_ID_MASK}"
+            new_capacity <= MAX_BUCKET_SIZE,
+            "Exceeds max bucket capacity: {new_capacity} > {MAX_BUCKET_SIZE}"
         );
 
         // Step 1: Extract all existing entries (but do not clear the cache yet)
@@ -1057,6 +1069,7 @@ fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::BUCKET_SLOT_ID_MASK;
     use std::{collections::BTreeMap, vec, vec::Vec};
 
     use crate::{
@@ -2727,6 +2740,42 @@ mod tests {
                 num_entries,
             );
         }
+    }
+
+    /// A bucket subtree addresses exactly `MAX_BUCKET_SIZE` = 2^40 slots, so that
+    /// capacity must be accepted. The bound used to be `BUCKET_SLOT_ID_MASK` (2^40 - 1),
+    /// which — since capacities only ever double from 256 — capped buckets at 2^39.
+    #[test]
+    fn test_max_bucket_capacity_is_a_reachable_power_of_two() {
+        // Capacities only ever double up from MIN_BUCKET_SIZE, so 2^40 is reachable:
+        // it is 2^39 doubled once more. (Stated via the multiplier rather than a
+        // `compute_resize_capacity` call, because how many doublings a given `used`
+        // triggers depends on the load-factor threshold, which `test-bucket-resize`
+        // overrides.)
+        assert_eq!((1u64 << 39) * BUCKET_RESIZE_MULTIPLIER, MAX_BUCKET_SIZE);
+        assert!(MAX_BUCKET_SIZE.is_power_of_two());
+        // Whatever the threshold, a resize lands on a power of two.
+        let resized = compute_resize_capacity(MIN_BUCKET_SIZE as u64, MIN_BUCKET_SIZE as u64);
+        assert!(resized.is_power_of_two());
+        assert!(resized > MIN_BUCKET_SIZE as u64);
+        // The superseded bound was BUCKET_SLOT_ID_MASK, one slot short of 2^40, so the
+        // largest power-of-two capacity it admitted was only 2^39.
+        assert_eq!(MAX_BUCKET_SIZE, BUCKET_SLOT_ID_MASK + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Exceeds max bucket capacity")]
+    fn test_shi_rehash_rejects_capacity_above_max() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+        // One doubling past the largest addressable capacity.
+        let _ = state.shi_rehash(
+            TEST_BUCKET,
+            0,
+            MAX_BUCKET_SIZE * BUCKET_RESIZE_MULTIPLIER,
+            &mut updates,
+        );
     }
 
     #[test]

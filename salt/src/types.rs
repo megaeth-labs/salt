@@ -11,8 +11,8 @@ use core::ops::RangeInclusive;
 use std::boxed::Box;
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-    NUM_META_BUCKETS, TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
+    NUM_BUCKETS, NUM_META_BUCKETS, TRIE_WIDTH,
 };
 use derive_more::{Deref, DerefMut};
 
@@ -118,17 +118,36 @@ impl TryFrom<&[u8]> for BucketMeta {
                 message: "BucketMeta requires exactly 12 bytes",
             });
         }
+        let nonce =
+            u32::from_le_bytes(
+                bytes[0..4]
+                    .try_into()
+                    .map_err(|_| SaltError::InvalidFormat {
+                        message: "Failed to parse nonce from bytes",
+                    })?,
+            );
+        let capacity =
+            u64::from_le_bytes(
+                bytes[4..12]
+                    .try_into()
+                    .map_err(|_| SaltError::InvalidFormat {
+                        message: "Failed to parse capacity from bytes",
+                    })?,
+            );
+        // A decoded capacity feeds `probe` (which divides by it) and
+        // `subtree_root_level` (which has no level below 0), so bound it here
+        // rather than at every consumer. This is only the range the trie can
+        // represent: capacities the protocol produces are `MIN_BUCKET_SIZE`
+        // doubled some number of times, which is not enforced at this boundary
+        // because tests exercise the SHI logic at smaller capacities.
+        if capacity == 0 || capacity > MAX_BUCKET_SIZE {
+            return Err(SaltError::InvalidFormat {
+                message: "BucketMeta capacity must be in 1..=MAX_BUCKET_SIZE",
+            });
+        }
         Ok(Self {
-            nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
-                SaltError::InvalidFormat {
-                    message: "Failed to parse nonce from bytes",
-                }
-            })?),
-            capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| {
-                SaltError::InvalidFormat {
-                    message: "Failed to parse capacity from bytes",
-                }
-            })?),
+            nonce,
+            capacity,
             used: None,
         })
     }
@@ -269,7 +288,9 @@ impl From<u64> for SaltKey {
 /// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMeta`.
 ///
 /// For `Account`, the key length is 20 bytes, and the value length is either 40
-/// (for EOA's) or 72 bytes (for smart contracts). So, encoding an `Account` requires:
+/// (when the account's code hash is the empty-code hash) or 72 bytes (any other
+/// code hash: a contract, or an EIP-7702-delegated EOA, whose code hash covers
+/// its delegation designator). So, encoding an `Account` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(40 or 72) = 62 or 94 bytes.
 ///
 /// For `Storage`, the key length is 52 bytes, and the value length is 32 bytes.
@@ -288,13 +309,51 @@ pub const MAX_SALT_VALUE_BYTES: usize = 94;
 ///
 /// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
 /// Supports Account, Storage, and BucketMeta types.
+///
+/// The encoded bytes are followed by zero padding out to `MAX_SALT_VALUE_BYTES`, so
+/// `2 + key_len + value_len` never exceeds `MAX_SALT_VALUE_BYTES`. Deserialization
+/// enforces that length bound (see `deserialize_checked_data`) so that a decoded
+/// value can be sliced by [`SaltValue::key`] and [`SaltValue::value`] without running
+/// past the buffer. The padding itself is not checked on decode: it never enters the
+/// slot hash, which covers only the trimmed key and value bytes.
 #[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaltValue {
     /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
     #[deref_mut]
-    #[serde(with = "serde_arrays")]
+    #[serde(
+        serialize_with = "serde_arrays::serialize",
+        deserialize_with = "deserialize_checked_data"
+    )]
     pub data: [u8; MAX_SALT_VALUE_BYTES],
+}
+
+/// Deserializes [`SaltValue::data`] through `serde_arrays`, the same wire shape a
+/// plain `#[serde(with = "serde_arrays")]` field has, and applies the
+/// `TryFrom<[u8; MAX_SALT_VALUE_BYTES]>` bound on the declared lengths.
+fn deserialize_checked_data<'de, D>(deserializer: D) -> Result<[u8; MAX_SALT_VALUE_BYTES], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let data: [u8; MAX_SALT_VALUE_BYTES] = serde_arrays::deserialize(deserializer)?;
+    SaltValue::try_from(data)
+        .map(|value| value.data)
+        .map_err(serde::de::Error::custom)
+}
+
+impl TryFrom<[u8; MAX_SALT_VALUE_BYTES]> for SaltValue {
+    type Error = SaltError;
+
+    /// Wrap an already-encoded buffer, rejecting one whose declared lengths overrun it.
+    fn try_from(data: [u8; MAX_SALT_VALUE_BYTES]) -> Result<Self, Self::Error> {
+        let value = Self { data };
+        if value.data_len() > MAX_SALT_VALUE_BYTES {
+            return Err(SaltError::InvalidFormat {
+                message: "SaltValue key_len + value_len overruns MAX_SALT_VALUE_BYTES",
+            });
+        }
+        Ok(value)
+    }
 }
 
 impl SaltValue {
@@ -629,8 +688,8 @@ mod tests {
     fn bucket_meta_serialization() {
         let meta = BucketMeta {
             nonce: 0x12345678,
-            capacity: 0x123456789ABCDEF0,
-            used: Some(100), // This value is not serialized
+            capacity: 0x123456789A, // arbitrary, within 1..=MAX_BUCKET_SIZE
+            used: Some(100),        // This value is not serialized
         };
         let bytes = meta.to_bytes();
         let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
@@ -651,6 +710,38 @@ mod tests {
                 .0;
 
         assert_eq!(bincode_recovered, recovered);
+    }
+
+    /// Tests that decoding bounds the capacity to what the trie can represent:
+    /// 0 would divide by zero in `probe` and recurse without bound in `shi_upsert`,
+    /// and anything above `MAX_BUCKET_SIZE` has no subtree level to hold it.
+    #[test]
+    fn bucket_meta_decode_bounds_capacity() {
+        let encode = |capacity: u64| {
+            BucketMeta {
+                nonce: 7,
+                capacity,
+                used: None,
+            }
+            .to_bytes()
+        };
+
+        for capacity in [1, MIN_BUCKET_SIZE as u64, MAX_BUCKET_SIZE] {
+            let meta = BucketMeta::try_from(&encode(capacity)[..])
+                .unwrap_or_else(|e| panic!("capacity {capacity} must decode: {e}"));
+            assert_eq!(meta.capacity, capacity);
+        }
+
+        for capacity in [0, MAX_BUCKET_SIZE + 1, u64::MAX] {
+            assert!(
+                BucketMeta::try_from(&encode(capacity)[..]).is_err(),
+                "capacity {capacity} must be rejected"
+            );
+        }
+
+        // The same bound applies when the metadata arrives inside a SaltValue.
+        let value = SaltValue::new(&encode(0), &[]);
+        assert!(BucketMeta::try_from(value).is_err());
     }
 
     /// Tests BucketMeta default constructor. Verifies that default values match
@@ -694,6 +785,51 @@ mod tests {
         assert_eq!(metadata.data_len(), 14);
         assert_eq!(metadata.key(), &[0x55; 12]);
         assert!(metadata.value().is_empty());
+    }
+
+    /// Tests that SaltValue deserialization keeps the derived wire shape (94 raw
+    /// bytes under bincode, a one-field struct under a self-describing format) and
+    /// rejects a payload whose declared lengths overrun the buffer.
+    #[test]
+    fn salt_value_deserialize_bounds_declared_lengths() {
+        let value = SaltValue::new(&[0x11; 20], &[0x22; 72]);
+        assert_eq!(value.data_len(), MAX_SALT_VALUE_BYTES);
+
+        let bytes = bincode::serde::encode_to_vec(&value, bincode::config::legacy()).unwrap();
+        assert_eq!(bytes, value.data);
+        let (decoded, _): (SaltValue, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+        assert_eq!(decoded, value);
+
+        let json = serde_json::to_string(&value).unwrap();
+        let decoded: SaltValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, value);
+
+        // One byte past the largest legal layout (20 + 72) is rejected...
+        let mut overrun = value.data;
+        overrun[1] = 73;
+        assert!(SaltValue::try_from(overrun).is_err());
+        let result: Result<(SaltValue, _), _> =
+            bincode::serde::decode_from_slice(&overrun, bincode::config::legacy());
+        assert!(
+            result.is_err(),
+            "key_len + value_len overrun must be rejected"
+        );
+
+        // ...and so is a key_len that overruns on its own.
+        let mut overrun = [0u8; MAX_SALT_VALUE_BYTES];
+        overrun[0] = u8::MAX;
+        let result: Result<(SaltValue, _), _> =
+            bincode::serde::decode_from_slice(&overrun, bincode::config::legacy());
+        assert!(result.is_err(), "key_len overrun must be rejected");
+
+        // An all-zero buffer (key_len = value_len = 0) is still a valid encoding.
+        let (decoded, _): (SaltValue, _) = bincode::serde::decode_from_slice(
+            &[0u8; MAX_SALT_VALUE_BYTES],
+            bincode::config::legacy(),
+        )
+        .unwrap();
+        assert_eq!(decoded, SaltValue::new(&[], &[]));
     }
 
     /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
@@ -807,8 +943,8 @@ mod tests {
         let long_bytes = [1u8; 20];
         assert!(BucketMeta::try_from(&long_bytes[..]).is_err());
 
-        // Test exactly 12 bytes (required) - should succeed
-        let valid_bytes = [0u8; 12];
+        // Test exactly 12 bytes (required) with an in-range capacity - should succeed
+        let valid_bytes = BucketMeta::default().to_bytes();
         assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
     }
 

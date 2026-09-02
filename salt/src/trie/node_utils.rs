@@ -102,11 +102,15 @@
 //!     ├─ Up to 65,536 Level 3 nodes
 //!     └─ Up to 16,777,216 Level 4 leaf nodes
 //!
-//! Capacity > 4,294,967,296:
+//! Capacity ≤ 1,099,511,627,776 (2^40 = MAX_BUCKET_SIZE):
 //!     Root at Level 0
 //!     NodeId = (bucket_id << 40) | 0
 //!     Full 5-level subtree structure
+//!     ├─ Up to 256 Level 1 nodes
+//!     └─ Up to 4,294,967,296 Level 4 leaf nodes
 //! ```
+//!
+//! 2^40 is the ceiling: the deepest level holds 256^4 = 2^32 segments of 256 slots.
 //!
 //! ### Key Insights
 //!
@@ -214,9 +218,11 @@ pub(crate) fn vc_position_in_parent(node_id: &NodeId) -> usize {
     let local_number = get_local_number(*node_id);
     let trie_level = get_bfs_level(local_number);
 
-    // Calculate relative position from the start of this level
-    let relative_pos = local_number as usize - STARTING_NODE_ID[trie_level];
-    relative_pos % TRIE_WIDTH
+    // Calculate relative position from the start of this level. Stay in u64: at
+    // `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit `usize`
+    // cannot hold it.
+    let relative_pos = local_number - STARTING_NODE_ID[trie_level] as u64;
+    (relative_pos % TRIE_WIDTH as u64) as usize
 }
 
 /// Computes the NodeId of a specific child given its parent and child index.
@@ -276,8 +282,10 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
     // Determine which level this node is on
     let level = get_bfs_level(local_node_id);
 
-    // Calculate relative position from the start of current level
-    let relative_position = local_node_id as usize - STARTING_NODE_ID[level];
+    // Calculate relative position from the start of current level. Stay in u64:
+    // at `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit
+    // `usize` cannot hold it.
+    let relative_position = local_node_id - STARTING_NODE_ID[level] as u64;
 
     // Divide by 256 (right-shift by 8) to get parent's relative position
     // Each parent has 256 children, so child positions 0-255 → parent 0,
@@ -286,7 +294,13 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 
     // Add parent level's starting position to get absolute parent ID
     // and preserve the bucket ID for subtree nodes
-    bucket_id + (parent_relative_position + STARTING_NODE_ID[level - 1]) as NodeId
+    let parent = bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId;
+    debug_assert_eq!(
+        get_bfs_level(get_local_number(parent)),
+        level - 1,
+        "parent of a level-{level} node must sit one level up"
+    );
+    parent
 }
 
 /// Maps a bucket ID to its subtree root node in the main trie.
@@ -366,19 +380,36 @@ pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
 /// to accommodate the given capacity.
 ///
 /// # Subtree Level Mapping
+///
+/// The root climbs *upward* as capacity grows: a small bucket is a lone leaf at the
+/// deepest level, while a maximal one is rooted at level 0 over a full 5-level subtree.
+///
 /// ```text
-/// Level 0: Root (capacity = 1)              [root:0]
-/// Level 1: Small (capacity ≤ 256)          [0] [1] ... [256]
-/// Level 2: Medium (capacity ≤ 65,536)      [0]...[256] [257]...[65536]
-/// Level 3: Large (capacity ≤ 16,777,216)   [0]...[65536] [65537]...[16777216]
-/// Level 4: Extra Large (capacity ≤ 2^32)   [0]...[16777216] [16777217]...[2^32]
+/// capacity ≤ 2^8  (256)             → level 4   a lone leaf, no internal nodes
+/// capacity ≤ 2^16 (65,536)          → level 3   over up to 256 leaves
+/// capacity ≤ 2^24 (16,777,216)      → level 2   over up to 65,536 leaves
+/// capacity ≤ 2^32 (4,294,967,296)   → level 1   over up to 16,777,216 leaves
+/// capacity ≤ 2^40 (1,099,511,627,776) → level 0 over up to 4,294,967,296 leaves
 /// ```
+///
+/// Each leaf ("segment") holds `MIN_BUCKET_SIZE` = 256 consecutive slots, so the
+/// deepest level's 2^32 segments cap a bucket at 2^32 * 256 = 2^40 slots, which is
+/// [`MAX_BUCKET_SIZE`](crate::constant::MAX_BUCKET_SIZE).
 ///
 /// # Arguments
 /// * `capacity` - The total number of slots the bucket needs to accommodate
 ///
 /// # Returns
 /// The subtree level (0-4) that should serve as the root for this capacity
+///
+/// # Panics
+///
+/// Panics in debug builds (and wraps `level` in release builds) if `capacity` exceeds
+/// `MAX_BUCKET_SIZE`, since no subtree level can hold it. Callers must bound capacity
+/// themselves. `EphemeralSaltState::shi_rehash` asserts it for the capacity it is
+/// asked to resize *to*, and `BucketMeta::try_from` rejects a decoded capacity outside
+/// `1..=MAX_BUCKET_SIZE`, so a capacity read back through a `StateReader` is bounded;
+/// a `BucketMeta` built in-process with a larger `capacity` field is not.
 pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
@@ -396,6 +427,35 @@ pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::MAX_BUCKET_SIZE;
+
+    /// The deepest subtree-local node number at `MAX_BUCKET_SIZE` exceeds u32, so
+    /// the level-relative arithmetic has to stay in u64 rather than `usize` to be
+    /// right on 32-bit targets. Pins the values that arithmetic produces there.
+    #[test]
+    fn parent_and_position_at_max_capacity_depth() {
+        use crate::constant::{
+            BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE, NUM_META_BUCKETS,
+            STARTING_NODE_ID, TRIE_WIDTH,
+        };
+        use crate::types::{get_local_number, NodeId};
+
+        let segments = MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64;
+        let deepest_local = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + segments - 1;
+        assert!(deepest_local > u32::MAX as u64);
+
+        let bucket_id = NUM_META_BUCKETS as u64;
+        let node: NodeId = (bucket_id << BUCKET_SLOT_BITS) | deepest_local;
+
+        assert_eq!(vc_position_in_parent(&node), TRIE_WIDTH - 1);
+
+        let parent = get_parent_node(&node);
+        assert_eq!(parent >> BUCKET_SLOT_BITS, bucket_id);
+        assert_eq!(
+            get_local_number(parent),
+            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 2] as u64 + segments / TRIE_WIDTH as u64 - 1
+        );
+    }
 
     /// Tests the vc_position_in_parent function for various node types and positions.
     ///
@@ -739,6 +799,11 @@ mod tests {
             (16777217, 1),   // Just over 256^3 → level 1
             (4294967296, 1), // 256^4 slots → still level 1
             (4294967297, 0), // Just over 256^4 → root level
+            // The top of the range: a maximally expanded bucket is rooted at level 0
+            // over 2^32 segments of 256 slots. Anything larger has nowhere to go.
+            (1 << 39, 0),             // largest capacity the old bound allowed
+            (MAX_BUCKET_SIZE - 1, 0), // BUCKET_SLOT_ID_MASK
+            (MAX_BUCKET_SIZE, 0),     // 2^40 — still fits the full subtree
         ];
 
         for (capacity, expected) in cases {

@@ -1153,6 +1153,10 @@ impl SubtrieChangeInfo {
 mod tests {
     use super::*;
     use crate::{
+        constant::{BUCKET_SLOT_ID_MASK, MAX_BUCKET_SIZE, MIN_BUCKET_SIZE},
+        types::leftmost_node,
+    };
+    use crate::{
         mem_store::MemStore,
         state::{state::EphemeralSaltState, updates::StateUpdates},
         trie::trie::{kv_hash, StateRoot},
@@ -1529,6 +1533,25 @@ mod tests {
         assert_change(512, 256, 3, 4);
         assert_change(65_536, 65_792, 3, 2);
         assert_change(65_537, 65_536, 2, 3);
+
+        // Top of the range. Every capacity above 2^32 is rooted at level 0, so the
+        // 2^39 -> 2^40 expansion the old `BUCKET_SLOT_ID_MASK` bound rejected is an
+        // ordinary level-0 transition, and STARTING_NODE_ID[0] == 0 makes the top id
+        // exactly `bucket_id << BUCKET_SLOT_BITS`.
+        assert_change(1 << 32, (1 << 32) + 1, 1, 0);
+        assert_change(1 << 39, MAX_BUCKET_SIZE, 0, 0);
+        assert_change(MAX_BUCKET_SIZE, 1 << 39, 0, 0);
+
+        // At maximum capacity the deepest node's local number must stay inside the
+        // 40-bit slot field, or it would bleed into the bucket-id bits.
+        let segments = MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64;
+        let deepest_local = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + segments - 1;
+        assert_eq!(deepest_local, 4_311_810_304);
+        assert_eq!(
+            deepest_local,
+            leftmost_node(MAX_SUBTREE_LEVELS as u32).unwrap() - 1
+        );
+        assert!(deepest_local <= BUCKET_SLOT_ID_MASK);
     }
 
     /// Rebuilds a main trie node commitment from storage for testing purposes.
