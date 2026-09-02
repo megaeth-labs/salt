@@ -1570,7 +1570,7 @@ mod tests {
                 (4, 3),
                 (1_000_000, 4),
                 (5, 5),
-                (BucketId::MAX, 6),
+                (BucketId::MAX, 1),
             ];
 
             let forward = levels_wrapper(entries);
@@ -1608,7 +1608,8 @@ mod tests {
         }
 
         /// Bincode (legacy config) bytes of a one-entry `levels` map, built by
-        /// hand so a test can present a level no serializer would emit.
+        /// hand so a test can present a level no prover produces (the serializer
+        /// itself writes any u8 unchanged; only deserialization validates).
         fn single_entry_bytes(bucket_id: BucketId, level: u8) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&1u64.to_le_bytes());
