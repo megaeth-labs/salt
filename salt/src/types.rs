@@ -10,8 +10,8 @@
 use core::ops::RangeInclusive;
 
 use crate::constant::{
-    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS, NUM_BUCKETS,
-    NUM_META_BUCKETS, TRIE_WIDTH,
+    BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, MAX_BUCKET_SIZE, MIN_BUCKET_SIZE, MIN_BUCKET_SIZE_BITS,
+    NUM_BUCKETS, NUM_META_BUCKETS, TRIE_WIDTH,
 };
 
 use derive_more::{Deref, DerefMut};
@@ -100,17 +100,36 @@ impl TryFrom<&[u8]> for BucketMeta {
                 message: "BucketMeta requires exactly 12 bytes",
             });
         }
+        let nonce =
+            u32::from_le_bytes(
+                bytes[0..4]
+                    .try_into()
+                    .map_err(|_| SaltError::InvalidFormat {
+                        message: "Failed to parse nonce from bytes",
+                    })?,
+            );
+        let capacity =
+            u64::from_le_bytes(
+                bytes[4..12]
+                    .try_into()
+                    .map_err(|_| SaltError::InvalidFormat {
+                        message: "Failed to parse capacity from bytes",
+                    })?,
+            );
+        // A decoded capacity feeds `probe` (which divides by it) and
+        // `subtree_root_level` (which has no level below 0), so bound it here
+        // rather than at every consumer. This is only the range the trie can
+        // represent: capacities the protocol produces are `MIN_BUCKET_SIZE`
+        // doubled some number of times, which is not enforced at this boundary
+        // because tests exercise the SHI logic at smaller capacities.
+        if capacity == 0 || capacity > MAX_BUCKET_SIZE {
+            return Err(SaltError::InvalidFormat {
+                message: "BucketMeta capacity must be in 1..=MAX_BUCKET_SIZE",
+            });
+        }
         Ok(Self {
-            nonce: u32::from_le_bytes(bytes[0..4].try_into().map_err(|_| {
-                SaltError::InvalidFormat {
-                    message: "Failed to parse nonce from bytes",
-                }
-            })?),
-            capacity: u64::from_le_bytes(bytes[4..12].try_into().map_err(|_| {
-                SaltError::InvalidFormat {
-                    message: "Failed to parse capacity from bytes",
-                }
-            })?),
+            nonce,
+            capacity,
             used: None,
         })
     }
@@ -654,8 +673,8 @@ mod tests {
     fn bucket_meta_serialization() {
         let meta = BucketMeta {
             nonce: 0x12345678,
-            capacity: 0x123456789ABCDEF0,
-            used: Some(100), // This value is not serialized
+            capacity: 0x123456789A, // arbitrary, within 1..=MAX_BUCKET_SIZE
+            used: Some(100),        // This value is not serialized
         };
         let bytes = meta.to_bytes();
         let recovered = BucketMeta::try_from(&bytes[..]).unwrap();
@@ -676,6 +695,38 @@ mod tests {
                 .0;
 
         assert_eq!(bincode_recovered, recovered);
+    }
+
+    /// Tests that decoding bounds the capacity to what the trie can represent:
+    /// 0 would divide by zero in `probe` and recurse without bound in `shi_upsert`,
+    /// and anything above `MAX_BUCKET_SIZE` has no subtree level to hold it.
+    #[test]
+    fn bucket_meta_decode_bounds_capacity() {
+        let encode = |capacity: u64| {
+            BucketMeta {
+                nonce: 7,
+                capacity,
+                used: None,
+            }
+            .to_bytes()
+        };
+
+        for capacity in [1, MIN_BUCKET_SIZE as u64, MAX_BUCKET_SIZE] {
+            let meta = BucketMeta::try_from(&encode(capacity)[..])
+                .unwrap_or_else(|e| panic!("capacity {capacity} must decode: {e}"));
+            assert_eq!(meta.capacity, capacity);
+        }
+
+        for capacity in [0, MAX_BUCKET_SIZE + 1, u64::MAX] {
+            assert!(
+                BucketMeta::try_from(&encode(capacity)[..]).is_err(),
+                "capacity {capacity} must be rejected"
+            );
+        }
+
+        // The same bound applies when the metadata arrives inside a SaltValue.
+        let value = SaltValue::new(&encode(0), &[]);
+        assert!(BucketMeta::try_from(value).is_err());
     }
 
     /// Tests BucketMeta default constructor. Verifies that default values match
@@ -877,8 +928,8 @@ mod tests {
         let long_bytes = [1u8; 20];
         assert!(BucketMeta::try_from(&long_bytes[..]).is_err());
 
-        // Test exactly 12 bytes (required) - should succeed
-        let valid_bytes = [0u8; 12];
+        // Test exactly 12 bytes (required) with an in-range capacity - should succeed
+        let valid_bytes = BucketMeta::default().to_bytes();
         assert!(BucketMeta::try_from(&valid_bytes[..]).is_ok());
     }
 
