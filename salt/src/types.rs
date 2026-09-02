@@ -251,7 +251,9 @@ impl From<u64> for SaltKey {
 /// There are 3 types of [`SaltValue`]: `Account`, `Storage`, and `BucketMeta`.
 ///
 /// For `Account`, the key length is 20 bytes, and the value length is either 40
-/// (for EOA's) or 72 bytes (for smart contracts). So, encoding an `Account` requires:
+/// (when the account's code hash is the empty-code hash) or 72 bytes (any other
+/// code hash: a contract, or an EIP-7702-delegated EOA, whose code hash covers
+/// its delegation designator). So, encoding an `Account` requires:
 ///     `key_len`(1) + `value_len`(1) + `key`(20) + `value`(40 or 72) = 62 or 94 bytes.
 ///
 /// For `Storage`, the key length is 52 bytes, and the value length is 32 bytes.
@@ -270,13 +272,54 @@ pub const MAX_SALT_VALUE_BYTES: usize = 94;
 ///
 /// Format: `key_len` (1 byte) | `value_len` (1 byte) | `key` | `value`
 /// Supports Account, Storage, and BucketMeta types.
-#[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The encoded bytes are followed by zero padding out to `MAX_SALT_VALUE_BYTES`, so
+/// `2 + key_len + value_len` never exceeds `MAX_SALT_VALUE_BYTES`. Deserialization
+/// enforces that bound (through `TryFrom<[u8; MAX_SALT_VALUE_BYTES]>`) so that a
+/// decoded value can be sliced by [`SaltValue::key`] and [`SaltValue::value`]
+/// without running past the buffer.
+#[derive(Clone, Debug, Deref, DerefMut, PartialEq, Eq, Serialize)]
 pub struct SaltValue {
     /// Fixed-size array accommodating the largest possible encoded data (94 bytes).
     #[deref]
     #[deref_mut]
     #[serde(with = "serde_arrays")]
     pub data: [u8; MAX_SALT_VALUE_BYTES],
+}
+
+impl<'de> Deserialize<'de> for SaltValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Same wire shape as the derived impl (a `SaltValue` struct with a single
+        // `data` field), so serialized bytes are unchanged; only the bound on the
+        // declared lengths is added.
+        #[derive(Deserialize)]
+        #[serde(rename = "SaltValue")]
+        struct Unchecked {
+            #[serde(with = "serde_arrays")]
+            data: [u8; MAX_SALT_VALUE_BYTES],
+        }
+
+        let Unchecked { data } = Unchecked::deserialize(deserializer)?;
+        SaltValue::try_from(data).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<[u8; MAX_SALT_VALUE_BYTES]> for SaltValue {
+    type Error = SaltError;
+
+    /// Wrap an already-encoded buffer, rejecting one whose declared lengths overrun it.
+    fn try_from(data: [u8; MAX_SALT_VALUE_BYTES]) -> Result<Self, Self::Error> {
+        let declared = 2 + data[0] as usize + data[1] as usize;
+        if declared > MAX_SALT_VALUE_BYTES {
+            return Err(SaltError::InvalidFormat {
+                message: "SaltValue key_len + value_len overruns MAX_SALT_VALUE_BYTES",
+            });
+        }
+        Ok(Self { data })
+    }
 }
 
 impl SaltValue {
@@ -676,6 +719,51 @@ mod tests {
         assert_eq!(metadata.data_len(), 14);
         assert_eq!(metadata.key(), &[0x55; 12]);
         assert!(metadata.value().is_empty());
+    }
+
+    /// Tests that SaltValue deserialization keeps the derived wire shape (94 raw
+    /// bytes under bincode, a one-field struct under a self-describing format) and
+    /// rejects a payload whose declared lengths overrun the buffer.
+    #[test]
+    fn salt_value_deserialize_bounds_declared_lengths() {
+        let value = SaltValue::new(&[0x11; 20], &[0x22; 72]);
+        assert_eq!(value.data_len(), MAX_SALT_VALUE_BYTES);
+
+        let bytes = bincode::serde::encode_to_vec(&value, bincode::config::legacy()).unwrap();
+        assert_eq!(bytes, value.data);
+        let (decoded, _): (SaltValue, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+        assert_eq!(decoded, value);
+
+        let json = serde_json::to_string(&value).unwrap();
+        let decoded: SaltValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, value);
+
+        // One byte past the largest legal layout (20 + 72) is rejected...
+        let mut overrun = value.data;
+        overrun[1] = 73;
+        assert!(SaltValue::try_from(overrun).is_err());
+        let result: Result<(SaltValue, _), _> =
+            bincode::serde::decode_from_slice(&overrun, bincode::config::legacy());
+        assert!(
+            result.is_err(),
+            "key_len + value_len overrun must be rejected"
+        );
+
+        // ...and so is a key_len that overruns on its own.
+        let mut overrun = [0u8; MAX_SALT_VALUE_BYTES];
+        overrun[0] = u8::MAX;
+        let result: Result<(SaltValue, _), _> =
+            bincode::serde::decode_from_slice(&overrun, bincode::config::legacy());
+        assert!(result.is_err(), "key_len overrun must be rejected");
+
+        // An all-zero buffer (key_len = value_len = 0) is still a valid encoding.
+        let (decoded, _): (SaltValue, _) = bincode::serde::decode_from_slice(
+            &[0u8; MAX_SALT_VALUE_BYTES],
+            bincode::config::legacy(),
+        )
+        .unwrap();
+        assert_eq!(decoded, SaltValue::new(&[], &[]));
     }
 
     /// Tests conversion between BucketMeta and SaltValue. For metadata, the key
