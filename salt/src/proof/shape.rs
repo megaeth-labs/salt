@@ -11,8 +11,9 @@
 //! - **Bucket Subtrees**: Dynamic trees within buckets that can expand from 1-5 levels
 
 use salt_macros::prelude::*;
-use salt_macros::{iter, reduce};
+use salt_macros::{chunks, num_threads};
 use std::collections::{BTreeMap, BTreeSet};
+use std::vec::Vec;
 
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
@@ -61,101 +62,130 @@ pub(crate) fn parents_and_points(
     BTreeMap<NodeId, BTreeSet<usize>>,
     BTreeMap<NodeId, BTreeSet<usize>>,
 ) {
-    reduce!(
-        iter!(salt_keys).map(|salt_key| {
+    // One accumulator pair per thread chunk, merged once at the end. (A
+    // per-key map-reduce would allocate and merge two BTreeMaps per key.)
+    let chunk_size = salt_keys.len().div_ceil(num_threads!()).max(1);
+    let partials: Vec<_> = chunks!(salt_keys, chunk_size)
+        .map(|chunk| {
             let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
             let mut slot_position_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
-            let bucket_id = salt_key.bucket_id();
-            let level = levels[&bucket_id];
-
-            // ============================================================================
-            // Phase 1: Main Trie Traversal
-            // ============================================================================
-            // Walk from the bucket root up to the main trie root (node 0), recording
-            // each parent-child relationship. This captures the path through the fixed
-            // 4-level main trie structure that leads to this bucket.
-            let mut node = bucket_root_node_id(salt_key.bucket_id());
-            while node != 0 {
-                let parent_node = get_parent_node(&node);
-                // Record that this parent needs to prove the child at this position
-                internal_nodes
-                    .entry(parent_node)
-                    .or_default()
-                    .insert(vc_position_in_parent(&node));
-
-                node = parent_node;
+            for salt_key in chunk {
+                record_key_paths(
+                    salt_key,
+                    levels,
+                    &mut internal_nodes,
+                    &mut slot_position_nodes,
+                );
             }
-
-            // ============================================================================
-            // Phase 2: Bucket Tree Traversal
-            // ============================================================================
-            // For expanded buckets (>256 slots), traverse the internal bucket tree
-            // structure from the key's leaf segment up toward the bucket root.
-            // This only applies to buckets with level > 2 (multi-level bucket trees).
-            let mut node = subtree_leaf_for_key(salt_key);
-
-            let mut count = level;
-            while count > 2 {
-                let parent_node = get_parent_node(&node);
-                // Record parent-child relationships within the bucket subtree
-                internal_nodes
-                    .entry(parent_node)
-                    .or_default()
-                    .insert(vc_position_in_parent(&node));
-
-                node = parent_node;
-                count -= 1;
-            }
-
-            // ============================================================================
-            // Phase 3: Bridge Connection (Expanded buckets)
-            // ============================================================================
-            // For bucket trees with exactly 2 levels, create the bridge connection
-            // between the bucket subtree and the main trie. The encode_parent function
-            // embeds level information in the node ID to distinguish different tree levels.
-            if count == 2 {
-                let main_trie_node = bucket_root_node_id(salt_key.bucket_id());
-                // Use encoded parent to bridge bucket tree to main trie
-                internal_nodes
-                    .entry(encode_parent(main_trie_node, level))
-                    .or_default()
-                    .insert(vc_position_in_parent(&node));
-            }
-
-            // ============================================================================
-            // Phase 4: Key-Value Slot Position
-            // ============================================================================
-            // Record the direct parent of the key-value pair itself. This determines
-            // which node contains the actual data slot and what position within that
-            // node's 256-slot array the key occupies.
-            let node = if level == 1 {
-                // Level 1: Key stored directly in bucket root (single 256-slot segment)
-                bucket_root_node_id(salt_key.bucket_id())
-            } else {
-                // Level 2+: Key stored in a leaf segment of the bucket tree
-                subtree_leaf_for_key(salt_key)
-            };
-
-            // Record which slot position within the segment contains this key
-            // Use lowest 8 bits of slot_id as position within 256-slot segment
-            slot_position_nodes
-                .entry(node)
-                .or_default()
-                .insert((salt_key.slot_id() & 0xFF) as usize);
-
             (internal_nodes, slot_position_nodes)
-        }),
-        || (BTreeMap::new(), BTreeMap::new()),
-        |mut acc, (internal_map, slot_map)| {
-            for (node_id, positions) in internal_map {
-                acc.0.entry(node_id).or_default().extend(positions);
-            }
-            for (node_id, positions) in slot_map {
-                acc.1.entry(node_id).or_default().extend(positions);
-            }
-            acc
+        })
+        .collect();
+
+    let mut merged = (BTreeMap::new(), BTreeMap::new());
+    for (internal_map, slot_map) in partials {
+        for (node_id, positions) in internal_map {
+            merged
+                .0
+                .entry(node_id)
+                .or_insert_with(BTreeSet::new)
+                .extend(positions);
         }
-    )
+        for (node_id, positions) in slot_map {
+            merged
+                .1
+                .entry(node_id)
+                .or_insert_with(BTreeSet::new)
+                .extend(positions);
+        }
+    }
+    merged
+}
+
+/// Records the authentication-path nodes and slot positions for one key into
+/// the given accumulators. See [`parents_and_points`] for the algorithm.
+fn record_key_paths(
+    salt_key: &SaltKey,
+    levels: &FxHashMap<BucketId, u8>,
+    internal_nodes: &mut BTreeMap<NodeId, BTreeSet<usize>>,
+    slot_position_nodes: &mut BTreeMap<NodeId, BTreeSet<usize>>,
+) {
+    let bucket_id = salt_key.bucket_id();
+    let level = levels[&bucket_id];
+
+    // ============================================================================
+    // Phase 1: Main Trie Traversal
+    // ============================================================================
+    // Walk from the bucket root up to the main trie root (node 0), recording
+    // each parent-child relationship. This captures the path through the fixed
+    // 4-level main trie structure that leads to this bucket.
+    let mut node = bucket_root_node_id(salt_key.bucket_id());
+    while node != 0 {
+        let parent_node = get_parent_node(&node);
+        // Record that this parent needs to prove the child at this position
+        internal_nodes
+            .entry(parent_node)
+            .or_default()
+            .insert(vc_position_in_parent(&node));
+
+        node = parent_node;
+    }
+
+    // ============================================================================
+    // Phase 2: Bucket Tree Traversal
+    // ============================================================================
+    // For expanded buckets (>256 slots), traverse the internal bucket tree
+    // structure from the key's leaf segment up toward the bucket root.
+    // This only applies to buckets with level > 2 (multi-level bucket trees).
+    let mut node = subtree_leaf_for_key(salt_key);
+
+    let mut count = level;
+    while count > 2 {
+        let parent_node = get_parent_node(&node);
+        // Record parent-child relationships within the bucket subtree
+        internal_nodes
+            .entry(parent_node)
+            .or_default()
+            .insert(vc_position_in_parent(&node));
+
+        node = parent_node;
+        count -= 1;
+    }
+
+    // ============================================================================
+    // Phase 3: Bridge Connection (Expanded buckets)
+    // ============================================================================
+    // For bucket trees with exactly 2 levels, create the bridge connection
+    // between the bucket subtree and the main trie. The encode_parent function
+    // embeds level information in the node ID to distinguish different tree levels.
+    if count == 2 {
+        let main_trie_node = bucket_root_node_id(salt_key.bucket_id());
+        // Use encoded parent to bridge bucket tree to main trie
+        internal_nodes
+            .entry(encode_parent(main_trie_node, level))
+            .or_default()
+            .insert(vc_position_in_parent(&node));
+    }
+
+    // ============================================================================
+    // Phase 4: Key-Value Slot Position
+    // ============================================================================
+    // Record the direct parent of the key-value pair itself. This determines
+    // which node contains the actual data slot and what position within that
+    // node's 256-slot array the key occupies.
+    let node = if level == 1 {
+        // Level 1: Key stored directly in bucket root (single 256-slot segment)
+        bucket_root_node_id(salt_key.bucket_id())
+    } else {
+        // Level 2+: Key stored in a leaf segment of the bucket tree
+        subtree_leaf_for_key(salt_key)
+    };
+
+    // Record which slot position within the segment contains this key
+    // Use lowest 8 bits of slot_id as position within 256-slot segment
+    slot_position_nodes
+        .entry(node)
+        .or_default()
+        .insert((salt_key.slot_id() & 0xFF) as usize);
 }
 
 /// Encodes bucket tree level information into a main trie node ID.

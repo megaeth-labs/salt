@@ -25,16 +25,16 @@ use crate::{
     },
     traits::{StateReader, TrieReader},
     trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
-    types::{BucketId, BucketMeta, NodeId, SaltKey},
+    types::{BucketId, BucketMeta, CommitmentBytes, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr};
+use banderwagon::{Element, Fr, Zero};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, num_threads};
 use std::collections::{BTreeMap, BTreeSet};
-use std::{format, string::ToString, vec, vec::Vec};
+use std::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
@@ -86,15 +86,26 @@ fn multi_commitments_to_scalars<Store>(
 where
     Store: TrieReader,
 {
-    // Helper closures for concise element conversion
+    // Helper closure for concise element conversion
     let to_element = |bytes| Element::from_bytes_unchecked_uncompressed(bytes);
-    let default_element = |node_id| to_element(default_commitment(node_id));
 
-    let total_capacity = nodes.len() * DOMAIN_SIZE;
-    let mut all_child_commitments = Vec::with_capacity(total_capacity);
+    // The trie is sparse, so most of a node's 256 children carry a default
+    // commitment, of which only a handful of distinct values exist (one or two
+    // per level). Mapping a commitment to the scalar field costs a field
+    // inversion, so defaults are converted once and cached by value while only
+    // the children that actually exist in storage are batch-converted.
+    let mut default_scalars: FxHashMap<CommitmentBytes, Fr> = FxHashMap::default();
+    let mut cached_default_scalar = |bytes: CommitmentBytes| {
+        *default_scalars
+            .entry(bytes)
+            .or_insert_with(|| to_element(bytes).map_to_scalar_field())
+    };
 
-    // Load child commitments for each internal node
-    for (node_id, _) in nodes {
+    let mut scalars = vec![Fr::zero(); nodes.len() * DOMAIN_SIZE];
+    // Children present in storage: (position in `scalars`, commitment)
+    let mut real_children: Vec<(usize, Element)> = Vec::new();
+
+    for (i, (node_id, _)) in nodes.iter().enumerate() {
         // Calculate starting index for this node's 256 children
         let child_idx = get_child_node(&logic_parent_id(*node_id), 0);
 
@@ -111,23 +122,32 @@ where
         } else {
             child_idx // Non-root levels: all use child_idx as default
         };
-        let mut child_commitments = vec![default_element(default_idx); DOMAIN_SIZE];
+        let node_scalars = &mut scalars[i * DOMAIN_SIZE..(i + 1) * DOMAIN_SIZE];
+        node_scalars.fill(cached_default_scalar(default_commitment(default_idx)));
 
         // Special case: root level first child uses different default
         if child_idx == ROOT_LEVEL_CHILD_START {
-            child_commitments[0] = default_element(child_idx);
+            node_scalars[0] = cached_default_scalar(default_commitment(child_idx));
         }
 
-        // Replace defaults with actual commitments where they exist
+        // Record actual commitments to overwrite the defaults where they exist
         for (absolute_node_id, commitment_bytes) in children {
             let relative_index = absolute_node_id as usize - child_idx as usize;
-            child_commitments[relative_index] = to_element(commitment_bytes);
+            real_children.push((
+                i * DOMAIN_SIZE + relative_index,
+                to_element(commitment_bytes),
+            ));
         }
-
-        all_child_commitments.extend(child_commitments);
     }
 
-    Ok(Element::batch_map_to_scalar_field(&all_child_commitments))
+    // Batch-convert the existing children and scatter them into place.
+    let elements: Vec<Element> = real_children.iter().map(|(_, element)| *element).collect();
+    let real_scalars = Element::batch_map_to_scalar_field(&elements);
+    for ((position, _), scalar) in real_children.iter().zip(real_scalars) {
+        scalars[*position] = scalar;
+    }
+
+    Ok(scalars)
 }
 
 /// Creates IPA prover queries for a given commitment and evaluation points.
@@ -151,11 +171,13 @@ fn create_prover_queries(
     poly: LagrangeBasis,
     points: BTreeSet<usize>,
 ) -> Vec<ProverQuery> {
+    // One shared allocation per polynomial, however many points are opened.
+    let poly = Arc::new(poly);
     points
         .iter()
         .map(|&i| ProverQuery {
             commitment,
-            poly: poly.clone(),
+            poly: Arc::clone(&poly),
             point: i,
             result: poly.evaluate_in_domain(i),
         })
@@ -198,77 +220,92 @@ where
         });
     }
 
-    // Validate salt keys
-    salt_keys.iter().try_for_each(|key| {
-        let capacity = if key.is_in_meta_bucket() {
-            META_BUCKET_SIZE as u64
-        } else {
-            store
-                .metadata(key.bucket_id())
-                .map_err(|e| ProofError::StateReadError {
-                    reason: format!(
-                        "Failed to read metadata for bucket {}: {e:?}",
-                        key.bucket_id()
-                    ),
-                })?
-                .capacity
+    // Steps 1 & 2: Validate every key against its bucket capacity and record
+    // the trie level of each bucket. Keys arrive sorted, so each bucket's
+    // metadata is read exactly once.
+    let mut buckets_level: FxHashMap<BucketId, u8> = FxHashMap::default();
+    let mut current_bucket: Option<(BucketId, u64)> = None;
+    for key in salt_keys {
+        let bucket_id = key.bucket_id();
+        let capacity = match current_bucket {
+            Some((bucket, capacity)) if bucket == bucket_id => capacity,
+            _ => {
+                let (capacity, level) = if bucket_id < NUM_META_BUCKETS as BucketId {
+                    // Metadata buckets are always at level 1 (never expand into subtrees)
+                    (META_BUCKET_SIZE as u64, METADATA_BUCKET_LEVEL)
+                } else {
+                    // Data buckets: read metadata to determine capacity and
+                    // subtree structure (higher capacity = higher level root)
+                    let meta =
+                        store
+                            .metadata(bucket_id)
+                            .map_err(|e| ProofError::StateReadError {
+                                reason: format!(
+                                    "Failed to read metadata for bucket {bucket_id}: {e:?}"
+                                ),
+                            })?;
+                    let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
+                    (meta.capacity, level as u8)
+                };
+                buckets_level.insert(bucket_id, level);
+                current_bucket = Some((bucket_id, capacity));
+                capacity
+            }
         };
 
-        (key.slot_id() < capacity)
-            .then_some(())
-            .ok_or(ProofError::InvalidSaltKey {
+        if key.slot_id() >= capacity {
+            return Err(ProofError::InvalidSaltKey {
                 key: *key,
                 capacity,
-            })
-    })?;
-
-    // Step 1: Extract and deduplicate bucket IDs from the input keys
-    let mut bucket_ids = salt_keys.iter().map(|k| k.bucket_id()).collect::<Vec<_>>();
-    bucket_ids.dedup();
-
-    // Step 2: Determine the trie level for each bucket
-    let buckets_level: FxHashMap<BucketId, u8> = bucket_ids
-        .into_iter()
-        .map(|bucket_id| {
-            if bucket_id < NUM_META_BUCKETS as BucketId {
-                // Metadata buckets are always at level 1 (never expand into subtrees)
-                Ok((bucket_id, METADATA_BUCKET_LEVEL))
-            } else {
-                // Data buckets: read metadata to determine subtree structure
-                let meta = store
-                    .metadata(bucket_id)
-                    .map_err(|e| ProofError::StateReadError {
-                        reason: format!("Failed to read metadata for bucket {bucket_id}: {e:?}"),
-                    })?;
-                // Convert capacity to subtree root level (higher capacity = higher level root)
-                let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
-                Ok((bucket_id, level as u8))
-            }
-        })
-        .collect::<ProofResult<_>>()?;
+            });
+        }
+    }
 
     // Step 3: Build the minimal node hierarchy needed for authentication
     let (internal_nodes, leaf_nodes) = parents_and_points(salt_keys, &buckets_level);
 
-    // Step 4: Collect cryptographic commitments for all parent nodes
-    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = internal_nodes
-        .iter()
-        .chain(leaf_nodes.iter())
-        .map(|(&parent, _)| {
-            let physical_parent = connect_parent_id(parent);
-            let commitment = Element::from_bytes_unchecked_uncompressed(
-                store
-                    .commitment(physical_parent)
-                    .map_err(|e| ProofError::StateReadError {
-                        reason: format!(
-                            "Failed to load commitment for node {physical_parent}: {e:?}"
-                        ),
-                    })?,
-            );
+    // Step 4: Collect cryptographic commitments for all parent nodes in
+    // parallel; steps 5 and 6 reuse them instead of re-reading the store.
+    let parent_ids: Vec<NodeId> = internal_nodes
+        .keys()
+        .chain(leaf_nodes.keys())
+        .map(|&parent| connect_parent_id(parent))
+        .collect();
+    let commitment_chunk = parent_ids.len().div_ceil(num_threads!()).max(1);
+    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = chunks!(
+        parent_ids,
+        commitment_chunk
+    )
+    .map(|chunk| {
+        chunk
+            .iter()
+            .map(|&physical_parent| {
+                let commitment = Element::from_bytes_unchecked_uncompressed(
+                    store
+                        .commitment(physical_parent)
+                        .map_err(|e| ProofError::StateReadError {
+                            reason: format!(
+                                "Failed to load commitment for node {physical_parent}: {e:?}"
+                            ),
+                        })?,
+                );
+                Ok((physical_parent, SerdeCommitment(commitment)))
+            })
+            .collect::<ProofResult<Vec<_>>>()
+    })
+    .collect::<ProofResult<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect();
 
-            Ok((physical_parent, SerdeCommitment(commitment)))
-        })
-        .collect::<ProofResult<_>>()?;
+    let parent_commitment = |parent: NodeId| -> ProofResult<Element> {
+        parents_commitments
+            .get(&connect_parent_id(parent))
+            .map(|commitment| commitment.0)
+            .ok_or_else(|| ProofError::StateReadError {
+                reason: format!("Failed to load commitment for node {parent}"),
+            })
+    };
 
     // Step 5: Generate IPA prover queries for each node in internal nodes
     let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
@@ -281,15 +318,8 @@ where
                 .iter()
                 .zip(children_scalars.chunks(DOMAIN_SIZE))
                 .map(|((parent, points), children_scalars)| {
-                    let commitment = store
-                        .commitment(connect_parent_id(*parent))
-                        .map(Element::from_bytes_unchecked_uncompressed)
-                        .map_err(|e| ProofError::StateReadError {
-                            reason: format!("Failed to load commitment for node {parent}: {e:?}"),
-                        })?;
-
                     Ok(create_prover_queries(
-                        commitment,
+                        parent_commitment(*parent)?,
                         LagrangeBasis::new(children_scalars.to_vec()),
                         points.clone(),
                     ))
@@ -309,16 +339,7 @@ where
     // Step 6: Generate IPA prover queries for each node in leaf nodes
     let leaf_queries = into_iter!(leaf_nodes)
         .map(|(parent, points)| {
-            let physical_parent = connect_parent_id(parent);
-            let parent_commitment = store
-                .commitment(physical_parent)
-                .map(Element::from_bytes_unchecked_uncompressed)
-                .map_err(|e| ProofError::StateReadError {
-                    reason: format!(
-                        "Failed to load element commitment for node {physical_parent}: {e:?}"
-                    ),
-                })?;
-            process_leaf_node(store, parent, parent_commitment, points)
+            process_leaf_node(store, parent, parent_commitment(parent)?, points)
         })
         .collect::<ProofResult<Vec<_>>>()?
         .into_iter()
@@ -464,7 +485,7 @@ mod tests {
         let poly = LagrangeBasis::new(coeffs);
         let query = ProverQuery {
             commitment: crs.commit_lagrange_poly(&poly),
-            poly: poly.clone(),
+            poly: poly.clone().into(),
             point: 208,
             result: poly.evaluate_in_domain(208),
         };

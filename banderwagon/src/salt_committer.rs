@@ -187,6 +187,11 @@ impl Committer {
         }
     }
 
+    /// Returns the number of base points covered by the precomputed tables.
+    pub fn num_bases(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This x86_64-optimized version uses CPU prefetching instructions to

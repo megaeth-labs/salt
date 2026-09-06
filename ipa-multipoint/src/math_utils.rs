@@ -22,6 +22,13 @@ pub fn powers_of(point: Fr, n: usize) -> Vec<Fr> {
 
 #[inline(always)]
 pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
+    // A field multiplication is ~20ns, so even tens of thousands of powers
+    // compute faster serially than the cost of waking the thread pool.
+    const MIN_PARALLEL_LEN: usize = 1 << 16;
+    if n < MIN_PARALLEL_LEN {
+        return powers_of(point, n);
+    }
+
     let mut powers = vec![Fr::zero(); n];
 
     // Compute base powers for each chunk

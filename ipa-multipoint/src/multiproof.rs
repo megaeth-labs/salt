@@ -2,28 +2,31 @@
 #![allow(non_snake_case)]
 
 use crate::crs::CRS;
-use crate::ipa::{multi_scalar_mul_par, IPAProof};
+use crate::ipa::{multi_scalar_mul_par, slow_vartime_multiscalar_mul, IPAProof};
 use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 
 use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use banderwagon::{trait_defs::*, Element, Fr};
+use banderwagon::{salt_committer::Committer, trait_defs::*, Element, Fr};
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, chunks_mut, into_iter, iter, num_threads, reduce};
-use std::vec::Vec;
+use std::sync::Arc;
+use std::{vec, vec::Vec};
 
 pub struct MultiPoint;
 
 #[derive(Clone, Debug)]
 pub struct ProverQuery {
     pub commitment: Element,
-    pub poly: LagrangeBasis, // TODO: Make this a reference so that upstream libraries do not need to clone
+    /// Shared so that opening one polynomial at several points does not clone
+    /// its 256 coefficients per point.
+    pub poly: Arc<LagrangeBasis>,
     // Given a function f, we use z_i to denote the input point and y_i to denote the output, ie f(z_i) = y_i
     pub point: usize,
     pub result: Fr,
@@ -74,6 +77,34 @@ impl MultiPoint {
         transcript: &mut Transcript,
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
+        Self::open_inner(crs, None, precomp, transcript, queries)
+    }
+
+    /// Same proof as [`MultiPoint::open`] (byte-identical output), but every
+    /// multi-scalar multiplication over the CRS generators — the two
+    /// polynomial commitments and all IPA `L`/`R` points — is computed with
+    /// the given precomputed fixed-base tables. This removes both the
+    /// per-round generator folding and the small variable-base MSMs, which
+    /// dominate proving time.
+    ///
+    /// `committer` must hold tables for the CRS `G` vector in order.
+    pub fn open_with_committer(
+        crs: CRS,
+        committer: &Committer,
+        precomp: &PrecomputedWeights,
+        transcript: &mut Transcript,
+        queries: Vec<ProverQuery>,
+    ) -> MultiPointProof {
+        Self::open_inner(crs, Some(committer), precomp, transcript, queries)
+    }
+
+    fn open_inner(
+        crs: CRS,
+        committer: Option<&Committer>,
+        precomp: &PrecomputedWeights,
+        transcript: &mut Transcript,
+        queries: Vec<ProverQuery>,
+    ) -> MultiPointProof {
         transcript.domain_sep(b"multiproof");
 
         // 1. Compute `r`
@@ -90,19 +121,30 @@ impl MultiPoint {
 
         let chunk_size = grouped_queries.len().div_ceil(num_threads!());
 
-        // aggregate all of the queries evaluated at the same point
+        // aggregate all of the queries evaluated at the same point;
+        // accumulate scaled polynomials in place instead of cloning each
+        // query's polynomial (one 8 KB allocation plus an extra add pass per
+        // query otherwise)
         let aggregated_queries: Vec<_> = chunks!(grouped_queries, chunk_size)
             .flat_map(|chunk| {
                 chunk
                     .iter()
                     .map(|(point, queries_challenges)| {
-                        let aggregated_polynomial = queries_challenges
-                            .iter()
-                            .map(|(query, challenge)| query.poly.clone() * *challenge)
-                            .reduce(|acc, x| acc + x)
-                            .expect("Failed to aggregate polynomial");
+                        let domain = queries_challenges
+                            .first()
+                            .expect("point group cannot be empty")
+                            .0
+                            .poly
+                            .values()
+                            .len();
+                        let mut aggregated = vec![Fr::zero(); domain];
+                        for (query, challenge) in queries_challenges.iter() {
+                            for (acc, coeff) in aggregated.iter_mut().zip(query.poly.values()) {
+                                *acc += **challenge * coeff;
+                            }
+                        }
 
-                        (*point, aggregated_polynomial)
+                        (*point, LagrangeBasis::new(aggregated))
                     })
                     .collect::<Vec<_>>()
             })
@@ -117,7 +159,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g_x_comm = crs.commit_lagrange_poly(&g_x);
+        let g_x_comm = commit_dense(&crs, committer, g_x.values());
 
         transcript.append_point(b"D", &g_x_comm);
 
@@ -148,7 +190,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g1_comm = crs.commit_lagrange_poly(&g1_x);
+        let g1_comm = commit_dense(&crs, committer, g1_x.values());
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -158,12 +200,31 @@ impl MultiPoint {
         let g_3_x_comm = g1_comm - g_x_comm;
 
         // 4. Compute the IPA for g_3
-        let g_3_ipa = open_point_outside_of_domain(crs, precomp, transcript, g_3_x, g_3_x_comm, t);
+        let g_3_ipa = match committer {
+            Some(committer) => {
+                let a = g_3_x.values().to_vec();
+                let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
+                crate::ipa::create_with_precomp(transcript, committer, crs.Q, a, g_3_x_comm, b, t)
+            }
+            None => open_point_outside_of_domain(crs, precomp, transcript, g_3_x, g_3_x_comm, t),
+        };
 
         MultiPointProof {
             open_proof: g_3_ipa,
             g_x_comm,
         }
+    }
+}
+
+/// Commits to a dense polynomial in Lagrange basis: with precomputed tables
+/// when available, otherwise via the generic variable-base MSM.
+fn commit_dense(crs: &CRS, committer: Option<&Committer>, values: &[Fr]) -> Element {
+    match committer {
+        Some(committer) => {
+            let terms: Vec<(usize, Fr)> = values.iter().copied().enumerate().collect();
+            crate::ipa::fixed_base_msm(committer, &terms)
+        }
+        None => slow_vartime_multiscalar_mul(values.iter(), crs.G.iter()),
     }
 }
 
@@ -289,24 +350,43 @@ impl MultiPointProof {
 
         // 3. Compute g_2(t)
         //
-        let mut g2_den: Vec<_> = iter!(queries).map(|query| t - query.point).collect();
+        // A handful of field operations per query: serial execution beats
+        // waking the thread pool even for tens of thousands of queries.
+        let mut g2_den: Vec<_> = queries.iter().map(|query| t - query.point).collect();
 
-        batch_inversion(&mut g2_den);
+        serial_batch_inversion_and_mul(&mut g2_den, &Fr::one());
 
-        let helper_scalars: Vec<_> = into_iter!(powers_of_r)
+        let helper_scalars: Vec<_> = powers_of_r
+            .into_iter()
             .zip(g2_den)
             .map(|(r_i, den_inv)| den_inv * r_i)
             .collect();
 
-        let g2_t: Fr = iter!(helper_scalars)
-            .zip(iter!(queries))
+        let g2_t: Fr = helper_scalars
+            .iter()
+            .zip(queries.iter())
             .map(|(r_i_den_inv, query)| *r_i_den_inv * query.result)
             .sum();
 
         //4. Compute [g_1(X)] = E
-        let comms: Vec<_> = iter!(queries).map(|query| query.commitment).collect();
+        //
+        // Queries arrive grouped per trie node, so runs of consecutive queries
+        // share one commitment. Summing the scalars of each run first shrinks
+        // the multiexp from one point per query to one point per node, which
+        // is where verification time is spent for large witnesses.
+        let mut comms: Vec<Element> = Vec::with_capacity(queries.len());
+        let mut comm_scalars: Vec<Fr> = Vec::with_capacity(queries.len());
+        for (query, scalar) in queries.iter().zip(helper_scalars.iter()) {
+            match (comms.last(), comm_scalars.last_mut()) {
+                (Some(last), Some(acc)) if *last == query.commitment => *acc += scalar,
+                _ => {
+                    comms.push(query.commitment);
+                    comm_scalars.push(*scalar);
+                }
+            }
+        }
 
-        let g1_comm = multi_scalar_mul_par(&comms, &helper_scalars);
+        let g1_comm = multi_scalar_mul_par(&comms, &comm_scalars);
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -365,7 +445,7 @@ mod tests {
 
         let prover_query = ProverQuery {
             commitment: poly_comm,
-            poly,
+            poly: poly.into(),
             point,
             result: y_i,
         };
@@ -407,13 +487,13 @@ mod tests {
 
         let prover_query_i = ProverQuery {
             commitment: poly_comm,
-            poly: poly.clone(),
+            poly: poly.clone().into(),
             point: z_i,
             result: y_i,
         };
         let prover_query_j = ProverQuery {
             commitment: poly_comm,
-            poly,
+            poly: poly.into(),
             point: x_j,
             result: y_j,
         };
@@ -535,13 +615,13 @@ mod tests {
 
         let prover_query_a = ProverQuery {
             commitment: poly_comm_a,
-            poly: polynomial_a,
+            poly: polynomial_a.into(),
             point: point_a,
             result: y_a,
         };
         let prover_query_b = ProverQuery {
             commitment: poly_comm_b,
-            poly: polynomial_b,
+            poly: polynomial_b.into(),
             point: point_b,
             result: y_b,
         };
@@ -581,6 +661,60 @@ mod tests {
         let got = hex::encode(bytes);
         let expected = "4f53588244efaf07a370ee3f9c467f933eed360d4fbf7a19dfc8bc49b67df47152d70c8ce788b897b4c7abc5dd8be1eeb658cc4f253501f2e0ee5c838ed5da6f397dc09a7a6624295fd10e174c5656b5c0e6ad9ca29a091019b1b2c9668869530e8b13a2358e4133feb463cfe86329fea452ca64965c31b7ec9538ad7f2fdd3f598b3add61473baa75951d0f58495be972283a2aee3c4c6e3655c4fce9a691d3719e7ec68e927e6ff6038f144820137f1aaba908daae8997abc1fda957f942703dd0e2b36facd51f62a16e5d6271f06cddf69766f525a3ba5c6ed7f0b8fa22d663e9b22a8c55c224115de6066e5cb497c16cfdf37757ebf22aa407f80b3cadf23cc3bd8f29b6c7ea4ae92167aecc02f9ab4421f7d8791bccb92a1c8c5e58373845f5ae0f83ec83311cc3e9a28a9b92d71a8238bd0bd21bd860ba4820e0f1bbc0387950897024ab43c09ba7a92c8522d165043e5da894d838db9f7a93ff7f98135faf4d94a84c0250bef4bfa4c7105c623da148b8fa5a674830839307d2f6bc2d4dfdc0a099347e37c64601bda2cfd456f7a5579d4d2cd0a102c0427bcb90d52b146d9cb14e30a39ea92e0461feb48d02874f5a37d930f026be83f5437e92b595340f4f2e4e1e308ca89fb02fc02e433f4b07949b1f3a6512045b92549096f6d60010d3d357dfeaf035d577e3c9b8715bd6feab808a3d392663159ef7c17c8a1c3c85d960bbb8581bbc344674b2d1e8c34293fdb8a39c53a4727b5637c5b4e69a83a34d1540c031ed38b50a6fc8717f0138136ef8661b38ceda6250053a08ba05";
         assert_eq!(got, expected)
+    }
+
+    /// The committer-accelerated prover must emit byte-identical proofs to
+    /// the generic prover: it computes the same group elements, only through
+    /// fixed-base precomputation instead of generator folding.
+    #[test]
+    fn open_with_committer_matches_open() {
+        let n = 256;
+        let crs = CRS::new(n, b"random seed");
+        let committer = Committer::new(&crs.G, 6);
+        let precomp = PrecomputedWeights::new(n);
+
+        let mut rng = test_rng();
+        let queries: Vec<ProverQuery> = (0..7)
+            .map(|i| {
+                let poly = LagrangeBasis::new((0..n).map(|_| Fr::rand(&mut rng)).collect());
+                let commitment = crs.commit_lagrange_poly(&poly);
+                let point = (i * 41) % n;
+                ProverQuery {
+                    commitment,
+                    result: poly.evaluate_in_domain(point),
+                    poly: poly.into(),
+                    point,
+                }
+            })
+            .collect();
+
+        let generic = MultiPoint::open(
+            crs.clone(),
+            &precomp,
+            &mut Transcript::new(b"st"),
+            queries.clone(),
+        );
+        let accelerated = MultiPoint::open_with_committer(
+            crs.clone(),
+            &committer,
+            &precomp,
+            &mut Transcript::new(b"st"),
+            queries.clone(),
+        );
+
+        assert_eq!(
+            generic.to_bytes().unwrap(),
+            accelerated.to_bytes().unwrap(),
+            "committer-accelerated proof must be byte-identical"
+        );
+
+        let verifier_queries: Vec<VerifierQuery> = queries.into_iter().map(Into::into).collect();
+        assert!(accelerated.check(
+            &crs,
+            &precomp,
+            &verifier_queries,
+            &mut Transcript::new(b"st")
+        ));
     }
 
     #[test]
@@ -623,7 +757,7 @@ mod tests {
 
                 ProverQuery {
                     commitment: random_element,
-                    poly: poly.clone(),
+                    poly: poly.clone().into(),
                     point: i % 7,
                     result: random_scalar,
                 }
