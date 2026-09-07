@@ -118,7 +118,7 @@ mod node_poly_cache {
 /// The store the witness reads must be the transition's pre-state, the view `update_fin` ran
 /// on; a parent the witness read at any other commitment is skipped. Applying one transition
 /// again (a retried witness) derives the same polynomial from a base validated at the same
-/// old commitment and inserts the same entry, so a refresh is idempotent (I8).
+/// old commitment and inserts the same entry, so a refresh is idempotent.
 pub struct NodePolyRefresh<'a> {
     /// The block's changed nodes as `(node, (old commitment, new commitment))`.
     pub trie_updates: &'a [(NodeId, (CommitmentBytes, CommitmentBytes))],
@@ -139,11 +139,11 @@ struct ParentPatch {
 /// ([`connect_parent_id`]): a bucket whose subtree top changed is keyed by its main-trie
 /// bucket root, like the witness keys it.
 ///
-/// The plan is complete for every parent it emits (I2, I3): every node whose commitment
+/// The plan is complete for every parent it emits: every node whose commitment
 /// changed is in `trie_updates`, so a parent's unchanged positions keep the base's values and
 /// its changed positions are exactly its changed children (internal node) or changed slots
 /// (leaf). Shapes where a per-position patch is wrong under a valid commitment are excluded
-/// whole (I5): a bucket whose capacity changes is frozen and every patch inside it is dropped,
+/// whole: a bucket whose capacity changes is frozen and every patch inside it is dropped,
 /// while the bucket root's position in its main-trie parent is still patched, because that
 /// `(old, new)` pair is a true transition of the main-trie node.
 fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch> {
@@ -186,7 +186,7 @@ fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch>
         .collect();
 
     // Changed children, keyed by the physical id of the parent whose polynomial holds them
-    // (I4). A changed subtree node is recorded under its own id unless it is the top, which
+    //. A changed subtree node is recorded under its own id unless it is the top, which
     // the trie records under the bucket root; so a subtree child's parent is the top exactly
     // when the parent is absent from the transition.
     let mut child_patches: Vec<(NodeId, usize, CommitmentBytes)> =
@@ -289,9 +289,9 @@ fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch>
 ///
 /// The base is the witness's in-hand polynomial when the witness read the parent at exactly
 /// the old commitment, else the cached entry for the old commitment, else the parent is
-/// skipped (I1: an entry is only ever derived from a base validated at `old`). Every
+/// skipped (an entry is only ever derived from a base validated at `old`). Every
 /// insert goes through the shard write lock as a whole `(commitment, polynomial)` pair, so
-/// concurrent witnesses can only ever replace an entry with another valid one (I6).
+/// concurrent witnesses can only ever replace an entry with another valid one.
 fn apply_refresh(
     plan: FxHashMap<NodeId, ParentPatch>,
     in_hand: &FxHashMap<NodeId, Arc<LagrangeBasis>>,
@@ -332,7 +332,7 @@ fn apply_refresh(
     refreshed
 }
 
-/// Debug-build self-check of one refreshed entry (I10): the patched positions must carry the
+/// Debug-build self-check of one refreshed entry: the patched positions must carry the
 /// parent's commitment from `old` to exactly `new`, `old + Σ G_i·(s_i − base_i) == new`,
 /// which is how the trie produced `new`. The check reads no store and fails on a wrong
 /// position, a wrong scalar, and a missing or extra position, which commitment validation
@@ -643,7 +643,7 @@ where
             })
     };
 
-    // Every resolved polynomial by physical parent id: the bases a refresh patches (I7: the
+    // Every resolved polynomial by physical parent id: the bases a refresh patches (the
     // witness reads the pre-state, so these are the polynomials the block's transition
     // transforms).
     let mut in_hand: FxHashMap<NodeId, Arc<LagrangeBasis>> = FxHashMap::default();
@@ -736,7 +736,7 @@ where
     }
 
     // Step 7: Advance the cache to the witnessed block's post-state. The queries above are
-    // already built from the pre-state polynomials, so this proof is unaffected (I9); it runs
+    // already built from the pre-state polynomials, so this proof is unaffected; it runs
     // here rather than after the proof so the entries land before the next block's witness
     // looks them up.
     if let Some(refresh) = refresh {
