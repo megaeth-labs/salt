@@ -40,6 +40,59 @@ use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
+/// Smallest number of parent commitments one parallel task reads.
+const MIN_PARENT_CHUNK: usize = 8;
+/// Smallest number of internal nodes one parallel task materializes (256 child reads each).
+const MIN_NODE_CHUNK: usize = 4;
+
+/// Process-wide cache of node polynomials, keyed by node id and validated by the node's
+/// commitment.
+///
+/// A commitment binds the node's children, so a node whose commitment is unchanged since its
+/// polynomial was last built has the same 256 child scalars (internal node) or slot scalars
+/// (leaf node), and the store reads plus scalar conversions that produce them can be skipped.
+/// Consecutive blocks share most of their authentication paths, which is what makes the hit
+/// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each. A shard
+/// that fills up is cleared whole; the working set refills within a few proofs.
+mod node_poly_cache {
+    use super::*;
+    use crate::types::CommitmentBytes;
+    use crate::Lazy;
+    use spin::RwLock;
+
+    const SHARDS: usize = 64;
+    const MAX_PER_SHARD: usize = 512;
+
+    type Shard = RwLock<FxHashMap<NodeId, (CommitmentBytes, Arc<LagrangeBasis>)>>;
+
+    static CACHE: Lazy<Vec<Shard>> = Lazy::new(|| {
+        (0..SHARDS)
+            .map(|_| RwLock::new(FxHashMap::default()))
+            .collect()
+    });
+
+    fn shard(node: NodeId) -> &'static Shard {
+        &CACHE[(node % SHARDS as NodeId) as usize]
+    }
+
+    /// The cached polynomial of `node`, if it was built for exactly this commitment.
+    pub(super) fn get(node: NodeId, commitment: &CommitmentBytes) -> Option<Arc<LagrangeBasis>> {
+        let guard = shard(node).read();
+        guard
+            .get(&node)
+            .filter(|(seen, _)| seen == commitment)
+            .map(|(_, poly)| Arc::clone(poly))
+    }
+
+    pub(super) fn insert(node: NodeId, commitment: CommitmentBytes, poly: Arc<LagrangeBasis>) {
+        let mut guard = shard(node).write();
+        if guard.len() >= MAX_PER_SHARD {
+            guard.clear();
+        }
+        guard.insert(node, (commitment, poly));
+    }
+}
+
 // Constants for improved code readability
 const METADATA_BUCKET_LEVEL: u8 = 1;
 const SLOT_INDEX_MASK: u64 = 0xff;
@@ -166,13 +219,23 @@ where
 ///
 /// # Returns
 /// A vector of `ProverQuery` objects, one for each evaluation point
+#[cfg(test)]
 fn create_prover_queries(
     commitment: Element,
     poly: LagrangeBasis,
     points: BTreeSet<usize>,
 ) -> Vec<ProverQuery> {
     // One shared allocation per polynomial, however many points are opened.
-    let poly = Arc::new(poly);
+    shared_prover_queries(commitment, Arc::new(poly), &points)
+}
+
+/// [`create_prover_queries`] over an already shared polynomial (a cache hit, or one built for
+/// the cache).
+fn shared_prover_queries(
+    commitment: Element,
+    poly: Arc<LagrangeBasis>,
+    points: &BTreeSet<usize>,
+) -> Vec<ProverQuery> {
     points
         .iter()
         .map(|&i| ProverQuery {
@@ -271,32 +334,43 @@ where
         .chain(leaf_nodes.keys())
         .map(|&parent| connect_parent_id(parent))
         .collect();
-    let commitment_chunk = parent_ids.len().div_ceil(num_threads!()).max(1);
-    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = chunks!(
-        parent_ids,
-        commitment_chunk
-    )
-    .map(|chunk| {
-        chunk
-            .iter()
-            .map(|&physical_parent| {
-                let commitment = Element::from_bytes_unchecked_uncompressed(
-                    store
-                        .commitment(physical_parent)
-                        .map_err(|e| ProofError::StateReadError {
-                            reason: format!(
-                                "Failed to load commitment for node {physical_parent}: {e:?}"
-                            ),
-                        })?,
-                );
-                Ok((physical_parent, SerdeCommitment(commitment)))
+    let commitment_chunk = parent_ids
+        .len()
+        .div_ceil(num_threads!())
+        .max(MIN_PARENT_CHUNK);
+    let parents_read: Vec<(NodeId, crate::types::CommitmentBytes)> =
+        chunks!(parent_ids, commitment_chunk)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|&physical_parent| {
+                        let bytes = store.commitment(physical_parent).map_err(|e| {
+                            ProofError::StateReadError {
+                                reason: format!(
+                                    "Failed to load commitment for node {physical_parent}: {e:?}"
+                                ),
+                            }
+                        })?;
+                        Ok((physical_parent, bytes))
+                    })
+                    .collect::<ProofResult<Vec<_>>>()
             })
-            .collect::<ProofResult<Vec<_>>>()
-    })
-    .collect::<ProofResult<Vec<_>>>()?
-    .into_iter()
-    .flatten()
-    .collect();
+            .collect::<ProofResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+    // The raw bytes key the polynomial cache; the decoded elements go into the proof.
+    let parent_bytes: FxHashMap<NodeId, crate::types::CommitmentBytes> =
+        parents_read.iter().copied().collect();
+    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = parents_read
+        .into_iter()
+        .map(|(id, bytes)| {
+            (
+                id,
+                SerdeCommitment(Element::from_bytes_unchecked_uncompressed(bytes)),
+            )
+        })
+        .collect();
 
     let parent_commitment = |parent: NodeId| -> ProofResult<Element> {
         parents_commitments
@@ -307,56 +381,115 @@ where
             })
     };
 
-    // Step 5: Generate IPA prover queries for each node in internal nodes
+    // Step 5: Generate IPA prover queries for each node in internal nodes. A node whose
+    // polynomial the cache holds for its current commitment skips the child reads; the rest
+    // are materialized in parallel chunks. Query order (node order, then point order) is the
+    // same either way: the transcript hashes it, so a cache hit must not reorder the proof.
     let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let chunk_size = in_nodes.len().div_ceil(num_threads!());
-    let mut queries = chunks!(in_nodes, chunk_size)
+    let mut polys: Vec<Option<Arc<LagrangeBasis>>> = Vec::with_capacity(in_nodes.len());
+    let mut missing: Vec<usize> = Vec::new();
+    for (i, (parent, _)) in in_nodes.iter().enumerate() {
+        let physical = connect_parent_id(*parent);
+        let hit = parent_bytes
+            .get(&physical)
+            .and_then(|bytes| node_poly_cache::get(physical, bytes));
+        if hit.is_none() {
+            missing.push(i);
+        }
+        polys.push(hit);
+    }
+    let missing_nodes: Vec<(NodeId, BTreeSet<usize>)> = missing
+        .iter()
+        .map(|&i| (in_nodes[i].0, BTreeSet::new()))
+        .collect();
+    let chunk_size = missing_nodes
+        .len()
+        .div_ceil(num_threads!())
+        .max(MIN_NODE_CHUNK);
+    let computed: Vec<Vec<Arc<LagrangeBasis>>> = chunks!(missing_nodes, chunk_size)
         .map(|nodes| {
-            let children_scalars = multi_commitments_to_scalars(store, nodes)?;
-
-            let res = nodes
-                .iter()
-                .zip(children_scalars.chunks(DOMAIN_SIZE))
-                .map(|((parent, points), children_scalars)| {
-                    Ok(create_prover_queries(
-                        parent_commitment(*parent)?,
-                        LagrangeBasis::new(children_scalars.to_vec()),
-                        points.clone(),
-                    ))
-                })
-                .collect::<ProofResult<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-
-            Ok(res)
+            let scalars = multi_commitments_to_scalars(store, nodes)?;
+            Ok(scalars
+                .chunks(DOMAIN_SIZE)
+                .map(|node_scalars| Arc::new(LagrangeBasis::new(node_scalars.to_vec())))
+                .collect::<Vec<_>>())
         })
-        .collect::<ProofResult<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .collect::<ProofResult<Vec<_>>>()?;
+    for (&i, poly) in missing.iter().zip(computed.into_iter().flatten()) {
+        let physical = connect_parent_id(in_nodes[i].0);
+        if let Some(bytes) = parent_bytes.get(&physical) {
+            node_poly_cache::insert(physical, *bytes, Arc::clone(&poly));
+        }
+        polys[i] = Some(poly);
+    }
+    let mut queries: Vec<ProverQuery> = Vec::new();
+    for ((parent, points), poly) in in_nodes.into_iter().zip(polys) {
+        let poly = poly.expect("every internal node polynomial is resolved above");
+        queries.extend(shared_prover_queries(
+            parent_commitment(parent)?,
+            poly,
+            &points,
+        ));
+    }
 
-    // Step 6: Generate IPA prover queries for each node in leaf nodes
-    let leaf_queries = into_iter!(leaf_nodes)
-        .map(|(parent, points)| {
-            process_leaf_node(store, parent, parent_commitment(parent)?, points)
-        })
-        .collect::<ProofResult<Vec<_>>>()?
-        .into_iter()
-        .flatten();
-
-    queries.extend(leaf_queries);
+    // Step 6: Generate IPA prover queries for each node in leaf nodes, with the same cache
+    // and the same order discipline.
+    let leaf_nodes: Vec<_> = leaf_nodes.into_iter().collect();
+    let mut leaf_polys: Vec<Option<Arc<LagrangeBasis>>> = Vec::with_capacity(leaf_nodes.len());
+    let mut leaf_missing: Vec<usize> = Vec::new();
+    for (i, (parent, _)) in leaf_nodes.iter().enumerate() {
+        let physical = connect_parent_id(*parent);
+        let hit = parent_bytes
+            .get(&physical)
+            .and_then(|bytes| node_poly_cache::get(physical, bytes));
+        if hit.is_none() {
+            leaf_missing.push(i);
+        }
+        leaf_polys.push(hit);
+    }
+    let computed: Vec<Arc<LagrangeBasis>> = into_iter!(leaf_missing.clone())
+        .map(|i| leaf_polynomial(store, leaf_nodes[i].0).map(Arc::new))
+        .collect::<ProofResult<Vec<_>>>()?;
+    for (&i, poly) in leaf_missing.iter().zip(computed) {
+        let physical = connect_parent_id(leaf_nodes[i].0);
+        if let Some(bytes) = parent_bytes.get(&physical) {
+            node_poly_cache::insert(physical, *bytes, Arc::clone(&poly));
+        }
+        leaf_polys[i] = Some(poly);
+    }
+    for ((parent, points), poly) in leaf_nodes.into_iter().zip(leaf_polys) {
+        let poly = poly.expect("every leaf node polynomial is resolved above");
+        queries.extend(shared_prover_queries(
+            parent_commitment(parent)?,
+            poly,
+            &points,
+        ));
+    }
 
     Ok((queries, parents_commitments, buckets_level))
 }
 
 /// Processes a leaf node to create prover queries.
+#[cfg(test)]
 fn process_leaf_node<Store>(
     store: &Store,
     parent: NodeId,
     parent_commitment: Element,
     points: BTreeSet<usize>,
 ) -> ProofResult<Vec<ProverQuery>>
+where
+    Store: StateReader,
+{
+    Ok(create_prover_queries(
+        parent_commitment,
+        leaf_polynomial(store, parent)?,
+        points,
+    ))
+}
+
+/// The 256-slot polynomial of a leaf node: every slot's value hashed to the field, with the
+/// bucket kind's default for empty slots.
+fn leaf_polynomial<Store>(store: &Store, parent: NodeId) -> ProofResult<LagrangeBasis>
 where
     Store: StateReader,
 {
@@ -401,12 +534,7 @@ where
         default_coefficients[index] = slot_to_field(&Some(value));
     }
 
-    // Create IPA prover queries for the specified evaluation points
-    Ok(create_prover_queries(
-        parent_commitment,
-        LagrangeBasis::new(default_coefficients),
-        points,
-    ))
+    Ok(LagrangeBasis::new(default_coefficients))
 }
 
 #[cfg(test)]

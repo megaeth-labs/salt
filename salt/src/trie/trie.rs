@@ -66,10 +66,16 @@ pub(crate) fn shared_committer() -> Arc<Committer> {
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
     let build = || {
-        Committer::new(
-            &crate::proof::prover::DEFAULT_CRS.G,
-            platform::DEFAULT_PRECOMP_WINDOW_SIZE,
-        )
+        let crs = &*crate::proof::prover::DEFAULT_CRS;
+        // `Q` rides along as base `crs.n`, so the IPA prover's blinding terms are fixed-base
+        // multiplications too (see `ipa::create_with_precomp`).
+        let bases: Vec<Element> = crs
+            .G
+            .iter()
+            .copied()
+            .chain(core::iter::once(crs.Q))
+            .collect();
+        Committer::new(&bases, platform::DEFAULT_PRECOMP_WINDOW_SIZE)
     };
     #[cfg(feature = "parallel")]
     {

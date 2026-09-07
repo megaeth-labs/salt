@@ -201,7 +201,8 @@ pub fn create(
 /// # Arguments
 ///
 /// * `precomp` - Fixed-base tables for the CRS `G` vector (must cover at least
-///   `a_vec.len()` bases, in CRS order)
+///   `a_vec.len()` bases, in CRS order); when they cover one more base, it must
+///   be `Q`, and the blinding terms become fixed-base multiplications too
 /// * `q` - The CRS blinding generator `Q`
 pub fn create_with_precomp(
     transcript: &mut Transcript,
@@ -229,7 +230,19 @@ pub fn create_with_precomp(
     transcript.append_scalar(b"output point", &output_point);
 
     let w = transcript.challenge_scalar(b"w");
-    let Q = q * w;
+    // Tables that cover one base past the vector carry `Q` there (the salt trie's shared
+    // committer does), which turns the blinding terms `z·(w·Q) = (w·z)·Q` into fixed-base
+    // multiplications as well. Otherwise `Q` is folded with one variable-base product.
+    let q_index = (precomp.num_bases() > n).then_some(n);
+    debug_assert!(
+        q_index.is_none_or(|i| precomp.mul_index(&Fr::one(), i) == q),
+        "committer base {n} is not the blinding generator Q"
+    );
+    let Q = q_index.is_none().then(|| q * w);
+    let blind = |z: Fr| match q_index {
+        Some(i) => precomp.mul_index(&(w * z), i),
+        None => Q.expect("Q is folded whenever the tables lack it") * z,
+    };
 
     let num_rounds = log2(n);
 
@@ -261,11 +274,11 @@ pub fn create_with_precomp(
 
         let left_compute = || -> Element {
             let z_L = inner_product(a_R, b_L);
-            fixed_base_msm(precomp, &l_terms) + Q * z_L
+            fixed_base_msm(precomp, &l_terms) + blind(z_L)
         };
         let right_compute = || -> Element {
             let z_R = inner_product(a_L, b_R);
-            fixed_base_msm(precomp, &r_terms) + Q * z_R
+            fixed_base_msm(precomp, &r_terms) + blind(z_R)
         };
 
         let (L, R) = join!(left_compute, right_compute);
@@ -304,8 +317,12 @@ pub fn create_with_precomp(
 
 /// Sums `scalar · G[index]` over the given terms using precomputed wNAF
 /// tables, splitting the terms across threads.
+/// Smallest number of terms one parallel task takes: below this the rayon dispatch costs more
+/// than the fixed-base multiplications it hands out, and concurrent proofs only contend.
+const MSM_MIN_CHUNK: usize = 8;
+
 pub(crate) fn fixed_base_msm(precomp: &Committer, terms: &[(usize, Fr)]) -> Element {
-    let chunk_size = terms.len().div_ceil(num_threads!()).max(1);
+    let chunk_size = terms.len().div_ceil(num_threads!()).max(MSM_MIN_CHUNK);
     chunks!(terms, chunk_size)
         .map(|chunk| {
             let mut acc = Element::zero();
@@ -481,6 +498,21 @@ mod tests {
         );
 
         assert_eq!(folded.to_bytes().unwrap(), precomputed.to_bytes().unwrap());
+
+        // Tables that also carry `Q` (as base `n`) take the fixed-base blinding path.
+        let mut bases_with_q = crs.G.clone();
+        bases_with_q.push(crs.Q);
+        let committer_with_q = Committer::new(&bases_with_q, 6);
+        let fixed_base_q = create_with_precomp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &committer_with_q,
+            crs.Q,
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+        assert_eq!(folded.to_bytes().unwrap(), fixed_base_q.to_bytes().unwrap());
 
         let output_point = inner_product(&a, &b);
         assert!(precomputed.verify_multiexp(

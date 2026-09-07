@@ -64,7 +64,7 @@ pub(crate) fn parents_and_points(
 ) {
     // One accumulator pair per thread chunk, merged once at the end. (A
     // per-key map-reduce would allocate and merge two BTreeMaps per key.)
-    let chunk_size = salt_keys.len().div_ceil(num_threads!()).max(1);
+    let chunk_size = salt_keys.len().div_ceil(num_threads!()).max(64);
     let partials: Vec<_> = chunks!(salt_keys, chunk_size)
         .map(|chunk| {
             let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();

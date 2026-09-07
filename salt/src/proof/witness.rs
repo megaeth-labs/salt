@@ -195,9 +195,11 @@ impl Witness {
             reason: format!("{e:?}"),
         })?;
 
+        let salt_witness = SaltWitness::create(&witnessed_keys, store)?;
+
         Ok(Witness {
             direct_lookup_tbl,
-            salt_witness: SaltWitness::create(&witnessed_keys, store)?,
+            salt_witness,
         })
     }
 
@@ -1172,5 +1174,30 @@ mod tests {
         assert!(bucket_ids
             .iter()
             .all(|&id| witness.metadata(id).unwrap() == new_metadata));
+    }
+
+    /// A node-polynomial cache hit must reproduce the miss byte for byte: the same inputs
+    /// witnessed twice serialize identically (the second pass is served from the cache), and
+    /// the witness still verifies.
+    #[test]
+    fn cached_node_polynomials_reproduce_the_witness_byte_for_byte() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let kvs: HashMap<_, _> = (0..64)
+            .map(|_| (mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40))))
+            .collect();
+        let store = MemStore::new();
+        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
+        store.update_state(updates.clone());
+        let (_root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
+        store.update_trie(trie_updates);
+
+        let build = || Witness::create([], kvs.keys(), &BTreeMap::new(), &store).unwrap();
+        let encode = |witness: &Witness| {
+            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy()).unwrap()
+        };
+        let first = encode(&build());
+        let second = encode(&build());
+        assert_eq!(first, second, "a cache hit must not change the proof");
+        build().verify().unwrap();
     }
 }
