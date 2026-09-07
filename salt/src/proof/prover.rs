@@ -3,7 +3,7 @@ use crate::{
     constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, STARTING_NODE_ID},
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
-        subtrie::create_sub_trie,
+        subtrie::{create_sub_trie, NodePolyRefresh},
         ProofError, ProofResult,
     },
     traits::{StateReader, TrieReader},
@@ -224,6 +224,21 @@ impl SaltProof {
         I: IntoIterator<Item = SaltKey>,
         Store: StateReader + TrieReader,
     {
+        Self::create_with_refresh(keys, store, None)
+    }
+
+    /// [`Self::create`], additionally advancing the node-polynomial cache with `refresh`, the
+    /// witnessed block's own transition, once this proof's polynomials are resolved (see
+    /// [`NodePolyRefresh`]). The proof itself is the same with or without a refresh.
+    pub fn create_with_refresh<Store, I>(
+        keys: I,
+        store: &Store,
+        refresh: Option<&NodePolyRefresh<'_>>,
+    ) -> Result<SaltProof, ProofError>
+    where
+        I: IntoIterator<Item = SaltKey>,
+        Store: StateReader + TrieReader,
+    {
         let mut keys: Vec<_> = keys.into_iter().collect();
         // Check if the array is already sorted - returns true if sorted, false otherwise
         // Using any() to find the first out-of-order pair for efficiency
@@ -234,7 +249,7 @@ impl SaltProof {
         }
         keys.dedup();
 
-        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys)?;
+        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys, refresh)?;
 
         let mut transcript = Transcript::new(b"st");
 

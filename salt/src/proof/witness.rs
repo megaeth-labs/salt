@@ -8,6 +8,7 @@
 use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
 use crate::{
     proof::salt_witness::SaltWitness,
+    proof::subtrie::NodePolyRefresh,
     proof::ProofError,
     state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
@@ -112,6 +113,29 @@ impl Witness {
     where
         Store: StateReader + TrieReader,
     {
+        Self::create_with_refresh(bucket_ids, lookups, updates, store, None)
+    }
+
+    /// [`Self::create`], additionally advancing the process-wide node-polynomial cache to the
+    /// witnessed block's post-state.
+    ///
+    /// The witness proves the parent state, and `refresh` is the block's own transition (its
+    /// `TrieUpdates` and `StateUpdates`, as `StateRoot::update_fin` produced them from that
+    /// parent state). After this witness's own lookups, the cache entries of every node the
+    /// block changed are advanced to the post-state, so the next block's witness hits instead
+    /// of rebuilding them from storage. Entries stay validated by commitment, so a stale or
+    /// foreign entry is only ever a miss; and the witness returned here is the same with or
+    /// without a refresh.
+    pub fn create_with_refresh<'b, Store>(
+        bucket_ids: impl IntoIterator<Item = BucketId>,
+        lookups: impl IntoIterator<Item = &'b Vec<u8>>,
+        updates: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        store: &Store,
+        refresh: Option<&NodePolyRefresh<'_>>,
+    ) -> Result<Witness, ProofError>
+    where
+        Store: StateReader + TrieReader,
+    {
         let mut witnessed_keys = vec![];
         let mut direct_lookup_tbl = HashMap::new();
 
@@ -195,7 +219,7 @@ impl Witness {
             reason: format!("{e:?}"),
         })?;
 
-        let salt_witness = SaltWitness::create(&witnessed_keys, store)?;
+        let salt_witness = SaltWitness::create_with_refresh(&witnessed_keys, store, refresh)?;
 
         Ok(Witness {
             direct_lookup_tbl,
@@ -1198,6 +1222,61 @@ mod tests {
         let first = encode(&build());
         let second = encode(&build());
         assert_eq!(first, second, "a cache hit must not change the proof");
+        build().verify().unwrap();
+    }
+
+    /// A witness built with its block's refresh verifies, and the next block's witness over
+    /// the refreshed entries serializes identically when built twice and still verifies: a
+    /// wrong refreshed entry on those paths would fail its verification.
+    #[test]
+    fn witness_over_refreshed_polynomials_verifies_and_is_stable() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let kvs_a: HashMap<_, _> = (0..64)
+            .map(|_| (mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40))))
+            .collect();
+        let store = MemStore::new();
+        let updates_a = EphemeralSaltState::new(&store).update_fin(&kvs_a).unwrap();
+        store.update_state(updates_a.clone());
+        let (_, trie_a) = StateRoot::new(&store).update_fin(&updates_a).unwrap();
+        store.update_trie(trie_a);
+
+        // Block B: 16 value updates, 8 deletes and 16 inserts over block A.
+        let mut keys_a: Vec<Vec<u8>> = kvs_a.into_keys().collect();
+        keys_a.sort();
+        let mut kvs_b: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+        for key in &keys_a[..16] {
+            kvs_b.insert(key.clone(), Some(mock_data(&mut rng, 40)));
+        }
+        for key in &keys_a[16..24] {
+            kvs_b.insert(key.clone(), None);
+        }
+        for _ in 0..16 {
+            kvs_b.insert(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)));
+        }
+        let updates_b = EphemeralSaltState::new(&store).update_fin(&kvs_b).unwrap();
+        let (_, trie_b) = StateRoot::new(&store).update_fin(&updates_b).unwrap();
+        let plain_b: BTreeMap<_, _> = kvs_b
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_b,
+            state_updates: &updates_b,
+        };
+        let witness_b =
+            Witness::create_with_refresh([], core::iter::empty(), &plain_b, &store, Some(&refresh))
+                .unwrap();
+        witness_b.verify().unwrap();
+
+        store.update_state(updates_b);
+        store.update_trie(trie_b);
+        let build = || Witness::create([], kvs_b.keys(), &BTreeMap::new(), &store).unwrap();
+        let encode = |witness: &Witness| {
+            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy()).unwrap()
+        };
+        let first = encode(&build());
+        let second = encode(&build());
+        assert_eq!(first, second, "a refreshed entry must not change the proof");
         build().verify().unwrap();
     }
 }
