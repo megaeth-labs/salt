@@ -1143,6 +1143,15 @@ mod tests {
         entry
     }
 
+    /// Whether `node` is the main-trie root of a data bucket. Fixtures do not share one: random
+    /// keys spread over sixteen million buckets, and hand-picked buckets differ between tests.
+    /// Its cache entry is therefore the current test's own, while every other class of node
+    /// (upper main-trie levels, metadata leaves) is shared with the rest of the process and
+    /// checked only when present.
+    fn is_data_bucket_root(node: NodeId) -> bool {
+        node >> BUCKET_SLOT_BITS == 0 && node >= bucket_root_node_id(NUM_META_BUCKETS as BucketId)
+    }
+
     /// Every changed node is planned with its own transition, and every entry the refresh
     /// inserts equals the polynomial a rebuild from the post-block store produces, for
     /// main-trie leaves and internal nodes alike.
@@ -1529,5 +1538,282 @@ mod tests {
             state_updates: &updates_b,
         };
         let _ = create_sub_trie(&store, &keys, Some(&refresh));
+    }
+
+    /// A planned parent the witness did not read takes its base from the cache's entry for its
+    /// old commitment, and is skipped while the cache holds none: after a refresh whose witness
+    /// covered one bucket, the other changed buckets' roots are absent under their new
+    /// commitment, and present, equal to the post-block rebuild, once a witness over the
+    /// pre-state has cached their bases.
+    #[test]
+    fn refresh_uses_cached_bases_for_parents_the_witness_did_not_read() {
+        let (store, updates_b, trie_b) = two_block_fixture(5);
+        let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_b,
+            state_updates: &updates_b,
+        };
+        let bucket = keys
+            .iter()
+            .find(|key| !key.is_in_meta_bucket())
+            .unwrap()
+            .bucket_id();
+        let witnessed: Vec<SaltKey> = keys
+            .iter()
+            .copied()
+            .filter(|key| key.bucket_id() == bucket)
+            .collect();
+        let unread_roots: Vec<(NodeId, CommitmentBytes)> = trie_b
+            .iter()
+            .filter(|&&(node, _)| is_data_bucket_root(node) && node != bucket_root_node_id(bucket))
+            .map(|&(node, (_, new))| (node, new))
+            .collect();
+        assert!(
+            unread_roots.len() >= 8,
+            "{} unread roots",
+            unread_roots.len()
+        );
+
+        // Nothing holds those roots' pre-state polynomials yet, so they are skipped.
+        let (queries, _, _) = create_sub_trie(&store, &witnessed, Some(&refresh)).unwrap();
+        assert!(verify_ipa_proof(queries));
+        for &(node, new) in &unread_roots {
+            assert!(
+                node_poly_cache::get(node, &new).is_none(),
+                "node {node} was refreshed without a base"
+            );
+        }
+
+        // A witness over the pre-state caches every parent under its old commitment.
+        create_sub_trie(&store, &keys, None).unwrap();
+        let (queries, _, _) = create_sub_trie(&store, &witnessed, Some(&refresh)).unwrap();
+        assert!(verify_ipa_proof(queries));
+
+        store.update_state(updates_b);
+        store.update_trie(trie_b.clone());
+        for &(node, new) in &unread_roots {
+            let entry = node_poly_cache::get(node, &new)
+                .unwrap_or_else(|| panic!("node {node} was not refreshed from its cached base"));
+            assert_eq!(*entry, rebuilt_polynomial(&store, node), "node {node}");
+        }
+        for &(node, (_, new)) in &trie_b {
+            if let Some(entry) = node_poly_cache::get(node, &new) {
+                assert_eq!(*entry, rebuilt_polynomial(&store, node), "node {node}");
+            }
+        }
+    }
+
+    /// Every planned parent whose base is in hand at its old commitment is applied: the
+    /// refresh inserts one entry per planned parent, skipping none, and each entry equals the
+    /// polynomial a rebuild from the post-block store produces.
+    #[test]
+    fn refresh_applies_every_planned_parent() {
+        let (store, updates_b, trie_b) = two_block_fixture(9);
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_b,
+            state_updates: &updates_b,
+        };
+        let plan = refresh_plan(&refresh);
+        let planned = plan.len();
+        let mut in_hand = FxHashMap::default();
+        let mut parent_bytes = FxHashMap::default();
+        for &node in plan.keys() {
+            in_hand.insert(node, Arc::new(rebuilt_polynomial(&store, node)));
+            parent_bytes.insert(node, store.commitment(node).unwrap());
+        }
+        assert_eq!(apply_refresh(plan, &in_hand, &parent_bytes), planned);
+
+        store.update_state(updates_b);
+        store.update_trie(trie_b.clone());
+        for &(node, (_, new)) in &trie_b {
+            let entry = node_poly_cache::get(node, &new);
+            assert!(
+                entry.is_some() || !is_data_bucket_root(node),
+                "node {node} was not refreshed"
+            );
+            if let Some(entry) = entry {
+                assert_eq!(*entry, rebuilt_polynomial(&store, node), "node {node}");
+            }
+        }
+    }
+
+    /// The witness must read the transition's pre-state: over the post-state store every
+    /// parent is read at its new commitment, which the debug guard rejects before any entry
+    /// is derived from it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "other than the refresh's pre-state")]
+    fn refresh_rejects_a_witness_over_the_post_state() {
+        let (store, updates_b, trie_b) = two_block_fixture(6);
+        let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
+        store.update_state(updates_b.clone());
+        store.update_trie(trie_b.clone());
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_b,
+            state_updates: &updates_b,
+        };
+        let _ = create_sub_trie(&store, &keys, Some(&refresh));
+    }
+
+    /// A parent the witness read at a commitment other than the refresh's old one is skipped,
+    /// never patched: a witness over the pre-B view carrying block C's transition (whose old
+    /// commitments are B's) leaves the bucket root absent under C's commitment, and inserts
+    /// nothing that differs from the post-C rebuild. Debug builds reject such a witness
+    /// outright instead (`refresh_rejects_a_witness_over_the_post_state`).
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn refresh_skips_a_parent_read_at_a_foreign_commitment() {
+        let store = MemStore::new();
+        let bucket = NUM_META_BUCKETS as BucketId + 7 * MIN_BUCKET_SIZE as BucketId + 11;
+        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
+        let key = |slot| SaltKey::from((bucket, slot));
+
+        // Blocks A and B change slot 3; block C, computed over B, changes slot 5.
+        apply_block(
+            &store,
+            StateUpdates {
+                data: [(key(3), (None, value(1))), (key(5), (None, value(2)))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let pre_b = store.clone();
+        apply_block(
+            &store,
+            StateUpdates {
+                data: [(key(3), (value(1), value(3)))].into_iter().collect(),
+            },
+        );
+        let updates_c = StateUpdates {
+            data: [(key(5), (value(2), value(4)))].into_iter().collect(),
+        };
+        let (_, trie_c) = StateRoot::new(&store).update_fin(&updates_c).unwrap();
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_c,
+            state_updates: &updates_c,
+        };
+
+        let (queries, _, _) = create_sub_trie(&pre_b, &[key(3), key(5)], Some(&refresh)).unwrap();
+        assert!(verify_ipa_proof(queries));
+
+        store.update_state(updates_c);
+        store.update_trie(trie_c.clone());
+        let root = bucket_root_node_id(bucket);
+        let (_, new_root) = transition(&trie_c, root);
+        assert!(
+            node_poly_cache::get(root, &new_root).is_none(),
+            "a parent read at a foreign commitment was patched"
+        );
+        for &(node, (_, new)) in &trie_c {
+            if let Some(entry) = node_poly_cache::get(node, &new) {
+                assert_eq!(*entry, rebuilt_polynomial(&store, node), "node {node}");
+            }
+        }
+    }
+
+    /// A metadata change that keeps the capacity (a rehash under a new nonce) does not freeze
+    /// the bucket: over a two-level, 512-slot subtree the moved slots are patched in their
+    /// leaves, the changed leaves in the top under the bucket root, and the metadata leaf at
+    /// the bucket's slot.
+    #[test]
+    fn refresh_patches_a_rehashed_bucket_with_unchanged_capacity() {
+        let store = MemStore::new();
+        let bucket = NUM_META_BUCKETS as BucketId + 9 * MIN_BUCKET_SIZE as BucketId + 13;
+        let capacity = 2 * MIN_BUCKET_SIZE as u64;
+        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
+        let meta = |nonce| {
+            Some(SaltValue::from(BucketMeta {
+                nonce,
+                capacity,
+                ..BucketMeta::default()
+            }))
+        };
+        let key = |slot| SaltKey::from((bucket, slot));
+        let meta_key = bucket_metadata_key(bucket);
+        let root = bucket_root_node_id(bucket);
+        let meta_root = bucket_root_node_id(meta_key.bucket_id());
+
+        // Block A: a 512-slot bucket holding two values in its first leaf and one in its
+        // second.
+        apply_block(
+            &store,
+            StateUpdates {
+                data: [
+                    (meta_key, (Some(BucketMeta::default().into()), meta(0))),
+                    (key(3), (None, value(1))),
+                    (key(5), (None, value(2))),
+                    (key(300), (None, value(3))),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        // Block B: a rehash under a new nonce moves the values, capacity unchanged.
+        let updates_b = EphemeralSaltState::new(&store)
+            .set_nonce(bucket, 1)
+            .unwrap();
+        assert_eq!(updates_b.data[&meta_key], (meta(0), meta(1)));
+        let (_, trie_b) = StateRoot::new(&store).update_fin(&updates_b).unwrap();
+        let refresh = NodePolyRefresh {
+            trie_updates: &trie_b,
+            state_updates: &updates_b,
+        };
+
+        // Every changed node is planned; the leaves at their moved slots, the top at the
+        // changed leaves, the metadata leaf at the bucket's slot.
+        let mut moved: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
+        for key in updates_b.data.keys().filter(|key| !key.is_in_meta_bucket()) {
+            moved
+                .entry(subtree_leaf_for_key(key))
+                .or_default()
+                .insert((key.slot_id() & SLOT_INDEX_MASK) as usize);
+        }
+        assert_eq!(moved.len(), 2, "both leaves change");
+        let plan = refresh_plan(&refresh);
+        assert_eq!(
+            node_set(plan.keys()),
+            node_set(trie_b.iter().map(|(node, _)| node))
+        );
+        for (leaf, slots) in &moved {
+            assert_eq!(planned_positions(&plan, *leaf), *slots, "leaf {leaf}");
+        }
+        assert_eq!(
+            planned_positions(&plan, root),
+            moved.keys().map(vc_position_in_parent).collect()
+        );
+        assert_eq!(
+            planned_positions(&plan, meta_root),
+            [(meta_key.slot_id() & SLOT_INDEX_MASK) as usize].into()
+        );
+
+        let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
+        let (queries, _, _) = create_sub_trie(&store, &keys, Some(&refresh)).unwrap();
+        assert!(verify_ipa_proof(queries));
+
+        store.update_state(updates_b);
+        store.update_trie(trie_b.clone());
+        let (_, new_root) = transition(&trie_b, root);
+        assert_eq!(
+            *refreshed(root, &new_root).unwrap(),
+            rebuilt_polynomial(&store, encode_parent(root, 2)),
+            "subtree top under the bucket root"
+        );
+        for leaf in moved.keys() {
+            let (_, new) = transition(&trie_b, *leaf);
+            assert_eq!(
+                *refreshed(*leaf, &new).unwrap(),
+                rebuilt_polynomial(&store, *leaf),
+                "leaf {leaf}"
+            );
+        }
+        let (_, new_meta_root) = transition(&trie_b, meta_root);
+        if let Some(entry) = node_poly_cache::get(meta_root, &new_meta_root) {
+            assert_eq!(
+                *entry,
+                rebuilt_polynomial(&store, meta_root),
+                "metadata leaf"
+            );
+        }
     }
 }
