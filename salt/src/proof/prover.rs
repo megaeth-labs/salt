@@ -1593,59 +1593,41 @@ mod tests {
             assert_eq!(forward_bytes, reverse_bytes);
         }
 
-        #[test]
-        fn rejects_duplicate_bucket_id() {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&2u64.to_le_bytes());
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(1u8);
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(2u8);
-
-            let result: Result<(LevelsWrapper, _), _> =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
-            assert!(result.is_err(), "duplicate BucketId must be rejected");
-        }
-
-        /// Bincode (legacy config) bytes of a one-entry `levels` map, built by
-        /// hand so a test can present a level no prover produces (the serializer
-        /// itself writes any u8 unchanged; only deserialization validates).
-        fn single_entry_bytes(bucket_id: BucketId, level: u8) -> Vec<u8> {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&1u64.to_le_bytes());
-            bytes.extend_from_slice(&bucket_id.to_le_bytes());
-            bytes.push(level);
+        /// Bincode (legacy config) bytes of a `levels` map, built by hand so a test
+        /// can present entries no prover produces: a duplicate bucket, or a level
+        /// outside the valid range (the serializer writes any u8 unchanged; only
+        /// deserialization validates).
+        fn levels_bytes(entries: &[(BucketId, u8)]) -> Vec<u8> {
+            let mut bytes = (entries.len() as u64).to_le_bytes().to_vec();
+            for (bucket_id, level) in entries {
+                bytes.extend_from_slice(&bucket_id.to_le_bytes());
+                bytes.push(*level);
+            }
             bytes
         }
 
-        #[test]
-        fn rejects_zero_level() {
-            let bytes = single_entry_bytes(7, 0);
-            let result: Result<(LevelsWrapper, _), _> =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
-            assert!(result.is_err(), "level 0 must be rejected");
+        fn decode(bytes: &[u8]) -> Result<LevelsWrapper, bincode::error::DecodeError> {
+            bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
+                .map(|(decoded, _)| decoded)
         }
 
         #[test]
-        fn rejects_level_above_max() {
-            let bytes = single_entry_bytes(7, MAX_SUBTREE_LEVELS as u8 + 1);
-            let result: Result<(LevelsWrapper, _), _> =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
+        fn rejects_duplicate_bucket_id() {
             assert!(
-                result.is_err(),
-                "level above MAX_SUBTREE_LEVELS must be rejected"
+                decode(&levels_bytes(&[(7, 1), (7, 2)])).is_err(),
+                "duplicate BucketId must be rejected"
             );
         }
 
-        /// Both ends of the valid range decode; only values outside it are refused.
+        /// Levels outside `1..=MAX_SUBTREE_LEVELS` are refused; both ends of the
+        /// range decode in `round_trip_preserves_entries`.
         #[test]
-        fn accepts_boundary_levels() {
-            for level in [1u8, MAX_SUBTREE_LEVELS as u8] {
-                let bytes = single_entry_bytes(7, level);
-                let (decoded, _): (LevelsWrapper, _) =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
-                        .unwrap_or_else(|e| panic!("level {level} must decode: {e}"));
-                assert_eq!(decoded, levels_wrapper([(7, level)]));
+        fn rejects_out_of_range_levels() {
+            for level in [0, MAX_SUBTREE_LEVELS as u8 + 1] {
+                assert!(
+                    decode(&levels_bytes(&[(7, level)])).is_err(),
+                    "level {level} must be rejected"
+                );
             }
         }
     }

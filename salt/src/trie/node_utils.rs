@@ -110,7 +110,7 @@
 //!     └─ Up to 4,294,967,296 Level 4 leaf nodes
 //! ```
 //!
-//! 2^40 is the ceiling: the deepest level holds 256^4 = 2^32 segments of 256 slots.
+//! 2^40 is [`MAX_BUCKET_SIZE`](crate::constant::MAX_BUCKET_SIZE), whose doc derives the ceiling.
 //!
 //! ### Key Insights
 //!
@@ -294,13 +294,7 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 
     // Add parent level's starting position to get absolute parent ID
     // and preserve the bucket ID for subtree nodes
-    let parent = bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId;
-    debug_assert_eq!(
-        get_bfs_level(get_local_number(parent)),
-        level - 1,
-        "parent of a level-{level} node must sit one level up"
-    );
-    parent
+    bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId
 }
 
 /// Maps a bucket ID to its subtree root node in the main trie.
@@ -392,24 +386,15 @@ pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
 /// capacity ≤ 2^40 (1,099,511,627,776) → level 0 over up to 4,294,967,296 leaves
 /// ```
 ///
-/// Each leaf ("segment") holds `MIN_BUCKET_SIZE` = 256 consecutive slots, so the
-/// deepest level's 2^32 segments cap a bucket at 2^32 * 256 = 2^40 slots, which is
-/// [`MAX_BUCKET_SIZE`](crate::constant::MAX_BUCKET_SIZE).
+/// The last row is the ceiling, [`MAX_BUCKET_SIZE`](crate::constant::MAX_BUCKET_SIZE).
 ///
 /// # Arguments
-/// * `capacity` - The total number of slots the bucket needs to accommodate
+/// * `capacity` - The total number of slots the bucket needs to accommodate. Callers
+///   must keep it at or below `MAX_BUCKET_SIZE`; past that `level` underflows (a
+///   panic in debug builds, a wrap in release builds).
 ///
 /// # Returns
 /// The subtree level (0-4) that should serve as the root for this capacity
-///
-/// # Panics
-///
-/// Panics in debug builds (and wraps `level` in release builds) if `capacity` exceeds
-/// `MAX_BUCKET_SIZE`, since no subtree level can hold it. Callers must bound capacity
-/// themselves. `EphemeralSaltState::shi_rehash` asserts it for the capacity it is
-/// asked to resize *to*, and `BucketMeta::try_from` rejects a decoded capacity outside
-/// `1..=MAX_BUCKET_SIZE`, so a capacity read back through a `StateReader` is bounded;
-/// a `BucketMeta` built in-process with a larger `capacity` field is not.
 pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
     // Start from the deepest possible level
     let mut level = MAX_SUBTREE_LEVELS - 1;
@@ -427,33 +412,24 @@ pub(crate) fn subtree_root_level(mut capacity: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constant::MAX_BUCKET_SIZE;
+    use crate::constant::{MAX_BUCKET_SIZE, NUM_META_BUCKETS};
 
     /// The deepest subtree-local node number at `MAX_BUCKET_SIZE` exceeds u32, so
     /// the level-relative arithmetic has to stay in u64 rather than `usize` to be
-    /// right on 32-bit targets. Pins the values that arithmetic produces there.
+    /// right on 32-bit targets. Pins what that arithmetic produces there.
     #[test]
     fn parent_and_position_at_max_capacity_depth() {
-        use crate::constant::{
-            BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, MIN_BUCKET_SIZE, NUM_META_BUCKETS,
-            STARTING_NODE_ID, TRIE_WIDTH,
-        };
-        use crate::types::{get_local_number, NodeId};
+        let last_slot = SaltKey::from((NUM_META_BUCKETS as BucketId, MAX_BUCKET_SIZE - 1));
+        let node = subtree_leaf_for_key(&last_slot);
+        assert!(get_local_number(node) > u32::MAX as u64);
 
-        let segments = MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64;
-        let deepest_local = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + segments - 1;
-        assert!(deepest_local > u32::MAX as u64);
-
-        let bucket_id = NUM_META_BUCKETS as u64;
-        let node: NodeId = (bucket_id << BUCKET_SLOT_BITS) | deepest_local;
-
+        // The last segment is the last child of the last level-3 node.
         assert_eq!(vc_position_in_parent(&node), TRIE_WIDTH - 1);
-
         let parent = get_parent_node(&node);
-        assert_eq!(parent >> BUCKET_SLOT_BITS, bucket_id);
+        assert_eq!(get_child_node(&parent, TRIE_WIDTH - 1), node);
         assert_eq!(
             get_local_number(parent),
-            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 2] as u64 + segments / TRIE_WIDTH as u64 - 1
+            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 - 1
         );
     }
 

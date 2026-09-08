@@ -52,6 +52,26 @@ pub const META_BUCKET_SIZE: usize = MIN_BUCKET_SIZE;
 pub const MAX_BUCKET_SIZE: u64 =
     1 << ((MAX_SUBTREE_LEVELS - 1) * TRIE_WIDTH_BITS + MIN_BUCKET_SIZE_BITS);
 
+// `MAX_BUCKET_SIZE` is derived from the subtree shape while `BUCKET_SLOT_BITS` is the
+// `SaltKey` layout; tie them together at compile time so neither can drift.
+const _: () = {
+    // The shift form above is the segment count times the segment size.
+    assert!(
+        MAX_BUCKET_SIZE
+            == (TRIE_WIDTH as u64).pow((MAX_SUBTREE_LEVELS - 1) as u32) * MIN_BUCKET_SIZE as u64
+    );
+    // Every slot index of a maximally expanded bucket fits the slot field, and the
+    // largest one is exactly `BUCKET_SLOT_ID_MASK`.
+    assert!(MAX_BUCKET_SIZE == 1 << BUCKET_SLOT_BITS);
+    // So does that bucket's deepest subtree node, which must not bleed into the
+    // bucket-id bits of a `NodeId`.
+    assert!(
+        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64
+            - 1
+            <= BUCKET_SLOT_ID_MASK
+    );
+};
+
 // ============================================================================
 // Trie Structure Constants
 // ============================================================================
@@ -77,8 +97,7 @@ pub const MAIN_TRIE_LEVELS: usize = 4;
 /// - 16,777,217-4,294,967,296 slots: Root at level 1
 /// - 4,294,967,297-1,099,511,627,776 slots: Root at level 0, the full 5-level subtree
 ///
-/// The last row is the ceiling: the deepest level holds 256^4 = 2^32 segments, so a
-/// bucket tops out at `MAX_BUCKET_SIZE` = 2^32 * 256 = 2^40 slots.
+/// The last row ends at [`MAX_BUCKET_SIZE`], whose doc derives that ceiling.
 ///
 /// Example for 512-slot bucket (2 segments):
 /// ```text
@@ -307,26 +326,6 @@ mod tests {
         assert_eq!(DOMAIN_SIZE, 256);
         assert_eq!(EMPTY_SLOT_HASH, [1u8; 32]);
         assert_eq!(STARTING_NODE_ID, [0, 1, 257, 65_793, 16_843_009]);
-    }
-
-    /// `MAX_BUCKET_SIZE` must be the slot *count* a full subtree addresses, not the
-    /// largest slot *index*. Confusing the two caps buckets one doubling short.
-    #[test]
-    fn test_max_bucket_size_matches_subtree_capacity() {
-        // The deepest subtree level has TRIE_WIDTH^(MAX_SUBTREE_LEVELS - 1) segments,
-        // each holding MIN_BUCKET_SIZE slots.
-        let segments = (TRIE_WIDTH as u64).pow((MAX_SUBTREE_LEVELS - 1) as u32);
-        assert_eq!(segments, 1u64 << 32);
-        assert_eq!(MAX_BUCKET_SIZE, segments * MIN_BUCKET_SIZE as u64);
-
-        // Every slot index of a maximally expanded bucket fits the 40-bit slot field,
-        // and the largest one is exactly the mask.
-        assert_eq!(MAX_BUCKET_SIZE, 1u64 << BUCKET_SLOT_BITS);
-        assert_eq!(MAX_BUCKET_SIZE - 1, BUCKET_SLOT_ID_MASK);
-
-        // Capacities only ever double up from MIN_BUCKET_SIZE, so bounding one by
-        // BUCKET_SLOT_ID_MASK would have stopped at 2^39 instead of 2^40.
-        assert_eq!(MAX_BUCKET_SIZE / BUCKET_RESIZE_MULTIPLIER, 1u64 << 39);
     }
 
     #[test]

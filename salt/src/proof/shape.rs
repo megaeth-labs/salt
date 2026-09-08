@@ -19,7 +19,9 @@ use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 use crate::{
-    constant::{BUCKET_SLOT_BITS, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},
+    constant::{
+        BUCKET_SLOT_BITS, MAIN_TRIE_LEVELS, MAX_SUBTREE_LEVELS, ROOT_NODE_ID, STARTING_NODE_ID,
+    },
     trie::node_utils::{
         bucket_root_node_id, get_parent_node, subtree_leaf_for_key, vc_position_in_parent,
     },
@@ -71,11 +73,12 @@ pub(crate) fn parents_and_points(
             // ============================================================================
             // Phase 1: Main Trie Traversal
             // ============================================================================
-            // Walk from the bucket root up to the main trie root (node 0), recording
-            // each parent-child relationship. This captures the path through the fixed
-            // 4-level main trie structure that leads to this bucket.
+            // Walk from the bucket root up to the main trie root, recording each
+            // parent-child relationship. The main trie has a fixed depth, so the walk
+            // is exactly `MAIN_TRIE_LEVELS - 1` steps; bounding it by that count rather
+            // than by reaching the root keeps a corrupt parent id from spinning forever.
             let mut node = bucket_root_node_id(salt_key.bucket_id());
-            while node != 0 {
+            for _ in 0..MAIN_TRIE_LEVELS - 1 {
                 let parent_node = get_parent_node(&node);
                 // Record that this parent needs to prove the child at this position
                 internal_nodes
@@ -85,6 +88,7 @@ pub(crate) fn parents_and_points(
 
                 node = parent_node;
             }
+            debug_assert_eq!(node, ROOT_NODE_ID);
 
             // ============================================================================
             // Phase 2: Bucket Tree Traversal
