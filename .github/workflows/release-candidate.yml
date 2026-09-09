@@ -23,6 +23,14 @@ permissions:
 jobs:
   propose:
     if: github.event_name == 'workflow_dispatch'
+    # One proposal at a time: two dispatches would race on the candidate
+    # branch. Job-level, not workflow-level: every PR closing on the default
+    # branch also starts this workflow, and a workflow-wide group would let
+    # that noise evict a queued release run (one pending run per group).
+    # A skipped job holds no slot in a job-level group.
+    concurrency:
+      group: ${{ github.workflow }}-propose
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -36,6 +44,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # For `bump_command`; picks up rust-toolchain.toml.
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
@@ -48,7 +57,9 @@ jobs:
           version_file: salt/Cargo.toml
           version_pattern: toml
           changelog_file: CHANGELOG.md
-          # Cargo.lock carries the crate version too.
+          # Only the `salt` crate carries the version (the other workspace
+          # members are internal, path-only dependencies); Cargo.lock must
+          # follow it.
           bump_command: cargo update --workspace
 
   cut:
@@ -57,6 +68,11 @@ jobs:
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'chore/release-candidate-') &&
       github.event.pull_request.user.login == 'mega-maxwell[bot]'
+    # One cut at a time, never cancelled: pull_request.closed does not refire.
+    # Job-level for the reason given on `propose`.
+    concurrency:
+      group: ${{ github.workflow }}-cut
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
