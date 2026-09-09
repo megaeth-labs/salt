@@ -63,13 +63,15 @@ const _: () = {
     // Every slot index of a maximally expanded bucket fits the slot field, and the
     // largest one is exactly `BUCKET_SLOT_ID_MASK`.
     assert!(MAX_BUCKET_SIZE == 1 << BUCKET_SLOT_BITS);
-    // So does that bucket's deepest subtree node, which must not bleed into the
-    // bucket-id bits of a `NodeId`.
-    assert!(
-        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64
-            - 1
-            <= BUCKET_SLOT_ID_MASK
-    );
+    // That bucket's segments fill the deepest subtree level exactly: its last node
+    // is the one just before a sixth level would begin, so the ceiling has no slack
+    // and a wrong level base fails to compile here.
+    const MAX_SUBTREE_NODE_ID: u64 = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
+        + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64
+        - 1;
+    assert!(MAX_SUBTREE_NODE_ID + 1 == leftmost_node(MAX_SUBTREE_LEVELS as u32).unwrap());
+    // And that node must not bleed into the bucket-id bits of a `NodeId`.
+    assert!(MAX_SUBTREE_NODE_ID <= BUCKET_SLOT_ID_MASK);
 };
 
 // ============================================================================
