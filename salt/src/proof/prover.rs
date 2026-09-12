@@ -3,7 +3,7 @@ use crate::{
     constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, STARTING_NODE_ID},
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
-        subtrie::create_sub_trie,
+        subtrie::{create_sub_trie, NodePolyRefresh},
         ProofError, ProofResult,
     },
     traits::{StateReader, TrieReader},
@@ -41,6 +41,12 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(DOMAIN_SIZE));
+
+/// Shared default CRS. Constructing `CRS::default()` decompresses 257 points,
+/// each costing a modular square root plus a subgroup check (several
+/// milliseconds total), so it is done once per process and reused by every
+/// proof creation and verification.
+pub static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
 
 /// Serde wrapper for banderwagon `Element` with validation and compression.
 ///
@@ -218,6 +224,21 @@ impl SaltProof {
         I: IntoIterator<Item = SaltKey>,
         Store: StateReader + TrieReader,
     {
+        Self::create_with_refresh(keys, store, None)
+    }
+
+    /// [`Self::create`], additionally advancing the node-polynomial cache with `refresh`, the
+    /// witnessed block's own transition, once this proof's polynomials are resolved (see
+    /// [`NodePolyRefresh`]). The proof itself is the same with or without a refresh.
+    pub fn create_with_refresh<Store, I>(
+        keys: I,
+        store: &Store,
+        refresh: Option<&NodePolyRefresh<'_>>,
+    ) -> Result<SaltProof, ProofError>
+    where
+        I: IntoIterator<Item = SaltKey>,
+        Store: StateReader + TrieReader,
+    {
         let mut keys: Vec<_> = keys.into_iter().collect();
         // Check if the array is already sorted - returns true if sorted, false otherwise
         // Using any() to find the first out-of-order pair for efficiency
@@ -228,13 +249,20 @@ impl SaltProof {
         }
         keys.dedup();
 
-        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys)?;
-
-        let crs = CRS::default();
+        let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys, refresh)?;
 
         let mut transcript = Transcript::new(b"st");
 
-        let proof = MultiPoint::open(crs, &PRECOMPUTED_WEIGHTS, &mut transcript, prover_queries);
+        // Reuse the shared CRS (deriving it decompresses 257 points) and the
+        // trie's fixed-base tables for all MSMs over the CRS generators.
+        let committer = crate::trie::trie::shared_committer();
+        let proof = MultiPoint::open_with_committer(
+            DEFAULT_CRS.clone(),
+            &committer,
+            &PRECOMPUTED_WEIGHTS,
+            &mut transcript,
+            prover_queries,
+        );
 
         Ok(SaltProof {
             parents_commitments,
@@ -267,14 +295,13 @@ impl SaltProof {
 
         let mut transcript = Transcript::new(b"st");
 
-        let crs = CRS::default();
-
         // call MultiPointProof::check to verify the proof
-        if self
-            .proof
-            .0
-            .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
-        {
+        if self.proof.0.check(
+            &DEFAULT_CRS,
+            &PRECOMPUTED_WEIGHTS,
+            &queries,
+            &mut transcript,
+        ) {
             Ok(())
         } else {
             Err(ProofError::MultiPointProofFailed)

@@ -4,13 +4,13 @@ use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
 use crate::{IOResult, SerdeError};
-use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
+use banderwagon::{multi_scalar_mul, salt_committer::Committer, trait_defs::*, Element, Fr};
 use core::iter;
 use itertools::Itertools;
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, chunks_mut, join, num_threads};
-use std::vec::Vec;
+use std::{vec, vec::Vec};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
@@ -177,6 +177,165 @@ pub fn create(
     }
 }
 
+/// Creates the same IPA proof as [`create`], but computes every `L`/`R` point
+/// as a fixed-base multi-scalar multiplication over the *original* CRS
+/// generators using precomputed wNAF tables, instead of folding the generator
+/// vector with one variable-base scalar multiplication per element.
+///
+/// # How it works
+///
+/// After `k` folding rounds, each folded generator is a known linear
+/// combination of the original generators:
+///
+/// ```text
+/// G_k[i] = Σ_m coeff[m] · G[m]     over m with m mod len == i
+/// ```
+///
+/// where `coeff[m]` is the product of the inverse challenges of every past
+/// round in which index `m` sat in the right half. Substituting this into
+/// `L_k = <a_R, G_L> + z_L·Q` (and symmetrically for `R_k`) turns each round's
+/// two MSMs into MSMs over the fixed generator set, where each original index
+/// contributes to exactly one of `L`/`R` per round. The scalars fold exactly
+/// as before, so the resulting proof is byte-identical to [`create`]'s.
+///
+/// # Arguments
+///
+/// * `precomp` - Fixed-base tables for the CRS `G` vector (must cover at least
+///   `a_vec.len()` bases, in CRS order); when they cover one more base, it must
+///   be `Q`, and the blinding terms become fixed-base multiplications too
+/// * `q` - The CRS blinding generator `Q`
+pub fn create_with_precomp(
+    transcript: &mut Transcript,
+    precomp: &Committer,
+    q: Element,
+    mut a_vec: Vec<Fr>,
+    a_comm: Element,
+    mut b_vec: Vec<Fr>,
+    // This is the z in f(z)
+    input_point: Fr,
+) -> IPAProof {
+    transcript.domain_sep(b"ipa");
+
+    let mut a = &mut a_vec[..];
+    let mut b = &mut b_vec[..];
+
+    let n = a.len();
+    assert_eq!(b.len(), n);
+    assert!(n.is_power_of_two());
+    assert!(precomp.num_bases() >= n);
+
+    let output_point = inner_product(a, b);
+    transcript.append_point(b"C", &a_comm);
+    transcript.append_scalar(b"input point", &input_point);
+    transcript.append_scalar(b"output point", &output_point);
+
+    let w = transcript.challenge_scalar(b"w");
+    // Tables that cover one base past the vector carry `Q` there (the salt trie's shared
+    // committer does), which turns the blinding terms `z·(w·Q) = (w·z)·Q` into fixed-base
+    // multiplications as well. Otherwise `Q` is folded with one variable-base product.
+    let q_index = (precomp.num_bases() > n).then_some(n);
+    debug_assert!(
+        q_index.is_none_or(|i| precomp.mul_index(&Fr::one(), i) == q),
+        "committer base {n} is not the blinding generator Q"
+    );
+    let Q = q_index.is_none().then(|| q * w);
+    let blind = |z: Fr| match q_index {
+        Some(i) => precomp.mul_index(&(w * z), i),
+        None => Q.expect("Q is folded whenever the tables lack it") * z,
+    };
+
+    let num_rounds = log2(n);
+
+    let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+    let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+
+    // coeff[m] tracks the coefficient of original generator G[m] inside the
+    // implicitly folded generator vector.
+    let mut coeff = vec![Fr::one(); n];
+    let mut len = n;
+
+    for _k in 0..num_rounds {
+        let half = len / 2;
+        let (a_L, a_R) = halve(a);
+        let (b_L, b_R) = halve(b);
+
+        // Express this round's L/R in terms of the original generators. Every
+        // original index lands in exactly one of the two point sets.
+        let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+        let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+        for (m, c) in coeff.iter().enumerate() {
+            let i = m % len;
+            if i < half {
+                l_terms.push((m, a_R[i] * c));
+            } else {
+                r_terms.push((m, a_L[i - half] * c));
+            }
+        }
+
+        let left_compute = || -> Element {
+            let z_L = inner_product(a_R, b_L);
+            fixed_base_msm(precomp, &l_terms) + blind(z_L)
+        };
+        let right_compute = || -> Element {
+            let z_R = inner_product(a_L, b_R);
+            fixed_base_msm(precomp, &r_terms) + blind(z_R)
+        };
+
+        let (L, R) = join!(left_compute, right_compute);
+        L_vec.push(L);
+        R_vec.push(R);
+
+        transcript.append_point(b"L", &L);
+        transcript.append_point(b"R", &R);
+
+        let x = transcript.challenge_scalar(b"x");
+        let x_inv = x.inverse().unwrap();
+
+        for i in 0..a_L.len() {
+            a_L[i] += x * a_R[i];
+            b_L[i] += x_inv * b_R[i];
+        }
+        // Indices in the right half of the current fold pick up the inverse
+        // challenge, mirroring `G_L += G_R * x_inv` on the original bases.
+        for (m, c) in coeff.iter_mut().enumerate() {
+            if m % len >= half {
+                *c *= x_inv;
+            }
+        }
+
+        a = a_L;
+        b = b_L;
+        len = half;
+    }
+
+    IPAProof {
+        L_vec,
+        R_vec,
+        a: a[0],
+    }
+}
+
+/// Sums `scalar · G[index]` over the given terms using precomputed wNAF
+/// tables, splitting the terms across threads.
+/// Smallest number of terms one parallel task takes: below this the rayon dispatch costs more
+/// than the fixed-base multiplications it hands out, and concurrent proofs only contend.
+const MSM_MIN_CHUNK: usize = 8;
+
+pub(crate) fn fixed_base_msm(precomp: &Committer, terms: &[(usize, Fr)]) -> Element {
+    let chunk_size = terms.len().div_ceil(num_threads!()).max(MSM_MIN_CHUNK);
+    chunks!(terms, chunk_size)
+        .map(|chunk| {
+            let mut acc = Element::zero();
+            for (index, scalar) in chunk {
+                if !scalar.is_zero() {
+                    acc += precomp.mul_index(scalar, *index);
+                }
+            }
+            acc
+        })
+        .sum()
+}
+
 // Halves the slice that is passed in
 // Assumes that the slice has an even length
 fn halve<T>(scalars: &mut [T]) -> (&mut [T], &mut [T]) {
@@ -217,9 +376,10 @@ impl IPAProof {
         let w = transcript.challenge_scalar(b"w");
 
         // Generate all of the necessary challenges and their inverses
+        // (log n elements — invert serially)
         let challenges = generate_challenges(self, transcript);
         let mut challenges_inv = challenges.clone();
-        batch_inversion(&mut challenges_inv);
+        serial_batch_inversion_and_mul(&mut challenges_inv, &Fr::one());
 
         // Generate the coefficients for the `G` vector and the `b` vector
         // {-g_i}{-b_i}
@@ -277,12 +437,10 @@ pub fn slow_vartime_multiscalar_mul<'a>(
 }
 
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    let chunk_size = bases.len().div_ceil(num_threads!());
-
-    chunks!(bases, chunk_size)
-        .zip(chunks!(scalars, chunk_size))
-        .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
-        .sum()
+    // `multi_scalar_mul` parallelizes internally across Pippenger windows;
+    // chunking the input here would multiply the window/doubling work per
+    // chunk and nest thread-pool dispatches.
+    multi_scalar_mul(bases, scalars)
 }
 
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
@@ -306,6 +464,66 @@ mod tests {
     use crate::math_utils::{inner_product, powers_of};
     use ark_std::{rand::SeedableRng, UniformRand};
     use rand_chacha::ChaCha20Rng;
+
+    /// `create_with_precomp` must produce exactly the proof `create` does —
+    /// same transcript interaction, same L/R points, same final scalar.
+    #[test]
+    fn create_with_precomp_matches_create() {
+        let n = 256;
+        let crs = CRS::new(n, b"random seed");
+        let committer = Committer::new(&crs.G, 6);
+
+        let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
+        let a: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let input_point = Fr::rand(&mut rng);
+        let b = powers_of(input_point, n);
+        let a_comm = slow_vartime_multiscalar_mul(a.iter(), crs.G.iter());
+
+        let folded = create(
+            &mut Transcript::new(b"ip_no_zk"),
+            crs.clone(),
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+        let precomputed = create_with_precomp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &committer,
+            crs.Q,
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+
+        assert_eq!(folded.to_bytes().unwrap(), precomputed.to_bytes().unwrap());
+
+        // Tables that also carry `Q` (as base `n`) take the fixed-base blinding path.
+        let mut bases_with_q = crs.G.clone();
+        bases_with_q.push(crs.Q);
+        let committer_with_q = Committer::new(&bases_with_q, 6);
+        let fixed_base_q = create_with_precomp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &committer_with_q,
+            crs.Q,
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+        assert_eq!(folded.to_bytes().unwrap(), fixed_base_q.to_bytes().unwrap());
+
+        let output_point = inner_product(&a, &b);
+        assert!(precomputed.verify_multiexp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &crs,
+            b,
+            a_comm,
+            input_point,
+            output_point
+        ));
+    }
 
     #[test]
     fn test_create_IPAProof_proof() {

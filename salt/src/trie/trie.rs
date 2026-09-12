@@ -32,7 +32,6 @@ use crate::{
     types::*,
 };
 use banderwagon::{platform, salt_committer::Committer, Element, Fr, PrimeField};
-use ipa_multipoint::crs::CRS;
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
 
@@ -45,6 +44,13 @@ use core::{cmp::Ordering, ops::Range};
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shared_committer()));
+
+/// Returns the process-wide committer holding fixed-base precomputation
+/// tables for the CRS generators. Forces the one-time table construction on
+/// first use.
+pub(crate) fn shared_committer() -> Arc<Committer> {
+    Arc::clone(&SHARED_COMMITTER)
+}
 
 /// Builds the shared committer's precomputation tables.
 ///
@@ -59,7 +65,18 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shar
 ///   touches `SHARED_COMMITTER` would re-enter this initialization on the
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
-    let build = || Committer::new(&CRS::default().G, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+    let build = || {
+        let crs = &*crate::proof::prover::DEFAULT_CRS;
+        // `Q` rides along as base `crs.n`, so the IPA prover's blinding terms are fixed-base
+        // multiplications too (see `ipa::create_with_precomp`).
+        let bases: Vec<Element> = crs
+            .G
+            .iter()
+            .copied()
+            .chain(core::iter::once(crs.Q))
+            .collect();
+        Committer::new(&bases, platform::DEFAULT_PRECOMP_WINDOW_SIZE)
+    };
     #[cfg(feature = "parallel")]
     {
         // Never run `build` inline here: under `parallel` it would par_iter

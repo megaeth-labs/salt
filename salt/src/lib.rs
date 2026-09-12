@@ -18,7 +18,7 @@ pub(crate) type Lazy<T> = spin::Lazy<T>;
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{fx_hashmap_serde, ProofError, SaltProof, SaltWitness, Witness};
+pub use proof::{fx_hashmap_serde, NodePolyRefresh, ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{
     hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,

@@ -1,4 +1,4 @@
-use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul, VariableBaseMSM};
+use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -413,15 +413,26 @@ fn subgroup_check(point: &EdwardsProjective) -> bool {
 }
 
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
-    let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
+    // The MSM needs affine bases. Points loaded from storage or deserialized
+    // proofs already have `z = 1`, so skip the batch inversion entirely in
+    // that common case.
+    let bases: Vec<EdwardsAffine> = if bases.iter().all(|element| element.0.z.is_one()) {
+        bases
+            .iter()
+            .map(|element| EdwardsAffine::new_unchecked(element.0.x, element.0.y))
+            .collect()
+    } else {
+        let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
+        EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
+    };
 
-    // XXX: Converting all of these to affine hurts performance
-    let bases = EdwardsProjective::batch_convert_to_mul_base(&bases_inner);
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
 
-    let result = EdwardsProjective::msm(&bases, scalars)
-        .expect("number of bases should equal number of scalars");
-
-    Element(result)
+    Element(crate::msm::msm_windowed(&bases, scalars))
 }
 
 /// Multiplies an `Element` by a scalar field element.

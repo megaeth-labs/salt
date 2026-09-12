@@ -33,7 +33,7 @@ use ark_ff::Zero;
 
 use salt_macros::iter;
 use salt_macros::prelude::*;
-use std::{vec, vec::Vec};
+use std::vec::Vec;
 
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
 ///
@@ -187,6 +187,11 @@ impl Committer {
         }
     }
 
+    /// Returns the number of base points covered by the precomputed tables.
+    pub fn num_bases(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This x86_64-optimized version uses CPU prefetching instructions to
@@ -204,7 +209,7 @@ impl Committer {
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 
-        let chunks = calculate_prefetch_index(scalar, self.window_size);
+        let mut digits = ScalarWindows::new(scalar, self.window_size);
         let mut result = EdwardsProjective::default();
         let precomp_table = &self.tables[g_i];
 
@@ -215,7 +220,7 @@ impl Committer {
         let mut c_next = 0;
 
         // prefetch first point
-        let data_0 = unsafe { *chunks.get_unchecked(0) } as usize;
+        let data_0 = digits.next().expect("a scalar has at least one window") as usize;
         if data_0 >= half_wnd {
             c_next = 1;
             idx_next = wnd_size - data_0;
@@ -231,9 +236,9 @@ impl Committer {
         idx = idx_next;
 
         // calculate point
-        for i in 1..chunks.len() {
+        for (i, digit) in (1..).zip(digits) {
             // fetch next point
-            idx_next = unsafe { *chunks.get_unchecked(i) as usize } + c_next;
+            idx_next = digit as usize + c_next;
             let carry = c_next;
             if idx_next >= half_wnd {
                 c_next = 1;
@@ -298,14 +303,14 @@ impl Committer {
     /// The result of `scalar * G[g_i]` as an `Element`.
     #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
-        let chunks = calculate_prefetch_index(scalar, self.window_size);
+        let digits = ScalarWindows::new(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
         let mut result = EdwardsProjective::default();
         let precom_table = &self.tables[g_i];
-        let mut ponits = Vec::with_capacity(chunks.len());
-        for i in 0..chunks.len() {
-            let mut index = (chunks[i] + carry) as usize;
+        let mut ponits = Vec::with_capacity(digits.len());
+        for (i, digit) in digits.enumerate() {
+            let mut index = (digit + carry) as usize;
             if index == 0 {
                 continue;
             }
@@ -432,43 +437,61 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     mont_mul_asm(&mut result.z.0 .0, &f.0 .0, &g.0 .0);
 }
 
-/// Decomposes a scalar into windows for efficient table lookups.
+/// The `w`-bit windows of a scalar, least significant first: the digits that index the
+/// precomputed multiplication tables.
 ///
-/// This function splits a scalar into w-bit windows for use with the
-/// precomputed multiplication tables. Each window represents a digit
-/// in the windowed representation of the scalar.
-///
-/// # Arguments
-///
-/// * `scalar` - The scalar to decompose
-/// * `w` - Window size in bits
-///
-/// # Returns
-///
-/// A vector of w-bit values representing the windowed decomposition.
-#[inline]
-fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
-    // Convert scalar from Montgomery form to big integer
-    let source_vec = scalar.into_bigint().0;
-    let mut index_vec = vec![];
+/// Fr's bit length is 253 plus a carry, so the windows cover 254 bits. They are produced on
+/// the fly from the scalar's limbs, so a multiplication never touches the heap.
+#[derive(Clone, Copy)]
+struct ScalarWindows {
+    /// The scalar out of Montgomery form.
+    limbs: [u64; 4],
+    /// Window size in bits.
+    w: usize,
+    /// First bit of the next window.
+    start_bit: usize,
+}
 
-    // Extract w bits of data from a scalar of n bits length
-    // Fr's bit length is 253 + Carry, so the maximum length is 254
-    for start_bit in (0..254).step_by(w) {
+impl ScalarWindows {
+    #[inline]
+    fn new(scalar: &Fr, w: usize) -> Self {
+        Self {
+            limbs: scalar.into_bigint().0,
+            w,
+            start_bit: 0,
+        }
+    }
+
+    /// Number of windows a scalar has at this window size.
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
+    #[inline]
+    fn len(&self) -> usize {
+        254usize.div_ceil(self.w)
+    }
+}
+
+impl Iterator for ScalarWindows {
+    type Item = u64;
+
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        let start_bit = self.start_bit;
+        if start_bit >= 254 {
+            return None;
+        }
+        self.start_bit += self.w;
+        let w = self.w;
         let source_i = start_bit >> 6;
         let offset_in_i = start_bit & 63;
 
-        let mut d = (source_vec[source_i] >> offset_in_i) & ((1 << w) - 1);
-        // If the data is not enough, take the remaining data from the next
-        if offset_in_i + w > 64 && source_i < source_vec.len() - 1 {
+        let mut d = (self.limbs[source_i] >> offset_in_i) & ((1 << w) - 1);
+        // If the data is not enough, take the remaining data from the next limb
+        if offset_in_i + w > 64 && source_i < self.limbs.len() - 1 {
             let left = w - (64 - offset_in_i);
-            d |= (source_vec[source_i + 1] & ((1 << left) - 1)) << (64 - offset_in_i);
-        };
-
-        index_vec.push(d)
+            d |= (self.limbs[source_i + 1] & ((1 << left) - 1)) << (64 - offset_in_i);
+        }
+        Some(d)
     }
-
-    index_vec
 }
 
 #[cfg(test)]
