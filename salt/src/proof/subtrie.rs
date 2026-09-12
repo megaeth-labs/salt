@@ -120,7 +120,10 @@ where
 
         // Replace defaults with actual commitments where they exist
         for (absolute_node_id, commitment_bytes) in children {
-            let relative_index = absolute_node_id as usize - child_idx as usize;
+            // Subtract in u64 before narrowing: a 256-child range near the top of
+            // a level-4 subtree straddles 2^32, so casting each id to a 32-bit
+            // `usize` first would underflow.
+            let relative_index = (absolute_node_id - child_idx) as usize;
             child_commitments[relative_index] = to_element(commitment_bytes);
         }
 

@@ -1161,8 +1161,8 @@ mod tests {
 
     use crate::{
         constant::{
-            default_commitment, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, MIN_BUCKET_SIZE_BITS,
-            STARTING_NODE_ID,
+            default_commitment, EMPTY_SLOT_HASH, MAIN_TRIE_LEVELS, MAX_BUCKET_SIZE,
+            MIN_BUCKET_SIZE_BITS, STARTING_NODE_ID,
         },
         empty_salt::EmptySalt,
     };
@@ -1529,6 +1529,13 @@ mod tests {
         assert_change(512, 256, 3, 4);
         assert_change(65_536, 65_792, 3, 2);
         assert_change(65_537, 65_536, 2, 3);
+
+        // Top of the range: every capacity above 2^32 is rooted at level 0, so the
+        // 2^39 <-> 2^40 doubling is an ordinary level-0 transition, and
+        // STARTING_NODE_ID[0] == 0 makes the top id exactly `bucket_id << BUCKET_SLOT_BITS`.
+        assert_change(1 << 32, (1 << 32) + 1, 1, 0);
+        assert_change(1 << 39, MAX_BUCKET_SIZE, 0, 0);
+        assert_change(MAX_BUCKET_SIZE, 1 << 39, 0, 0);
     }
 
     /// Rebuilds a main trie node commitment from storage for testing purposes.

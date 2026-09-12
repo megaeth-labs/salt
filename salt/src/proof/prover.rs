@@ -1,6 +1,6 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, STARTING_NODE_ID},
+    constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
         subtrie::create_sub_trie,
@@ -152,6 +152,14 @@ pub struct SaltProof {
 /// and breaks downstream alloy-tx-macros 1.0.23). Entries are emitted in
 /// ascending key order to keep proof bytes deterministic across provers.
 /// Also reused downstream (e.g. `stateless-core::LightWitness`) via `#[serde(with = "salt::fx_hashmap_serde")]`.
+///
+/// Deserialization rejects a duplicate `BucketId` and any level outside
+/// `1..=MAX_SUBTREE_LEVELS`. A bucket at `MIN_BUCKET_SIZE` capacity has one
+/// level (its single segment) and a bucket at `MAX_BUCKET_SIZE` has
+/// `MAX_SUBTREE_LEVELS`, so no prover emits anything else, and the code that
+/// turns a level back into a subtree shape (`parents_and_points`, and the
+/// trie's `update_bucket_subtrees` via `get_subtree_levels`) is only defined on
+/// that range.
 pub mod fx_hashmap_serde {
     use super::*;
 
@@ -177,12 +185,20 @@ pub mod fx_hashmap_serde {
             type Value = FxHashMap<BucketId, u8>;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a map of BucketId to u8")
+                write!(
+                    f,
+                    "a map of BucketId to a subtree level in 1..={MAX_SUBTREE_LEVELS}"
+                )
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
                 let mut map: FxHashMap<BucketId, u8> = FxHashMap::default();
                 while let Some((k, v)) = access.next_entry::<BucketId, u8>()? {
+                    if !(1..=MAX_SUBTREE_LEVELS as u8).contains(&v) {
+                        return Err(A::Error::custom(format!(
+                            "level {v} for BucketId {k} is outside 1..={MAX_SUBTREE_LEVELS}"
+                        )));
+                    }
                     if map.insert(k, v).is_some() {
                         return Err(A::Error::custom("duplicate BucketId in levels"));
                     }
@@ -1515,8 +1531,12 @@ mod tests {
         /// Serializing then deserializing must yield an equivalent map.
         #[test]
         fn round_trip_preserves_entries() {
-            let original =
-                levels_wrapper([(0u32, 0u8), (42, 3), (1_000_000, 7), (BucketId::MAX, 255)]);
+            let original = levels_wrapper([
+                (0u32, 1u8),
+                (42, 3),
+                (1_000_000, 4),
+                (BucketId::MAX, MAX_SUBTREE_LEVELS as u8),
+            ]);
 
             let bytes =
                 bincode::serde::encode_to_vec(&original, bincode::config::legacy()).unwrap();
@@ -1550,7 +1570,7 @@ mod tests {
                 (4, 3),
                 (1_000_000, 4),
                 (5, 5),
-                (BucketId::MAX, 6),
+                (BucketId::MAX, 1),
             ];
 
             let forward = levels_wrapper(entries);
@@ -1573,18 +1593,42 @@ mod tests {
             assert_eq!(forward_bytes, reverse_bytes);
         }
 
+        /// Bincode (legacy config) bytes of a `levels` map, built by hand so a test
+        /// can present entries no prover produces: a duplicate bucket, or a level
+        /// outside the valid range (the serializer writes any u8 unchanged; only
+        /// deserialization validates).
+        fn levels_bytes(entries: &[(BucketId, u8)]) -> Vec<u8> {
+            let mut bytes = (entries.len() as u64).to_le_bytes().to_vec();
+            for (bucket_id, level) in entries {
+                bytes.extend_from_slice(&bucket_id.to_le_bytes());
+                bytes.push(*level);
+            }
+            bytes
+        }
+
+        fn decode(bytes: &[u8]) -> Result<LevelsWrapper, bincode::error::DecodeError> {
+            bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
+                .map(|(decoded, _)| decoded)
+        }
+
         #[test]
         fn rejects_duplicate_bucket_id() {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&2u64.to_le_bytes());
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(1u8);
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(2u8);
+            assert!(
+                decode(&levels_bytes(&[(7, 1), (7, 2)])).is_err(),
+                "duplicate BucketId must be rejected"
+            );
+        }
 
-            let result: Result<(LevelsWrapper, _), _> =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
-            assert!(result.is_err(), "duplicate BucketId must be rejected");
+        /// Levels outside `1..=MAX_SUBTREE_LEVELS` are refused; both ends of the
+        /// range decode in `round_trip_preserves_entries`.
+        #[test]
+        fn rejects_out_of_range_levels() {
+            for level in [0, MAX_SUBTREE_LEVELS as u8 + 1] {
+                assert!(
+                    decode(&levels_bytes(&[(7, level)])).is_err(),
+                    "level {level} must be rejected"
+                );
+            }
         }
     }
 

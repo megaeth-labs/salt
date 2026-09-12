@@ -56,7 +56,7 @@ The main trie's internal nodes also use homomorphic commitments. After bucket co
 While each step up the trie costs one ECMul, updates from multiple distinct child nodes are batched into a single update for their common parent. This optimization is extremely effective because the trie's width shrinks dramatically at higher levels, consolidating many changes at the leaf level into a small number of updates near the root. For example, updating 200,000 random keys in SALT requires a total of approximately 460,000 ECMul operations, or an amortized cost of about **2.3 ECMuls** per key.
 
 ### Bucket Growth
-While the main SALT tree is static, the buckets are not. A bucket is initialized with 256 slots. When it fills up, it can be resized to a multiple of 256. If a bucket grows beyond 256 slots, it is partitioned into 256-slot segments. A new complete 256-ary **bucket tree** is built on top of these segments, and the root of this new tree becomes the bucket's new commitment (also the new leaf in the main trie). The diagram below shows a bucket tree of 768 slots.
+While the main SALT tree is static, the buckets are not. A bucket is initialized with 256 slots. When it fills up, its capacity is doubled, so every capacity is a power of two from 256 up to 2^40 slots (the most a 5-level bucket tree can address). If a bucket grows beyond 256 slots, it is partitioned into 256-slot segments. A new complete 256-ary **bucket tree** is built on top of these segments, and the root of this new tree becomes the bucket's new commitment (also the new leaf in the main trie). The diagram below shows a bucket tree of 768 slots (three segments) purely to illustrate the shape; a bucket the protocol has grown holds 512, 1024, ... slots.
 
 ```
 (In Main SALT Trie)
