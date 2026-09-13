@@ -13,9 +13,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use salt::{
-    traits::StateReader, types::*, EphemeralSaltState, MemStore, SaltProof, StateRoot, Witness,
-};
+use salt::{types::*, EphemeralSaltState, MemStore, SaltProof, SaltWitness, StateRoot, Witness};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::OnceLock;
@@ -88,25 +86,6 @@ fn proof_keys(s: &Setup, n: usize) -> Vec<SaltKey> {
     keys
 }
 
-/// Builds the kv data map the verifier is given for `keys`.
-fn proof_data(s: &Setup, keys: &[SaltKey]) -> BTreeMap<SaltKey, Option<SaltValue>> {
-    keys.iter()
-        .map(|&k| {
-            let v = if k.is_in_meta_bucket() {
-                Some(
-                    s.store
-                        .metadata(bucket_id_from_metadata_key(k))
-                        .unwrap()
-                        .into(),
-                )
-            } else {
-                s.store.value(k).unwrap()
-            };
-            (k, v)
-        })
-        .collect()
-}
-
 fn bench_salt_proof(c: &mut Criterion) {
     let s = setup();
 
@@ -126,13 +105,12 @@ fn bench_salt_proof(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     for n in [16usize, 256, 2048] {
         let keys = proof_keys(s, n);
-        let proof = SaltProof::create(keys.iter().copied(), &s.store).unwrap();
-        let data = proof_data(s, &keys);
+        let SaltWitness { kvs, proof } = SaltWitness::create(&keys, &s.store).unwrap();
         group.bench_with_input(
             BenchmarkId::from_parameter(n),
-            &(proof, data),
-            |b, (proof, data)| {
-                b.iter(|| proof.check(black_box(data), s.root).unwrap());
+            &(proof, kvs),
+            |b, (proof, kvs)| {
+                b.iter(|| proof.check(black_box(kvs), s.root).unwrap());
             },
         );
     }

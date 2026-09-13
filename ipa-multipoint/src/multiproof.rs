@@ -2,14 +2,14 @@
 #![allow(non_snake_case)]
 
 use crate::crs::CRS;
-use crate::ipa::{multi_scalar_mul_par, slow_vartime_multiscalar_mul, IPAProof};
+use crate::ipa::IPAProof;
 use crate::lagrange_basis::{LagrangeBasis, PrecomputedWeights};
 
 use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use banderwagon::{salt_committer::Committer, trait_defs::*, Element, Fr};
+use banderwagon::{multi_scalar_mul, salt_committer::Committer, trait_defs::*, Element, Fr};
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
@@ -77,7 +77,7 @@ impl MultiPoint {
         transcript: &mut Transcript,
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
-        Self::open_inner(crs, None, precomp, transcript, queries)
+        Self::open_inner(&crs, None, precomp, transcript, queries)
     }
 
     /// Same proof as [`MultiPoint::open`] (byte-identical output), but every
@@ -87,9 +87,10 @@ impl MultiPoint {
     /// per-round generator folding and the small variable-base MSMs, which
     /// dominate proving time.
     ///
-    /// `committer` must hold tables for the CRS `G` vector in order.
+    /// `committer` must hold tables for the CRS `G` vector in order; tables that also hold
+    /// `Q` as base `crs.n` make the IPA's blinding terms fixed-base too.
     pub fn open_with_committer(
-        crs: CRS,
+        crs: &CRS,
         committer: &Committer,
         precomp: &PrecomputedWeights,
         transcript: &mut Transcript,
@@ -99,7 +100,7 @@ impl MultiPoint {
     }
 
     fn open_inner(
-        crs: CRS,
+        crs: &CRS,
         committer: Option<&Committer>,
         precomp: &PrecomputedWeights,
         transcript: &mut Transcript,
@@ -132,14 +133,7 @@ impl MultiPoint {
                 chunk
                     .iter()
                     .map(|(point, queries_challenges)| {
-                        let domain = queries_challenges
-                            .first()
-                            .expect("point group cannot be empty")
-                            .0
-                            .poly
-                            .values()
-                            .len();
-                        let mut aggregated = vec![Fr::zero(); domain];
+                        let mut aggregated = vec![Fr::zero(); crs.n];
                         for (query, challenge) in queries_challenges.iter() {
                             for (acc, coeff) in aggregated.iter_mut().zip(query.poly.values()) {
                                 *acc += **challenge * coeff;
@@ -161,7 +155,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g_x_comm = commit_dense(&crs, committer, g_x.values());
+        let g_x_comm = commit_dense(crs, committer, &g_x);
 
         transcript.append_point(b"D", &g_x_comm);
 
@@ -192,7 +186,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g1_comm = commit_dense(&crs, committer, g1_x.values());
+        let g1_comm = commit_dense(crs, committer, &g1_x);
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -208,7 +202,9 @@ impl MultiPoint {
                 let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
                 crate::ipa::create_with_precomp(transcript, committer, crs.Q, a, g_3_x_comm, b, t)
             }
-            None => open_point_outside_of_domain(crs, precomp, transcript, g_3_x, g_3_x_comm, t),
+            None => {
+                open_point_outside_of_domain(crs.clone(), precomp, transcript, g_3_x, g_3_x_comm, t)
+            }
         };
 
         MultiPointProof {
@@ -220,13 +216,13 @@ impl MultiPoint {
 
 /// Commits to a dense polynomial in Lagrange basis: with precomputed tables
 /// when available, otherwise via the generic variable-base MSM.
-fn commit_dense(crs: &CRS, committer: Option<&Committer>, values: &[Fr]) -> Element {
+fn commit_dense(crs: &CRS, committer: Option<&Committer>, poly: &LagrangeBasis) -> Element {
     match committer {
         Some(committer) => {
-            let terms: Vec<(usize, Fr)> = values.iter().copied().enumerate().collect();
+            let terms: Vec<(usize, Fr)> = poly.values().iter().copied().enumerate().collect();
             crate::ipa::fixed_base_msm(committer, &terms)
         }
-        None => slow_vartime_multiscalar_mul(values.iter(), crs.G.iter()),
+        None => crs.commit_lagrange_poly(poly),
     }
 }
 
@@ -388,7 +384,7 @@ impl MultiPointProof {
             }
         }
 
-        let g1_comm = multi_scalar_mul_par(&comms, &comm_scalars);
+        let g1_comm = multi_scalar_mul(&comms, &comm_scalars);
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -697,7 +693,7 @@ mod tests {
             queries.clone(),
         );
         let accelerated = MultiPoint::open_with_committer(
-            crs.clone(),
+            &crs,
             &committer,
             &precomp,
             &mut Transcript::new(b"st"),

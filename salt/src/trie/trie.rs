@@ -32,6 +32,7 @@ use crate::{
     types::*,
 };
 use banderwagon::{platform, salt_committer::Committer, Element, Fr, PrimeField};
+use ipa_multipoint::crs::CRS;
 use salt_macros::prelude::*;
 use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable_by, sort_unstable_by_key};
 
@@ -41,6 +42,12 @@ use std::{collections::BTreeMap, vec::Vec};
 use std::{sync::Arc, vec};
 
 use core::{cmp::Ordering, ops::Range};
+
+/// Shared default CRS. Constructing `CRS::default()` decompresses 257 points,
+/// each costing a modular square root plus a subgroup check (several
+/// milliseconds total), so it is done once per process and reused by the
+/// shared committer and by every proof creation and verification.
+pub static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shared_committer()));
@@ -66,7 +73,7 @@ pub(crate) fn shared_committer() -> Arc<Committer> {
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
     let build = || {
-        let crs = &*crate::proof::prover::DEFAULT_CRS;
+        let crs = &*DEFAULT_CRS;
         // `Q` rides along as base `crs.n`, so the IPA prover's blinding terms are fixed-base
         // multiplications too (see `ipa::create_with_precomp`).
         let bases: Vec<Element> = crs

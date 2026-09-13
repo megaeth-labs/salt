@@ -81,24 +81,17 @@ pub(crate) fn parents_and_points(
         })
         .collect();
 
-    let mut merged = (BTreeMap::new(), BTreeMap::new());
+    let merge = |into: &mut BTreeMap<NodeId, BTreeSet<usize>>, from| {
+        for (node_id, positions) in from {
+            into.entry(node_id).or_default().extend(positions);
+        }
+    };
+    let (mut internal_nodes, mut slot_position_nodes) = (BTreeMap::new(), BTreeMap::new());
     for (internal_map, slot_map) in partials {
-        for (node_id, positions) in internal_map {
-            merged
-                .0
-                .entry(node_id)
-                .or_insert_with(BTreeSet::new)
-                .extend(positions);
-        }
-        for (node_id, positions) in slot_map {
-            merged
-                .1
-                .entry(node_id)
-                .or_insert_with(BTreeSet::new)
-                .extend(positions);
-        }
+        merge(&mut internal_nodes, internal_map);
+        merge(&mut slot_position_nodes, slot_map);
     }
-    merged
+    (internal_nodes, slot_position_nodes)
 }
 
 /// Records the authentication-path nodes and slot positions for one key into

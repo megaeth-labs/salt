@@ -232,16 +232,18 @@ pub fn create_with_precomp(
     let w = transcript.challenge_scalar(b"w");
     // Tables that cover one base past the vector carry `Q` there (the salt trie's shared
     // committer does), which turns the blinding terms `z·(w·Q) = (w·z)·Q` into fixed-base
-    // multiplications as well. Otherwise `Q` is folded with one variable-base product.
-    let q_index = (precomp.num_bases() > n).then_some(n);
+    // multiplications as well. Otherwise `Q` takes one variable-base product per term.
+    let q_in_tables = precomp.num_bases() > n;
     debug_assert!(
-        q_index.is_none_or(|i| precomp.mul_index(&Fr::one(), i) == q),
+        !q_in_tables || precomp.mul_index(&Fr::one(), n) == q,
         "committer base {n} is not the blinding generator Q"
     );
-    let Q = q_index.is_none().then(|| q * w);
-    let blind = |z: Fr| match q_index {
-        Some(i) => precomp.mul_index(&(w * z), i),
-        None => Q.expect("Q is folded whenever the tables lack it") * z,
+    let blind = |z: Fr| {
+        if q_in_tables {
+            precomp.mul_index(&(w * z), n)
+        } else {
+            q * (w * z)
+        }
     };
 
     let num_rounds = log2(n);
@@ -253,6 +255,9 @@ pub fn create_with_precomp(
     // implicitly folded generator vector.
     let mut coeff = vec![Fr::one(); n];
     let mut len = n;
+    // This round's L/R terms over the original generators; each index lands in one of them.
+    let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+    let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
 
     for _k in 0..num_rounds {
         let half = len / 2;
@@ -261,8 +266,8 @@ pub fn create_with_precomp(
 
         // Express this round's L/R in terms of the original generators. Every
         // original index lands in exactly one of the two point sets.
-        let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
-        let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+        l_terms.clear();
+        r_terms.clear();
         for (m, c) in coeff.iter().enumerate() {
             let i = m % len;
             if i < half {
@@ -315,12 +320,12 @@ pub fn create_with_precomp(
     }
 }
 
-/// Sums `scalar · G[index]` over the given terms using precomputed wNAF
-/// tables, splitting the terms across threads.
 /// Smallest number of terms one parallel task takes: below this the rayon dispatch costs more
 /// than the fixed-base multiplications it hands out, and concurrent proofs only contend.
 const MSM_MIN_CHUNK: usize = 8;
 
+/// Sums `scalar · G[index]` over the given terms using precomputed wNAF
+/// tables, splitting the terms across threads.
 pub(crate) fn fixed_base_msm(precomp: &Committer, terms: &[(usize, Fr)]) -> Element {
     let chunk_size = terms.len().div_ceil(num_threads!()).max(MSM_MIN_CHUNK);
     chunks!(terms, chunk_size)
@@ -436,6 +441,7 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     multi_scalar_mul(&points, &scalars)
 }
 
+#[deprecated(note = "no longer chunks its input; call `banderwagon::multi_scalar_mul`")]
 pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
     // `multi_scalar_mul` parallelizes internally across Pippenger windows;
     // chunking the input here would multiply the window/doubling work per

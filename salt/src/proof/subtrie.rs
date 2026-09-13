@@ -41,7 +41,7 @@ use banderwagon::{Element, Fr, Zero};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, into_iter, num_threads};
+use salt_macros::{chunks, iter, num_threads};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
@@ -66,7 +66,6 @@ const MIN_NODE_CHUNK: usize = 4;
 /// that fills up is cleared whole; the working set refills within a few proofs.
 mod node_poly_cache {
     use super::*;
-    use crate::types::CommitmentBytes;
     use crate::Lazy;
     use spin::RwLock;
 
@@ -96,10 +95,17 @@ mod node_poly_cache {
 
     pub(super) fn insert(node: NodeId, commitment: CommitmentBytes, poly: Arc<LagrangeBasis>) {
         let mut guard = shard(node).write();
-        if guard.len() >= MAX_PER_SHARD {
-            guard.clear();
-        }
-        guard.insert(node, (commitment, poly));
+        // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
+        // after the lock is released, so readers do not wait on the frees.
+        let evicted = (guard.len() >= MAX_PER_SHARD && !guard.contains_key(&node)).then(|| {
+            core::mem::replace(
+                &mut *guard,
+                FxHashMap::with_capacity_and_hasher(MAX_PER_SHARD, FxBuildHasher),
+            )
+        });
+        let replaced = guard.insert(node, (commitment, poly));
+        drop(guard);
+        drop((evicted, replaced));
     }
 }
 
@@ -185,8 +191,8 @@ fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch>
         .map(|node| (node >> BUCKET_SLOT_BITS) as BucketId)
         .collect();
 
-    // Changed children, keyed by the physical id of the parent whose polynomial holds them
-    //. A changed subtree node is recorded under its own id unless it is the top, which
+    // Changed children, keyed by the physical id of the parent whose polynomial holds them.
+    // A changed subtree node is recorded under its own id unless it is the top, which
     // the trie records under the bucket root; so a subtree child's parent is the top exactly
     // when the parent is absent from the transition.
     let mut child_patches: Vec<(NodeId, usize, CommitmentBytes)> =
@@ -246,10 +252,9 @@ fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch>
         // An emptied slot takes the bucket kind's default, as `leaf_polynomial` fills it.
         let scalar = match new {
             Some(_) => slot_to_field(new),
-            None if key.is_in_meta_bucket() => slot_to_field(&Some(BucketMeta::default().into())),
-            None => slot_to_field(&None),
+            None => empty_slot_scalar(key.bucket_id()),
         };
-        leaf_patches.push((leaf, (key.slot_id() & SLOT_INDEX_MASK) as usize, scalar));
+        leaf_patches.push((leaf, slot_position(key), scalar));
     }
 
     // One batch maps every changed child commitment to its scalar; it is the same map the
@@ -294,16 +299,15 @@ fn refresh_plan(refresh: &NodePolyRefresh<'_>) -> FxHashMap<NodeId, ParentPatch>
 /// concurrent witnesses can only ever replace an entry with another valid one.
 fn apply_refresh(
     plan: FxHashMap<NodeId, ParentPatch>,
-    in_hand: &FxHashMap<NodeId, Arc<LagrangeBasis>>,
-    parent_bytes: &FxHashMap<NodeId, CommitmentBytes>,
+    in_hand: &FxHashMap<NodeId, (CommitmentBytes, Arc<LagrangeBasis>)>,
 ) -> usize {
     let mut refreshed = 0;
     for (physical, patch) in plan {
         let base = match in_hand.get(&physical) {
-            Some(poly) => {
+            Some((read, poly)) => {
                 // The witness resolved this polynomial against the commitment it read, so
                 // it is the pre-state base only if that commitment is the transition's old.
-                let read_at_old = parent_bytes.get(&physical) == Some(&patch.old);
+                let read_at_old = *read == patch.old;
                 debug_assert!(
                     read_at_old,
                     "node {physical}: the witness read a commitment other than the refresh's pre-state"
@@ -318,9 +322,7 @@ fn apply_refresh(
                 None => continue,
             },
         };
-        let mut values: Vec<Fr> = (0..DOMAIN_SIZE)
-            .map(|i| base.evaluate_in_domain(i))
-            .collect();
+        let mut values = base.values().to_vec();
         #[cfg(debug_assertions)]
         assert_patch_commits(physical, &patch, &values);
         for &(position, scalar) in &patch.positions {
@@ -373,7 +375,7 @@ type SubTrieInfo = (
 /// # Parameters
 ///
 /// * `store` - Storage backend providing access to trie node commitments
-/// * `nodes` - Internal nodes with their evaluation points (child indices to prove)
+/// * `nodes` - Internal nodes (logical ids) whose children to convert
 ///
 /// # Returns
 ///
@@ -390,10 +392,7 @@ type SubTrieInfo = (
 /// # Errors
 ///
 /// Returns `ProofError::StateReadError` if unable to read child node commitments from storage.
-fn multi_commitments_to_scalars<Store>(
-    store: &Store,
-    nodes: &[(NodeId, BTreeSet<usize>)],
-) -> ProofResult<Vec<Fr>>
+fn multi_commitments_to_scalars<Store>(store: &Store, nodes: &[NodeId]) -> ProofResult<Vec<Fr>>
 where
     Store: TrieReader,
 {
@@ -413,10 +412,11 @@ where
     };
 
     let mut scalars = vec![Fr::zero(); nodes.len() * DOMAIN_SIZE];
-    // Children present in storage: (position in `scalars`, commitment)
-    let mut real_children: Vec<(usize, Element)> = Vec::new();
+    // Children present in storage: their positions in `scalars`, and their commitments
+    let mut real_positions: Vec<usize> = Vec::new();
+    let mut real_children: Vec<Element> = Vec::new();
 
-    for (i, (node_id, _)) in nodes.iter().enumerate() {
+    for (i, node_id) in nodes.iter().enumerate() {
         // Calculate starting index for this node's 256 children
         let child_idx = get_child_node(&logic_parent_id(*node_id), 0);
 
@@ -444,18 +444,15 @@ where
         // Record actual commitments to overwrite the defaults where they exist
         for (absolute_node_id, commitment_bytes) in children {
             let relative_index = absolute_node_id as usize - child_idx as usize;
-            real_children.push((
-                i * DOMAIN_SIZE + relative_index,
-                to_element(commitment_bytes),
-            ));
+            real_positions.push(i * DOMAIN_SIZE + relative_index);
+            real_children.push(to_element(commitment_bytes));
         }
     }
 
     // Batch-convert the existing children and scatter them into place.
-    let elements: Vec<Element> = real_children.iter().map(|(_, element)| *element).collect();
-    let real_scalars = Element::batch_map_to_scalar_field(&elements);
-    for ((position, _), scalar) in real_children.iter().zip(real_scalars) {
-        scalars[*position] = scalar;
+    let real_scalars = Element::batch_map_to_scalar_field(&real_children);
+    for (position, scalar) in real_positions.into_iter().zip(real_scalars) {
+        scalars[position] = scalar;
     }
 
     Ok(scalars)
@@ -472,24 +469,12 @@ where
 ///
 /// # Parameters
 /// * `commitment` - The cryptographic commitment to the polynomial
-/// * `poly` - The polynomial in Lagrange basis form (256 coefficients)
+/// * `poly` - The polynomial in Lagrange basis form (256 coefficients), shared by every query
 /// * `points` - Set of evaluation points (child indices) to create queries for
 ///
 /// # Returns
 /// A vector of `ProverQuery` objects, one for each evaluation point
-#[cfg(test)]
 fn create_prover_queries(
-    commitment: Element,
-    poly: LagrangeBasis,
-    points: BTreeSet<usize>,
-) -> Vec<ProverQuery> {
-    // One shared allocation per polynomial, however many points are opened.
-    shared_prover_queries(commitment, Arc::new(poly), &points)
-}
-
-/// [`create_prover_queries`] over an already shared polynomial (a cache hit, or one built for
-/// the cache).
-fn shared_prover_queries(
     commitment: Element,
     poly: Arc<LagrangeBasis>,
     points: &BTreeSet<usize>,
@@ -600,30 +585,28 @@ where
         .len()
         .div_ceil(num_threads!())
         .max(MIN_PARENT_CHUNK);
-    let parents_read: Vec<(NodeId, crate::types::CommitmentBytes)> =
-        chunks!(parent_ids, commitment_chunk)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|&physical_parent| {
-                        let bytes = store.commitment(physical_parent).map_err(|e| {
-                            ProofError::StateReadError {
-                                reason: format!(
-                                    "Failed to load commitment for node {physical_parent}: {e:?}"
-                                ),
-                            }
-                        })?;
-                        Ok((physical_parent, bytes))
-                    })
-                    .collect::<ProofResult<Vec<_>>>()
-            })
-            .collect::<ProofResult<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+    let parents_read: Vec<(NodeId, CommitmentBytes)> = chunks!(parent_ids, commitment_chunk)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|&physical_parent| {
+                    let bytes = store.commitment(physical_parent).map_err(|e| {
+                        ProofError::StateReadError {
+                            reason: format!(
+                                "Failed to load commitment for node {physical_parent}: {e:?}"
+                            ),
+                        }
+                    })?;
+                    Ok((physical_parent, bytes))
+                })
+                .collect::<ProofResult<Vec<_>>>()
+        })
+        .collect::<ProofResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     // The raw bytes key the polynomial cache; the decoded elements go into the proof.
-    let parent_bytes: FxHashMap<NodeId, crate::types::CommitmentBytes> =
-        parents_read.iter().copied().collect();
+    let parent_bytes: FxHashMap<NodeId, CommitmentBytes> = parents_read.iter().copied().collect();
     let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = parents_read
         .into_iter()
         .map(|(id, bytes)| {
@@ -643,125 +626,95 @@ where
             })
     };
 
-    // Every resolved polynomial by physical parent id: the bases a refresh patches (the
-    // witness reads the pre-state, so these are the polynomials the block's transition
-    // transforms).
-    let mut in_hand: FxHashMap<NodeId, Arc<LagrangeBasis>> = FxHashMap::default();
-
-    // Step 5: Generate IPA prover queries for each node in internal nodes. A node whose
-    // polynomial the cache holds for its current commitment skips the child reads; the rest
-    // are materialized in parallel chunks. Query order (node order, then point order) is the
-    // same either way: the transcript hashes it, so a cache hit must not reorder the proof.
-    let in_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let mut polys: Vec<Option<Arc<LagrangeBasis>>> = Vec::with_capacity(in_nodes.len());
-    let mut missing: Vec<usize> = Vec::new();
-    for (i, (parent, _)) in in_nodes.iter().enumerate() {
-        let physical = connect_parent_id(*parent);
-        let hit = parent_bytes
-            .get(&physical)
-            .and_then(|bytes| node_poly_cache::get(physical, bytes));
-        if hit.is_none() {
-            missing.push(i);
-        }
-        polys.push(hit);
-    }
-    let missing_nodes: Vec<(NodeId, BTreeSet<usize>)> = missing
-        .iter()
-        .map(|&i| (in_nodes[i].0, BTreeSet::new()))
-        .collect();
-    let chunk_size = missing_nodes
-        .len()
-        .div_ceil(num_threads!())
-        .max(MIN_NODE_CHUNK);
-    let computed: Vec<Vec<Arc<LagrangeBasis>>> = chunks!(missing_nodes, chunk_size)
-        .map(|nodes| {
-            let scalars = multi_commitments_to_scalars(store, nodes)?;
-            Ok(scalars
-                .chunks(DOMAIN_SIZE)
-                .map(|node_scalars| Arc::new(LagrangeBasis::new(node_scalars.to_vec())))
-                .collect::<Vec<_>>())
-        })
-        .collect::<ProofResult<Vec<_>>>()?;
-    for (&i, poly) in missing.iter().zip(computed.into_iter().flatten()) {
-        let physical = connect_parent_id(in_nodes[i].0);
-        if let Some(bytes) = parent_bytes.get(&physical) {
-            node_poly_cache::insert(physical, *bytes, Arc::clone(&poly));
-        }
-        polys[i] = Some(poly);
-    }
-    let mut queries: Vec<ProverQuery> = Vec::new();
-    for ((parent, points), poly) in in_nodes.into_iter().zip(polys) {
-        let poly = poly.expect("every internal node polynomial is resolved above");
-        in_hand.insert(connect_parent_id(parent), Arc::clone(&poly));
-        queries.extend(shared_prover_queries(
-            parent_commitment(parent)?,
-            poly,
-            &points,
-        ));
-    }
-
-    // Step 6: Generate IPA prover queries for each node in leaf nodes, with the same cache
-    // and the same order discipline.
+    // Step 5: Generate IPA prover queries for the internal nodes, then the leaf nodes. Internal
+    // nodes the cache misses are materialized in parallel chunks, leaf nodes one per task.
+    let internal_nodes: Vec<_> = internal_nodes.into_iter().collect();
     let leaf_nodes: Vec<_> = leaf_nodes.into_iter().collect();
-    let mut leaf_polys: Vec<Option<Arc<LagrangeBasis>>> = Vec::with_capacity(leaf_nodes.len());
-    let mut leaf_missing: Vec<usize> = Vec::new();
-    for (i, (parent, _)) in leaf_nodes.iter().enumerate() {
-        let physical = connect_parent_id(*parent);
-        let hit = parent_bytes
-            .get(&physical)
-            .and_then(|bytes| node_poly_cache::get(physical, bytes));
-        if hit.is_none() {
-            leaf_missing.push(i);
+    let internal_polys = resolve_polys(&internal_nodes, &parent_bytes, |missing| {
+        let chunk_size = missing.len().div_ceil(num_threads!()).max(MIN_NODE_CHUNK);
+        let chunks = chunks!(missing, chunk_size)
+            .map(|nodes| {
+                let scalars = multi_commitments_to_scalars(store, nodes)?;
+                Ok(scalars
+                    .chunks(DOMAIN_SIZE)
+                    .map(|node_scalars| LagrangeBasis::new(node_scalars.to_vec()))
+                    .collect::<Vec<_>>())
+            })
+            .collect::<ProofResult<Vec<_>>>()?;
+        Ok(chunks.into_iter().flatten().collect())
+    })?;
+    let leaf_polys = resolve_polys(&leaf_nodes, &parent_bytes, |missing| {
+        iter!(missing)
+            .map(|&node| leaf_polynomial(store, node))
+            .collect()
+    })?;
+
+    // Every resolved polynomial by physical parent id, with the commitment it was read at:
+    // the bases a refresh patches (the witness reads the pre-state, so these are the
+    // polynomials the block's transition transforms).
+    let mut in_hand: FxHashMap<NodeId, (CommitmentBytes, Arc<LagrangeBasis>)> =
+        FxHashMap::default();
+    let mut queries: Vec<ProverQuery> = Vec::new();
+    let nodes = internal_nodes.into_iter().chain(leaf_nodes);
+    for ((parent, points), poly) in nodes.zip(internal_polys.into_iter().chain(leaf_polys)) {
+        if refresh.is_some() {
+            let physical = connect_parent_id(parent);
+            in_hand.insert(physical, (parent_bytes[&physical], Arc::clone(&poly)));
         }
-        leaf_polys.push(hit);
-    }
-    let computed: Vec<Arc<LagrangeBasis>> = into_iter!(leaf_missing.clone())
-        .map(|i| leaf_polynomial(store, leaf_nodes[i].0).map(Arc::new))
-        .collect::<ProofResult<Vec<_>>>()?;
-    for (&i, poly) in leaf_missing.iter().zip(computed) {
-        let physical = connect_parent_id(leaf_nodes[i].0);
-        if let Some(bytes) = parent_bytes.get(&physical) {
-            node_poly_cache::insert(physical, *bytes, Arc::clone(&poly));
-        }
-        leaf_polys[i] = Some(poly);
-    }
-    for ((parent, points), poly) in leaf_nodes.into_iter().zip(leaf_polys) {
-        let poly = poly.expect("every leaf node polynomial is resolved above");
-        in_hand.insert(connect_parent_id(parent), Arc::clone(&poly));
-        queries.extend(shared_prover_queries(
+        queries.extend(create_prover_queries(
             parent_commitment(parent)?,
             poly,
             &points,
         ));
     }
 
-    // Step 7: Advance the cache to the witnessed block's post-state. The queries above are
+    // Step 6: Advance the cache to the witnessed block's post-state. The queries above are
     // already built from the pre-state polynomials, so this proof is unaffected; it runs
     // here rather than after the proof so the entries land before the next block's witness
     // looks them up.
     if let Some(refresh) = refresh {
-        apply_refresh(refresh_plan(refresh), &in_hand, &parent_bytes);
+        apply_refresh(refresh_plan(refresh), &in_hand);
     }
 
     Ok((queries, parents_commitments, buckets_level))
 }
 
-/// Processes a leaf node to create prover queries.
-#[cfg(test)]
-fn process_leaf_node<Store>(
-    store: &Store,
-    parent: NodeId,
-    parent_commitment: Element,
-    points: BTreeSet<usize>,
-) -> ProofResult<Vec<ProverQuery>>
-where
-    Store: StateReader,
-{
-    Ok(create_prover_queries(
-        parent_commitment,
-        leaf_polynomial(store, parent)?,
-        points,
-    ))
+/// The polynomial of every node in `nodes` (logical parent ids), in order: query order is
+/// node order, which the transcript hashes, so a cache hit must not reorder the proof. A node
+/// whose polynomial the cache holds for the commitment it was read at skips `rebuild`; the
+/// misses are rebuilt in one call, one polynomial per missing node, and cached under that
+/// commitment.
+fn resolve_polys(
+    nodes: &[(NodeId, BTreeSet<usize>)],
+    parent_bytes: &FxHashMap<NodeId, CommitmentBytes>,
+    rebuild: impl FnOnce(&[NodeId]) -> ProofResult<Vec<LagrangeBasis>>,
+) -> ProofResult<Vec<Arc<LagrangeBasis>>> {
+    let hits: Vec<Option<Arc<LagrangeBasis>>> = nodes
+        .iter()
+        .map(|(parent, _)| {
+            let physical = connect_parent_id(*parent);
+            node_poly_cache::get(physical, &parent_bytes[&physical])
+        })
+        .collect();
+    let missing: Vec<NodeId> = nodes
+        .iter()
+        .zip(&hits)
+        .filter(|(_, hit)| hit.is_none())
+        .map(|((parent, _), _)| *parent)
+        .collect();
+    let mut rebuilt = rebuild(&missing)?.into_iter();
+    Ok(nodes
+        .iter()
+        .zip(hits)
+        .map(|((parent, _), hit)| {
+            hit.unwrap_or_else(|| {
+                let physical = connect_parent_id(*parent);
+                let poly = Arc::new(rebuilt.next().expect("one rebuilt polynomial per miss"));
+                node_poly_cache::insert(physical, parent_bytes[&physical], Arc::clone(&poly));
+                poly
+            })
+        })
+        .collect())
 }
 
 /// The 256-slot polynomial of a leaf node: every slot's value hashed to the field, with the
@@ -796,22 +749,29 @@ where
     })?;
 
     // Initialize polynomial coefficients with appropriate default values
-    let mut default_coefficients = if bucket_id < NUM_META_BUCKETS as BucketId {
-        // Metadata buckets: initialize with default metadata hash
-        vec![slot_to_field(&Some(BucketMeta::default().into())); DOMAIN_SIZE]
-    } else {
-        // Data buckets: initialize with empty slot hash
-        vec![slot_to_field(&None); DOMAIN_SIZE]
-    };
+    let mut default_coefficients = vec![empty_slot_scalar(bucket_id); DOMAIN_SIZE];
 
     // Replace default values with actual key-value hashes where data exists
     for (key, value) in entries {
-        // Map slot ID to polynomial coefficient index (last 8 bits)
-        let index = (key.slot_id() & SLOT_INDEX_MASK) as usize;
-        default_coefficients[index] = slot_to_field(&Some(value));
+        default_coefficients[slot_position(&key)] = slot_to_field(&Some(value));
     }
 
     Ok(LagrangeBasis::new(default_coefficients))
+}
+
+/// The scalar of an empty slot in `bucket_id`: the default metadata's hash for a metadata
+/// bucket, the empty slot's hash for a data bucket.
+fn empty_slot_scalar(bucket_id: BucketId) -> Fr {
+    if bucket_id < NUM_META_BUCKETS as BucketId {
+        slot_to_field(&Some(BucketMeta::default().into()))
+    } else {
+        slot_to_field(&None)
+    }
+}
+
+/// The position of `key`'s slot in its leaf's 256-slot polynomial (the slot id's low 8 bits).
+fn slot_position(key: &SaltKey) -> usize {
+    (key.slot_id() & SLOT_INDEX_MASK) as usize
 }
 
 #[cfg(test)]
@@ -950,25 +910,27 @@ mod tests {
     }
 
     #[test]
-    fn process_leaf_node_with_real_commitment() {
+    fn leaf_polynomial_with_real_commitment() {
         let (store, salt_key) = setup_test_store();
         let parent_node = STARTING_NODE_ID[3] as NodeId + salt_key.bucket_id() as u64;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(store.commitment(parent_node).unwrap());
-        let points = [0, salt_key.slot_id() as usize & 0xff].into();
+        let points = [0, slot_position(&salt_key)].into();
 
-        let queries = process_leaf_node(&store, parent_node, commitment, points).unwrap();
+        let poly = Arc::new(leaf_polynomial(&store, parent_node).unwrap());
+        let queries = create_prover_queries(commitment, poly, &points);
         assert_eq!(queries.len(), 2);
         assert!(verify_ipa_proof(queries));
     }
 
     #[test]
-    fn process_leaf_node_uses_metadata_default_for_meta_bucket() {
+    fn leaf_polynomial_uses_metadata_default_for_meta_bucket() {
         let store = MemStore::new();
         let parent_node = STARTING_NODE_ID[3] as NodeId;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
-        let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
+        let poly = Arc::new(leaf_polynomial(&store, parent_node).unwrap());
+        let queries = create_prover_queries(commitment, poly, &[0, 255].into());
         let metadata_default = slot_to_field(&Some(BucketMeta::default().into()));
 
         assert_eq!(
@@ -979,12 +941,13 @@ mod tests {
     }
 
     #[test]
-    fn process_leaf_node_uses_empty_default_for_data_bucket() {
+    fn leaf_polynomial_uses_empty_default_for_data_bucket() {
         let store = MemStore::new();
         let parent_node = STARTING_NODE_ID[3] as NodeId + NUM_META_BUCKETS as NodeId;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
-        let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
+        let poly = Arc::new(leaf_polynomial(&store, parent_node).unwrap());
+        let queries = create_prover_queries(commitment, poly, &[0, 255].into());
         let empty_default = slot_to_field(&None);
 
         assert_eq!(
@@ -1002,16 +965,15 @@ mod tests {
         assert_eq!(multi_commitments_to_scalars(&store, &[]).unwrap().len(), 0);
 
         // Single internal node
-        let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
-        let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
+        let scalars =
+            multi_commitments_to_scalars(&store, &[STARTING_NODE_ID[2] as NodeId]).unwrap();
         assert_eq!(scalars.len(), DOMAIN_SIZE);
     }
 
     #[test]
     fn multi_commitments_to_scalars_root_defaults_are_pinned() {
         let store = MemStore::new();
-        let scalars =
-            multi_commitments_to_scalars(&store, &[(ROOT_NODE_ID, [0, 1, 255].into())]).unwrap();
+        let scalars = multi_commitments_to_scalars(&store, &[ROOT_NODE_ID]).unwrap();
         let expected = Element::batch_map_to_scalar_field(&[
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[1] as NodeId,
@@ -1048,40 +1010,33 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Applies one block's transition to `store` and returns its trie updates.
-    fn apply_block(store: &MemStore, updates: StateUpdates) -> TrieUpdates {
-        let (_, trie_updates) = StateRoot::new(store).update_fin(&updates).unwrap();
-        store.update_state(updates);
-        store.update_trie(trie_updates.clone());
-        trie_updates
+    /// A slot value filled with `byte`.
+    fn value(byte: u8) -> Option<SaltValue> {
+        Some(SaltValue::new(&[byte; 32], &[byte; 32]))
     }
 
-    /// A store holding block A (64 random plain kvs), and block B's transition over it (16
-    /// value updates, 8 deletes and 16 inserts) computed but not applied.
-    fn two_block_fixture(seed: u64) -> (MemStore, StateUpdates, TrieUpdates) {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let kvs_a: HashMap<Vec<u8>, Option<Vec<u8>>> = (0..64)
-            .map(|_| (mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40))))
-            .collect();
-        let store = MemStore::new();
-        let updates_a = EphemeralSaltState::new(&store).update_fin(&kvs_a).unwrap();
-        apply_block(&store, updates_a);
+    /// Bucket metadata with `nonce` and `capacity`.
+    fn meta(nonce: u32, capacity: u64) -> Option<SaltValue> {
+        Some(SaltValue::from(BucketMeta {
+            nonce,
+            capacity,
+            ..BucketMeta::default()
+        }))
+    }
 
-        let mut keys_a: Vec<Vec<u8>> = kvs_a.into_keys().collect();
-        keys_a.sort();
-        let mut kvs_b: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
-        for key in &keys_a[..16] {
-            kvs_b.insert(key.clone(), Some(mock_data(&mut rng, 40)));
-        }
-        for key in &keys_a[16..24] {
-            kvs_b.insert(key.clone(), None);
-        }
-        for _ in 0..16 {
-            kvs_b.insert(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)));
-        }
-        let updates_b = EphemeralSaltState::new(&store).update_fin(&kvs_b).unwrap();
-        let (_, trie_b) = StateRoot::new(&store).update_fin(&updates_b).unwrap();
-        (store, updates_b, trie_b)
+    /// A store holding `bucket` with slots 3 and 5 set to `value(1)` and `value(2)`.
+    fn store_with_two_slots(bucket: BucketId) -> MemStore {
+        let store = MemStore::new();
+        let key = |slot| SaltKey::from((bucket, slot));
+        apply_block(
+            &store,
+            StateUpdates {
+                data: [(key(3), (None, value(1))), (key(5), (None, value(2)))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        store
     }
 
     /// Whether `node` is a leaf of its trie: a main-trie bucket root or a subtree leaf.
@@ -1100,9 +1055,7 @@ mod tests {
         if is_leaf_node(node) {
             leaf_polynomial(store, node).unwrap()
         } else {
-            LagrangeBasis::new(
-                multi_commitments_to_scalars(store, &[(node, BTreeSet::new())]).unwrap(),
-            )
+            LagrangeBasis::new(multi_commitments_to_scalars(store, &[node]).unwrap())
         }
     }
 
@@ -1157,7 +1110,12 @@ mod tests {
     /// main-trie leaves and internal nodes alike.
     #[test]
     fn refreshed_polynomials_equal_a_storage_rebuild() {
-        let (store, updates_b, trie_b) = two_block_fixture(1);
+        let TwoBlocks {
+            store,
+            updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(1);
         let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
         let refresh = NodePolyRefresh {
             trie_updates: &trie_b,
@@ -1202,34 +1160,19 @@ mod tests {
     /// other subtree node under its own id and every slot under its subtree leaf.
     #[test]
     fn refresh_covers_expanded_bucket_subtrees() {
-        let store = MemStore::new();
         let bucket = NUM_META_BUCKETS as BucketId + 3 * MIN_BUCKET_SIZE as BucketId + 7;
         let capacity = 131072u64;
-        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
-        let meta = |capacity| {
-            Some(SaltValue::from(BucketMeta {
-                capacity,
-                ..BucketMeta::default()
-            }))
-        };
         let key = |slot| SaltKey::from((bucket, slot));
 
         // Block A: two slots, then an expansion to a three-level subtree (top at level 2).
-        apply_block(
-            &store,
-            StateUpdates {
-                data: [(key(3), (None, value(1))), (key(5), (None, value(2)))]
-                    .into_iter()
-                    .collect(),
-            },
-        );
+        let store = store_with_two_slots(bucket);
         apply_block(
             &store,
             StateUpdates {
                 data: [
                     (
                         bucket_metadata_key(bucket),
-                        (meta(MIN_BUCKET_SIZE as u64), meta(capacity)),
+                        (meta(0, MIN_BUCKET_SIZE as u64), meta(0, capacity)),
                     ),
                     (key(3), (value(1), None)),
                     (key(2049), (None, value(3))),
@@ -1327,29 +1270,13 @@ mod tests {
     /// next witness over the bucket rebuilds from storage.
     #[test]
     fn refresh_skips_buckets_whose_capacity_changed() {
-        let store = MemStore::new();
         let bucket = NUM_META_BUCKETS as BucketId + 5 * MIN_BUCKET_SIZE as BucketId + 9;
-        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
-        let meta = |capacity| {
-            Some(SaltValue::from(BucketMeta {
-                capacity,
-                ..BucketMeta::default()
-            }))
-        };
+        let store = store_with_two_slots(bucket);
         let key = |slot| SaltKey::from((bucket, slot));
         let meta_key = bucket_metadata_key(bucket);
         let root = bucket_root_node_id(bucket);
         let parent = get_parent_node(&root);
         let meta_root = bucket_root_node_id(meta_key.bucket_id());
-
-        apply_block(
-            &store,
-            StateUpdates {
-                data: [(key(3), (None, value(1))), (key(5), (None, value(2)))]
-                    .into_iter()
-                    .collect(),
-            },
-        );
 
         // Witnesses `witnessed` against the current store with the block's refresh, applies
         // the block and checks what was and was not refreshed.
@@ -1371,7 +1298,7 @@ mod tests {
             );
             assert_eq!(
                 planned_positions(&plan, meta_root),
-                [(meta_key.slot_id() & SLOT_INDEX_MASK) as usize].into()
+                [slot_position(&meta_key)].into()
             );
 
             let (queries, _, _) = create_sub_trie(&store, witnessed, Some(&refresh)).unwrap();
@@ -1416,8 +1343,8 @@ mod tests {
                     (
                         meta_key,
                         (
-                            meta(MIN_BUCKET_SIZE as u64),
-                            meta(2 * MIN_BUCKET_SIZE as u64),
+                            meta(0, MIN_BUCKET_SIZE as u64),
+                            meta(0, 2 * MIN_BUCKET_SIZE as u64),
                         ),
                     ),
                     (key(3), (value(1), None)),
@@ -1438,8 +1365,8 @@ mod tests {
                     (
                         meta_key,
                         (
-                            meta(2 * MIN_BUCKET_SIZE as u64),
-                            meta(MIN_BUCKET_SIZE as u64),
+                            meta(0, 2 * MIN_BUCKET_SIZE as u64),
+                            meta(0, MIN_BUCKET_SIZE as u64),
                         ),
                     ),
                     (key(300), (value(3), None)),
@@ -1458,7 +1385,12 @@ mod tests {
     /// the proof bytes do not change.
     #[test]
     fn refresh_is_idempotent_across_a_retried_witness() {
-        let (store, updates_b, trie_b) = two_block_fixture(2);
+        let TwoBlocks {
+            store,
+            updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(2);
         let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
         let refresh = NodePolyRefresh {
             trie_updates: &trie_b,
@@ -1497,7 +1429,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not commit")]
     fn refresh_debug_check_rejects_an_inconsistent_transition() {
-        let (store, updates_b, mut trie_b) = two_block_fixture(3);
+        let TwoBlocks {
+            store,
+            updates_b,
+            mut trie_b,
+            ..
+        } = two_block_fixture(3);
         let foreign = trie_b
             .iter()
             .find(|(node, _)| *node != ROOT_NODE_ID)
@@ -1524,7 +1461,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not commit")]
     fn refresh_debug_check_rejects_a_wrong_slot_value() {
-        let (store, mut updates_b, trie_b) = two_block_fixture(4);
+        let TwoBlocks {
+            store,
+            mut updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(4);
         let key = *updates_b
             .data
             .iter()
@@ -1547,7 +1489,12 @@ mod tests {
     /// pre-state has cached their bases.
     #[test]
     fn refresh_uses_cached_bases_for_parents_the_witness_did_not_read() {
-        let (store, updates_b, trie_b) = two_block_fixture(5);
+        let TwoBlocks {
+            store,
+            updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(5);
         let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
         let refresh = NodePolyRefresh {
             trie_updates: &trie_b,
@@ -1608,20 +1555,26 @@ mod tests {
     /// polynomial a rebuild from the post-block store produces.
     #[test]
     fn refresh_applies_every_planned_parent() {
-        let (store, updates_b, trie_b) = two_block_fixture(9);
+        let TwoBlocks {
+            store,
+            updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(9);
         let refresh = NodePolyRefresh {
             trie_updates: &trie_b,
             state_updates: &updates_b,
         };
         let plan = refresh_plan(&refresh);
         let planned = plan.len();
-        let mut in_hand = FxHashMap::default();
-        let mut parent_bytes = FxHashMap::default();
-        for &node in plan.keys() {
-            in_hand.insert(node, Arc::new(rebuilt_polynomial(&store, node)));
-            parent_bytes.insert(node, store.commitment(node).unwrap());
-        }
-        assert_eq!(apply_refresh(plan, &in_hand, &parent_bytes), planned);
+        let in_hand = plan
+            .keys()
+            .map(|&node| {
+                let base = Arc::new(rebuilt_polynomial(&store, node));
+                (node, (store.commitment(node).unwrap(), base))
+            })
+            .collect();
+        assert_eq!(apply_refresh(plan, &in_hand), planned);
 
         store.update_state(updates_b);
         store.update_trie(trie_b.clone());
@@ -1644,7 +1597,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "other than the refresh's pre-state")]
     fn refresh_rejects_a_witness_over_the_post_state() {
-        let (store, updates_b, trie_b) = two_block_fixture(6);
+        let TwoBlocks {
+            store,
+            updates_b,
+            trie_b,
+            ..
+        } = two_block_fixture(6);
         let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();
         store.update_state(updates_b.clone());
         store.update_trie(trie_b.clone());
@@ -1663,20 +1621,11 @@ mod tests {
     #[cfg(not(debug_assertions))]
     #[test]
     fn refresh_skips_a_parent_read_at_a_foreign_commitment() {
-        let store = MemStore::new();
         let bucket = NUM_META_BUCKETS as BucketId + 7 * MIN_BUCKET_SIZE as BucketId + 11;
-        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
         let key = |slot| SaltKey::from((bucket, slot));
 
         // Blocks A and B change slot 3; block C, computed over B, changes slot 5.
-        apply_block(
-            &store,
-            StateUpdates {
-                data: [(key(3), (None, value(1))), (key(5), (None, value(2)))]
-                    .into_iter()
-                    .collect(),
-            },
-        );
+        let store = store_with_two_slots(bucket);
         let pre_b = store.clone();
         apply_block(
             &store,
@@ -1720,14 +1669,6 @@ mod tests {
         let store = MemStore::new();
         let bucket = NUM_META_BUCKETS as BucketId + 9 * MIN_BUCKET_SIZE as BucketId + 13;
         let capacity = 2 * MIN_BUCKET_SIZE as u64;
-        let value = |byte: u8| Some(SaltValue::new(&[byte; 32], &[byte; 32]));
-        let meta = |nonce| {
-            Some(SaltValue::from(BucketMeta {
-                nonce,
-                capacity,
-                ..BucketMeta::default()
-            }))
-        };
         let key = |slot| SaltKey::from((bucket, slot));
         let meta_key = bucket_metadata_key(bucket);
         let root = bucket_root_node_id(bucket);
@@ -1739,7 +1680,10 @@ mod tests {
             &store,
             StateUpdates {
                 data: [
-                    (meta_key, (Some(BucketMeta::default().into()), meta(0))),
+                    (
+                        meta_key,
+                        (Some(BucketMeta::default().into()), meta(0, capacity)),
+                    ),
                     (key(3), (None, value(1))),
                     (key(5), (None, value(2))),
                     (key(300), (None, value(3))),
@@ -1753,7 +1697,10 @@ mod tests {
         let updates_b = EphemeralSaltState::new(&store)
             .set_nonce(bucket, 1)
             .unwrap();
-        assert_eq!(updates_b.data[&meta_key], (meta(0), meta(1)));
+        assert_eq!(
+            updates_b.data[&meta_key],
+            (meta(0, capacity), meta(1, capacity))
+        );
         let (_, trie_b) = StateRoot::new(&store).update_fin(&updates_b).unwrap();
         let refresh = NodePolyRefresh {
             trie_updates: &trie_b,
@@ -1767,7 +1714,7 @@ mod tests {
             moved
                 .entry(subtree_leaf_for_key(key))
                 .or_default()
-                .insert((key.slot_id() & SLOT_INDEX_MASK) as usize);
+                .insert(slot_position(key));
         }
         assert_eq!(moved.len(), 2, "both leaves change");
         let plan = refresh_plan(&refresh);
@@ -1784,7 +1731,7 @@ mod tests {
         );
         assert_eq!(
             planned_positions(&plan, meta_root),
-            [(meta_key.slot_id() & SLOT_INDEX_MASK) as usize].into()
+            [slot_position(&meta_key)].into()
         );
 
         let keys: Vec<SaltKey> = updates_b.data.keys().copied().collect();

@@ -1200,6 +1200,11 @@ mod tests {
             .all(|&id| witness.metadata(id).unwrap() == new_metadata));
     }
 
+    /// The bytes of `witness`'s SALT witness, as the proof byte-identity tests compare them.
+    fn encode_salt_witness(witness: &Witness) -> Vec<u8> {
+        bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy()).unwrap()
+    }
+
     /// A node-polynomial cache hit must reproduce the miss byte for byte: the same inputs
     /// witnessed twice serialize identically (the second pass is served from the cache), and
     /// the witness still verifies.
@@ -1210,17 +1215,14 @@ mod tests {
             .map(|_| (mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40))))
             .collect();
         let store = MemStore::new();
-        let updates = EphemeralSaltState::new(&store).update_fin(&kvs).unwrap();
-        store.update_state(updates.clone());
-        let (_root, trie_updates) = StateRoot::new(&store).update_fin(&updates).unwrap();
-        store.update_trie(trie_updates);
+        apply_block(
+            &store,
+            EphemeralSaltState::new(&store).update_fin(&kvs).unwrap(),
+        );
 
         let build = || Witness::create([], kvs.keys(), &BTreeMap::new(), &store).unwrap();
-        let encode = |witness: &Witness| {
-            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy()).unwrap()
-        };
-        let first = encode(&build());
-        let second = encode(&build());
+        let first = encode_salt_witness(&build());
+        let second = encode_salt_witness(&build());
         assert_eq!(first, second, "a cache hit must not change the proof");
         build().verify().unwrap();
     }
@@ -1230,31 +1232,12 @@ mod tests {
     /// wrong refreshed entry on those paths would fail its verification.
     #[test]
     fn witness_over_refreshed_polynomials_verifies_and_is_stable() {
-        let mut rng = StdRng::seed_from_u64(11);
-        let kvs_a: HashMap<_, _> = (0..64)
-            .map(|_| (mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40))))
-            .collect();
-        let store = MemStore::new();
-        let updates_a = EphemeralSaltState::new(&store).update_fin(&kvs_a).unwrap();
-        store.update_state(updates_a.clone());
-        let (_, trie_a) = StateRoot::new(&store).update_fin(&updates_a).unwrap();
-        store.update_trie(trie_a);
-
-        // Block B: 16 value updates, 8 deletes and 16 inserts over block A.
-        let mut keys_a: Vec<Vec<u8>> = kvs_a.into_keys().collect();
-        keys_a.sort();
-        let mut kvs_b: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
-        for key in &keys_a[..16] {
-            kvs_b.insert(key.clone(), Some(mock_data(&mut rng, 40)));
-        }
-        for key in &keys_a[16..24] {
-            kvs_b.insert(key.clone(), None);
-        }
-        for _ in 0..16 {
-            kvs_b.insert(mock_data(&mut rng, 20), Some(mock_data(&mut rng, 40)));
-        }
-        let updates_b = EphemeralSaltState::new(&store).update_fin(&kvs_b).unwrap();
-        let (_, trie_b) = StateRoot::new(&store).update_fin(&updates_b).unwrap();
+        let TwoBlocks {
+            store,
+            kvs_b,
+            updates_b,
+            trie_b,
+        } = two_block_fixture(11);
         let plain_b: BTreeMap<_, _> = kvs_b
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -1271,11 +1254,8 @@ mod tests {
         store.update_state(updates_b);
         store.update_trie(trie_b);
         let build = || Witness::create([], kvs_b.keys(), &BTreeMap::new(), &store).unwrap();
-        let encode = |witness: &Witness| {
-            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy()).unwrap()
-        };
-        let first = encode(&build());
-        let second = encode(&build());
+        let first = encode_salt_witness(&build());
+        let second = encode_salt_witness(&build());
         assert_eq!(first, second, "a refreshed entry must not change the proof");
         build().verify().unwrap();
     }

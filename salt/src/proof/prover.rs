@@ -9,14 +9,13 @@ use crate::{
     traits::{StateReader, TrieReader},
     trie::{
         node_utils::{get_child_node, subtree_leaf_start_key},
-        trie::kv_hash,
+        trie::{kv_hash, shared_committer, DEFAULT_CRS},
     },
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{
-    crs::CRS,
     lagrange_basis::PrecomputedWeights,
     multiproof::{MultiPoint, MultiPointProof, VerifierQuery},
     transcript::Transcript,
@@ -41,12 +40,6 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// Create a new CRS.
 pub static PRECOMPUTED_WEIGHTS: Lazy<PrecomputedWeights> =
     Lazy::new(|| PrecomputedWeights::new(DOMAIN_SIZE));
-
-/// Shared default CRS. Constructing `CRS::default()` decompresses 257 points,
-/// each costing a modular square root plus a subgroup check (several
-/// milliseconds total), so it is done once per process and reused by every
-/// proof creation and verification.
-pub static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
 
 /// Serde wrapper for banderwagon `Element` with validation and compression.
 ///
@@ -255,9 +248,9 @@ impl SaltProof {
 
         // Reuse the shared CRS (deriving it decompresses 257 points) and the
         // trie's fixed-base tables for all MSMs over the CRS generators.
-        let committer = crate::trie::trie::shared_committer();
+        let committer = shared_committer();
         let proof = MultiPoint::open_with_committer(
-            DEFAULT_CRS.clone(),
+            &DEFAULT_CRS,
             &committer,
             &PRECOMPUTED_WEIGHTS,
             &mut transcript,
@@ -616,7 +609,7 @@ mod tests {
         BucketMeta,
     };
     use banderwagon::{CanonicalSerialize, PrimeField};
-    use ipa_multipoint::lagrange_basis::LagrangeBasis;
+    use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
     use rand::{rngs::StdRng, SeedableRng};
     use std::vec;
 
