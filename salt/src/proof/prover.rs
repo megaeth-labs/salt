@@ -296,7 +296,9 @@ pub mod parents_commitments_serde {
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            let n = map.size_hint().unwrap_or(0);
+            // The declared length is untrusted. Cap the initial reservation;
+            // larger valid maps grow as their entries are read.
+            let n = map.size_hint().unwrap_or(0).min(65_536);
             let mut ids: Vec<NodeId> = Vec::with_capacity(n);
             let mut bytes: Vec<[u8; 32]> = Vec::with_capacity(n);
             let mut sorted = true;
