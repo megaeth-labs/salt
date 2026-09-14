@@ -293,8 +293,9 @@ const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
 
 /// Queries per transcript chunk: the chunk is serialized in parallel into one buffer and the
 /// buffer fed to the transcript's hash, so the transcript never holds more than this many
-/// queries' bytes (≈ 0.8 MB) however many queries a proof has.
-const TRANSCRIPT_CHUNK_QUERIES: usize = 8192;
+/// queries' bytes (≈ 1.6 MB) however many queries a proof has. A 16K chunk halves the
+/// serialization-and-hash handoffs for large proofs while keeping memory bounded.
+const TRANSCRIPT_CHUNK_QUERIES: usize = 16384;
 
 #[inline(always)]
 fn write_query_bytes(chunk_res: &mut [u8], commitment: &[u8; 32], point: &Fr, result: &Fr) {
