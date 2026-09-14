@@ -9,6 +9,8 @@ mod decoder_arithmetic;
 mod element;
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod ifma;
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+mod ifma_committer;
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod ifma_msm;
 #[cfg(all(feature = "std", target_arch = "x86_64"))]

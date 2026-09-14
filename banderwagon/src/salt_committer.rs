@@ -289,6 +289,40 @@ impl Committer {
         Element(result)
     }
 
+    /// `scalars[i] * G[indices[i]]` for every `i`, the elements [`Committer::mul_index`] returns one by one.
+    ///
+    /// On `x86_64` with `std` and a host with AVX-512 IFMA, eight multiplications run per vector register
+    /// ([`crate::ifma_committer`]); everywhere else this maps `mul_index`.
+    ///
+    /// # Panics
+    /// If the lengths differ.
+    pub fn mul_index_batch(&self, scalars: &[Fr], indices: &[usize]) -> Vec<Element> {
+        assert_eq!(scalars.len(), indices.len(), "one index per scalar");
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        {
+            if crate::ifma::available() {
+                let mut out = Vec::with_capacity(scalars.len());
+                for (s, g) in scalars.chunks(8).zip(indices.chunks(8)) {
+                    // SAFETY: lanes are available; the chunks are equal length <= 8; every index is
+                    // below `tables.len()` (or `tables[g]` panics here as `mul_index` would).
+                    for &gi in g {
+                        assert!(gi < self.tables.len(), "base index out of range");
+                    }
+                    let r = unsafe {
+                        crate::ifma_committer::mul_index8(&self.tables, self.window_size, s, g)
+                    };
+                    out.extend(r[..s.len()].iter().map(|p| Element(*p)));
+                }
+                return out;
+            }
+        }
+        scalars
+            .iter()
+            .zip(indices)
+            .map(|(s, &g)| self.mul_index(s, g))
+            .collect()
+    }
+
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This is the generic implementation for non-x86_64 architectures.
@@ -489,7 +523,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
 ///
 /// A vector of w-bit values representing the windowed decomposition.
 #[inline]
-fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
+pub(crate) fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     // Convert scalar from Montgomery form to big integer
     let source_vec = scalar.into_bigint().0;
     let mut index_vec = vec![];
