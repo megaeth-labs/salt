@@ -6,8 +6,9 @@
 //!   `parents_commitments` map, the witness-decode hot path this crate parallelizes. Each
 //!   commitment costs a modular sqrt (point decompression) plus a subgroup check in
 //!   `Element::from_bytes`, and a proof carries one per path node, so this map dominates decode.
-//!   `sequential` is the derived per-element path; `parallel` is the overridden
-//!   [`parents_commitments_serde::deserialize`].
+//!   `sequential` is the per-element path (a `BTreeMap` of `SerdeCommitment`, each through its own
+//!   deserializer); `parallel` is [`PathCommitments`]' deserializer (the overridden
+//!   [`parents_commitments_serde::deserialize`], the wire map read straight into its two vectors).
 //! - `salt_proof_codec` — full-`SaltProof` bincode `serialize` vs `deserialize` (deserialize uses
 //!   the parallel override), showing the encode/decode asymmetry: encoding already-normalized
 //!   commitments is cheap, decoding pays the per-point elliptic-curve work.
@@ -21,7 +22,7 @@ use std::hint::black_box;
 
 use bincode::config::legacy;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use salt::proof::SerdeCommitment;
+use salt::proof::{PathCommitments, SerdeCommitment};
 use salt::{types::NodeId, SaltProof};
 
 /// Directory of committed `SaltProof` fixtures, resolved relative to this crate at compile time.
@@ -31,8 +32,7 @@ const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/fixture
 /// single-field bincode struct adds no framing, so it decodes the same bytes as a bare map.
 #[derive(serde::Deserialize)]
 struct ParallelMap {
-    #[serde(deserialize_with = "salt::proof::prover::parents_commitments_serde::deserialize")]
-    inner: BTreeMap<NodeId, SerdeCommitment>,
+    inner: PathCommitments,
 }
 
 /// A loaded fixture: the parsed proof, its on-wire bytes, and its `parents_commitments` map bytes.
