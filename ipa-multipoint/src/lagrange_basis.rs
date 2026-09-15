@@ -97,7 +97,18 @@ impl Sub<&LagrangeBasis> for &LagrangeBasis {
     type Output = LagrangeBasis;
 
     fn sub(self, rhs: &LagrangeBasis) -> Self::Output {
-        self.clone() + (-rhs)
+        assert_eq!(
+            self.values.len(),
+            rhs.values.len(),
+            "LagrangeBasis subtraction requires same length"
+        );
+        LagrangeBasis::new(
+            self.values
+                .iter()
+                .zip(rhs.values.iter())
+                .map(|(a, b)| *a - *b)
+                .collect(),
+        )
     }
 }
 
