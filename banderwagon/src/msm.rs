@@ -18,18 +18,26 @@ use std::{vec, vec::Vec};
 /// carries enough work to pay for the dispatch.
 pub(crate) fn msm_windowed(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
     let size = bases.len().min(scalars.len());
-    let bases = &bases[..size];
-    let scalars = &scalars[..size];
-    if size == 0 {
-        return EdwardsProjective::zero();
-    }
-
     let c = if size < 32 {
         3
     } else {
         // ln_without_floats: log2(size) * ln(2), plus 2
         (usize::BITS - (size - 1).leading_zeros()) as usize * 69 / 100 + 2
     };
+    msm_windowed_with_c(bases, scalars, c)
+}
+
+/// [`msm_windowed`] with the window width given, so the tests can exercise every
+/// width — and with it every bucket-count branch of [`bucket_len`] — at a size
+/// that keeps a debug-mode run cheap.
+fn msm_windowed_with_c(bases: &[EdwardsAffine], scalars: &[Fr], c: usize) -> EdwardsProjective {
+    let size = bases.len().min(scalars.len());
+    let bases = &bases[..size];
+    let scalars = &scalars[..size];
+    if size == 0 {
+        return EdwardsProjective::zero();
+    }
+
     let num_bits = <Fr as PrimeField>::MODULUS_BIT_SIZE as usize;
     let digits_count = num_bits.div_ceil(c);
 
@@ -43,7 +51,8 @@ pub(crate) fn msm_windowed(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsPr
     }
 
     let window_sum = |window: usize| -> EdwardsProjective {
-        let mut buckets = vec![EdwardsProjective::zero(); 1 << c];
+        let mut buckets =
+            vec![EdwardsProjective::zero(); bucket_len(c, num_bits, digits_count, window)];
         for (digits, base) in scalar_digits.chunks_exact(digits_count).zip(bases) {
             let digit = digits[window];
             match 0.cmp(&digit) {
@@ -83,6 +92,25 @@ pub(crate) fn msm_windowed(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsPr
                 }
                 total
             })
+}
+
+/// Buckets one window of [`msm_windowed_with_c`] needs, which is half of the
+/// window's `2^c` digit values for every window but the last.
+///
+/// [`make_digits`] recenters each digit to `[-2^(c-1), 2^(c-1) - 1]`, so a
+/// bucket index `|digit| - 1` stays below `2^(c-1)` — the upper half of a
+/// `2^c` array is never written, and reducing over it costs one full point
+/// addition per empty bucket. The last window is the exception: it absorbs the
+/// outstanding carry instead of being recentered, so its digits run
+/// `0..=2^last_bits`, where `last_bits` is what the modulus leaves for it.
+/// `last_bits == c` when `c` divides the modulus width (c = 11 and c = 23 at
+/// 253 bits), and then the last window does need all `2^c` buckets.
+fn bucket_len(c: usize, num_bits: usize, digits_count: usize, window: usize) -> usize {
+    if window == digits_count - 1 {
+        1 << (num_bits - (digits_count - 1) * c)
+    } else {
+        1 << (c - 1)
+    }
 }
 
 /// Decomposes a scalar into signed `w`-bit digits in `[-2^(w-1), 2^(w-1)]`,
@@ -215,6 +243,117 @@ mod tests {
 
         // Empty input yields the identity.
         assert!(msm_windowed(&[], &[]).is_zero());
+    }
+
+    /// Every window width must agree with arkworks, not only the ones the size
+    /// heuristic happens to pick: [`bucket_len`] sizes the last window from the
+    /// bits the modulus leaves it, and `c = 11` — the width chosen for 8,193 to
+    /// 16,384 points — is the one where that is the full `2^c`.
+    #[test]
+    fn msm_windowed_matches_arkworks_for_every_window_width() {
+        use ark_ec::{CurveGroup, VariableBaseMSM};
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::from_seed([21u8; 32]);
+        let size = 200;
+        let bases_proj: Vec<EdwardsProjective> = (0..size)
+            .map(|_| EdwardsProjective::rand(&mut rng))
+            .collect();
+        let bases = EdwardsProjective::normalize_batch(&bases_proj);
+        let mut scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
+        scalars[0] = Fr::zero();
+        // `r - 1` maximizes the last window's digit, which is the one the last
+        // bucket count has to cover.
+        scalars[1] = -Fr::from(1u64);
+        scalars[2] = Fr::from(1u64);
+
+        let expected = EdwardsProjective::msm(&bases, &scalars).unwrap();
+        for c in 3..=13 {
+            assert_eq!(
+                msm_windowed_with_c(&bases, &scalars, c),
+                expected,
+                "c = {c}"
+            );
+        }
+    }
+
+    /// Timing of [`msm_windowed`] at the sizes SALT verification actually hits:
+    /// the IPA's closing MSM is a fixed 274 points, an ordinary head witness
+    /// coalesces to a few hundred to a couple of thousand commitments, and a
+    /// dense one to tens of thousands. Run with
+    /// `cargo test -p banderwagon --release msm_windowed_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, not a correctness check"]
+    fn msm_windowed_timing() {
+        use ark_ec::CurveGroup;
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+        use std::{println, time::Instant};
+
+        let mut rng = ChaCha20Rng::from_seed([5u8; 32]);
+        // Spin the thread pool up before the first timed size.
+        {
+            let warm: Vec<EdwardsProjective> = (0..512)
+                .map(|_| EdwardsProjective::rand(&mut rng))
+                .collect();
+            let warm = EdwardsProjective::normalize_batch(&warm);
+            let scalars: Vec<Fr> = (0..warm.len()).map(|_| Fr::rand(&mut rng)).collect();
+            for _ in 0..20 {
+                let _ = core::hint::black_box(msm_windowed(&warm, &scalars));
+            }
+        }
+        for size in [274usize, 400, 1000, 2335, 8192] {
+            let bases_proj: Vec<EdwardsProjective> = (0..size)
+                .map(|_| EdwardsProjective::rand(&mut rng))
+                .collect();
+            let bases = EdwardsProjective::normalize_batch(&bases_proj);
+            let scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
+
+            let reps = if size <= 1000 { 50 } else { 10 };
+            let _ = msm_windowed(&bases, &scalars);
+            let start = Instant::now();
+            for _ in 0..reps {
+                let _ = core::hint::black_box(msm_windowed(&bases, &scalars));
+            }
+            let us = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
+            println!("msm_windowed n = {size:>5}: {us:>9.1} us");
+        }
+    }
+
+    /// The bucket counts [`bucket_len`] hands out must cover every digit
+    /// [`make_digits`] can produce: a bucket index is `|digit| - 1`, so every
+    /// window needs `|digit| <= bucket_len`.
+    #[test]
+    fn make_digits_stays_within_the_bucket_counts() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
+        let num_bits = <Fr as PrimeField>::MODULUS_BIT_SIZE as usize;
+        let mut scalars: Vec<Fr> = (0..64).map(|_| Fr::rand(&mut rng)).collect();
+        scalars.extend([Fr::zero(), Fr::from(1u64), -Fr::from(1u64)]);
+
+        for c in 3..=16 {
+            let digits_count = num_bits.div_ceil(c);
+            let mut digits = vec![0i64; digits_count];
+            for scalar in &scalars {
+                make_digits(&scalar.into_bigint().0, c, &mut digits);
+                for (window, &digit) in digits.iter().enumerate() {
+                    let len = bucket_len(c, num_bits, digits_count, window) as i64;
+                    assert!(
+                        digit.abs() <= len,
+                        "c = {c}, window {window}: digit {digit} needs more than {len} buckets"
+                    );
+                    if window == digits_count - 1 {
+                        assert!(digit >= 0, "c = {c}: the last digit absorbs the carry");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
