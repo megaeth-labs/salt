@@ -93,6 +93,16 @@ mod node_poly_cache {
             .map(|(_, poly)| Arc::clone(poly))
     }
 
+    /// Drops every entry, freeing each shard's map after its lock is released.
+    pub(super) fn clear() {
+        for shard in CACHE.iter() {
+            let mut guard = shard.write();
+            let dropped = core::mem::take(&mut *guard);
+            drop(guard);
+            drop(dropped);
+        }
+    }
+
     pub(super) fn insert(node: NodeId, commitment: CommitmentBytes, poly: Arc<LagrangeBasis>) {
         let mut guard = shard(node).write();
         // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
@@ -107,6 +117,17 @@ mod node_poly_cache {
         drop(guard);
         drop((evicted, replaced));
     }
+}
+
+/// Drops every entry of the process-wide node-polynomial cache.
+///
+/// Nothing in production wants this — carrying entries across witnesses is the point of the
+/// cache. It exists so a benchmark can time a *cold* witness build, the shape a witness takes
+/// over nodes no earlier witness has touched: without it a benchmark that repeats one witness
+/// measures a 100% hit rate, which no validator sees.
+#[doc(hidden)]
+pub fn clear_node_poly_cache() {
+    node_poly_cache::clear();
 }
 
 /// One block's header-verified trie transition, used to advance the node-polynomial cache to
