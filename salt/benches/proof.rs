@@ -11,12 +11,9 @@
 //! cargo bench --package salt --bench proof
 //! ```
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use salt::{
-    clear_node_poly_cache, types::*, EphemeralSaltState, MemStore, SaltProof, SaltWitness,
-    StateRoot, Witness,
-};
+use salt::{types::*, EphemeralSaltState, MemStore, SaltProof, SaltWitness, StateRoot, Witness};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::OnceLock;
@@ -103,25 +100,6 @@ fn bench_salt_proof(c: &mut Criterion) {
     }
     group.finish();
 
-    // Cold: the node-polynomial cache is cleared before every iteration, so each proof pays
-    // the store reads and map-to-field passes for every node on its paths. A repeated warm
-    // benchmark measures a 100% hit rate, which no caller sees; production sits between the
-    // two (44% on mainnet without the refresh, 98% with it).
-    let mut group = c.benchmark_group("salt_proof/create-cold");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
-    for n in [16usize, 256, 2048] {
-        let keys = proof_keys(s, n);
-        group.bench_with_input(BenchmarkId::from_parameter(n), &keys, |b, keys| {
-            b.iter_batched(
-                clear_node_poly_cache,
-                |()| black_box(SaltProof::create(keys.iter().copied(), &s.store).unwrap()),
-                BatchSize::PerIteration,
-            );
-        });
-    }
-    group.finish();
-
     let mut group = c.benchmark_group("salt_proof/check");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
@@ -193,25 +171,6 @@ fn bench_witness(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(Witness::create([], lookups.iter(), updates, &s.store).unwrap())
                 });
-            },
-        );
-    }
-    group.finish();
-
-    let mut group = c.benchmark_group("witness/create-cold");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
-    for n in [256usize, 1024] {
-        let (lookups, updates) = witness_workload(s, n, &mut rng);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &(lookups, updates),
-            |b, (lookups, updates)| {
-                b.iter_batched(
-                    clear_node_poly_cache,
-                    |()| black_box(Witness::create([], lookups.iter(), updates, &s.store).unwrap()),
-                    BatchSize::PerIteration,
-                );
             },
         );
     }

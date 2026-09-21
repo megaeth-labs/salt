@@ -279,50 +279,6 @@ mod tests {
         }
     }
 
-    /// Timing of [`msm_windowed`] at the sizes SALT verification actually hits:
-    /// the IPA's closing MSM is a fixed 274 points, an ordinary head witness
-    /// coalesces to a few hundred to a couple of thousand commitments, and a
-    /// dense one to tens of thousands. Run with
-    /// `cargo test -p banderwagon --release msm_windowed_timing -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "timing, not a correctness check"]
-    fn msm_windowed_timing() {
-        use ark_ec::CurveGroup;
-        use ark_ff::UniformRand;
-        use rand_chacha::rand_core::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
-        use std::{println, time::Instant};
-
-        let mut rng = ChaCha20Rng::from_seed([5u8; 32]);
-        // Spin the thread pool up before the first timed size.
-        {
-            let warm: Vec<EdwardsProjective> = (0..512)
-                .map(|_| EdwardsProjective::rand(&mut rng))
-                .collect();
-            let warm = EdwardsProjective::normalize_batch(&warm);
-            let scalars: Vec<Fr> = (0..warm.len()).map(|_| Fr::rand(&mut rng)).collect();
-            for _ in 0..20 {
-                let _ = core::hint::black_box(msm_windowed(&warm, &scalars));
-            }
-        }
-        for size in [274usize, 400, 1000, 2335, 8192] {
-            let bases_proj: Vec<EdwardsProjective> = (0..size)
-                .map(|_| EdwardsProjective::rand(&mut rng))
-                .collect();
-            let bases = EdwardsProjective::normalize_batch(&bases_proj);
-            let scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
-
-            let reps = if size <= 1000 { 50 } else { 10 };
-            let _ = msm_windowed(&bases, &scalars);
-            let start = Instant::now();
-            for _ in 0..reps {
-                let _ = core::hint::black_box(msm_windowed(&bases, &scalars));
-            }
-            let us = start.elapsed().as_secs_f64() * 1e6 / reps as f64;
-            println!("msm_windowed n = {size:>5}: {us:>9.1} us");
-        }
-    }
-
     /// The bucket counts [`bucket_len`] hands out must cover every digit
     /// [`make_digits`] can produce: a bucket index is `|digit| - 1`, so every
     /// window needs `|digit| <= bucket_len`.

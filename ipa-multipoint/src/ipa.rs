@@ -320,14 +320,11 @@ pub fn create_with_precomp(
     }
 }
 
-/// Smallest number of terms one parallel task takes: below this the rayon dispatch costs more
-/// than the fixed-base multiplications it hands out, and concurrent proofs only contend.
-const MSM_MIN_CHUNK: usize = 8;
-
 /// Sums `scalar · G[index]` over the given terms using precomputed wNAF
 /// tables, splitting the terms across threads.
 pub(crate) fn fixed_base_msm(precomp: &Committer, terms: &[(usize, Fr)]) -> Element {
-    let chunk_size = terms.len().div_ceil(num_threads!()).max(MSM_MIN_CHUNK);
+    // `max(1)`: an empty term list must not reach `chunks(0)`, which panics.
+    let chunk_size = terms.len().div_ceil(num_threads!()).max(1);
     chunks!(terms, chunk_size)
         .map(|chunk| {
             let mut acc = Element::zero();

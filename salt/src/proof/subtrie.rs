@@ -50,9 +50,6 @@ use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 type FxHashSet<K> = HashSet<K, FxBuildHasher>;
 
-/// Smallest number of internal nodes one parallel task materializes (256 child reads each).
-const MIN_NODE_CHUNK: usize = 4;
-
 /// Process-wide cache of node polynomials, keyed by node id and validated by the node's
 /// commitment.
 ///
@@ -91,16 +88,6 @@ mod node_poly_cache {
             .map(|(_, poly)| Arc::clone(poly))
     }
 
-    /// Drops every entry, freeing each shard's map after its lock is released.
-    pub(super) fn clear() {
-        for shard in CACHE.iter() {
-            let mut guard = shard.write();
-            let dropped = core::mem::take(&mut *guard);
-            drop(guard);
-            drop(dropped);
-        }
-    }
-
     pub(super) fn insert(node: NodeId, commitment: CommitmentBytes, poly: Arc<LagrangeBasis>) {
         let mut guard = shard(node).write();
         // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
@@ -115,17 +102,6 @@ mod node_poly_cache {
         drop(guard);
         drop((evicted, replaced));
     }
-}
-
-/// Drops every entry of the process-wide node-polynomial cache.
-///
-/// Nothing in production wants this — carrying entries across witnesses is the point of the
-/// cache. It exists so a benchmark can time a *cold* witness build, the shape a witness takes
-/// over nodes no earlier witness has touched: without it a benchmark that repeats one witness
-/// measures a 100% hit rate, which no validator sees.
-#[doc(hidden)]
-pub fn clear_node_poly_cache() {
-    node_poly_cache::clear();
 }
 
 /// One block's header-verified trie transition, used to advance the node-polynomial cache to
@@ -647,7 +623,8 @@ where
     let internal_nodes: Vec<_> = internal_nodes.into_iter().collect();
     let leaf_nodes: Vec<_> = leaf_nodes.into_iter().collect();
     let internal_polys = resolve_polys(&internal_nodes, &parent_bytes, |missing| {
-        let chunk_size = missing.len().div_ceil(num_threads!()).max(MIN_NODE_CHUNK);
+        // `max(1)`: `missing` is empty when every node hits the cache, and `chunks(0)` panics.
+        let chunk_size = missing.len().div_ceil(num_threads!()).max(1);
         let chunks = chunks!(missing, chunk_size)
             .map(|nodes| {
                 let scalars = multi_commitments_to_scalars(store, nodes)?;

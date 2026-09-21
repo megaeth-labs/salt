@@ -78,7 +78,7 @@ mod test_utils;
 
 pub use prover::{fx_hashmap_serde, SaltProof, SerdeCommitment, SerdeMultiPointProof};
 pub use salt_witness::SaltWitness;
-pub use subtrie::{clear_node_poly_cache, NodePolyRefresh};
+pub use subtrie::NodePolyRefresh;
 pub use witness::Witness;
 
 /// Error type for proof operations
