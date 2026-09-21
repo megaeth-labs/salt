@@ -120,9 +120,8 @@ impl MultiPoint {
 
         let grouped_queries: Vec<_> = into_iter!(grouped_queries).collect();
 
-        // At least a few point groups per task: each is a 256-coefficient pass, too little to
-        // farm out one by one.
-        let chunk_size = grouped_queries.len().div_ceil(num_threads!()).max(8);
+        // `max(1)`: an empty query set must not reach `chunks(0)`, which panics.
+        let chunk_size = grouped_queries.len().div_ceil(num_threads!()).max(1);
 
         // aggregate all of the queries evaluated at the same point;
         // accumulate scaled polynomials in place instead of cloning each

@@ -50,8 +50,6 @@ use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 type FxHashSet<K> = HashSet<K, FxBuildHasher>;
 
-/// Smallest number of parent commitments one parallel task reads.
-const MIN_PARENT_CHUNK: usize = 8;
 /// Smallest number of internal nodes one parallel task materializes (256 child reads each).
 const MIN_NODE_CHUNK: usize = 4;
 
@@ -602,10 +600,7 @@ where
         .chain(leaf_nodes.keys())
         .map(|&parent| connect_parent_id(parent))
         .collect();
-    let commitment_chunk = parent_ids
-        .len()
-        .div_ceil(num_threads!())
-        .max(MIN_PARENT_CHUNK);
+    let commitment_chunk = parent_ids.len().div_ceil(num_threads!());
     let parents_read: Vec<(NodeId, CommitmentBytes)> = chunks!(parent_ids, commitment_chunk)
         .map(|chunk| {
             chunk
