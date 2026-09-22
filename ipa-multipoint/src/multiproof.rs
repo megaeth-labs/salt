@@ -15,9 +15,8 @@ use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, chunks_mut, into_iter, iter, num_threads, reduce};
-use std::sync::Arc;
-use std::{vec, vec::Vec};
+use salt_macros::{chunks, chunks_mut, into_iter, iter, reduce, thread_chunk_size};
+use std::{sync::Arc, vec, vec::Vec};
 
 pub struct MultiPoint;
 
@@ -87,8 +86,7 @@ impl MultiPoint {
     /// per-round generator folding and the small variable-base MSMs, which
     /// dominate proving time.
     ///
-    /// `committer` must hold tables for the CRS `G` vector in order; tables that also hold
-    /// `Q` as base `crs.n` make the IPA's blinding terms fixed-base too.
+    /// `committer` is `crs`'s fixed-base tables, [`CRS::committer`]: `G` in order, then `Q`.
     pub fn open_with_committer(
         crs: &CRS,
         committer: &Committer,
@@ -120,8 +118,7 @@ impl MultiPoint {
 
         let grouped_queries: Vec<_> = into_iter!(grouped_queries).collect();
 
-        // `max(1)`: an empty query set must not reach `chunks(0)`, which panics.
-        let chunk_size = grouped_queries.len().div_ceil(num_threads!()).max(1);
+        let chunk_size = thread_chunk_size!(grouped_queries.len());
 
         // aggregate all of the queries evaluated at the same point;
         // accumulate scaled polynomials in place instead of cloning each
@@ -195,15 +192,13 @@ impl MultiPoint {
         let g_3_x_comm = g1_comm - g_x_comm;
 
         // 4. Compute the IPA for g_3
+        let a = g_3_x.values().to_vec();
+        let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
         let g_3_ipa = match committer {
             Some(committer) => {
-                let a = g_3_x.values().to_vec();
-                let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
-                crate::ipa::create_with_precomp(transcript, committer, crs.Q, a, g_3_x_comm, b, t)
+                crate::ipa::create_with_precomp(transcript, committer, a, g_3_x_comm, b, t)
             }
-            None => {
-                open_point_outside_of_domain(crs.clone(), precomp, transcript, g_3_x, g_3_x_comm, t)
-            }
+            None => crate::ipa::create(transcript, crs.clone(), a, g_3_x_comm, b, t),
         };
 
         MultiPointProof {
@@ -219,7 +214,7 @@ fn commit_dense(crs: &CRS, committer: Option<&Committer>, poly: &LagrangeBasis) 
     match committer {
         Some(committer) => {
             let terms: Vec<(usize, Fr)> = poly.values().iter().copied().enumerate().collect();
-            crate::ipa::fixed_base_msm(committer, &terms)
+            committer.msm(&terms)
         }
         None => crs.commit_lagrange_poly(poly),
     }
@@ -398,24 +393,6 @@ impl MultiPointProof {
     }
 }
 
-// TODO: we could probably get rid of this method altogether and just do this in the multiproof
-// TODO method
-// TODO: check that the point is actually not in the domain
-pub(crate) fn open_point_outside_of_domain(
-    crs: CRS,
-    precomp: &PrecomputedWeights,
-    transcript: &mut Transcript,
-    polynomial: LagrangeBasis,
-    commitment: Element,
-    z_i: Fr,
-) -> IPAProof {
-    let a = polynomial.values().to_vec();
-
-    let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, z_i);
-
-    crate::ipa::create(transcript, crs, a, commitment, b, z_i)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,13 +510,13 @@ mod tests {
         );
 
         let mut prover_transcript = Transcript::new(b"test");
-
-        let proof = open_point_outside_of_domain(
-            crs.clone(),
-            &precomp,
+        let b = LagrangeBasis::evaluate_lagrange_coefficients(&precomp, crs.n, input_point);
+        let proof = crate::ipa::create(
             &mut prover_transcript,
-            polynomial,
+            crs.clone(),
+            poly.clone(),
             commitment,
+            b.clone(),
             input_point,
         );
 
@@ -552,7 +529,6 @@ mod tests {
         );
 
         let mut verifier_transcript = Transcript::new(b"test");
-        let b = LagrangeBasis::evaluate_lagrange_coefficients(&precomp, crs.n, input_point);
         let output_point = inner_product(&poly, &b);
         let mut bytes = [0u8; 32];
         output_point.serialize_compressed(&mut bytes[..]).unwrap();
@@ -667,7 +643,7 @@ mod tests {
     fn open_with_committer_matches_open() {
         let n = 256;
         let crs = CRS::new(n, b"random seed");
-        let committer = Committer::new(&crs.G, 6);
+        let committer = crs.committer(6);
         let precomp = PrecomputedWeights::new(n);
 
         let mut rng = test_rng();

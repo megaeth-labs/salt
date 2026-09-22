@@ -1,6 +1,6 @@
 use banderwagon::{trait_defs::*, Fr};
 use salt_macros::prelude::*;
-use salt_macros::{chunks_mut, num_threads};
+use salt_macros::{chunks_mut, thread_chunk_size};
 use std::{vec, vec::Vec};
 
 /// Computes the inner product between two scalar vectors
@@ -32,7 +32,7 @@ pub fn powers_of_par(point: Fr, n: usize) -> Vec<Fr> {
     let mut powers = vec![Fr::zero(); n];
 
     // Compute base powers for each chunk
-    let chunk_size = n.div_ceil(num_threads!());
+    let chunk_size = thread_chunk_size!(n);
 
     // to handle the case where n is not a multiple of chunk_size
     let len = n.div_ceil(chunk_size);

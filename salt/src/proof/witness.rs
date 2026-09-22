@@ -195,11 +195,9 @@ impl Witness {
             reason: format!("{e:?}"),
         })?;
 
-        let salt_witness = SaltWitness::create(&witnessed_keys, store)?;
-
         Ok(Witness {
             direct_lookup_tbl,
-            salt_witness,
+            salt_witness: SaltWitness::create(&witnessed_keys, store)?,
         })
     }
 
@@ -462,9 +460,7 @@ mod tests {
         let witness = Witness::create([], kvs.keys(), &BTreeMap::new(), &store).unwrap();
 
         // Test serialization round-trip of the underlying SaltWitness
-        let serialized =
-            bincode::serde::encode_to_vec(&witness.salt_witness, bincode::config::legacy())
-                .unwrap();
+        let serialized = encode_salt_witness(&witness);
         let (deserialized, _): (SaltWitness, _) =
             bincode::serde::decode_from_slice(&serialized, bincode::config::legacy()).unwrap();
 

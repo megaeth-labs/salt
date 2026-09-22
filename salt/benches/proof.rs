@@ -125,12 +125,12 @@ type PlainUpdates = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
 fn witness_workload(s: &Setup, n: usize, rng: &mut StdRng) -> (Vec<Vec<u8>>, PlainUpdates) {
     let half = n / 2;
     let hits = half * 2 / 3;
-    let step = s.plain_keys.len() / half.max(1);
+    let step = (s.plain_keys.len() / half.max(1)).max(1);
 
     let mut lookups: Vec<Vec<u8>> = s
         .plain_keys
         .iter()
-        .step_by(step.max(1))
+        .step_by(step)
         .take(hits)
         .cloned()
         .collect();
@@ -139,13 +139,7 @@ fn witness_workload(s: &Setup, n: usize, rng: &mut StdRng) -> (Vec<Vec<u8>>, Pla
     }
 
     let mut updates = BTreeMap::new();
-    for key in s
-        .plain_keys
-        .iter()
-        .skip(1)
-        .step_by(step.max(1))
-        .take(half / 2)
-    {
+    for key in s.plain_keys.iter().skip(1).step_by(step).take(half / 2) {
         updates.insert(key.clone(), Some(mock_data(rng, 32))); // overwrite
     }
     while updates.len() < half {

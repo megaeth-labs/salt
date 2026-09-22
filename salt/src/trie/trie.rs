@@ -47,16 +47,14 @@ use core::{cmp::Ordering, ops::Range};
 /// each costing a modular square root plus a subgroup check (several
 /// milliseconds total), so it is done once per process and reused by the
 /// shared committer and by every proof creation and verification.
-pub static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
+pub(crate) static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
 
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shared_committer()));
 
-/// Returns the process-wide committer holding fixed-base precomputation
-/// tables for the CRS generators. Forces the one-time table construction on
-/// first use.
-pub(crate) fn shared_committer() -> Arc<Committer> {
-    Arc::clone(&SHARED_COMMITTER)
+/// The process-wide committer: fixed-base tables over the shared CRS.
+pub(crate) fn shared_committer() -> &'static Committer {
+    SHARED_COMMITTER.as_ref()
 }
 
 /// Builds the shared committer's precomputation tables.
@@ -72,18 +70,7 @@ pub(crate) fn shared_committer() -> Arc<Committer> {
 ///   touches `SHARED_COMMITTER` would re-enter this initialization on the
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
-    let build = || {
-        let crs = &*DEFAULT_CRS;
-        // `Q` rides along as base `crs.n`, so the IPA prover's blinding terms are fixed-base
-        // multiplications too (see `ipa::create_with_precomp`).
-        let bases: Vec<Element> = crs
-            .G
-            .iter()
-            .copied()
-            .chain(core::iter::once(crs.Q))
-            .collect();
-        Committer::new(&bases, platform::DEFAULT_PRECOMP_WINDOW_SIZE)
-    };
+    let build = || DEFAULT_CRS.committer(platform::DEFAULT_PRECOMP_WINDOW_SIZE);
     #[cfg(feature = "parallel")]
     {
         // Never run `build` inline here: under `parallel` it would par_iter

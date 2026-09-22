@@ -413,6 +413,12 @@ fn subgroup_check(point: &EdwardsProjective) -> bool {
 }
 
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
+
     // The MSM needs affine bases. Points loaded from storage or deserialized
     // proofs already have `z = 1`, so skip the batch inversion entirely in
     // that common case.
@@ -425,12 +431,6 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
         EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
     };
-
-    assert_eq!(
-        bases.len(),
-        scalars.len(),
-        "number of bases should equal number of scalars"
-    );
 
     Element(crate::msm::msm_windowed(&bases, scalars))
 }

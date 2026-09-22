@@ -11,7 +11,7 @@
 //! - **Bucket Subtrees**: Dynamic trees within buckets that can expand from 1-5 levels
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, num_threads};
+use salt_macros::{chunks, thread_chunk_size};
 use std::collections::{BTreeMap, BTreeSet};
 use std::vec::Vec;
 
@@ -64,9 +64,7 @@ pub(crate) fn parents_and_points(
 ) {
     // One accumulator pair per thread chunk, merged once at the end. (A
     // per-key map-reduce would allocate and merge two BTreeMaps per key.)
-    // `max(1)`: the verifier calls this with whatever key set it was handed, including none,
-    // and `chunks(0)` panics.
-    let chunk_size = salt_keys.len().div_ceil(num_threads!()).max(1);
+    let chunk_size = thread_chunk_size!(salt_keys.len());
     let partials: Vec<_> = chunks!(salt_keys, chunk_size)
         .map(|chunk| {
             let mut internal_nodes: BTreeMap<NodeId, BTreeSet<usize>> = BTreeMap::new();
@@ -175,12 +173,15 @@ fn record_key_paths(
         subtree_leaf_for_key(salt_key)
     };
 
-    // Record which slot position within the segment contains this key
-    // Use lowest 8 bits of slot_id as position within 256-slot segment
     slot_position_nodes
         .entry(node)
         .or_default()
-        .insert((salt_key.slot_id() & 0xFF) as usize);
+        .insert(slot_position(salt_key));
+}
+
+/// The position of `key`'s slot in its leaf's 256-slot polynomial (the slot id's low 8 bits).
+pub(super) fn slot_position(key: &SaltKey) -> usize {
+    (key.slot_id() & 0xFF) as usize
 }
 
 /// Encodes bucket tree level information into a main trie node ID.

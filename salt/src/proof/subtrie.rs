@@ -11,8 +11,9 @@
 //! 1. Extract and deduplicate bucket IDs from input keys
 //! 2. Determine trie levels for each bucket (metadata vs dynamic data buckets)
 //! 3. Build minimal node hierarchy using [`parents_and_points`]
-//! 4. Collect cryptographic commitments for all parent nodes
-//! 5. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)
+//! 4. Read the commitment of every parent node
+//! 5. Resolve every parent's polynomial, from the process-wide node-polynomial cache or storage
+//! 6. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)
 use crate::{
     constant::{
         default_commitment, BUCKET_SLOT_BITS, BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS,
@@ -20,7 +21,7 @@ use crate::{
     },
     proof::{
         prover::slot_to_field,
-        shape::{connect_parent_id, logic_parent_id, parents_and_points},
+        shape::{connect_parent_id, logic_parent_id, parents_and_points, slot_position},
         ProofError, ProofResult, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
@@ -28,11 +29,11 @@ use crate::{
     types::{BucketId, BucketMeta, CommitmentBytes, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr, Zero};
+use banderwagon::{Element, Fr};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, iter, num_threads};
+use salt_macros::{chunks, iter, thread_chunk_size};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
@@ -47,8 +48,8 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// polynomial was last built has the same 256 child scalars (internal node) or slot scalars
 /// (leaf node), and the store reads plus scalar conversions that produce them can be skipped.
 /// Consecutive blocks share most of their authentication paths, which is what makes the hit
-/// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each. A shard
-/// that fills up is cleared whole; the working set refills within a few proofs.
+/// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each, 256 MiB.
+/// A shard that fills up is cleared whole; the working set refills within a few proofs.
 mod node_poly_cache {
     use super::*;
     use crate::Lazy;
@@ -96,7 +97,6 @@ mod node_poly_cache {
 
 // Constants for improved code readability
 const METADATA_BUCKET_LEVEL: u8 = 1;
-const SLOT_INDEX_MASK: u64 = 0xff;
 const ROOT_LEVEL_CHILD_START: NodeId = 1;
 
 /// Information returned by the subtrie creation process
@@ -106,34 +106,14 @@ type SubTrieInfo = (
     FxHashMap<BucketId, u8>,
 );
 
-/// Converts cryptographic commitments from multiple internal trie nodes into scalar field elements.
-///
-/// This function processes internal nodes in the trie hierarchy and converts their child node
-/// commitments into scalar field elements suitable for IPA (Inner Product Argument) proof generation.
-/// For each internal node, it loads commitments for all 256 possible child positions, using default
-/// commitments where actual child nodes don't exist (sparse trie optimization).
-///
-/// # Parameters
-///
-/// * `store` - Storage backend providing access to trie node commitments
-/// * `nodes` - Internal nodes (logical ids) whose children to convert
-///
-/// # Returns
-///
-/// A vector of scalar field elements (`Fr`) representing all child commitments for the given nodes.
-/// The elements are ordered by node, then by child index (0-255 per node).
-///
-/// # Implementation Details
-///
-/// - Handles sparse child nodes by filling missing positions with appropriate default commitments
-/// - Special handling for root level nodes (different default commitment for first child)
-/// - Uses parallel processing for performance when dealing with multiple nodes
-/// - Converts Element commitments to scalar field using `serial_batch_map_to_scalar_field`
+/// The polynomial of every internal node in `nodes` (logical ids), in order: its 256 child
+/// commitments mapped to the scalar field, with the level's default commitment where a child
+/// does not exist in storage (the root level's first child has its own default).
 ///
 /// # Errors
 ///
 /// Returns `ProofError::StateReadError` if unable to read child node commitments from storage.
-fn multi_commitments_to_scalars<Store>(store: &Store, nodes: &[NodeId]) -> ProofResult<Vec<Fr>>
+fn internal_polynomials<Store>(store: &Store, nodes: &[NodeId]) -> ProofResult<Vec<LagrangeBasis>>
 where
     Store: TrieReader,
 {
@@ -152,9 +132,9 @@ where
             .or_insert_with(|| to_element(bytes).map_to_scalar_field())
     };
 
-    let mut scalars = vec![Fr::zero(); nodes.len() * DOMAIN_SIZE];
-    // Children present in storage: their positions in `scalars`, and their commitments
-    let mut real_positions: Vec<usize> = Vec::new();
+    let mut polys: Vec<Vec<Fr>> = Vec::with_capacity(nodes.len());
+    // Children present in storage: `(node index, child index)`, and their commitments
+    let mut real_positions: Vec<(usize, usize)> = Vec::new();
     let mut real_children: Vec<Element> = Vec::new();
 
     for (i, node_id) in nodes.iter().enumerate() {
@@ -174,8 +154,8 @@ where
         } else {
             child_idx // Non-root levels: all use child_idx as default
         };
-        let node_scalars = &mut scalars[i * DOMAIN_SIZE..(i + 1) * DOMAIN_SIZE];
-        node_scalars.fill(cached_default_scalar(default_commitment(default_idx)));
+        let mut node_scalars =
+            vec![cached_default_scalar(default_commitment(default_idx)); DOMAIN_SIZE];
 
         // Special case: root level first child uses different default
         if child_idx == ROOT_LEVEL_CHILD_START {
@@ -184,19 +164,29 @@ where
 
         // Record actual commitments to overwrite the defaults where they exist
         for (absolute_node_id, commitment_bytes) in children {
-            let relative_index = absolute_node_id as usize - child_idx as usize;
-            real_positions.push(i * DOMAIN_SIZE + relative_index);
+            real_positions.push((i, absolute_node_id as usize - child_idx as usize));
             real_children.push(to_element(commitment_bytes));
         }
+        polys.push(node_scalars);
     }
 
     // Batch-convert the existing children and scatter them into place.
     let real_scalars = Element::batch_map_to_scalar_field(&real_children);
-    for (position, scalar) in real_positions.into_iter().zip(real_scalars) {
-        scalars[position] = scalar;
+    for ((node, position), scalar) in real_positions.into_iter().zip(real_scalars) {
+        polys[node][position] = scalar;
     }
 
-    Ok(scalars)
+    Ok(polys.into_iter().map(LagrangeBasis::new).collect())
+}
+
+/// One parent node of the subtrie: the logical id [`parents_and_points`] reports (which
+/// encodes a bucket root's level), the physical id the store and the polynomial cache key by,
+/// and its commitment as read for this proof.
+struct ParentNode {
+    logical: NodeId,
+    physical: NodeId,
+    bytes: CommitmentBytes,
+    commitment: Element,
 }
 
 /// Creates IPA prover queries for a given commitment and evaluation points.
@@ -267,40 +257,28 @@ where
         });
     }
 
-    // Steps 1 & 2: Validate every key against its bucket capacity and record
-    // the trie level of each bucket. Keys arrive sorted, so each bucket's
-    // metadata is read exactly once.
+    // Steps 1 & 2: Validate every key against its bucket capacity and record the trie level
+    // of each bucket. Keys arrive sorted, so each bucket's keys form one run and its metadata
+    // is read once.
     let mut buckets_level: FxHashMap<BucketId, u8> = FxHashMap::default();
-    let mut current_bucket: Option<(BucketId, u64)> = None;
-    for key in salt_keys {
-        let bucket_id = key.bucket_id();
-        let capacity = match current_bucket {
-            Some((bucket, capacity)) if bucket == bucket_id => capacity,
-            _ => {
-                let (capacity, level) = if bucket_id < NUM_META_BUCKETS as BucketId {
-                    // Metadata buckets are always at level 1 (never expand into subtrees)
-                    (META_BUCKET_SIZE as u64, METADATA_BUCKET_LEVEL)
-                } else {
-                    // Data buckets: read metadata to determine capacity and
-                    // subtree structure (higher capacity = higher level root)
-                    let meta =
-                        store
-                            .metadata(bucket_id)
-                            .map_err(|e| ProofError::StateReadError {
-                                reason: format!(
-                                    "Failed to read metadata for bucket {bucket_id}: {e:?}"
-                                ),
-                            })?;
-                    let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
-                    (meta.capacity, level as u8)
-                };
-                buckets_level.insert(bucket_id, level);
-                current_bucket = Some((bucket_id, capacity));
-                capacity
-            }
+    for bucket_keys in salt_keys.chunk_by(|a, b| a.bucket_id() == b.bucket_id()) {
+        let bucket_id = bucket_keys[0].bucket_id();
+        let (capacity, level) = if bucket_id < NUM_META_BUCKETS as BucketId {
+            // Metadata buckets are always at level 1 (never expand into subtrees)
+            (META_BUCKET_SIZE as u64, METADATA_BUCKET_LEVEL)
+        } else {
+            // Data buckets: read metadata to determine capacity and
+            // subtree structure (higher capacity = higher level root)
+            let meta = store
+                .metadata(bucket_id)
+                .map_err(|e| ProofError::StateReadError {
+                    reason: format!("Failed to read metadata for bucket {bucket_id}: {e:?}"),
+                })?;
+            let level = MAX_SUBTREE_LEVELS - subtree_root_level(meta.capacity);
+            (meta.capacity, level as u8)
         };
-
-        if key.slot_id() >= capacity {
+        buckets_level.insert(bucket_id, level);
+        if let Some(key) = bucket_keys.iter().find(|key| key.slot_id() >= capacity) {
             return Err(ProofError::InvalidSaltKey {
                 key: *key,
                 capacity,
@@ -311,124 +289,90 @@ where
     // Step 3: Build the minimal node hierarchy needed for authentication
     let (internal_nodes, leaf_nodes) = parents_and_points(salt_keys, &buckets_level);
 
-    // Step 4: Collect cryptographic commitments for all parent nodes in
-    // parallel; steps 5 and 6 reuse them instead of re-reading the store.
-    let parent_ids: Vec<NodeId> = internal_nodes
-        .keys()
-        .chain(leaf_nodes.keys())
-        .map(|&parent| connect_parent_id(parent))
-        .collect();
-    let commitment_chunk = parent_ids.len().div_ceil(num_threads!());
-    let parents_read: Vec<(NodeId, CommitmentBytes)> = chunks!(parent_ids, commitment_chunk)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|&physical_parent| {
-                    let bytes = store.commitment(physical_parent).map_err(|e| {
-                        ProofError::StateReadError {
-                            reason: format!(
-                                "Failed to load commitment for node {physical_parent}: {e:?}"
-                            ),
-                        }
+    // Step 4: Read every parent's commitment in parallel, internal nodes first, then leaves;
+    // steps 5 and 6 index this list instead of re-reading the store.
+    let parents: Vec<ParentNode> = {
+        let logical_ids: Vec<NodeId> = internal_nodes
+            .keys()
+            .chain(leaf_nodes.keys())
+            .copied()
+            .collect();
+        // A store read is too short a task to split below one chunk per thread.
+        iter!(logical_ids, thread_chunk_size!(logical_ids.len()))
+            .map(|&logical| {
+                let physical = connect_parent_id(logical);
+                let bytes = store
+                    .commitment(physical)
+                    .map_err(|e| ProofError::StateReadError {
+                        reason: format!("Failed to load commitment for node {physical}: {e:?}"),
                     })?;
-                    Ok((physical_parent, bytes))
+                Ok(ParentNode {
+                    logical,
+                    physical,
+                    bytes,
+                    commitment: Element::from_bytes_unchecked_uncompressed(bytes),
                 })
-                .collect::<ProofResult<Vec<_>>>()
-        })
-        .collect::<ProofResult<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    // The raw bytes key the polynomial cache; the decoded elements go into the proof.
-    let parent_bytes: FxHashMap<NodeId, CommitmentBytes> = parents_read.iter().copied().collect();
-    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = parents_read
-        .into_iter()
-        .map(|(id, bytes)| {
-            (
-                id,
-                SerdeCommitment(Element::from_bytes_unchecked_uncompressed(bytes)),
-            )
-        })
-        .collect();
-
-    let parent_commitment = |parent: NodeId| -> ProofResult<Element> {
-        parents_commitments
-            .get(&connect_parent_id(parent))
-            .map(|commitment| commitment.0)
-            .ok_or_else(|| ProofError::StateReadError {
-                reason: format!("Failed to load commitment for node {parent}"),
             })
+            .collect::<ProofResult<_>>()?
     };
+    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = parents
+        .iter()
+        .map(|parent| (parent.physical, SerdeCommitment(parent.commitment)))
+        .collect();
 
-    // Step 5: Generate IPA prover queries for the internal nodes, then the leaf nodes. Internal
-    // nodes the cache misses are materialized in parallel chunks, leaf nodes one per task.
-    let internal_nodes: Vec<_> = internal_nodes.into_iter().collect();
-    let leaf_nodes: Vec<_> = leaf_nodes.into_iter().collect();
-    let internal_polys = resolve_polys(&internal_nodes, &parent_bytes, |missing| {
-        // `max(1)`: `missing` is empty when every node hits the cache, and `chunks(0)` panics.
-        let chunk_size = missing.len().div_ceil(num_threads!()).max(1);
+    // Step 5: Resolve the polynomial of every parent, internal nodes in parallel chunks and
+    // leaves one per task.
+    let (internal_parents, leaf_parents) = parents.split_at(internal_nodes.len());
+    let internal_polys = resolve_polys(internal_parents, |missing| {
+        let chunk_size = thread_chunk_size!(missing.len());
         let chunks = chunks!(missing, chunk_size)
-            .map(|nodes| {
-                let scalars = multi_commitments_to_scalars(store, nodes)?;
-                Ok(scalars
-                    .chunks(DOMAIN_SIZE)
-                    .map(|node_scalars| LagrangeBasis::new(node_scalars.to_vec()))
-                    .collect::<Vec<_>>())
-            })
+            .map(|nodes| internal_polynomials(store, nodes))
             .collect::<ProofResult<Vec<_>>>()?;
         Ok(chunks.into_iter().flatten().collect())
     })?;
-    let leaf_polys = resolve_polys(&leaf_nodes, &parent_bytes, |missing| {
+    let leaf_polys = resolve_polys(leaf_parents, |missing| {
         iter!(missing)
             .map(|&node| leaf_polynomial(store, node))
             .collect()
     })?;
 
+    // Step 6: One IPA prover query per proven point, in node order.
+    let points = internal_nodes.into_values().chain(leaf_nodes.into_values());
+    let polys = internal_polys.into_iter().chain(leaf_polys);
     let mut queries: Vec<ProverQuery> = Vec::new();
-    let nodes = internal_nodes.into_iter().chain(leaf_nodes);
-    for ((parent, points), poly) in nodes.zip(internal_polys.into_iter().chain(leaf_polys)) {
-        queries.extend(create_prover_queries(
-            parent_commitment(parent)?,
-            poly,
-            &points,
-        ));
+    for ((parent, points), poly) in parents.iter().zip(points).zip(polys) {
+        queries.extend(create_prover_queries(parent.commitment, poly, &points));
     }
 
     Ok((queries, parents_commitments, buckets_level))
 }
 
-/// The polynomial of every node in `nodes` (logical parent ids), in order: query order is
-/// node order, which the transcript hashes, so a cache hit must not reorder the proof. A node
-/// whose polynomial the cache holds for the commitment it was read at skips `rebuild`; the
-/// misses are rebuilt in one call, one polynomial per missing node, and cached under that
-/// commitment.
+/// The polynomial of every parent in `parents`, in order: query order is node order, which
+/// the transcript hashes, so a cache hit must not reorder the proof. A parent whose polynomial
+/// the cache holds for the commitment it was read at skips `rebuild`; the misses are rebuilt
+/// in one call (by logical id, one polynomial per miss) and cached under that commitment.
 fn resolve_polys(
-    nodes: &[(NodeId, BTreeSet<usize>)],
-    parent_bytes: &FxHashMap<NodeId, CommitmentBytes>,
+    parents: &[ParentNode],
     rebuild: impl FnOnce(&[NodeId]) -> ProofResult<Vec<LagrangeBasis>>,
 ) -> ProofResult<Vec<Arc<LagrangeBasis>>> {
-    let hits: Vec<Option<Arc<LagrangeBasis>>> = nodes
+    let hits: Vec<Option<Arc<LagrangeBasis>>> = parents
         .iter()
-        .map(|(parent, _)| {
-            let physical = connect_parent_id(*parent);
-            node_poly_cache::get(physical, &parent_bytes[&physical])
-        })
+        .map(|parent| node_poly_cache::get(parent.physical, &parent.bytes))
         .collect();
-    let missing: Vec<NodeId> = nodes
+    let missing: Vec<NodeId> = parents
         .iter()
         .zip(&hits)
         .filter(|(_, hit)| hit.is_none())
-        .map(|((parent, _), _)| *parent)
+        .map(|(parent, _)| parent.logical)
         .collect();
     let mut rebuilt = rebuild(&missing)?.into_iter();
-    Ok(nodes
+    Ok(parents
         .iter()
         .zip(hits)
-        .map(|((parent, _), hit)| {
+        .map(|(parent, hit)| {
             hit.unwrap_or_else(|| {
-                let physical = connect_parent_id(*parent);
                 let poly = Arc::new(rebuilt.next().expect("one rebuilt polynomial per miss"));
-                node_poly_cache::insert(physical, parent_bytes[&physical], Arc::clone(&poly));
+                node_poly_cache::insert(parent.physical, parent.bytes, Arc::clone(&poly));
                 poly
             })
         })
@@ -485,11 +429,6 @@ fn empty_slot_scalar(bucket_id: BucketId) -> Fr {
     } else {
         slot_to_field(&None)
     }
-}
-
-/// The position of `key`'s slot in its leaf's 256-slot polynomial (the slot id's low 8 bits).
-fn slot_position(key: &SaltKey) -> usize {
-    (key.slot_id() & SLOT_INDEX_MASK) as usize
 }
 
 #[cfg(test)]
@@ -669,22 +608,24 @@ mod tests {
     }
 
     #[test]
-    fn multi_commitments_to_scalars_empty_and_single_node() {
+    fn internal_polynomials_empty_and_single_node() {
         let store = MemStore::new();
 
         // Empty input
-        assert_eq!(multi_commitments_to_scalars(&store, &[]).unwrap().len(), 0);
+        assert!(internal_polynomials(&store, &[]).unwrap().is_empty());
 
         // Single internal node
-        let scalars =
-            multi_commitments_to_scalars(&store, &[STARTING_NODE_ID[2] as NodeId]).unwrap();
-        assert_eq!(scalars.len(), DOMAIN_SIZE);
+        let polys = internal_polynomials(&store, &[STARTING_NODE_ID[2] as NodeId]).unwrap();
+        assert_eq!(polys.len(), 1);
     }
 
     #[test]
-    fn multi_commitments_to_scalars_root_defaults_are_pinned() {
+    fn internal_polynomials_root_defaults_are_pinned() {
         let store = MemStore::new();
-        let scalars = multi_commitments_to_scalars(&store, &[ROOT_NODE_ID]).unwrap();
+        let polys = internal_polynomials(&store, &[ROOT_NODE_ID]).unwrap();
+        let scalars: Vec<Fr> = (0..DOMAIN_SIZE)
+            .map(|i| polys[0].evaluate_in_domain(i))
+            .collect();
         let expected = Element::batch_map_to_scalar_field(&[
             Element::from_bytes_unchecked_uncompressed(default_commitment(
                 STARTING_NODE_ID[1] as NodeId,

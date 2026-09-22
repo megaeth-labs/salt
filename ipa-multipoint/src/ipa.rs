@@ -9,7 +9,7 @@ use core::iter;
 use itertools::Itertools;
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, chunks_mut, join, num_threads};
+use salt_macros::{chunks, chunks_mut, join, thread_chunk_size};
 use std::{vec, vec::Vec};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,7 +152,7 @@ pub fn create(
         let x = transcript.challenge_scalar(b"x");
         let x_inv = x.inverse().unwrap();
 
-        let chunk_size = G_L.len().div_ceil(num_threads!());
+        let chunk_size = thread_chunk_size!(G_L.len());
         chunks_mut!(G_L, chunk_size)
             .zip(chunks!(G_R, chunk_size))
             .for_each(|(g_l_chunk, g_r_chunk)| {
@@ -200,14 +200,11 @@ pub fn create(
 ///
 /// # Arguments
 ///
-/// * `precomp` - Fixed-base tables for the CRS `G` vector (must cover at least
-///   `a_vec.len()` bases, in CRS order); when they cover one more base, it must
-///   be `Q`, and the blinding terms become fixed-base multiplications too
-/// * `q` - The CRS blinding generator `Q`
+/// * `precomp` - The CRS's fixed-base tables ([`CRS::committer`](crate::crs::CRS::committer)):
+///   `G` in order, then `Q` as base `a_vec.len()`, so the blinding terms are fixed-base too
 pub fn create_with_precomp(
     transcript: &mut Transcript,
     precomp: &Committer,
-    q: Element,
     mut a_vec: Vec<Fr>,
     a_comm: Element,
     mut b_vec: Vec<Fr>,
@@ -222,7 +219,11 @@ pub fn create_with_precomp(
     let n = a.len();
     assert_eq!(b.len(), n);
     assert!(n.is_power_of_two());
-    assert!(precomp.num_bases() >= n);
+    assert_eq!(
+        precomp.num_bases(),
+        n + 1,
+        "the committer must hold the CRS `G` vector followed by `Q`"
+    );
 
     let output_point = inner_product(a, b);
     transcript.append_point(b"C", &a_comm);
@@ -230,21 +231,8 @@ pub fn create_with_precomp(
     transcript.append_scalar(b"output point", &output_point);
 
     let w = transcript.challenge_scalar(b"w");
-    // Tables that cover one base past the vector carry `Q` there (the salt trie's shared
-    // committer does), which turns the blinding terms `z·(w·Q) = (w·z)·Q` into fixed-base
-    // multiplications as well. Otherwise `Q` takes one variable-base product per term.
-    let q_in_tables = precomp.num_bases() > n;
-    debug_assert!(
-        !q_in_tables || precomp.mul_index(&Fr::one(), n) == q,
-        "committer base {n} is not the blinding generator Q"
-    );
-    let blind = |z: Fr| {
-        if q_in_tables {
-            precomp.mul_index(&(w * z), n)
-        } else {
-            q * (w * z)
-        }
-    };
+    // `Q` is base `n` of the tables, so the blinding term `z·(w·Q) = (w·z)·Q` is fixed-base too.
+    let blind = |z: Fr| precomp.mul_index(&(w * z), n);
 
     let num_rounds = log2(n);
 
@@ -259,7 +247,7 @@ pub fn create_with_precomp(
     let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
     let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
 
-    for _k in 0..num_rounds {
+    for _ in 0..num_rounds {
         let half = len / 2;
         let (a_L, a_R) = halve(a);
         let (b_L, b_R) = halve(b);
@@ -279,11 +267,11 @@ pub fn create_with_precomp(
 
         let left_compute = || -> Element {
             let z_L = inner_product(a_R, b_L);
-            fixed_base_msm(precomp, &l_terms) + blind(z_L)
+            precomp.msm(&l_terms) + blind(z_L)
         };
         let right_compute = || -> Element {
             let z_R = inner_product(a_L, b_R);
-            fixed_base_msm(precomp, &r_terms) + blind(z_R)
+            precomp.msm(&r_terms) + blind(z_R)
         };
 
         let (L, R) = join!(left_compute, right_compute);
@@ -318,24 +306,6 @@ pub fn create_with_precomp(
         R_vec,
         a: a[0],
     }
-}
-
-/// Sums `scalar · G[index]` over the given terms using precomputed wNAF
-/// tables, splitting the terms across threads.
-pub(crate) fn fixed_base_msm(precomp: &Committer, terms: &[(usize, Fr)]) -> Element {
-    // `max(1)`: an empty term list must not reach `chunks(0)`, which panics.
-    let chunk_size = terms.len().div_ceil(num_threads!()).max(1);
-    chunks!(terms, chunk_size)
-        .map(|chunk| {
-            let mut acc = Element::zero();
-            for (index, scalar) in chunk {
-                if !scalar.is_zero() {
-                    acc += precomp.mul_index(scalar, *index);
-                }
-            }
-            acc
-        })
-        .sum()
 }
 
 // Halves the slice that is passed in
@@ -438,14 +408,6 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     multi_scalar_mul(&points, &scalars)
 }
 
-#[deprecated(note = "no longer chunks its input; call `banderwagon::multi_scalar_mul`")]
-pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    // `multi_scalar_mul` parallelizes internally across Pippenger windows;
-    // chunking the input here would multiply the window/doubling work per
-    // chunk and nest thread-pool dispatches.
-    multi_scalar_mul(bases, scalars)
-}
-
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
     let mut challenges: Vec<Fr> = Vec::with_capacity(proof.L_vec.len());
 
@@ -474,7 +436,7 @@ mod tests {
     fn create_with_precomp_matches_create() {
         let n = 256;
         let crs = CRS::new(n, b"random seed");
-        let committer = Committer::new(&crs.G, 6);
+        let committer = crs.committer(6);
 
         let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
         let a: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
@@ -493,7 +455,6 @@ mod tests {
         let precomputed = create_with_precomp(
             &mut Transcript::new(b"ip_no_zk"),
             &committer,
-            crs.Q,
             a.clone(),
             a_comm,
             b.clone(),
@@ -501,21 +462,6 @@ mod tests {
         );
 
         assert_eq!(folded.to_bytes().unwrap(), precomputed.to_bytes().unwrap());
-
-        // Tables that also carry `Q` (as base `n`) take the fixed-base blinding path.
-        let mut bases_with_q = crs.G.clone();
-        bases_with_q.push(crs.Q);
-        let committer_with_q = Committer::new(&bases_with_q, 6);
-        let fixed_base_q = create_with_precomp(
-            &mut Transcript::new(b"ip_no_zk"),
-            &committer_with_q,
-            crs.Q,
-            a.clone(),
-            a_comm,
-            b.clone(),
-            input_point,
-        );
-        assert_eq!(folded.to_bytes().unwrap(), fixed_base_q.to_bytes().unwrap());
 
         let output_point = inner_product(&a, &b);
         assert!(precomputed.verify_multiexp(

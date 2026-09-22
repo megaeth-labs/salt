@@ -17,7 +17,7 @@ use std::{vec, vec::Vec};
 /// the entire digit pass. Windows are processed in parallel only when each
 /// carries enough work to pay for the dispatch.
 pub(crate) fn msm_windowed(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
-    let size = bases.len().min(scalars.len());
+    let size = bases.len();
     let c = if size < 32 {
         3
     } else {
@@ -31,9 +31,8 @@ pub(crate) fn msm_windowed(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsPr
 /// width — and with it every bucket-count branch of [`bucket_len`] — at a size
 /// that keeps a debug-mode run cheap.
 fn msm_windowed_with_c(bases: &[EdwardsAffine], scalars: &[Fr], c: usize) -> EdwardsProjective {
-    let size = bases.len().min(scalars.len());
-    let bases = &bases[..size];
-    let scalars = &scalars[..size];
+    debug_assert_eq!(bases.len(), scalars.len());
+    let size = bases.len();
     if size == 0 {
         return EdwardsProjective::zero();
     }
@@ -74,7 +73,7 @@ fn msm_windowed_with_c(bases: &[EdwardsAffine], scalars: &[Fr], c: usize) -> Edw
     // Below this size the per-window work is too small to farm out.
     const MIN_PARALLEL_SIZE: usize = 64;
     let window_sums: Vec<EdwardsProjective> = if size >= MIN_PARALLEL_SIZE {
-        into_iter!((0..digits_count)).map(window_sum).collect()
+        into_iter!(0..digits_count).map(window_sum).collect()
     } else {
         (0..digits_count).map(window_sum).collect()
     };
@@ -212,30 +211,39 @@ mod tests {
     use crate::{multi_scalar_mul, Element};
     use std::vec;
 
+    /// `size` random affine points and scalars, with the edge cases `0`, `r - 1` (which
+    /// maximizes the last window's digit, the one the last bucket count has to cover) and `1`
+    /// patched into the first scalars.
+    fn msm_input(seed: u8, size: usize) -> (Vec<EdwardsAffine>, Vec<Fr>) {
+        use ark_ec::CurveGroup;
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+        let bases_proj: Vec<EdwardsProjective> = (0..size)
+            .map(|_| EdwardsProjective::rand(&mut rng))
+            .collect();
+        let bases = EdwardsProjective::normalize_batch(&bases_proj);
+        let mut scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
+        for (scalar, edge) in scalars
+            .iter_mut()
+            .zip([Fr::zero(), -Fr::from(1u64), Fr::from(1u64)])
+        {
+            *scalar = edge;
+        }
+        (bases, scalars)
+    }
+
     /// The hand-rolled windowed MSM must agree with arkworks' generic MSM for
     /// every size class (serial windows, parallel windows, small-c) and for
     /// edge-case scalars.
     #[test]
     fn msm_windowed_matches_arkworks() {
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::UniformRand;
-        use rand_chacha::rand_core::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
+        use ark_ec::VariableBaseMSM;
 
-        let mut rng = ChaCha20Rng::from_seed([9u8; 32]);
         for size in [1usize, 2, 16, 31, 32, 33, 129, 256, 1000] {
-            let bases_proj: Vec<EdwardsProjective> = (0..size)
-                .map(|_| EdwardsProjective::rand(&mut rng))
-                .collect();
-            let bases = EdwardsProjective::normalize_batch(&bases_proj);
-            let mut scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
-            // Exercise edge-case scalars.
-            scalars[0] = Fr::zero();
-            if size > 2 {
-                scalars[1] = -Fr::from(1u64);
-                scalars[2] = Fr::from(1u64);
-            }
-
+            let (bases, scalars) = msm_input(9, size);
             let expected = EdwardsProjective::msm(&bases, &scalars).unwrap();
             let got = msm_windowed(&bases, &scalars);
             assert_eq!(got, expected, "size {size}");
@@ -251,24 +259,9 @@ mod tests {
     /// 16,384 points — is the one where that is the full `2^c`.
     #[test]
     fn msm_windowed_matches_arkworks_for_every_window_width() {
-        use ark_ec::{CurveGroup, VariableBaseMSM};
-        use ark_ff::UniformRand;
-        use rand_chacha::rand_core::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
+        use ark_ec::VariableBaseMSM;
 
-        let mut rng = ChaCha20Rng::from_seed([21u8; 32]);
-        let size = 200;
-        let bases_proj: Vec<EdwardsProjective> = (0..size)
-            .map(|_| EdwardsProjective::rand(&mut rng))
-            .collect();
-        let bases = EdwardsProjective::normalize_batch(&bases_proj);
-        let mut scalars: Vec<Fr> = (0..size).map(|_| Fr::rand(&mut rng)).collect();
-        scalars[0] = Fr::zero();
-        // `r - 1` maximizes the last window's digit, which is the one the last
-        // bucket count has to cover.
-        scalars[1] = -Fr::from(1u64);
-        scalars[2] = Fr::from(1u64);
-
+        let (bases, scalars) = msm_input(21, 200);
         let expected = EdwardsProjective::msm(&bases, &scalars).unwrap();
         for c in 3..=13 {
             assert_eq!(

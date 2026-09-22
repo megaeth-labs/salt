@@ -23,7 +23,7 @@ use ipa_multipoint::{
 
 use crate::Lazy;
 use salt_macros::prelude::*;
-use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable};
+use salt_macros::{chunks, into_iter, iter, sort_unstable, thread_chunk_size};
 use serde::{
     de::{Error as _, MapAccess, Visitor},
     ser::SerializeMap,
@@ -233,10 +233,9 @@ impl SaltProof {
 
         // Reuse the shared CRS (deriving it decompresses 257 points) and the
         // trie's fixed-base tables for all MSMs over the CRS generators.
-        let committer = shared_committer();
         let proof = MultiPoint::open_with_committer(
             &DEFAULT_CRS,
-            &committer,
+            shared_committer(),
             &PRECOMPUTED_WEIGHTS,
             &mut transcript,
             prover_queries,
@@ -396,7 +395,7 @@ fn create_internal_node_queries(
 ) -> ProofResult<Vec<VerifierQuery>> {
     // Distribute internal nodes across CPU threads for parallel processing
     let in_nodes: Vec<_> = internal_nodes.iter().collect();
-    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let chunk_size = thread_chunk_size!(in_nodes.len());
     let queries = chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             // Step 1: Collect all child commitments needed by this thread's nodes

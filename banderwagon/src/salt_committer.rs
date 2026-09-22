@@ -31,8 +31,8 @@ use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr}
 use ark_ff::PrimeField;
 use ark_ff::Zero;
 
-use salt_macros::iter;
 use salt_macros::prelude::*;
+use salt_macros::{chunks, iter, thread_chunk_size};
 use std::{vec, vec::Vec};
 
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
@@ -350,6 +350,23 @@ impl Committer {
 /// * `result` - The projective point to update (in-place)
 /// * `p2_x` - X-coordinate of the affine point to add
 /// * `p2_y` - Y-coordinate of the affine point to add
+impl Committer {
+    /// Sums `scalar · G[index]` over `terms`, splitting them across threads.
+    pub fn msm(&self, terms: &[(usize, Fr)]) -> Element {
+        chunks!(terms, thread_chunk_size!(terms.len()))
+            .map(|chunk| {
+                let mut acc = Element::zero();
+                for (index, scalar) in chunk {
+                    if !scalar.is_zero() {
+                        acc += self.mul_index(scalar, *index);
+                    }
+                }
+                acc
+            })
+            .sum()
+    }
+}
+
 #[cfg(not(target_arch = "x86_64"))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;

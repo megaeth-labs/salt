@@ -236,7 +236,7 @@ impl LagrangeBasis {
         self.values[index]
     }
 
-    pub fn values(&self) -> &[Fr] {
+    pub(crate) fn values(&self) -> &[Fr] {
         &self.values
     }
 
