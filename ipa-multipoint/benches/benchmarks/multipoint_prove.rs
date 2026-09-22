@@ -35,7 +35,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
             let prover_query = ProverQuery {
                 commitment: poly_comm,
-                poly,
+                poly: poly.into(),
                 point,
                 result: y_i,
             };

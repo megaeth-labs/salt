@@ -9,14 +9,13 @@ use crate::{
     traits::{StateReader, TrieReader},
     trie::{
         node_utils::{get_child_node, subtree_leaf_start_key},
-        trie::kv_hash,
+        trie::{kv_hash, shared_committer, DEFAULT_CRS},
     },
     types::{hash_commitment, CommitmentBytes, NodeId, SaltKey, SaltValue},
     BucketId, ScalarBytes,
 };
 use banderwagon::{Element, Fr};
 use ipa_multipoint::{
-    crs::CRS,
     lagrange_basis::PrecomputedWeights,
     multiproof::{MultiPoint, MultiPointProof, VerifierQuery},
     transcript::Transcript,
@@ -24,7 +23,7 @@ use ipa_multipoint::{
 
 use crate::Lazy;
 use salt_macros::prelude::*;
-use salt_macros::{chunks, into_iter, iter, num_threads, sort_unstable};
+use salt_macros::{chunks, into_iter, iter, sort_unstable, thread_chunk_size};
 use serde::{
     de::{Error as _, MapAccess, Visitor},
     ser::SerializeMap,
@@ -230,11 +229,17 @@ impl SaltProof {
 
         let (prover_queries, parents_commitments, levels) = create_sub_trie(store, &keys)?;
 
-        let crs = CRS::default();
-
         let mut transcript = Transcript::new(b"st");
 
-        let proof = MultiPoint::open(crs, &PRECOMPUTED_WEIGHTS, &mut transcript, prover_queries);
+        // Reuse the shared CRS (deriving it decompresses 257 points) and the
+        // trie's fixed-base tables for all MSMs over the CRS generators.
+        let proof = MultiPoint::open_with_committer(
+            &DEFAULT_CRS,
+            shared_committer(),
+            &PRECOMPUTED_WEIGHTS,
+            &mut transcript,
+            prover_queries,
+        );
 
         Ok(SaltProof {
             parents_commitments,
@@ -267,14 +272,13 @@ impl SaltProof {
 
         let mut transcript = Transcript::new(b"st");
 
-        let crs = CRS::default();
-
         // call MultiPointProof::check to verify the proof
-        if self
-            .proof
-            .0
-            .check(&crs, &PRECOMPUTED_WEIGHTS, &queries, &mut transcript)
-        {
+        if self.proof.0.check(
+            &DEFAULT_CRS,
+            &PRECOMPUTED_WEIGHTS,
+            &queries,
+            &mut transcript,
+        ) {
             Ok(())
         } else {
             Err(ProofError::MultiPointProofFailed)
@@ -391,7 +395,7 @@ fn create_internal_node_queries(
 ) -> ProofResult<Vec<VerifierQuery>> {
     // Distribute internal nodes across CPU threads for parallel processing
     let in_nodes: Vec<_> = internal_nodes.iter().collect();
-    let chunk_size = in_nodes.len().div_ceil(num_threads!());
+    let chunk_size = thread_chunk_size!(in_nodes.len());
     let queries = chunks!(in_nodes, chunk_size)
         .map(|nodes| {
             // Step 1: Collect all child commitments needed by this thread's nodes
@@ -589,7 +593,7 @@ mod tests {
         BucketMeta,
     };
     use banderwagon::{CanonicalSerialize, PrimeField};
-    use ipa_multipoint::lagrange_basis::LagrangeBasis;
+    use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
     use rand::{rngs::StdRng, SeedableRng};
     use std::vec;
 

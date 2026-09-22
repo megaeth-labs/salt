@@ -10,7 +10,7 @@
 //! approach, ensuring reproducibility and verifiability of the setup.
 
 use crate::{default_crs, ipa::slow_vartime_multiscalar_mul, lagrange_basis::LagrangeBasis};
-use banderwagon::{try_reduce_to_element, Element, SerializationError};
+use banderwagon::{salt_committer::Committer, try_reduce_to_element, Element, SerializationError};
 use std::{string::String, vec::Vec};
 use thiserror::Error;
 
@@ -177,6 +177,19 @@ impl CRS {
     ///
     /// # Returns
     /// The elliptic curve point representing the polynomial commitment
+    /// Fixed-base tables over this CRS: `G` in order, then `Q` as base `n`. This is the shape
+    /// [`crate::multiproof::MultiPoint::open_with_committer`] and [`crate::ipa::create_with_precomp`]
+    /// take, so every MSM they compute — the IPA's blinding terms included — is fixed-base.
+    pub fn committer(&self, window_size: usize) -> Committer {
+        let bases: Vec<Element> = self
+            .G
+            .iter()
+            .copied()
+            .chain(core::iter::once(self.Q))
+            .collect();
+        Committer::new(&bases, window_size)
+    }
+
     pub fn commit_lagrange_poly(&self, polynomial: &LagrangeBasis) -> Element {
         slow_vartime_multiscalar_mul(polynomial.values().iter(), self.G.iter())
     }

@@ -43,8 +43,19 @@ use std::{sync::Arc, vec};
 
 use core::{cmp::Ordering, ops::Range};
 
+/// Shared default CRS. Constructing `CRS::default()` decompresses 257 points,
+/// each costing a modular square root plus a subgroup check (several
+/// milliseconds total), so it is done once per process and reused by the
+/// shared committer and by every proof creation and verification.
+pub(crate) static DEFAULT_CRS: Lazy<CRS> = Lazy::new(CRS::default);
+
 /// Global shared instance of the Committer to avoid repeated expensive initialization
 static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shared_committer()));
+
+/// The process-wide committer: fixed-base tables over the shared CRS.
+pub(crate) fn shared_committer() -> &'static Committer {
+    SHARED_COMMITTER.as_ref()
+}
 
 /// Builds the shared committer's precomputation tables.
 ///
@@ -59,7 +70,7 @@ static SHARED_COMMITTER: Lazy<Arc<Committer>> = Lazy::new(|| Arc::new(build_shar
 ///   touches `SHARED_COMMITTER` would re-enter this initialization on the
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
-    let build = || Committer::new(&CRS::default().G, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+    let build = || DEFAULT_CRS.committer(platform::DEFAULT_PRECOMP_WINDOW_SIZE);
     #[cfg(feature = "parallel")]
     {
         // Never run `build` inline here: under `parallel` it would par_iter
