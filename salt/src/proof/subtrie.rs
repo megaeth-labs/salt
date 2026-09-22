@@ -55,43 +55,61 @@ mod node_poly_cache {
     use crate::Lazy;
     use spin::RwLock;
 
-    const SHARDS: usize = 64;
-    const MAX_PER_SHARD: usize = 512;
+    pub(super) const SHARDS: usize = 64;
+    pub(super) const MAX_PER_SHARD: usize = 512;
 
     type Shard = RwLock<FxHashMap<NodeId, (CommitmentBytes, Arc<LagrangeBasis>)>>;
 
-    static CACHE: Lazy<Vec<Shard>> = Lazy::new(|| {
-        (0..SHARDS)
-            .map(|_| RwLock::new(FxHashMap::default()))
-            .collect()
-    });
+    /// The shards of one cache: [`CACHE`] is the process-wide instance, and a test holds its own.
+    pub(super) struct NodePolyCache(Vec<Shard>);
 
-    fn shard(node: NodeId) -> &'static Shard {
-        &CACHE[(node % SHARDS as NodeId) as usize]
-    }
+    pub(super) static CACHE: Lazy<NodePolyCache> = Lazy::new(NodePolyCache::new);
 
-    /// The cached polynomial of `node`, if it was built for exactly this commitment.
-    pub(super) fn get(node: NodeId, commitment: &CommitmentBytes) -> Option<Arc<LagrangeBasis>> {
-        let guard = shard(node).read();
-        guard
-            .get(&node)
-            .filter(|(seen, _)| seen == commitment)
-            .map(|(_, poly)| Arc::clone(poly))
-    }
-
-    pub(super) fn insert(node: NodeId, commitment: CommitmentBytes, poly: Arc<LagrangeBasis>) {
-        let mut guard = shard(node).write();
-        // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
-        // after the lock is released, so readers do not wait on the frees.
-        let evicted = (guard.len() >= MAX_PER_SHARD && !guard.contains_key(&node)).then(|| {
-            core::mem::replace(
-                &mut *guard,
-                FxHashMap::with_capacity_and_hasher(MAX_PER_SHARD, FxBuildHasher),
+    impl NodePolyCache {
+        pub(super) fn new() -> Self {
+            Self(
+                (0..SHARDS)
+                    .map(|_| RwLock::new(FxHashMap::default()))
+                    .collect(),
             )
-        });
-        let replaced = guard.insert(node, (commitment, poly));
-        drop(guard);
-        drop((evicted, replaced));
+        }
+
+        fn shard(&self, node: NodeId) -> &Shard {
+            &self.0[(node % SHARDS as NodeId) as usize]
+        }
+
+        /// The cached polynomial of `node`, if it was built for exactly this commitment.
+        pub(super) fn get(
+            &self,
+            node: NodeId,
+            commitment: &CommitmentBytes,
+        ) -> Option<Arc<LagrangeBasis>> {
+            let guard = self.shard(node).read();
+            guard
+                .get(&node)
+                .filter(|(seen, _)| seen == commitment)
+                .map(|(_, poly)| Arc::clone(poly))
+        }
+
+        pub(super) fn insert(
+            &self,
+            node: NodeId,
+            commitment: CommitmentBytes,
+            poly: Arc<LagrangeBasis>,
+        ) {
+            let mut guard = self.shard(node).write();
+            // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
+            // after the lock is released, so readers do not wait on the frees.
+            let evicted = (guard.len() >= MAX_PER_SHARD && !guard.contains_key(&node)).then(|| {
+                core::mem::replace(
+                    &mut *guard,
+                    FxHashMap::with_capacity_and_hasher(MAX_PER_SHARD, FxBuildHasher),
+                )
+            });
+            let replaced = guard.insert(node, (commitment, poly));
+            drop(guard);
+            drop((evicted, replaced));
+        }
     }
 }
 
@@ -357,7 +375,7 @@ fn resolve_polys(
 ) -> ProofResult<Vec<Arc<LagrangeBasis>>> {
     let hits: Vec<Option<Arc<LagrangeBasis>>> = parents
         .iter()
-        .map(|parent| node_poly_cache::get(parent.physical, &parent.bytes))
+        .map(|parent| node_poly_cache::CACHE.get(parent.physical, &parent.bytes))
         .collect();
     let missing: Vec<NodeId> = parents
         .iter()
@@ -372,7 +390,7 @@ fn resolve_polys(
         .map(|(parent, hit)| {
             hit.unwrap_or_else(|| {
                 let poly = Arc::new(rebuilt.next().expect("one rebuilt polynomial per miss"));
-                node_poly_cache::insert(parent.physical, parent.bytes, Arc::clone(&poly));
+                node_poly_cache::CACHE.insert(parent.physical, parent.bytes, Arc::clone(&poly));
                 poly
             })
         })
@@ -605,6 +623,34 @@ mod tests {
             vec![0, 255]
         );
         assert!(queries.iter().all(|q| q.result == empty_default));
+    }
+
+    /// A full shard is cleared only by a node it does not hold: re-inserting a node it holds
+    /// replaces that entry and keeps the rest, and a lookup at another commitment misses.
+    #[test]
+    fn node_poly_cache_clears_a_full_shard_only_for_a_new_node() {
+        use node_poly_cache::{NodePolyCache, MAX_PER_SHARD, SHARDS};
+
+        let cache = NodePolyCache::new();
+        let poly = Arc::new(LagrangeBasis::new(vec![Fr::zero(); DOMAIN_SIZE]));
+        let commitment = |byte: u8| -> CommitmentBytes { [byte; 64] };
+        // Nodes `7 + i * SHARDS` share one shard.
+        let node = |i: usize| (7 + i * SHARDS) as NodeId;
+
+        for i in 0..MAX_PER_SHARD {
+            cache.insert(node(i), commitment(1), Arc::clone(&poly));
+        }
+        assert!((0..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_some()));
+        assert!(cache.get(node(0), &commitment(2)).is_none());
+
+        cache.insert(node(0), commitment(2), Arc::clone(&poly));
+        assert!(cache.get(node(0), &commitment(2)).is_some());
+        assert!(cache.get(node(0), &commitment(1)).is_none());
+        assert!((1..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_some()));
+
+        cache.insert(node(MAX_PER_SHARD), commitment(1), Arc::clone(&poly));
+        assert!(cache.get(node(MAX_PER_SHARD), &commitment(1)).is_some());
+        assert!((0..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_none()));
     }
 
     #[test]
