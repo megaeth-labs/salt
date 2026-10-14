@@ -5,7 +5,7 @@
 //! enforces critical security properties to prevent state manipulation attacks.
 use crate::{
     constant::ROOT_NODE_ID,
-    proof::{ProofError, SaltProof},
+    proof::{subtrie::NodePolyRefresh, ProofError, SaltProof},
     traits::{StateReader, TrieReader},
     types::*,
 };
@@ -83,6 +83,20 @@ impl SaltWitness {
     where
         Store: StateReader + TrieReader,
     {
+        Self::create_with_refresh(keys, store, None)
+    }
+
+    /// [`Self::create`], additionally advancing the node-polynomial cache with `refresh`, the
+    /// witnessed block's own transition, once the proof's polynomials are resolved (see
+    /// [`NodePolyRefresh`]). The witness itself is the same with or without a refresh.
+    pub fn create_with_refresh<Store>(
+        keys: &[SaltKey],
+        store: &Store,
+        refresh: Option<&NodePolyRefresh<'_>>,
+    ) -> Result<SaltWitness, ProofError>
+    where
+        Store: StateReader + TrieReader,
+    {
         let kvs = iter!(keys)
             .map(|&salt_key| {
                 let value = (if salt_key.is_in_meta_bucket() {
@@ -100,7 +114,7 @@ impl SaltWitness {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-        let proof = SaltProof::create(kvs.keys().copied(), store)?;
+        let proof = SaltProof::create_with_refresh(kvs.keys().copied(), store, refresh)?;
         Ok(SaltWitness { kvs, proof })
     }
 
