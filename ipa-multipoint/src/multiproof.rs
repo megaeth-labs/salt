@@ -94,6 +94,11 @@ impl MultiPoint {
         transcript: &mut Transcript,
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
+        assert_eq!(
+            committer.num_bases(),
+            crs.n + 1,
+            "the committer must hold the CRS `G` vector followed by `Q`"
+        );
         Self::open_inner(crs, Some(committer), precomp, transcript, queries)
     }
 
@@ -131,6 +136,11 @@ impl MultiPoint {
                     .map(|(point, queries_challenges)| {
                         let mut aggregated = vec![Fr::zero(); crs.n];
                         for (query, challenge) in queries_challenges.iter() {
+                            assert_eq!(
+                                query.poly.values().len(),
+                                crs.n,
+                                "a query polynomial must have one coefficient per CRS generator"
+                            );
                             for (acc, coeff) in aggregated.iter_mut().zip(query.poly.values()) {
                                 *acc += **challenge * coeff;
                             }

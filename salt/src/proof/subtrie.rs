@@ -50,6 +50,13 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// Consecutive blocks share most of their authentication paths, which is what makes the hit
 /// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each, 256 MiB.
 /// A shard that fills up is cleared whole; the working set refills within a few proofs.
+///
+/// The commitment key only holds if the store is a consistent snapshot: the commitment and the
+/// children or slots of a node must come from the same state. Callers must keep the store
+/// unchanged while a proof is created; a polynomial rebuilt from a changed store would be cached
+/// under a commitment it does not open to, and every later proof that reads that commitment
+/// would reuse it. The rebuilt polynomial is deliberately not checked against the commitment,
+/// which would cost an MSM per miss.
 mod node_poly_cache {
     use super::*;
     use crate::Lazy;

@@ -338,19 +338,7 @@ impl Committer {
             .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
     }
-}
 
-/// Adds an affine point to a projective point using extended Edwards coordinates.
-///
-/// This is the generic implementation using the extended twisted Edwards addition formula.
-/// The formula is optimized for adding an affine point (Z=1) to a projective point.
-///
-/// # Arguments
-///
-/// * `result` - The projective point to update (in-place)
-/// * `p2_x` - X-coordinate of the affine point to add
-/// * `p2_y` - Y-coordinate of the affine point to add
-impl Committer {
     /// Sums `scalar · G[index]` over `terms`, splitting them across threads.
     pub fn msm(&self, terms: &[(usize, Fr)]) -> Element {
         chunks!(terms, thread_chunk_size!(terms.len()))
@@ -367,6 +355,16 @@ impl Committer {
     }
 }
 
+/// Adds an affine point to a projective point using extended Edwards coordinates.
+///
+/// This is the generic implementation using the extended twisted Edwards addition formula.
+/// The formula is optimized for adding an affine point (Z=1) to a projective point.
+///
+/// # Arguments
+///
+/// * `result` - The projective point to update (in-place)
+/// * `p2_x` - X-coordinate of the affine point to add
+/// * `p2_y` - Y-coordinate of the affine point to add
 #[cfg(not(target_arch = "x86_64"))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
