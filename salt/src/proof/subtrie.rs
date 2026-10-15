@@ -25,7 +25,10 @@ use crate::{
         ProofError, ProofResult, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
-    trie::node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
+    trie::{
+        node_utils::{get_child_node, subtree_leaf_start_key, subtree_root_level},
+        trie::shared_committer,
+    },
     types::{BucketId, BucketMeta, CommitmentBytes, NodeId, SaltKey},
     SlotId,
 };
@@ -51,12 +54,13 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each, 256 MiB.
 /// A shard that fills up is cleared whole; the working set refills within a few proofs.
 ///
-/// The commitment key only holds if the store is a consistent snapshot: the commitment and the
-/// children or slots of a node must come from the same state. Callers must keep the store
-/// unchanged while a proof is created; a polynomial rebuilt from a changed store would be cached
-/// under a commitment it does not open to, and every later proof that reads that commitment
-/// would reuse it. The rebuilt polynomial is deliberately not checked against the commitment,
-/// which would cost an MSM per miss.
+/// The commitment key only holds if the polynomial really opens to that commitment, which a
+/// store that is not a consistent snapshot (commitments and children or slots from different
+/// states) does not guarantee. Callers should still keep the store unchanged while a proof is
+/// created, since such a proof will not verify; but an inconsistent store must not poison the
+/// cache for consistent ones, so a rebuilt polynomial is cached only after one fixed-base MSM
+/// shows it opens to the commitment it was read at. One that does not is used for this proof
+/// and dropped.
 mod node_poly_cache {
     use super::*;
     use crate::Lazy;
@@ -375,7 +379,8 @@ where
 /// The polynomial of every parent in `parents`, in order: query order is node order, which
 /// the transcript hashes, so a cache hit must not reorder the proof. A parent whose polynomial
 /// the cache holds for the commitment it was read at skips `rebuild`; the misses are rebuilt
-/// in one call (by logical id, one polynomial per miss) and cached under that commitment.
+/// in one call (by logical id, one polynomial per miss) and cached under that commitment, but
+/// only if the polynomial opens to it.
 fn resolve_polys(
     parents: &[ParentNode],
     rebuild: impl FnOnce(&[NodeId]) -> ProofResult<Vec<LagrangeBasis>>,
@@ -384,24 +389,41 @@ fn resolve_polys(
         .iter()
         .map(|parent| node_poly_cache::CACHE.get(parent.physical, &parent.bytes))
         .collect();
-    let missing: Vec<NodeId> = parents
+    let misses: Vec<&ParentNode> = parents
         .iter()
         .zip(&hits)
         .filter(|(_, hit)| hit.is_none())
-        .map(|(parent, _)| parent.logical)
+        .map(|(parent, _)| parent)
         .collect();
-    let mut rebuilt = rebuild(&missing)?.into_iter();
-    Ok(parents
-        .iter()
-        .zip(hits)
-        .map(|(parent, hit)| {
-            hit.unwrap_or_else(|| {
-                let poly = Arc::new(rebuilt.next().expect("one rebuilt polynomial per miss"));
-                node_poly_cache::CACHE.insert(parent.physical, parent.bytes, Arc::clone(&poly));
-                poly
-            })
-        })
+    let missing: Vec<NodeId> = misses.iter().map(|parent| parent.logical).collect();
+    let rebuilt: Vec<Arc<LagrangeBasis>> = rebuild(&missing)?.into_iter().map(Arc::new).collect();
+
+    // A polynomial rebuilt from a store that does not match the commitment must not be cached
+    // under it: the cache is process-wide, so every later proof reading that commitment would
+    // reuse it.
+    let consistent: Vec<bool> = iter!(misses)
+        .zip(iter!(rebuilt))
+        .map(|(parent, poly)| opens_to(poly, &parent.commitment))
+        .collect();
+    for ((parent, poly), consistent) in misses.iter().zip(&rebuilt).zip(consistent) {
+        if consistent {
+            node_poly_cache::CACHE.insert(parent.physical, parent.bytes, Arc::clone(poly));
+        }
+    }
+
+    let mut rebuilt = rebuilt.into_iter();
+    Ok(hits
+        .into_iter()
+        .map(|hit| hit.unwrap_or_else(|| rebuilt.next().expect("one rebuilt polynomial per miss")))
         .collect())
+}
+
+/// Whether `poly` commits to `commitment` under the shared CRS.
+fn opens_to(poly: &LagrangeBasis, commitment: &Element) -> bool {
+    let terms: Vec<(usize, Fr)> = (0..DOMAIN_SIZE)
+        .map(|i| (i, poly.evaluate_in_domain(i)))
+        .collect();
+    shared_committer().msm(&terms) == *commitment
 }
 
 /// The 256-slot polynomial of a leaf node: every slot's value hashed to the field, with the
@@ -658,6 +680,65 @@ mod tests {
         cache.insert(node(MAX_PER_SHARD), commitment(1), Arc::clone(&poly));
         assert!(cache.get(node(MAX_PER_SHARD), &commitment(1)).is_some());
         assert!((0..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_none()));
+    }
+
+    /// Regression test for PR #152 review comment r4080228453: a store whose trie and state
+    /// disagree must not poison the process-wide node-polynomial cache for consistent stores.
+    ///
+    /// The cache is keyed by (node id, commitment). On a miss, `resolve_polys` reads the
+    /// node's commitment and rebuilds its polynomial from the store's slots or children; it
+    /// files the result only if the polynomial opens to that commitment.
+    ///
+    /// Here `inconsistent` has block 2's state but block 1's trie (`update_state` without
+    /// `update_trie`), so the leaf holding `key` reports block 1's commitment while its slots
+    /// hold block 2's value. Without the check, creating a witness on it files block 2's leaf
+    /// polynomial under block 1's commitment, `consistent` (a correct store of block 1) is
+    /// then served that polynomial, and its witness no longer verifies.
+    ///
+    /// The `inconsistent` witness is created first on purpose: a cache entry for block 1's
+    /// commitment that `consistent` had already filed would hide the problem. The key and
+    /// values come from a seed no other test uses, so the only entries this test could poison
+    /// are ones no other test in the process reads.
+    #[test]
+    fn inconsistent_store_does_not_poison_witnesses_of_a_consistent_store() {
+        use crate::proof::salt_witness::SaltWitness;
+
+        let mut rng = StdRng::seed_from_u64(0x5A17_0152);
+        let key = mock_data(&mut rng, 52);
+        let (block_1_value, block_2_value) = (mock_data(&mut rng, 32), mock_data(&mut rng, 32));
+        let write = |value: &Vec<u8>| -> HashMap<Vec<u8>, Option<Vec<u8>>> {
+            [(key.clone(), Some(value.clone()))].into_iter().collect()
+        };
+
+        // Block 1, fully applied: state and trie agree.
+        let consistent = MemStore::new();
+        let block_1 = EphemeralSaltState::new(&consistent)
+            .update_fin(&write(&block_1_value))
+            .unwrap();
+        consistent.update_state(block_1.clone());
+        let (_, block_1_trie) = StateRoot::new(&consistent).update_fin(&block_1).unwrap();
+        consistent.update_trie(block_1_trie);
+        let salt_key = *block_1.data.keys().next().unwrap();
+
+        // Block 2 on top of it, with only its state applied: the commitments are block 1's.
+        let inconsistent = consistent.clone();
+        let block_2 = EphemeralSaltState::new(&inconsistent)
+            .update_fin(&write(&block_2_value))
+            .unwrap();
+        assert_eq!(*block_2.data.keys().next().unwrap(), salt_key);
+        inconsistent.update_state(block_2);
+
+        // A witness from the inconsistent store cannot verify: its value is block 2's, its
+        // commitments are block 1's. That is the expected cost of the bad store itself.
+        let bad = SaltWitness::create(&[salt_key], &inconsistent).unwrap();
+        assert!(bad.verify_proof().is_err());
+
+        // The consistent store must be unaffected by what the other store did.
+        let good = SaltWitness::create(&[salt_key], &consistent).unwrap();
+        good.verify_proof().expect(
+            "a witness from a consistent store must verify, \
+             whatever other stores the process has proven before",
+        );
     }
 
     #[test]
