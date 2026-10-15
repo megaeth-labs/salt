@@ -47,5 +47,9 @@ name = "salt_trie"
 harness = false
 
 [[bench]]
+name = "proof"
+harness = false
+
+[[bench]]
 name = "parents_commitments_deser"
 harness = false

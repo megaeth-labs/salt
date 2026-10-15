@@ -4,13 +4,13 @@ use crate::math_utils::inner_product;
 use crate::transcript::{Transcript, TranscriptProtocol};
 
 use crate::{IOResult, SerdeError};
-use banderwagon::{multi_scalar_mul, trait_defs::*, Element, Fr};
+use banderwagon::{multi_scalar_mul, salt_committer::Committer, trait_defs::*, Element, Fr};
 use core::iter;
 use itertools::Itertools;
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, chunks_mut, join, num_threads};
-use std::vec::Vec;
+use salt_macros::{chunks, chunks_mut, join, thread_chunk_size};
+use std::{vec, vec::Vec};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IPAProof {
@@ -152,7 +152,7 @@ pub fn create(
         let x = transcript.challenge_scalar(b"x");
         let x_inv = x.inverse().unwrap();
 
-        let chunk_size = G_L.len().div_ceil(num_threads!());
+        let chunk_size = thread_chunk_size!(G_L.len());
         chunks_mut!(G_L, chunk_size)
             .zip(chunks!(G_R, chunk_size))
             .for_each(|(g_l_chunk, g_r_chunk)| {
@@ -168,6 +168,137 @@ pub fn create(
         a = a_L;
         b = b_L;
         G = G_L;
+    }
+
+    IPAProof {
+        L_vec,
+        R_vec,
+        a: a[0],
+    }
+}
+
+/// Creates the same IPA proof as [`create`], but computes every `L`/`R` point
+/// as a fixed-base multi-scalar multiplication over the *original* CRS
+/// generators using precomputed wNAF tables, instead of folding the generator
+/// vector with one variable-base scalar multiplication per element.
+///
+/// # How it works
+///
+/// After `k` folding rounds, each folded generator is a known linear
+/// combination of the original generators:
+///
+/// ```text
+/// G_k[i] = Σ_m coeff[m] · G[m]     over m with m mod len == i
+/// ```
+///
+/// where `coeff[m]` is the product of the inverse challenges of every past
+/// round in which index `m` sat in the right half. Substituting this into
+/// `L_k = <a_R, G_L> + z_L·Q` (and symmetrically for `R_k`) turns each round's
+/// two MSMs into MSMs over the fixed generator set, where each original index
+/// contributes to exactly one of `L`/`R` per round. The scalars fold exactly
+/// as before, so the resulting proof is byte-identical to [`create`]'s.
+///
+/// # Arguments
+///
+/// * `precomp` - The CRS's fixed-base tables ([`CRS::committer`](crate::crs::CRS::committer)):
+///   `G` in order, then `Q` as base `a_vec.len()`, so the blinding terms are fixed-base too
+pub fn create_with_precomp(
+    transcript: &mut Transcript,
+    precomp: &Committer,
+    mut a_vec: Vec<Fr>,
+    a_comm: Element,
+    mut b_vec: Vec<Fr>,
+    // This is the z in f(z)
+    input_point: Fr,
+) -> IPAProof {
+    transcript.domain_sep(b"ipa");
+
+    let mut a = &mut a_vec[..];
+    let mut b = &mut b_vec[..];
+
+    let n = a.len();
+    assert_eq!(b.len(), n);
+    assert!(n.is_power_of_two());
+    assert_eq!(
+        precomp.num_bases(),
+        n + 1,
+        "the committer must hold the CRS `G` vector followed by `Q`"
+    );
+
+    let output_point = inner_product(a, b);
+    transcript.append_point(b"C", &a_comm);
+    transcript.append_scalar(b"input point", &input_point);
+    transcript.append_scalar(b"output point", &output_point);
+
+    let w = transcript.challenge_scalar(b"w");
+    // `Q` is base `n` of the tables, so the blinding term `z·(w·Q) = (w·z)·Q` is fixed-base too.
+    let blind = |z: Fr| precomp.mul_index(&(w * z), n);
+
+    let num_rounds = log2(n);
+
+    let mut L_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+    let mut R_vec: Vec<Element> = Vec::with_capacity(num_rounds as usize);
+
+    // coeff[m] tracks the coefficient of original generator G[m] inside the
+    // implicitly folded generator vector.
+    let mut coeff = vec![Fr::one(); n];
+    let mut len = n;
+    // This round's L/R terms over the original generators; each index lands in one of them.
+    let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+    let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+
+    for _ in 0..num_rounds {
+        let half = len / 2;
+        let (a_L, a_R) = halve(a);
+        let (b_L, b_R) = halve(b);
+
+        // Express this round's L/R in terms of the original generators. Every
+        // original index lands in exactly one of the two point sets.
+        l_terms.clear();
+        r_terms.clear();
+        for (m, c) in coeff.iter().enumerate() {
+            let i = m % len;
+            if i < half {
+                l_terms.push((m, a_R[i] * c));
+            } else {
+                r_terms.push((m, a_L[i - half] * c));
+            }
+        }
+
+        let left_compute = || -> Element {
+            let z_L = inner_product(a_R, b_L);
+            precomp.msm(&l_terms) + blind(z_L)
+        };
+        let right_compute = || -> Element {
+            let z_R = inner_product(a_L, b_R);
+            precomp.msm(&r_terms) + blind(z_R)
+        };
+
+        let (L, R) = join!(left_compute, right_compute);
+        L_vec.push(L);
+        R_vec.push(R);
+
+        transcript.append_point(b"L", &L);
+        transcript.append_point(b"R", &R);
+
+        let x = transcript.challenge_scalar(b"x");
+        let x_inv = x.inverse().unwrap();
+
+        for i in 0..a_L.len() {
+            a_L[i] += x * a_R[i];
+            b_L[i] += x_inv * b_R[i];
+        }
+        // Indices in the right half of the current fold pick up the inverse
+        // challenge, mirroring `G_L += G_R * x_inv` on the original bases.
+        for (m, c) in coeff.iter_mut().enumerate() {
+            if m % len >= half {
+                *c *= x_inv;
+            }
+        }
+
+        a = a_L;
+        b = b_L;
+        len = half;
     }
 
     IPAProof {
@@ -217,9 +348,10 @@ impl IPAProof {
         let w = transcript.challenge_scalar(b"w");
 
         // Generate all of the necessary challenges and their inverses
+        // (log n elements — invert serially)
         let challenges = generate_challenges(self, transcript);
         let mut challenges_inv = challenges.clone();
-        batch_inversion(&mut challenges_inv);
+        serial_batch_inversion_and_mul(&mut challenges_inv, &Fr::one());
 
         // Generate the coefficients for the `G` vector and the `b` vector
         // {-g_i}{-b_i}
@@ -276,15 +408,6 @@ pub fn slow_vartime_multiscalar_mul<'a>(
     multi_scalar_mul(&points, &scalars)
 }
 
-pub fn multi_scalar_mul_par(bases: &[Element], scalars: &[Fr]) -> Element {
-    let chunk_size = bases.len().div_ceil(num_threads!());
-
-    chunks!(bases, chunk_size)
-        .zip(chunks!(scalars, chunk_size))
-        .map(|(bases, scalars)| multi_scalar_mul(bases, scalars))
-        .sum()
-}
-
 fn generate_challenges(proof: &IPAProof, transcript: &mut Transcript) -> Vec<Fr> {
     let mut challenges: Vec<Fr> = Vec::with_capacity(proof.L_vec.len());
 
@@ -306,6 +429,50 @@ mod tests {
     use crate::math_utils::{inner_product, powers_of};
     use ark_std::{rand::SeedableRng, UniformRand};
     use rand_chacha::ChaCha20Rng;
+
+    /// `create_with_precomp` must produce exactly the proof `create` does —
+    /// same transcript interaction, same L/R points, same final scalar.
+    #[test]
+    fn create_with_precomp_matches_create() {
+        let n = 256;
+        let crs = CRS::new(n, b"random seed");
+        let committer = crs.committer(6);
+
+        let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
+        let a: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let input_point = Fr::rand(&mut rng);
+        let b = powers_of(input_point, n);
+        let a_comm = slow_vartime_multiscalar_mul(a.iter(), crs.G.iter());
+
+        let folded = create(
+            &mut Transcript::new(b"ip_no_zk"),
+            crs.clone(),
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+        let precomputed = create_with_precomp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &committer,
+            a.clone(),
+            a_comm,
+            b.clone(),
+            input_point,
+        );
+
+        assert_eq!(folded.to_bytes().unwrap(), precomputed.to_bytes().unwrap());
+
+        let output_point = inner_product(&a, &b);
+        assert!(precomputed.verify_multiexp(
+            &mut Transcript::new(b"ip_no_zk"),
+            &crs,
+            b,
+            a_comm,
+            input_point,
+            output_point
+        ));
+    }
 
     #[test]
     fn test_create_IPAProof_proof() {
