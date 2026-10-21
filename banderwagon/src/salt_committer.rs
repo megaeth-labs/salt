@@ -31,8 +31,8 @@ use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr}
 use ark_ff::PrimeField;
 use ark_ff::Zero;
 
-use salt_macros::iter;
 use salt_macros::prelude::*;
+use salt_macros::{chunks, iter, thread_chunk_size};
 use std::{vec, vec::Vec};
 
 /// Precomputed Multi-Scalar Multiplication engine for fixed base points.
@@ -187,6 +187,11 @@ impl Committer {
         }
     }
 
+    /// Returns the number of base points covered by the precomputed tables.
+    pub fn num_bases(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This x86_64-optimized version uses CPU prefetching instructions to
@@ -332,6 +337,21 @@ impl Committer {
             .iter()
             .for_each(|p| add_affine_point(&mut result, &p.x, &p.y));
         Element(result)
+    }
+
+    /// Sums `scalar · G[index]` over `terms`, splitting them across threads.
+    pub fn msm(&self, terms: &[(usize, Fr)]) -> Element {
+        chunks!(terms, thread_chunk_size!(terms.len()))
+            .map(|chunk| {
+                let mut acc = Element::zero();
+                for (index, scalar) in chunk {
+                    if !scalar.is_zero() {
+                        acc += self.mul_index(scalar, *index);
+                    }
+                }
+                acc
+            })
+            .sum()
     }
 }
 
