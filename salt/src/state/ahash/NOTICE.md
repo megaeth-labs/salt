@@ -27,4 +27,4 @@ The original AHash crate is dual-licensed under the Apache License 2.0 or the MI
 - https://www.apache.org/licenses/LICENSE-2.0
 - https://opensource.org/licenses/MIT
 
-Both license texts are included at the repository root as `LICENSE-APACHE` and `LICENSE-MIT`; the AHash copyright notice they apply to is the one reproduced above.
+The `salt` crate distributes these files under the same MIT OR Apache-2.0 terms. Both license texts are included in the `salt` crate as `salt/LICENSE-APACHE` and `salt/LICENSE-MIT`; the AHash copyright notice they apply to is the one reproduced above.

@@ -313,13 +313,15 @@ NUM_DATA_BUCKETS=3 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo build --features test-b
 
 ## License
 
-Licensed under either of
+Each crate is licensed as follows:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+| Crate | License | License texts |
+|---|---|---|
+| `salt`, `salt-macros`, `banderwagon` | MIT OR Apache-2.0, at your option | `LICENSE-APACHE` and `LICENSE-MIT` in the crate directory |
+| `ipa-multipoint` | MIT | [ipa-multipoint/LICENSE](ipa-multipoint/LICENSE) |
 
-at your option.
+Everything outside the crate directories is licensed under either of the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>) or the MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>), at your option.
 
-Portions of this project are derived from third-party code; see [NOTICE.md](NOTICE.md) for their origins and licenses.
+`banderwagon` and `ipa-multipoint` are derived from rust-verkle, and `salt` contains code derived from AHash; see [NOTICE.md](NOTICE.md) for their origins and licenses.
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be licensed under the license of the crate it is submitted to, as listed above, without any additional terms or conditions.
