@@ -35,6 +35,44 @@ pub const MIN_BUCKET_SIZE: usize = 1 << MIN_BUCKET_SIZE_BITS;
 /// Set equal to MIN_BUCKET_SIZE since metadata buckets don't need to resize
 /// and maintaining uniform size simplifies the implementation.
 pub const META_BUCKET_SIZE: usize = MIN_BUCKET_SIZE;
+/// Maximum capacity of a SALT bucket (2^40 = 1,099,511,627,776 slots).
+///
+/// A bucket keeps its slots in the deepest level of its subtree, which holds
+/// `TRIE_WIDTH^(MAX_SUBTREE_LEVELS - 1)` = 256^4 = 2^32 segments of `MIN_BUCKET_SIZE`
+/// = 256 slots each. So a bucket can address 2^32 * 2^8 = 2^40 slots, and
+/// `subtree_root_level(MAX_BUCKET_SIZE)` is 0, the topmost subtree level.
+///
+/// This equals `1 << BUCKET_SLOT_BITS`: slot IDs run over `0..MAX_BUCKET_SIZE`, whose
+/// largest member is `BUCKET_SLOT_ID_MASK`, so every slot ID still fits in the low
+/// `BUCKET_SLOT_BITS` bits of a `SaltKey`.
+///
+/// **Note**: `MAX_BUCKET_SIZE` is a slot *count*, whereas `BUCKET_SLOT_ID_MASK` is the
+/// largest slot *index*. Bounding a capacity by the mask caps it one doubling short,
+/// at 2^39, because capacities only ever double up from `MIN_BUCKET_SIZE`.
+pub const MAX_BUCKET_SIZE: u64 =
+    1 << ((MAX_SUBTREE_LEVELS - 1) * TRIE_WIDTH_BITS + MIN_BUCKET_SIZE_BITS);
+
+// `MAX_BUCKET_SIZE` is derived from the subtree shape while `BUCKET_SLOT_BITS` is the
+// `SaltKey` layout; tie them together at compile time so neither can drift.
+const _: () = {
+    // The shift form above is the segment count times the segment size.
+    assert!(
+        MAX_BUCKET_SIZE
+            == (TRIE_WIDTH as u64).pow((MAX_SUBTREE_LEVELS - 1) as u32) * MIN_BUCKET_SIZE as u64
+    );
+    // Every slot index of a maximally expanded bucket fits the slot field, and the
+    // largest one is exactly `BUCKET_SLOT_ID_MASK`.
+    assert!(MAX_BUCKET_SIZE == 1 << BUCKET_SLOT_BITS);
+    // That bucket's segments fill the deepest subtree level exactly: its last node
+    // is the one just before a sixth level would begin, so the ceiling has no slack
+    // and a wrong level base fails to compile here.
+    const MAX_SUBTREE_NODE_ID: u64 = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
+        + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64
+        - 1;
+    assert!(MAX_SUBTREE_NODE_ID + 1 == leftmost_node(MAX_SUBTREE_LEVELS as u32).unwrap());
+    // And that node must not bleed into the bucket-id bits of a `NodeId`.
+    assert!(MAX_SUBTREE_NODE_ID <= BUCKET_SLOT_ID_MASK);
+};
 
 // ============================================================================
 // Trie Structure Constants
@@ -54,11 +92,14 @@ pub const MAIN_TRIE_LEVELS: usize = 4;
 /// leaf nodes at the deepest level (level 4) of the MAXIMAL subtree structure. As
 /// bucket capacity increases, the subtree root moves UP to accommodate more leaves.
 ///
-/// Structure evolution by capacity:
+/// Structure evolution by capacity (see `subtree_root_level`):
 /// - 256 slots (1 segment): Single-node subtree, root at level 4
-/// - 512 slots (2 segments): Root at level 3, 2 leaf nodes at level 4
-/// - 768-65536 slots: Root at level 2, internal nodes at level 3, leaves at level 4
-/// - 65537+ slots: Root at higher levels as needed
+/// - 512-65,536 slots: Root at level 3, leaves at level 4
+/// - 65,537-16,777,216 slots: Root at level 2
+/// - 16,777,217-4,294,967,296 slots: Root at level 1
+/// - 4,294,967,297-1,099,511,627,776 slots: Root at level 0, the full 5-level subtree
+///
+/// The last row ends at [`MAX_BUCKET_SIZE`], whose doc derives that ceiling.
 ///
 /// Example for 512-slot bucket (2 segments):
 /// ```text
@@ -129,7 +170,8 @@ pub const STARTING_NODE_ID: [usize; MAX_SUBTREE_LEVELS] = [
 pub const BUCKET_ID_BITS: usize = 24;
 
 /// Maximum number of bits to represent a slot index in a bucket.
-/// 40 bits supports up to ~1 trillion slots per bucket, providing ample room for growth.
+/// 40 bits holds every slot index of a maximally expanded bucket, which has
+/// `MAX_BUCKET_SIZE` = 2^40 (~1.1 trillion) slots indexed `0..=BUCKET_SLOT_ID_MASK`.
 pub const BUCKET_SLOT_BITS: usize = 40;
 
 /// Mask to extract the slot ID from a NodeId or SaltKey.
@@ -269,6 +311,7 @@ mod tests {
         assert_eq!(MIN_BUCKET_SIZE_BITS, 8);
         assert_eq!(MIN_BUCKET_SIZE, 256);
         assert_eq!(META_BUCKET_SIZE, 256);
+        assert_eq!(MAX_BUCKET_SIZE, 1_099_511_627_776);
         assert_eq!(MAIN_TRIE_LEVELS, 4);
         assert_eq!(MAX_SUBTREE_LEVELS, 5);
         assert_eq!(TRIE_WIDTH_BITS, 8);
