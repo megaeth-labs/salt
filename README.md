@@ -310,3 +310,18 @@ NUM_DATA_BUCKETS=3 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo build --features test-b
 
 ### Presentations & Talks
 - [SALT: Breaking the I/O Bottleneck for Blockchains with a Scalable Authenticated Key-Value Store](https://x.com/yangl1996/status/1957487663818416406) - [Science and Engineering of Consensus 2025](https://tselab.stanford.edu/workshop-sbc25/), August 3rd, 2025
+
+## License
+
+Each crate is licensed as follows:
+
+| Crate | License | License texts |
+|---|---|---|
+| `salt`, `salt-macros`, `banderwagon` | MIT OR Apache-2.0, at your option | `LICENSE-APACHE` and `LICENSE-MIT` in the crate directory |
+| `ipa-multipoint` | MIT | [ipa-multipoint/LICENSE](ipa-multipoint/LICENSE) |
+
+Everything outside the crate directories is licensed under either of the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>) or the MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>), at your option.
+
+`banderwagon` and `ipa-multipoint` are derived from rust-verkle, and `salt` contains code derived from AHash; see [NOTICE.md](NOTICE.md) for their origins and licenses.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be licensed under the license of the crate it is submitted to, as listed above, without any additional terms or conditions.
