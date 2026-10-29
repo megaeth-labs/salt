@@ -2,6 +2,7 @@
 name = "salt"
 version = "1.0.6"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 banderwagon = { path = "../banderwagon", default-features = false }
