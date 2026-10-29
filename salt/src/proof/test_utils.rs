@@ -2,7 +2,10 @@
 //!
 //! This module provides common mock data generation functions used across proof tests.
 
+use crate::mem_store::MemStore;
 use crate::proof::SerdeCommitment;
+use crate::state::updates::StateUpdates;
+use crate::trie::trie::StateRoot;
 use crate::types::SaltValue;
 use banderwagon::{Element, Fr};
 use rand::{rngs::StdRng, Rng};
@@ -37,4 +40,11 @@ pub(crate) fn mock_commitment() -> SerdeCommitment {
 /// Generates a SaltValue with fixed test key and value.
 pub(crate) fn mock_salt_value() -> SaltValue {
     SaltValue::new(&[1u8; 32], &[2u8; 32])
+}
+
+/// Applies one block's transition to `store`.
+pub(crate) fn apply_block(store: &MemStore, updates: StateUpdates) {
+    let (_, trie_updates) = StateRoot::new(store).update_fin(&updates).unwrap();
+    store.update_state(updates);
+    store.update_trie(trie_updates);
 }
