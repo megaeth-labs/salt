@@ -69,7 +69,7 @@ jobs:
 
       - name: Warm test binaries
         if: steps.scope.outputs.changed == 'true'
-        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+        run: cargo nextest run -p salt --no-default-features --features parallel,reth-codecs --no-run
 
       # With no salt/src changes this only records an explicit empty result
       # set, so it needs neither the Rust toolchain nor cargo-mutants.
@@ -345,7 +345,7 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       - name: Warm test binaries
-        run: cargo nextest run -p salt --no-default-features --features parallel --no-run
+        run: cargo nextest run -p salt --no-default-features --features parallel,reth-codecs --no-run
 
       - name: Run mutation testing
         run: scripts/mutation_test.sh full --shard ${{ matrix.shard }}/8
