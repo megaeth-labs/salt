@@ -218,10 +218,9 @@ pub(crate) fn vc_position_in_parent(node_id: &NodeId) -> usize {
     let local_number = get_local_number(*node_id);
     let trie_level = get_bfs_level(local_number);
 
-    // Calculate relative position from the start of this level. Stay in u64: at
-    // `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit `usize`
-    // cannot hold it.
-    let relative_pos = local_number - STARTING_NODE_ID[trie_level] as u64;
+    // Calculate relative position from the start of this level. Only the final
+    // 0..256 index is narrowed to `usize`.
+    let relative_pos = local_number - STARTING_NODE_ID[trie_level];
     (relative_pos % TRIE_WIDTH as u64) as usize
 }
 
@@ -246,10 +245,10 @@ pub fn get_child_node(parent: &NodeId, child_idx: usize) -> NodeId {
     let level = get_bfs_level(local_node_id);
 
     // Calculate parent's relative position from the start of its level
-    let parent_relative_position = local_node_id - STARTING_NODE_ID[level] as NodeId;
+    let parent_relative_position = local_node_id - STARTING_NODE_ID[level];
 
     // Get the starting position for the child level
-    let child_level_start = STARTING_NODE_ID[level + 1] as NodeId;
+    let child_level_start = STARTING_NODE_ID[level + 1];
 
     // Multiply parent's position by 256 then add the child level start and the
     // specific child index
@@ -282,10 +281,8 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
     // Determine which level this node is on
     let level = get_bfs_level(local_node_id);
 
-    // Calculate relative position from the start of current level. Stay in u64:
-    // at `MAX_BUCKET_SIZE` a subtree-local number exceeds u32, so a 32-bit
-    // `usize` cannot hold it.
-    let relative_position = local_node_id - STARTING_NODE_ID[level] as u64;
+    // Calculate relative position from the start of current level
+    let relative_position = local_node_id - STARTING_NODE_ID[level];
 
     // Divide by 256 (right-shift by 8) to get parent's relative position
     // Each parent has 256 children, so child positions 0-255 → parent 0,
@@ -294,7 +291,7 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 
     // Add parent level's starting position to get absolute parent ID
     // and preserve the bucket ID for subtree nodes
-    bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1] as NodeId
+    bucket_id + parent_relative_position + STARTING_NODE_ID[level - 1]
 }
 
 /// Maps a bucket ID to its subtree root node in the main trie.
@@ -309,7 +306,7 @@ pub(crate) fn get_parent_node(node_id: &NodeId) -> NodeId {
 /// # Returns
 /// The NodeId of the bucket's root node at the main trie level (level 3)
 pub(crate) fn bucket_root_node_id(bucket_id: BucketId) -> NodeId {
-    bucket_id as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId
+    bucket_id as NodeId + STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1]
 }
 
 /// Converts a SaltKey to the NodeId of its corresponding subtree leaf node.
@@ -332,7 +329,7 @@ pub(crate) fn subtree_leaf_for_key(key: &SaltKey) -> NodeId {
     // bucket_id (24 bits) | starting_node_at_L4 + slot_id/256 (40 bits)
     ((key.bucket_id() as u64) << BUCKET_SLOT_BITS)
         + (key.slot_id() >> MIN_BUCKET_SIZE_BITS)
-        + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
+        + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1]
 }
 
 /// Returns the starting SaltKey for a subtree leaf node's bucket segment.
@@ -357,7 +354,7 @@ pub(crate) fn subtree_leaf_start_key(node_id: &NodeId) -> SaltKey {
     let bucket_id = *node_id - local_node_number;
 
     // Calculate relative position within the deepest subtree level
-    let relative_position = local_node_number - STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
+    let relative_position = local_node_number - STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1];
 
     // Convert back to slot ID by multiplying by 256
     // Each subtree node represents a range of 256 consecutive slots
@@ -429,7 +426,7 @@ mod tests {
         assert_eq!(get_child_node(&parent, TRIE_WIDTH - 1), node);
         assert_eq!(
             get_local_number(parent),
-            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64 - 1
+            STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] - 1
         );
     }
 
@@ -630,7 +627,7 @@ mod tests {
         for (bucket_id, expected, description) in test_cases {
             let result = bucket_root_node_id(bucket_id);
             assert_eq!(
-                result, expected as NodeId,
+                result, expected,
                 "Failed for {}: bucket_id={}, expected={}, got={}",
                 description, bucket_id, expected, result
             );
@@ -639,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_bucket_root_boundary_node_ids() {
-        let starting_l3_node = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1] as NodeId;
+        let starting_l3_node = STARTING_NODE_ID[MAIN_TRIE_LEVELS - 1];
         let cases = [
             (0, starting_l3_node),
             (
@@ -667,7 +664,7 @@ mod tests {
     /// at the deepest subtree level (level 4).
     #[test]
     fn test_subtree_leaf_for_key() {
-        let starting_l4_node = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64;
+        let starting_l4_node = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1];
 
         let test_cases = [
             (
@@ -711,8 +708,8 @@ mod tests {
     #[test]
     fn test_subtree_leaf_for_key_segment_boundaries() {
         let bucket_id = crate::constant::NUM_META_BUCKETS as BucketId;
-        let base = ((bucket_id as NodeId) << BUCKET_SLOT_BITS)
-            + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as NodeId;
+        let base =
+            ((bucket_id as NodeId) << BUCKET_SLOT_BITS) + STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1];
         let cases = [
             (0, base),
             (255, base),

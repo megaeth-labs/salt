@@ -560,7 +560,7 @@ fn create_leaf_node_queries(
             // Calculate the starting SaltKey address for this bucket/segment
             let salt_key_start = if *parent_node < BUCKET_SLOT_ID_MASK as NodeId {
                 // Main trie bucket: predictable addressing based on bucket ID
-                let bucket_id = (*parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                let bucket_id = (*parent_node - STARTING_NODE_ID[3]) as BucketId;
                 SaltKey::from((bucket_id, 0))
             } else {
                 // Subtree segment: use helper to calculate complex addressing
@@ -679,9 +679,7 @@ mod tests {
 
         assert_eq!(
             meta_bucket_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[3] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[3]))
         );
 
         let data_bucket_frs = vec![default_fr; 256];
@@ -696,36 +694,28 @@ mod tests {
         let l3_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_left_frs));
         assert_eq!(
             l3_left_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[2] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[2]))
         );
 
         let l3_right_frs = vec![data_bucket_commitment.map_to_scalar_field(); 256];
         let l3_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_right_frs));
         assert_eq!(
             l3_right_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[3] as NodeId - 1
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[3] - 1))
         );
 
         let l2_left_frs = vec![l3_left_commitment.map_to_scalar_field(); 256];
         let l2_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_left_frs));
         assert_eq!(
             l2_left_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1]))
         );
 
         let l2_right_frs = vec![l3_right_commitment.map_to_scalar_field(); 256];
         let l2_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_right_frs));
         assert_eq!(
             l2_right_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[2] as NodeId - 1
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[2] - 1))
         );
 
         let mut l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
@@ -734,9 +724,7 @@ mod tests {
         let l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l1_frs));
         assert_eq!(
             l1_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[0] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[0]))
         );
 
         let sub_trie_l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
@@ -1462,7 +1450,7 @@ mod tests {
     #[test]
     fn test_create_leaf_node_queries() {
         // Setup: Create leaf node representing a bucket with key-value data
-        let bucket_node = STARTING_NODE_ID[3] as NodeId + 100; // Main trie bucket
+        let bucket_node = STARTING_NODE_ID[3] + 100; // Main trie bucket
         let slot_points = [0usize, 5usize].into();
         let mut leaf_nodes = BTreeMap::new();
         leaf_nodes.insert(bucket_node, slot_points);
@@ -1471,7 +1459,7 @@ mod tests {
         path_commitments.insert(connect_parent_id(bucket_node), mock_commitment());
 
         // Add key-value data for the slots
-        let bucket_id = (bucket_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+        let bucket_id = (bucket_node - STARTING_NODE_ID[3]) as BucketId;
         let key1 = SaltKey::from((bucket_id, 0));
         let key2 = SaltKey::from((bucket_id, 5));
         let mut kvs = BTreeMap::new();
@@ -1673,7 +1661,7 @@ mod tests {
     #[test]
     fn test_create_leaf_node_queries_missing_data() {
         // Setup: Leaf node with slot but no corresponding key-value data
-        let bucket_node = STARTING_NODE_ID[3] as NodeId + 100;
+        let bucket_node = STARTING_NODE_ID[3] + 100;
         let slot_points = [0usize].into();
         let mut leaf_nodes = BTreeMap::new();
         leaf_nodes.insert(bucket_node, slot_points);

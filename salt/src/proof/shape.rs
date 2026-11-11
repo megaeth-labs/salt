@@ -298,9 +298,8 @@ pub const fn logic_parent_id(maybe_encoded_node: NodeId) -> NodeId {
     if is_encoded_node(maybe_encoded_node) {
         let connect_parent = maybe_encoded_node & ((1 << 33) - 1);
         let levels = (maybe_encoded_node >> 33) as u8;
-        let bucket_id = connect_parent - STARTING_NODE_ID[3] as u64;
-        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - levels as usize] as u64
-            | (bucket_id << BUCKET_SLOT_BITS)
+        let bucket_id = connect_parent - STARTING_NODE_ID[3];
+        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - levels as usize] | (bucket_id << BUCKET_SLOT_BITS)
     } else {
         maybe_encoded_node
     }
@@ -435,7 +434,7 @@ mod tests {
                 assert_eq!(logic >> BUCKET_SLOT_BITS, bucket_id as u64);
                 assert_eq!(
                     logic & ((1u64 << BUCKET_SLOT_BITS) - 1),
-                    STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize] as u64
+                    STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize]
                 );
             }
         }
@@ -533,18 +532,18 @@ mod tests {
 
         // Test level 1: bucket_id = 65536, root_level = 4
         let encoded_level1 = encode_parent(bucket_root, 1);
-        let expected_logic1 = (65536u64 << BUCKET_SLOT_BITS) | STARTING_NODE_ID[4] as u64;
+        let expected_logic1 = (65536u64 << BUCKET_SLOT_BITS) | STARTING_NODE_ID[4];
         assert_eq!(logic_parent_id(encoded_level1), expected_logic1);
 
         // Test level 2: bucket_id = 65536, root_level = 3
         let encoded_level2 = encode_parent(bucket_root, 2);
-        let expected_logic2 = (65536u64 << BUCKET_SLOT_BITS) | STARTING_NODE_ID[3] as u64;
+        let expected_logic2 = (65536u64 << BUCKET_SLOT_BITS) | STARTING_NODE_ID[3];
         assert_eq!(logic_parent_id(encoded_level2), expected_logic2);
 
         // Test with bucket_id = 65540
-        let bucket_root_1 = STARTING_NODE_ID[3] as u64 + 65540; // 131333
+        let bucket_root_1 = STARTING_NODE_ID[3] + 65540; // 131333
         let encoded = encode_parent(bucket_root_1, 2);
-        let expected = STARTING_NODE_ID[3] as u64 | (65540u64 << BUCKET_SLOT_BITS);
+        let expected = STARTING_NODE_ID[3] | (65540u64 << BUCKET_SLOT_BITS);
         assert_eq!(logic_parent_id(encoded), expected);
 
         // Test level boundaries
@@ -553,7 +552,7 @@ mod tests {
             let logic_id = logic_parent_id(encoded);
             // Verify the bucket_id is correctly extracted and shifted
             if level <= MAX_SUBTREE_LEVELS as u8 {
-                let expected_base = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize] as u64;
+                let expected_base = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - level as usize];
                 assert!((logic_id & !((0xFFFFFFu64) << BUCKET_SLOT_BITS)) == expected_base);
             }
         }

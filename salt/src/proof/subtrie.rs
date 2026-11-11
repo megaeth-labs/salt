@@ -345,7 +345,7 @@ where
     // Determine the starting slot and bucket ID for this leaf
     let (slot_start, bucket_id) = if parent < BUCKET_SLOT_ID_MASK as NodeId {
         // Main trie leaf: bucket ID derived from position in level 3
-        let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
+        let bucket_id = (parent - STARTING_NODE_ID[3]) as BucketId;
         (0, bucket_id)
     } else {
         // Subtree leaf: extract bucket ID and slot start from node ID encoding
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn process_leaf_node_with_real_commitment() {
         let (store, salt_key) = setup_test_store();
-        let parent_node = STARTING_NODE_ID[3] as NodeId + salt_key.bucket_id() as u64;
+        let parent_node = STARTING_NODE_ID[3] + salt_key.bucket_id() as u64;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(store.commitment(parent_node).unwrap());
         let points = [0, salt_key.slot_id() as usize & 0xff].into();
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn process_leaf_node_uses_metadata_default_for_meta_bucket() {
         let store = MemStore::new();
-        let parent_node = STARTING_NODE_ID[3] as NodeId;
+        let parent_node = STARTING_NODE_ID[3];
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
         let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn process_leaf_node_uses_empty_default_for_data_bucket() {
         let store = MemStore::new();
-        let parent_node = STARTING_NODE_ID[3] as NodeId + NUM_META_BUCKETS as NodeId;
+        let parent_node = STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
         let queries = process_leaf_node(&store, parent_node, commitment, [0, 255].into()).unwrap();
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(multi_commitments_to_scalars(&store, &[]).unwrap().len(), 0);
 
         // Single internal node
-        let node_points = vec![(STARTING_NODE_ID[2] as NodeId, [0, 1].into())];
+        let node_points = vec![(STARTING_NODE_ID[2], [0, 1].into())];
         let scalars = multi_commitments_to_scalars(&store, &node_points).unwrap();
         assert_eq!(scalars.len(), DOMAIN_SIZE);
     }
@@ -583,12 +583,8 @@ mod tests {
         let scalars =
             multi_commitments_to_scalars(&store, &[(ROOT_NODE_ID, [0, 1, 255].into())]).unwrap();
         let expected = Element::batch_map_to_scalar_field(&[
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId,
-            )),
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId + 1,
-            )),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1])),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1] + 1)),
         ]);
 
         assert_eq!(scalars.len(), DOMAIN_SIZE);

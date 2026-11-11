@@ -66,9 +66,8 @@ const _: () = {
     // That bucket's segments fill the deepest subtree level exactly: its last node
     // is the one just before a sixth level would begin, so the ceiling has no slack
     // and a wrong level base fails to compile here.
-    const MAX_SUBTREE_NODE_ID: u64 = STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] as u64
-        + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64
-        - 1;
+    const MAX_SUBTREE_NODE_ID: u64 =
+        STARTING_NODE_ID[MAX_SUBTREE_LEVELS - 1] + MAX_BUCKET_SIZE / MIN_BUCKET_SIZE as u64 - 1;
     assert!(MAX_SUBTREE_NODE_ID + 1 == leftmost_node(MAX_SUBTREE_LEVELS as u32).unwrap());
     // And that node must not bleed into the bucket-id bits of a `NodeId`.
     assert!(MAX_SUBTREE_NODE_ID <= BUCKET_SLOT_ID_MASK);
@@ -161,12 +160,18 @@ pub const EMPTY_SLOT_HASH: [u8; 32] = [1u8; 32];
 /// - Level 2: 257 (after 1 + 256 nodes)
 /// - Level 3: 65,793 (after 1 + 256 + 65,536 nodes)
 /// - Level 4: 16,843,009 (after 1 + 256 + 65,536 + 16,777,216 nodes)
-pub const STARTING_NODE_ID: [usize; MAX_SUBTREE_LEVELS] = [
-    leftmost_node(0).unwrap() as usize, // 0
-    leftmost_node(1).unwrap() as usize, // 1
-    leftmost_node(2).unwrap() as usize, // 257
-    leftmost_node(3).unwrap() as usize, // 65793
-    leftmost_node(4).unwrap() as usize, // 16843009
+///
+/// Typed as [`NodeId`] rather than `usize`: the entries fit in a `u32`, but the
+/// subtree-local numbers they are subtracted from do not (at `MAX_BUCKET_SIZE` the
+/// deepest one is above `u32::MAX`). Keeping the table in the node-id type makes
+/// level arithmetic on a `usize` fail to compile instead of silently truncating
+/// on 32-bit targets.
+pub const STARTING_NODE_ID: [NodeId; MAX_SUBTREE_LEVELS] = [
+    leftmost_node(0).unwrap(), // 0
+    leftmost_node(1).unwrap(), // 1
+    leftmost_node(2).unwrap(), // 257
+    leftmost_node(3).unwrap(), // 65793
+    leftmost_node(4).unwrap(), // 16843009
 ];
 
 /// Maximum number of bits to represent a bucket ID.
@@ -262,7 +267,7 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
     // Precomputed commitments for each level of an empty SALT main trie.
     // Each entry contains: (boundary_position, left_commitment, right_commitment)
     // where left is for positions < boundary, right is for positions >= boundary.
-    static DEFAULT_COMMITMENT_AT_LEVEL: [(usize, CommitmentBytes, CommitmentBytes); MAIN_TRIE_LEVELS] = [
+    static DEFAULT_COMMITMENT_AT_LEVEL: [(NodeId, CommitmentBytes, CommitmentBytes); MAIN_TRIE_LEVELS] = [
         (
             STARTING_NODE_ID[0] + 1,
             b512!("a2f11cbb573b3beba869c4417fd616e550f66feea3edcf6b8979bee66dd18767d744099c52a92477cb2e005ca3665892ce7860ccaf476aa224528837e5732270"),
@@ -274,12 +279,12 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
             b512!("866b0fd149ea8e233d295dff7b91af9ac54e82e3083a979e068fe9f5a8747832f59ed53dfd1e939bdcbf9e1bbc87752c8fe8537c662f537ebfde227ce7845659"),
         ),
         (
-            STARTING_NODE_ID[2] + MIN_BUCKET_SIZE,
+            STARTING_NODE_ID[2] + MIN_BUCKET_SIZE as NodeId,
             b512!("9ed527e0e507e93c05d5a77184211e6bbf6e1820fdc7cd36387c4d52f8b931182f47ece1ebb6dad09b8b96062bc5241b143e03f36e69ffb83b0ef8d99f818772"),
             b512!("1d8d81bcb60ff180ff99c497a8298af38d71d2fbf3c0ffda09b659839e3732612771a485191ab8fe740dc20d1a33c53f8cfbb1c07676d74050de914c0efc7f54"),
         ),
         (
-            STARTING_NODE_ID[3] + NUM_META_BUCKETS,
+            STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId,
             b512!("e07db25c34ee2ddb23992be6e8c3a9fc0c3b3c23effd4089cb262524ce64671abc3da78e1f67a926db11faa1385ca8d35aee7905cff1251536c75b73f60ed16b"),
             b512!("da260863cc36b265d34f9912c3b98ae7e046ced37bf5eebe1be164695093714efc9e5b23b9ab87c9f7b51e4fec4ea377e4fe44672d70752f7c3522e0f0269555"),
         ),
@@ -299,7 +304,7 @@ pub fn default_commitment(node_id: NodeId) -> CommitmentBytes {
 
     if is_subtree_node(node_id) {
         SUBTREE_DEFAULT_COMMITMENT[level]
-    } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 as NodeId {
+    } else if node_id < DEFAULT_COMMITMENT_AT_LEVEL[level].0 {
         DEFAULT_COMMITMENT_AT_LEVEL[level].1
     } else {
         DEFAULT_COMMITMENT_AT_LEVEL[level].2
@@ -339,26 +344,26 @@ mod tests {
         assert_eq!(default_commitment(ROOT_NODE_ID), default_commitment(0));
 
         assert_ne!(
-            default_commitment(STARTING_NODE_ID[1] as NodeId),
-            default_commitment((STARTING_NODE_ID[1] + 1) as NodeId)
+            default_commitment(STARTING_NODE_ID[1]),
+            default_commitment(STARTING_NODE_ID[1] + 1)
         );
         assert_ne!(
-            default_commitment((STARTING_NODE_ID[2] + MIN_BUCKET_SIZE - 1) as NodeId),
-            default_commitment((STARTING_NODE_ID[2] + MIN_BUCKET_SIZE) as NodeId)
+            default_commitment(STARTING_NODE_ID[2] + MIN_BUCKET_SIZE as NodeId - 1),
+            default_commitment(STARTING_NODE_ID[2] + MIN_BUCKET_SIZE as NodeId)
         );
         assert_ne!(
-            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS - 1) as NodeId),
-            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS) as NodeId)
+            default_commitment(STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId - 1),
+            default_commitment(STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId)
         );
 
         let first_data_bucket = (NUM_META_BUCKETS as NodeId) << BUCKET_SLOT_BITS;
         assert_ne!(
-            default_commitment(first_data_bucket | STARTING_NODE_ID[0] as NodeId),
-            default_commitment(first_data_bucket | STARTING_NODE_ID[4] as NodeId)
+            default_commitment(first_data_bucket | STARTING_NODE_ID[0]),
+            default_commitment(first_data_bucket | STARTING_NODE_ID[4])
         );
         assert_eq!(
-            default_commitment(first_data_bucket | STARTING_NODE_ID[4] as NodeId),
-            default_commitment((STARTING_NODE_ID[3] + NUM_META_BUCKETS) as NodeId)
+            default_commitment(first_data_bucket | STARTING_NODE_ID[4]),
+            default_commitment(STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId)
         );
     }
 }
