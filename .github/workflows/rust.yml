@@ -118,6 +118,27 @@ jobs:
           command: test
           args: --no-default-features --features test-bucket-resize
 
+  test-i686:
+    name: Test i686
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: i686-unknown-linux-gnu
+
+      - name: Install 32-bit C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      # `usize` is 32 bits here. At MAX_BUCKET_SIZE a subtree-local node number
+      # exceeds u32, so a node id narrowed to `usize` only goes wrong on a target
+      # like this one; the 64-bit test job passes either way.
+      - name: Run cargo test on i686
+        run: cargo test --target i686-unknown-linux-gnu
+
   lints:
     name: Lints
     runs-on: ubuntu-latest

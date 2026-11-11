@@ -413,7 +413,9 @@ mod tests {
 
     /// The deepest subtree-local node number at `MAX_BUCKET_SIZE` exceeds u32, so
     /// the level-relative arithmetic has to stay in u64 rather than `usize` to be
-    /// right on 32-bit targets. Pins what that arithmetic produces there.
+    /// right on 32-bit targets. Pins what that arithmetic produces there. A 64-bit
+    /// `usize` holds the number, so only a 32-bit run catches a narrowing: CI runs
+    /// the test suite on i686 (`test-i686` in `.github/workflows/rust.yml`).
     #[test]
     fn parent_and_position_at_max_capacity_depth() {
         let last_slot = SaltKey::from((NUM_META_BUCKETS as BucketId, MAX_BUCKET_SIZE - 1));
