@@ -72,6 +72,10 @@ const _: () = {
     assert!(MAX_SUBTREE_NODE_ID + 1 == leftmost_node(MAX_SUBTREE_LEVELS as u32).unwrap());
     // And that node must not bleed into the bucket-id bits of a `NodeId`.
     assert!(MAX_SUBTREE_NODE_ID <= BUCKET_SLOT_ID_MASK);
+    // The tighter limit is bit 33: `proof::shape::encode_parent` tags a node id with
+    // a subtree level in bits 33-35, and `is_encoded_node` reads any id with one of
+    // those bits set as tagged, so no subtree-local number may reach them.
+    assert!(MAX_SUBTREE_NODE_ID < 1 << 33);
 };
 
 // ============================================================================

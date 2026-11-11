@@ -41,7 +41,7 @@ use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 // Constants for improved code readability
-const METADATA_BUCKET_LEVEL: u8 = 1;
+pub(crate) const METADATA_BUCKET_LEVEL: u8 = 1;
 const SLOT_INDEX_MASK: u64 = 0xff;
 const ROOT_LEVEL_CHILD_START: NodeId = 1;
 

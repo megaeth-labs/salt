@@ -559,6 +559,12 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                     // slots in view nor treated as an error, leaving the exhaustion
                     // case below as the only resize trigger.
                     //
+                    // Every `Err` from the store's `bucket_used_slots` takes this
+                    // branch, because `Store::Error` cannot tell "not witnessed" from
+                    // a failed read. A store that is not a witness must therefore
+                    // serve the count whenever it backs insertions; one that cannot
+                    // would have its due resizes skipped here without any error.
+                    //
                     // ## Why skipping is correct against a complete witness
                     // A witness builder includes every slot of any bucket the block's
                     // insertions resize, so the count is available exactly where a
@@ -676,8 +682,10 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// ## Panics
     ///
-    /// Panics if `new_capacity` exceeds [`MAX_BUCKET_SIZE`], the largest capacity a
-    /// bucket subtree can address (2^40 slots).
+    /// Panics if `new_capacity` is 0 or exceeds [`MAX_BUCKET_SIZE`], the largest
+    /// capacity a bucket subtree can address (2^40 slots). Either would be written
+    /// into the bucket's metadata, which no reader can decode afterwards (see
+    /// [`BucketMeta::is_valid_capacity`]).
     pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
@@ -686,8 +694,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         assert!(
-            new_capacity <= MAX_BUCKET_SIZE,
-            "Exceeds max bucket capacity: {new_capacity} > {MAX_BUCKET_SIZE}"
+            BucketMeta::is_valid_capacity(new_capacity),
+            "Invalid bucket capacity {new_capacity}: must be in 1..={MAX_BUCKET_SIZE}"
         );
 
         // Step 1: Extract all existing entries (but do not clear the cache yet)
@@ -2742,9 +2750,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Exceeds max bucket capacity")]
+    #[should_panic(expected = "Invalid bucket capacity")]
     fn test_shi_rehash_rejects_capacity_above_max() {
-        let reader = EmptySalt;
+        // An empty witness fails the first read, so a check that wrongly accepted
+        // this capacity returns an error here instead of walking 2^41 slots.
+        let reader = crate::proof::salt_witness::create_witness(TEST_BUCKET, None, vec![]);
         let mut state = EphemeralSaltState::new(&reader);
         let mut updates = StateUpdates::default();
         // One doubling past the largest addressable capacity.
@@ -2754,6 +2764,36 @@ mod tests {
             MAX_BUCKET_SIZE * BUCKET_RESIZE_MULTIPLIER,
             &mut updates,
         );
+    }
+
+    /// A zero capacity would be written into the bucket's metadata, and every later
+    /// read of that metadata would then fail to decode.
+    #[test]
+    #[should_panic(expected = "Invalid bucket capacity")]
+    fn test_shi_rehash_rejects_zero_capacity() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+        let _ = state.shi_rehash(TEST_BUCKET, 0, 0, &mut updates);
+    }
+
+    /// The capacity check admits exactly `MAX_BUCKET_SIZE`, the capacity one doubling
+    /// above 2^39 that the old `BUCKET_SLOT_ID_MASK` bound rejected.
+    ///
+    /// A rehash to 2^40 cannot be run to completion in a test, because it walks every
+    /// slot. So the store is an empty witness, which fails the first read: reaching
+    /// that read means the check passed, while a bound one slot too low would panic
+    /// before it.
+    #[test]
+    fn test_shi_rehash_accepts_max_capacity() {
+        let reader = crate::proof::salt_witness::create_witness(TEST_BUCKET, None, vec![]);
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+
+        let result = state.shi_rehash(TEST_BUCKET, 0, MAX_BUCKET_SIZE, &mut updates);
+
+        assert!(matches!(result, Err(SaltError::NotInWitness { .. })));
+        assert!(updates.data.is_empty());
     }
 
     #[test]

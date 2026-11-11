@@ -109,7 +109,7 @@ impl TryFrom<&[u8]> for BucketMeta {
         // rather than at every consumer. This is only the range the trie can
         // represent; that the protocol only ever produces `MIN_BUCKET_SIZE`
         // doubled some number of times is not enforced here.
-        if capacity == 0 || capacity > MAX_BUCKET_SIZE {
+        if !Self::is_valid_capacity(capacity) {
             return Err(SaltError::InvalidFormat {
                 message: "BucketMeta capacity must be in 1..=MAX_BUCKET_SIZE",
             });
@@ -130,6 +130,19 @@ impl TryFrom<&SaltValue> for BucketMeta {
 }
 
 impl BucketMeta {
+    /// Returns whether `capacity` is one the trie can represent: at least one slot
+    /// (`probe` divides by the capacity) and at most [`MAX_BUCKET_SIZE`] (above it
+    /// `subtree_root_level` has no level left to return).
+    ///
+    /// This is the one statement of that range. Decoding (`TryFrom<&[u8]>`) and
+    /// `shi_rehash` both go through it, and code that builds a `BucketMeta` from
+    /// untrusted bytes without `TryFrom` should check it too. It is deliberately
+    /// wider than what the protocol produces, which is `MIN_BUCKET_SIZE` doubled
+    /// some number of times.
+    pub const fn is_valid_capacity(capacity: u64) -> bool {
+        capacity != 0 && capacity <= MAX_BUCKET_SIZE
+    }
+
     /// Serialize bucket metadata to a 12-byte little-endian byte array.
     ///
     /// Layout: `nonce`(4) | `capacity`(8)
@@ -683,12 +696,14 @@ mod tests {
         };
 
         for capacity in [1, MIN_BUCKET_SIZE as u64, MAX_BUCKET_SIZE] {
+            assert!(BucketMeta::is_valid_capacity(capacity));
             let decoded = BucketMeta::try_from(&meta(capacity).to_bytes()[..])
                 .unwrap_or_else(|e| panic!("capacity {capacity} must decode: {e}"));
             assert_eq!(decoded.capacity, capacity);
         }
 
         for capacity in [0, MAX_BUCKET_SIZE + 1, u64::MAX] {
+            assert!(!BucketMeta::is_valid_capacity(capacity));
             assert!(
                 BucketMeta::try_from(&meta(capacity).to_bytes()[..]).is_err(),
                 "capacity {capacity} must be rejected"

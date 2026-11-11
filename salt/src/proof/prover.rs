@@ -1,9 +1,11 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS, STARTING_NODE_ID},
+    constant::{
+        BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID,
+    },
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
-        subtrie::create_sub_trie,
+        subtrie::{create_sub_trie, METADATA_BUCKET_LEVEL},
         ProofError, ProofResult,
     },
     traits::{StateReader, TrieReader},
@@ -160,6 +162,10 @@ pub struct SaltProof {
 /// turns a level back into a subtree shape (`parents_and_points`, and the
 /// trie's `update_bucket_subtrees` via `get_subtree_levels`) is only defined on
 /// that range.
+///
+/// It also rejects a metadata bucket whose level is not 1. Metadata buckets
+/// never expand, so every prover emits 1 for them, and a larger level would
+/// make `parents_and_points` address a subtree that cannot exist.
 pub mod fx_hashmap_serde {
     use super::*;
 
@@ -197,6 +203,12 @@ pub mod fx_hashmap_serde {
                     if !(1..=MAX_SUBTREE_LEVELS as u8).contains(&v) {
                         return Err(A::Error::custom(format!(
                             "level {v} for BucketId {k} is outside 1..={MAX_SUBTREE_LEVELS}"
+                        )));
+                    }
+                    if k < NUM_META_BUCKETS as BucketId && v != METADATA_BUCKET_LEVEL {
+                        return Err(A::Error::custom(format!(
+                            "level {v} for metadata BucketId {k}: metadata buckets never \
+                             expand, so their level is always {METADATA_BUCKET_LEVEL}"
                         )));
                     }
                     if map.insert(k, v).is_some() {
@@ -1531,9 +1543,13 @@ mod tests {
         /// Serializing then deserializing must yield an equivalent map.
         #[test]
         fn round_trip_preserves_entries() {
+            // Metadata buckets carry level 1; data buckets span the whole range,
+            // starting at the first data bucket.
             let original = levels_wrapper([
                 (0u32, 1u8),
-                (42, 3),
+                (NUM_META_BUCKETS as BucketId - 1, 1),
+                (NUM_META_BUCKETS as BucketId, 2),
+                (NUM_META_BUCKETS as BucketId + 42, 3),
                 (1_000_000, 4),
                 (BucketId::MAX, MAX_SUBTREE_LEVELS as u8),
             ]);
@@ -1566,11 +1582,11 @@ mod tests {
         fn serialization_is_order_independent() {
             let entries: [(BucketId, u8); 6] = [
                 (3, 1),
-                (1, 2),
-                (4, 3),
+                (1, 1),
+                (70_004, 3),
                 (1_000_000, 4),
-                (5, 5),
-                (BucketId::MAX, 1),
+                (70_005, 5),
+                (BucketId::MAX, 2),
             ];
 
             let forward = levels_wrapper(entries);
@@ -1627,6 +1643,27 @@ mod tests {
                 assert!(
                     decode(&levels_bytes(&[(7, level)])).is_err(),
                     "level {level} must be rejected"
+                );
+            }
+        }
+
+        /// A metadata bucket never expands, so any level but 1 is refused for it,
+        /// while the first data bucket may carry every level.
+        #[test]
+        fn rejects_expanded_metadata_bucket() {
+            let last_meta_bucket = NUM_META_BUCKETS as BucketId - 1;
+            let first_data_bucket = NUM_META_BUCKETS as BucketId;
+
+            for level in 2..=MAX_SUBTREE_LEVELS as u8 {
+                for bucket_id in [0, 7, last_meta_bucket] {
+                    assert!(
+                        decode(&levels_bytes(&[(bucket_id, level)])).is_err(),
+                        "level {level} must be rejected for metadata bucket {bucket_id}"
+                    );
+                }
+                assert!(
+                    decode(&levels_bytes(&[(first_data_bucket, level)])).is_ok(),
+                    "level {level} must decode for data bucket {first_data_bucket}"
                 );
             }
         }
