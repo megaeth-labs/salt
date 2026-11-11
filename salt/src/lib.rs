@@ -15,6 +15,8 @@ pub(crate) type Lazy<T> = std::sync::LazyLock<T>;
 #[cfg(not(feature = "std"))]
 pub(crate) type Lazy<T> = spin::Lazy<T>;
 
+#[cfg(feature = "reth-codecs")]
+mod codecs;
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;

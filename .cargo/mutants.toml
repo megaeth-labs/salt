@@ -8,8 +8,9 @@ test_package = ["salt"]
 
 # Pin the feature set so local and CI runs generate the same mutant population.
 # Do not use --all-features here: test-bucket-resize is environment-sensitive,
-# and enable-hugepages is not part of the normal CI test path.
-additional_cargo_args = ["--no-default-features", "--features", "parallel"]
+# and enable-hugepages is not part of the normal CI test path. reth-codecs is
+# included so the feature-gated storage encodings in codecs.rs are mutated.
+additional_cargo_args = ["--no-default-features", "--features", "parallel,reth-codecs"]
 
 # Mutation should measure production behavior. Test-only helpers, ignored fuzz
 # scaffolding, benches, and benchmark fixtures are not useful mutation targets.
