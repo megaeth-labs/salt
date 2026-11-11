@@ -167,7 +167,8 @@ pub trait StateReader: Debug + Send + Sync {
     ///   - Capacity ≤ 256: 1 level (no internal nodes)
     ///   - Capacity ≤ 65,536: 2 levels (1 internal + 1 leaf)
     ///   - Capacity ≤ 16,777,216: 3 levels (2 internal + 1 leaf)
-    ///   - And so on, up to 5 levels maximum
+    ///   - Capacity ≤ 4,294,967,296: 4 levels (3 internal + 1 leaf)
+    ///   - Capacity ≤ 1,099,511,627,776 (`MAX_BUCKET_SIZE`): 5 levels, the maximum
     ///
     /// # Arguments
     ///

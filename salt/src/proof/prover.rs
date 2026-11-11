@@ -1,9 +1,11 @@
 //! Prover for the Salt proof
 use crate::{
-    constant::{BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, STARTING_NODE_ID},
+    constant::{
+        BUCKET_SLOT_ID_MASK, DOMAIN_SIZE, MAX_SUBTREE_LEVELS, NUM_META_BUCKETS, STARTING_NODE_ID,
+    },
     proof::{
         shape::{connect_parent_id, logic_parent_id, parents_and_points},
-        subtrie::create_sub_trie,
+        subtrie::{create_sub_trie, METADATA_BUCKET_LEVEL},
         ProofError, ProofResult,
     },
     traits::{StateReader, TrieReader},
@@ -152,6 +154,18 @@ pub struct SaltProof {
 /// and breaks downstream alloy-tx-macros 1.0.23). Entries are emitted in
 /// ascending key order to keep proof bytes deterministic across provers.
 /// Also reused downstream (e.g. `stateless-core::LightWitness`) via `#[serde(with = "salt::fx_hashmap_serde")]`.
+///
+/// Deserialization rejects a duplicate `BucketId` and any level outside
+/// `1..=MAX_SUBTREE_LEVELS`. A bucket at `MIN_BUCKET_SIZE` capacity has one
+/// level (its single segment) and a bucket at `MAX_BUCKET_SIZE` has
+/// `MAX_SUBTREE_LEVELS`, so no prover emits anything else, and the code that
+/// turns a level back into a subtree shape (`parents_and_points`, and the
+/// trie's `update_bucket_subtrees` via `get_subtree_levels`) is only defined on
+/// that range.
+///
+/// It also rejects a metadata bucket whose level is not 1. Metadata buckets
+/// never expand, so every prover emits 1 for them, and a larger level would
+/// make `parents_and_points` address a subtree that cannot exist.
 pub mod fx_hashmap_serde {
     use super::*;
 
@@ -177,12 +191,26 @@ pub mod fx_hashmap_serde {
             type Value = FxHashMap<BucketId, u8>;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a map of BucketId to u8")
+                write!(
+                    f,
+                    "a map of BucketId to a subtree level in 1..={MAX_SUBTREE_LEVELS}"
+                )
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
                 let mut map: FxHashMap<BucketId, u8> = FxHashMap::default();
                 while let Some((k, v)) = access.next_entry::<BucketId, u8>()? {
+                    if !(1..=MAX_SUBTREE_LEVELS as u8).contains(&v) {
+                        return Err(A::Error::custom(format!(
+                            "level {v} for BucketId {k} is outside 1..={MAX_SUBTREE_LEVELS}"
+                        )));
+                    }
+                    if k < NUM_META_BUCKETS as BucketId && v != METADATA_BUCKET_LEVEL {
+                        return Err(A::Error::custom(format!(
+                            "level {v} for metadata BucketId {k}: metadata buckets never \
+                             expand, so their level is always {METADATA_BUCKET_LEVEL}"
+                        )));
+                    }
                     if map.insert(k, v).is_some() {
                         return Err(A::Error::custom("duplicate BucketId in levels"));
                     }
@@ -532,7 +560,7 @@ fn create_leaf_node_queries(
             // Calculate the starting SaltKey address for this bucket/segment
             let salt_key_start = if *parent_node < BUCKET_SLOT_ID_MASK as NodeId {
                 // Main trie bucket: predictable addressing based on bucket ID
-                let bucket_id = (*parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                let bucket_id = (*parent_node - STARTING_NODE_ID[3]) as BucketId;
                 SaltKey::from((bucket_id, 0))
             } else {
                 // Subtree segment: use helper to calculate complex addressing
@@ -651,9 +679,7 @@ mod tests {
 
         assert_eq!(
             meta_bucket_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[3] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[3]))
         );
 
         let data_bucket_frs = vec![default_fr; 256];
@@ -668,36 +694,28 @@ mod tests {
         let l3_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_left_frs));
         assert_eq!(
             l3_left_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[2] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[2]))
         );
 
         let l3_right_frs = vec![data_bucket_commitment.map_to_scalar_field(); 256];
         let l3_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l3_right_frs));
         assert_eq!(
             l3_right_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[3] as NodeId - 1
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[3] - 1))
         );
 
         let l2_left_frs = vec![l3_left_commitment.map_to_scalar_field(); 256];
         let l2_left_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_left_frs));
         assert_eq!(
             l2_left_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1]))
         );
 
         let l2_right_frs = vec![l3_right_commitment.map_to_scalar_field(); 256];
         let l2_right_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l2_right_frs));
         assert_eq!(
             l2_right_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[2] as NodeId - 1
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[2] - 1))
         );
 
         let mut l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
@@ -706,9 +724,7 @@ mod tests {
         let l1_commitment = crs.commit_lagrange_poly(&LagrangeBasis::new(l1_frs));
         assert_eq!(
             l1_commitment,
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[0] as NodeId
-            ))
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[0]))
         );
 
         let sub_trie_l1_frs = vec![l2_right_commitment.map_to_scalar_field(); 256];
@@ -1434,7 +1450,7 @@ mod tests {
     #[test]
     fn test_create_leaf_node_queries() {
         // Setup: Create leaf node representing a bucket with key-value data
-        let bucket_node = STARTING_NODE_ID[3] as NodeId + 100; // Main trie bucket
+        let bucket_node = STARTING_NODE_ID[3] + 100; // Main trie bucket
         let slot_points = [0usize, 5usize].into();
         let mut leaf_nodes = BTreeMap::new();
         leaf_nodes.insert(bucket_node, slot_points);
@@ -1443,7 +1459,7 @@ mod tests {
         path_commitments.insert(connect_parent_id(bucket_node), mock_commitment());
 
         // Add key-value data for the slots
-        let bucket_id = (bucket_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+        let bucket_id = (bucket_node - STARTING_NODE_ID[3]) as BucketId;
         let key1 = SaltKey::from((bucket_id, 0));
         let key2 = SaltKey::from((bucket_id, 5));
         let mut kvs = BTreeMap::new();
@@ -1515,8 +1531,16 @@ mod tests {
         /// Serializing then deserializing must yield an equivalent map.
         #[test]
         fn round_trip_preserves_entries() {
-            let original =
-                levels_wrapper([(0u32, 0u8), (42, 3), (1_000_000, 7), (BucketId::MAX, 255)]);
+            // Metadata buckets carry level 1; data buckets span the whole range,
+            // starting at the first data bucket.
+            let original = levels_wrapper([
+                (0u32, 1u8),
+                (NUM_META_BUCKETS as BucketId - 1, 1),
+                (NUM_META_BUCKETS as BucketId, 2),
+                (NUM_META_BUCKETS as BucketId + 42, 3),
+                (1_000_000, 4),
+                (BucketId::MAX, MAX_SUBTREE_LEVELS as u8),
+            ]);
 
             let bytes =
                 bincode::serde::encode_to_vec(&original, bincode::config::legacy()).unwrap();
@@ -1546,11 +1570,11 @@ mod tests {
         fn serialization_is_order_independent() {
             let entries: [(BucketId, u8); 6] = [
                 (3, 1),
-                (1, 2),
-                (4, 3),
+                (1, 1),
+                (70_004, 3),
                 (1_000_000, 4),
-                (5, 5),
-                (BucketId::MAX, 6),
+                (70_005, 5),
+                (BucketId::MAX, 2),
             ];
 
             let forward = levels_wrapper(entries);
@@ -1573,18 +1597,63 @@ mod tests {
             assert_eq!(forward_bytes, reverse_bytes);
         }
 
+        /// Bincode (legacy config) bytes of a `levels` map, built by hand so a test
+        /// can present entries no prover produces: a duplicate bucket, or a level
+        /// outside the valid range (the serializer writes any u8 unchanged; only
+        /// deserialization validates).
+        fn levels_bytes(entries: &[(BucketId, u8)]) -> Vec<u8> {
+            let mut bytes = (entries.len() as u64).to_le_bytes().to_vec();
+            for (bucket_id, level) in entries {
+                bytes.extend_from_slice(&bucket_id.to_le_bytes());
+                bytes.push(*level);
+            }
+            bytes
+        }
+
+        fn decode(bytes: &[u8]) -> Result<LevelsWrapper, bincode::error::DecodeError> {
+            bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
+                .map(|(decoded, _)| decoded)
+        }
+
         #[test]
         fn rejects_duplicate_bucket_id() {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&2u64.to_le_bytes());
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(1u8);
-            bytes.extend_from_slice(&7u32.to_le_bytes());
-            bytes.push(2u8);
+            assert!(
+                decode(&levels_bytes(&[(7, 1), (7, 2)])).is_err(),
+                "duplicate BucketId must be rejected"
+            );
+        }
 
-            let result: Result<(LevelsWrapper, _), _> =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
-            assert!(result.is_err(), "duplicate BucketId must be rejected");
+        /// Levels outside `1..=MAX_SUBTREE_LEVELS` are refused; both ends of the
+        /// range decode in `round_trip_preserves_entries`.
+        #[test]
+        fn rejects_out_of_range_levels() {
+            for level in [0, MAX_SUBTREE_LEVELS as u8 + 1] {
+                assert!(
+                    decode(&levels_bytes(&[(7, level)])).is_err(),
+                    "level {level} must be rejected"
+                );
+            }
+        }
+
+        /// A metadata bucket never expands, so any level but 1 is refused for it,
+        /// while the first data bucket may carry every level.
+        #[test]
+        fn rejects_expanded_metadata_bucket() {
+            let last_meta_bucket = NUM_META_BUCKETS as BucketId - 1;
+            let first_data_bucket = NUM_META_BUCKETS as BucketId;
+
+            for level in 2..=MAX_SUBTREE_LEVELS as u8 {
+                for bucket_id in [0, 7, last_meta_bucket] {
+                    assert!(
+                        decode(&levels_bytes(&[(bucket_id, level)])).is_err(),
+                        "level {level} must be rejected for metadata bucket {bucket_id}"
+                    );
+                }
+                assert!(
+                    decode(&levels_bytes(&[(first_data_bucket, level)])).is_ok(),
+                    "level {level} must decode for data bucket {first_data_bucket}"
+                );
+            }
         }
     }
 
@@ -1592,7 +1661,7 @@ mod tests {
     #[test]
     fn test_create_leaf_node_queries_missing_data() {
         // Setup: Leaf node with slot but no corresponding key-value data
-        let bucket_node = STARTING_NODE_ID[3] as NodeId + 100;
+        let bucket_node = STARTING_NODE_ID[3] + 100;
         let slot_points = [0usize].into();
         let mut leaf_nodes = BTreeMap::new();
         leaf_nodes.insert(bucket_node, slot_points);
