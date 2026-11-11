@@ -3,8 +3,8 @@
 ## AHash Crate
 
 **Source**: [ahash v0.8.12](https://github.com/tkaitchuck/aHash)
-**License**: Apache License 2.0
-**Copyright**: Copyright (c) 2019 Tom Kaitchuck
+**License**: Dual-licensed under Apache License 2.0 OR MIT License
+**Copyright**: Copyright (c) 2018 Tom Kaitchuck
 **Repository**: https://github.com/tkaitchuck/aHash
 
 ### Files Derived from AHash
@@ -23,5 +23,8 @@ The code has been extracted and modified for deterministic cross-platform behavi
 
 ### Original License
 
-The original AHash crate is licensed under the Apache License 2.0. The full license text can be found at:
-https://www.apache.org/licenses/LICENSE-2.0
+The original AHash crate is dual-licensed under the Apache License 2.0 or the MIT License, at the user's option. The full license texts can be found at:
+- https://www.apache.org/licenses/LICENSE-2.0
+- https://opensource.org/licenses/MIT
+
+The `salt` crate distributes these files under the same MIT OR Apache-2.0 terms. Both license texts are included in the `salt` crate as `salt/LICENSE-APACHE` and `salt/LICENSE-MIT`; the AHash copyright notice they apply to is the one reproduced above.

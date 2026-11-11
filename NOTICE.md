@@ -10,12 +10,15 @@ This file contains attributions and notices for third-party code incorporated in
 
 This project includes modified portions of code from the rust-verkle project.
 
-**Copyright**: Copyright (c) 2023 rust-verkle contributors  
 **Source Repository**: https://github.com/crate-crypto/rust-verkle  
-**License**: Dual-licensed under Apache License 2.0 OR MIT License  
 **Components Derived**:
 - `banderwagon/` - Banderwagon elliptic curve cryptography implementation
 - `ipa-multipoint/` - Inner Product Argument (IPA) based polynomial commitment scheme with multipoint opening proofs
+
+| Component | Origin | Copyright | License in this repository |
+|---|---|---|---|
+| `banderwagon/` | rust-verkle `banderwagon/`, first published as [crate-crypto/banderwagon](https://github.com/crate-crypto/banderwagon) (Apache-2.0) | Copyright (c) 2023 Crate Crypto | MIT OR Apache-2.0 |
+| `ipa-multipoint/` | rust-verkle `ipa-multipoint/`, first published as [crate-crypto/ipa_multipoint](https://github.com/crate-crypto/ipa_multipoint) (MIT) | Copyright (c) 2021 Kevaundray Wedderburn; Copyright (c) 2023 Crate Crypto | MIT |
 
 #### Modifications
 
@@ -38,11 +41,10 @@ This project has modified the original rust-verkle code. Key modifications inclu
 
 #### License Compliance
 
-The original rust-verkle code is dual-licensed under:
-- Apache License, Version 2.0 ([full text](https://www.apache.org/licenses/LICENSE-2.0))
-- MIT License ([full text](https://opensource.org/licenses/MIT))
+rust-verkle offers its code under the MIT License or the Apache License, Version 2.0: its README states "MIT/APACHE" and its repository root carries both license texts.
 
-Both license texts are included in this repository as `LICENSE-APACHE` and `LICENSE-MIT`.
+- `banderwagon/` has no license file of its own in rust-verkle, so the repository-level MIT OR Apache-2.0 terms apply to it. This project distributes it under the same terms; the license texts are `banderwagon/LICENSE-MIT` and `banderwagon/LICENSE-APACHE`.
+- `ipa-multipoint/` keeps, in rust-verkle, the MIT license file of the repository it was first published in. That file is the more specific grant, so this project distributes `ipa-multipoint/` under the MIT License only; the license text is `ipa-multipoint/LICENSE`.
 
 ---
 

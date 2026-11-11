@@ -6,7 +6,7 @@
 //! uses the same deterministic algorithm.
 //!
 //! The code is derived from [AHash v0.8.12](https://github.com/tkaitchuck/aHash)
-//! under Apache License 2.0. See [`NOTICE.md`](./NOTICE.md) for full attribution.
+//! under MIT OR Apache-2.0. See [`NOTICE.md`](./NOTICE.md) for full attribution.
 
 /// Convert utilities extracted from AHash for efficient byte operations.
 pub mod convert;

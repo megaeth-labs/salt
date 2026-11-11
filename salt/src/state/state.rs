@@ -41,7 +41,7 @@
 
 use super::{hasher, updates::StateUpdates};
 use crate::{
-    constant::{BUCKET_RESIZE_MULTIPLIER, BUCKET_SLOT_ID_MASK},
+    constant::{BUCKET_RESIZE_MULTIPLIER, MAX_BUCKET_SIZE},
     traits::StateReader,
     types::*,
 };
@@ -553,34 +553,47 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
                 } else {
                     // Bucket usage count is unavailable (metadata.used is None).
                     //
-                    // This can only occur during stateless validation when replaying blocks
-                    // with execution witnesses. The witness may omit the bucket usage count
-                    // to optimize witness size.
+                    // This only occurs during stateless validation, where a bucket's
+                    // count is known only if the witness covers every slot of it. The
+                    // load-factor check is then skipped: neither approximated from the
+                    // slots in view nor treated as an error, leaving the exhaustion
+                    // case below as the only resize trigger.
                     //
-                    // ## Witness Size Trade-off
-                    // Including the usage count would require revealing ALL slots in the
-                    // bucket (to prove the count is correct), significantly increasing
-                    // witness size for every insertion operation.
+                    // Every `Err` from the store's `bucket_used_slots` takes this
+                    // branch, because `Store::Error` cannot tell "not witnessed" from
+                    // a failed read. A store that is not a witness must therefore
+                    // serve the count whenever it backs insertions; one that cannot
+                    // would have its due resizes skipped here without any error.
                     //
-                    // ## Security Model
-                    // We accept this optimization because:
-                    // 1. Omitting usage count cannot create invalid key-value pairs
-                    // 2. It can only delay bucket resizing (temporary deviation from the
-                    //    canonical state)
-                    // 3. The worst case: a malicious sequencer causes the bucket to exceed
-                    //    its ideal load factor, degrading performance but not correctness
+                    // ## Why skipping is correct against a complete witness
+                    // A witness builder includes every slot of any bucket the block's
+                    // insertions resize, so the count is available exactly where a
+                    // resize is due and this replay reaches the same decision the
+                    // builder's replay did. An absent count means the builder's replay
+                    // resized nothing here; witnessing the whole bucket for every other
+                    // insertion would only inflate the witness.
                     //
-                    // ## Self-Healing Mechanism
-                    // When a legitimate sequencer performs the next insertion, it will:
-                    // 1. Compute the actual usage count from the full state
-                    // 2. Trigger resize if needed (restoring optimal bucket structure)
-                    // 3. Continue normal operations with proper load factor tracking
-                    // Even a malicious sequencer will be forced to resize the bucket when
-                    // no empty slot can be found for insertion because it has no choice
-                    // but to reveal all slots at this point.
+                    // ## What a skipped resize costs
+                    // Skipping cannot misplace an entry or admit a value that does not
+                    // belong: every placement still follows the probe sequence, and the
+                    // committed root still authenticates the bucket's true contents.
+                    // What it breaks is the layout bound. A sequencer that skips a due
+                    // resize commits the bucket at a capacity the load factor would have
+                    // rejected, and nothing on the delta path corrects it:
+                    // canonicalization rebuilds only buckets actually resized in the
+                    // block, and nodes applying the block's deltas reproduce the
+                    // transmitted layout verbatim without re-running SHI logic. Only
+                    // stateless validation exposes it, and only against a complete
+                    // witness from a builder independent of the sequencer: a witness
+                    // that leaves the bucket's remaining slots uncovered makes the
+                    // validator skip the same check and accept the over-loaded bucket.
                     //
-                    // This approach prioritizes witness compactness while maintaining
-                    // eventual consistency of bucket structure.
+                    // The backstops are structural rather than checked, and hold
+                    // below the capacity ceiling: an insertion into a completely full
+                    // bucket forces the exhaustion-case resize below, and any later
+                    // insertion applied with the count available triggers the
+                    // postponed resize at that point. At `MAX_BUCKET_SIZE` there is no
+                    // larger capacity to resize to, and `shi_rehash` asserts instead.
                 }
                 return Ok(());
             }
@@ -666,6 +679,13 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// If the new capacity is smaller than the number of existing entries in the bucket,
     /// the function returns early without making any changes to prevent data loss.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if `new_capacity` is 0 or exceeds [`MAX_BUCKET_SIZE`], the largest
+    /// capacity a bucket subtree can address (2^40 slots). Either would be written
+    /// into the bucket's metadata, which no reader can decode afterwards (see
+    /// [`BucketMeta::is_valid_capacity`]).
     pub fn shi_rehash(
         &mut self,
         bucket_id: BucketId,
@@ -674,8 +694,8 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
         out_updates: &mut StateUpdates,
     ) -> Result<(), Store::Error> {
         assert!(
-            new_capacity <= BUCKET_SLOT_ID_MASK,
-            "Exceeds max bucket capacity: {new_capacity} > {BUCKET_SLOT_ID_MASK}"
+            BucketMeta::is_valid_capacity(new_capacity),
+            "Invalid bucket capacity {new_capacity}: must be in 1..={MAX_BUCKET_SIZE}"
         );
 
         // Step 1: Extract all existing entries (but do not clear the cache yet)
@@ -2727,6 +2747,53 @@ mod tests {
                 num_entries,
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid bucket capacity")]
+    fn test_shi_rehash_rejects_capacity_above_max() {
+        // An empty witness fails the first read, so a check that wrongly accepted
+        // this capacity returns an error here instead of walking 2^41 slots.
+        let reader = crate::proof::salt_witness::create_witness(TEST_BUCKET, None, vec![]);
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+        // One doubling past the largest addressable capacity.
+        let _ = state.shi_rehash(
+            TEST_BUCKET,
+            0,
+            MAX_BUCKET_SIZE * BUCKET_RESIZE_MULTIPLIER,
+            &mut updates,
+        );
+    }
+
+    /// A zero capacity would be written into the bucket's metadata, and every later
+    /// read of that metadata would then fail to decode.
+    #[test]
+    #[should_panic(expected = "Invalid bucket capacity")]
+    fn test_shi_rehash_rejects_zero_capacity() {
+        let reader = EmptySalt;
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+        let _ = state.shi_rehash(TEST_BUCKET, 0, 0, &mut updates);
+    }
+
+    /// The capacity check admits exactly `MAX_BUCKET_SIZE`, the capacity one doubling
+    /// above 2^39 that the old `BUCKET_SLOT_ID_MASK` bound rejected.
+    ///
+    /// A rehash to 2^40 cannot be run to completion in a test, because it walks every
+    /// slot. So the store is an empty witness, which fails the first read: reaching
+    /// that read means the check passed, while a bound one slot too low would panic
+    /// before it.
+    #[test]
+    fn test_shi_rehash_accepts_max_capacity() {
+        let reader = crate::proof::salt_witness::create_witness(TEST_BUCKET, None, vec![]);
+        let mut state = EphemeralSaltState::new(&reader);
+        let mut updates = StateUpdates::default();
+
+        let result = state.shi_rehash(TEST_BUCKET, 0, MAX_BUCKET_SIZE, &mut updates);
+
+        assert!(matches!(result, Err(SaltError::NotInWitness { .. })));
+        assert!(updates.data.is_empty());
     }
 
     #[test]

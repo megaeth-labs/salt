@@ -56,7 +56,7 @@ The main trie's internal nodes also use homomorphic commitments. After bucket co
 While each step up the trie costs one ECMul, updates from multiple distinct child nodes are batched into a single update for their common parent. This optimization is extremely effective because the trie's width shrinks dramatically at higher levels, consolidating many changes at the leaf level into a small number of updates near the root. For example, updating 200,000 random keys in SALT requires a total of approximately 460,000 ECMul operations, or an amortized cost of about **2.3 ECMuls** per key.
 
 ### Bucket Growth
-While the main SALT tree is static, the buckets are not. A bucket is initialized with 256 slots. When it fills up, it can be resized to a multiple of 256. If a bucket grows beyond 256 slots, it is partitioned into 256-slot segments. A new complete 256-ary **bucket tree** is built on top of these segments, and the root of this new tree becomes the bucket's new commitment (also the new leaf in the main trie). The diagram below shows a bucket tree of 768 slots.
+While the main SALT tree is static, the buckets are not. A bucket is initialized with 256 slots. When more than 80% of its slots are in use, its capacity is doubled, so every capacity is a power of two from 256 up to 2^40 slots (the most a 5-level bucket tree can address). If a bucket grows beyond 256 slots, it is partitioned into 256-slot segments. A new complete 256-ary **bucket tree** is built on top of these segments, and the root of this new tree becomes the bucket's new commitment (also the new leaf in the main trie). The diagram below shows a bucket tree of 768 slots (three segments) purely to illustrate the shape; a bucket the protocol has grown holds 512, 1024, ... slots.
 
 ```
 (In Main SALT Trie)
@@ -310,3 +310,18 @@ NUM_DATA_BUCKETS=3 BUCKET_RESIZE_LOAD_FACTOR_PCT=1 cargo build --features test-b
 
 ### Presentations & Talks
 - [SALT: Breaking the I/O Bottleneck for Blockchains with a Scalable Authenticated Key-Value Store](https://x.com/yangl1996/status/1957487663818416406) - [Science and Engineering of Consensus 2025](https://tselab.stanford.edu/workshop-sbc25/), August 3rd, 2025
+
+## License
+
+Each crate is licensed as follows:
+
+| Crate | License | License texts |
+|---|---|---|
+| `salt`, `salt-macros`, `banderwagon` | MIT OR Apache-2.0, at your option | `LICENSE-APACHE` and `LICENSE-MIT` in the crate directory |
+| `ipa-multipoint` | MIT | [ipa-multipoint/LICENSE](ipa-multipoint/LICENSE) |
+
+Everything outside the crate directories is licensed under either of the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>) or the MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>), at your option.
+
+`banderwagon` and `ipa-multipoint` are derived from rust-verkle, and `salt` contains code derived from AHash; see [NOTICE.md](NOTICE.md) for their origins and licenses.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be licensed under the license of the crate it is submitted to, as listed above, without any additional terms or conditions.

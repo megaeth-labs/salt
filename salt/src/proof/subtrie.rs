@@ -125,7 +125,7 @@ mod node_poly_cache {
 }
 
 // Constants for improved code readability
-const METADATA_BUCKET_LEVEL: u8 = 1;
+pub(crate) const METADATA_BUCKET_LEVEL: u8 = 1;
 const ROOT_LEVEL_CHILD_START: NodeId = 1;
 
 /// Information returned by the subtrie creation process
@@ -193,7 +193,10 @@ where
 
         // Record actual commitments to overwrite the defaults where they exist
         for (absolute_node_id, commitment_bytes) in children {
-            real_positions.push((i, absolute_node_id as usize - child_idx as usize));
+            // Subtract in u64 before narrowing: a 256-child range near the top of
+            // a level-4 subtree straddles 2^32, so casting each id to a 32-bit
+            // `usize` first would underflow.
+            real_positions.push((i, (absolute_node_id - child_idx) as usize));
             real_children.push(to_element(commitment_bytes));
         }
         polys.push(node_scalars);
@@ -435,7 +438,7 @@ where
     // Determine the starting slot and bucket ID for this leaf
     let (slot_start, bucket_id) = if parent < BUCKET_SLOT_ID_MASK as NodeId {
         // Main trie leaf: bucket ID derived from position in level 3
-        let bucket_id = (parent - STARTING_NODE_ID[3] as NodeId) as BucketId;
+        let bucket_id = (parent - STARTING_NODE_ID[3]) as BucketId;
         (0, bucket_id)
     } else {
         // Subtree leaf: extract bucket ID and slot start from node ID encoding
@@ -609,7 +612,7 @@ mod tests {
     #[test]
     fn leaf_polynomial_with_real_commitment() {
         let (store, salt_key) = setup_test_store();
-        let parent_node = STARTING_NODE_ID[3] as NodeId + salt_key.bucket_id() as u64;
+        let parent_node = STARTING_NODE_ID[3] + salt_key.bucket_id() as u64;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(store.commitment(parent_node).unwrap());
         let points = [0, slot_position(&salt_key)].into();
@@ -623,7 +626,7 @@ mod tests {
     #[test]
     fn leaf_polynomial_uses_metadata_default_for_meta_bucket() {
         let store = MemStore::new();
-        let parent_node = STARTING_NODE_ID[3] as NodeId;
+        let parent_node = STARTING_NODE_ID[3];
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
         let poly = Arc::new(leaf_polynomial(&store, parent_node).unwrap());
@@ -640,7 +643,7 @@ mod tests {
     #[test]
     fn leaf_polynomial_uses_empty_default_for_data_bucket() {
         let store = MemStore::new();
-        let parent_node = STARTING_NODE_ID[3] as NodeId + NUM_META_BUCKETS as NodeId;
+        let parent_node = STARTING_NODE_ID[3] + NUM_META_BUCKETS as NodeId;
         let commitment =
             Element::from_bytes_unchecked_uncompressed(default_commitment(parent_node));
         let poly = Arc::new(leaf_polynomial(&store, parent_node).unwrap());
@@ -749,7 +752,7 @@ mod tests {
         assert!(internal_polynomials(&store, &[]).unwrap().is_empty());
 
         // Single internal node
-        let polys = internal_polynomials(&store, &[STARTING_NODE_ID[2] as NodeId]).unwrap();
+        let polys = internal_polynomials(&store, &[STARTING_NODE_ID[2]]).unwrap();
         assert_eq!(polys.len(), 1);
     }
 
@@ -761,12 +764,8 @@ mod tests {
             .map(|i| polys[0].evaluate_in_domain(i))
             .collect();
         let expected = Element::batch_map_to_scalar_field(&[
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId,
-            )),
-            Element::from_bytes_unchecked_uncompressed(default_commitment(
-                STARTING_NODE_ID[1] as NodeId + 1,
-            )),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1])),
+            Element::from_bytes_unchecked_uncompressed(default_commitment(STARTING_NODE_ID[1] + 1)),
         ]);
 
         assert_eq!(scalars.len(), DOMAIN_SIZE);
