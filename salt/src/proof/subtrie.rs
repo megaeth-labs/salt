@@ -32,11 +32,11 @@ use crate::{
     types::{BucketId, BucketMeta, CommitmentBytes, NodeId, SaltKey},
     SlotId,
 };
-use banderwagon::{Element, Fr};
+use banderwagon::{multi_scalar_mul, Element, Fr, PrimeField, Zero};
 use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 
 use salt_macros::prelude::*;
-use salt_macros::{chunks, iter, thread_chunk_size};
+use salt_macros::{chunks, iter, reduce, thread_chunk_size};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
@@ -51,42 +51,125 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 /// polynomial was last built has the same 256 child scalars (internal node) or slot scalars
 /// (leaf node), and the store reads plus scalar conversions that produce them can be skipped.
 /// Consecutive blocks share most of their authentication paths, which is what makes the hit
-/// rate worth the memory: at most `SHARDS * MAX_PER_SHARD` polynomials of 8 KiB each, 256 MiB.
-/// A shard that fills up is cleared whole; the working set refills within a few proofs.
+/// rate worth the memory: by default at most 32768 polynomials of 8 KiB each, 256 MiB
+/// ([`NodePolyCache::set_capacity`]). A full shard evicts one polynomial per new node and
+/// passes over those used since it last considered them, so the paths that proof after
+/// proof walks outlive the leaves a single proof touched.
 ///
 /// The commitment key only holds if the polynomial really opens to that commitment, which a
 /// store that is not a consistent snapshot (commitments and children or slots from different
 /// states) does not guarantee. Callers should still keep the store unchanged while a proof is
 /// created, since such a proof will not verify; but an inconsistent store must not poison the
-/// cache for consistent ones, so a rebuilt polynomial is cached only after one fixed-base MSM
-/// shows it opens to the commitment it was read at. One that does not is used for this proof
-/// and dropped.
+/// cache for consistent ones, so a rebuilt polynomial is cached only once it is shown to open
+/// to the commitment it was read at: one check for all the polynomials a call rebuilds
+/// ([`batch_opens`]), and one per polynomial only when that fails. One that does not open is
+/// used for this proof and dropped.
 mod node_poly_cache {
     use super::*;
-    use crate::Lazy;
-    use spin::RwLock;
+    use crate::{Lazy, RwLock};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     pub(super) const SHARDS: usize = 64;
-    pub(super) const MAX_PER_SHARD: usize = 512;
 
-    type Shard = RwLock<FxHashMap<NodeId, (CommitmentBytes, Arc<LagrangeBasis>)>>;
+    /// One cached polynomial, with the node it belongs to and the commitment it was built
+    /// for.
+    struct Slot {
+        node: NodeId,
+        commitment: CommitmentBytes,
+        poly: Arc<LagrangeBasis>,
+        /// Set when the polynomial is served or the node is cached again, cleared when the
+        /// eviction hand passes: a polynomial is evicted only when the hand comes round and
+        /// finds it unused since.
+        used: AtomicBool,
+    }
 
-    /// The shards of one cache: [`CACHE`] is the process-wide instance, and a test holds its own.
-    pub(super) struct NodePolyCache(Vec<Shard>);
+    /// One shard: its polynomials, which slot holds which node, and the slot the next
+    /// eviction considers first (taken modulo the number of slots).
+    #[derive(Default)]
+    struct Shard {
+        slots: Vec<Slot>,
+        index: FxHashMap<NodeId, usize>,
+        hand: usize,
+    }
 
-    pub(super) static CACHE: Lazy<NodePolyCache> = Lazy::new(NodePolyCache::new);
+    /// The cache of node polynomials that proof and witness creation share across calls: see
+    /// [`NodePolyCache::global`] for the one instance a process has.
+    ///
+    /// A cached polynomial saves the store reads and scalar conversions that rebuild it, and
+    /// costs 8 KiB while it is kept. The default bound suits a process that proves block
+    /// after block; one that creates a single proof, or cannot spare the memory, can lower it
+    /// or turn the cache off with [`set_capacity`](Self::set_capacity).
+    pub struct NodePolyCache {
+        shards: Vec<RwLock<Shard>>,
+        max_per_shard: AtomicUsize,
+    }
+
+    static CACHE: Lazy<NodePolyCache> =
+        Lazy::new(|| NodePolyCache::with_capacity(NodePolyCache::DEFAULT_CAPACITY));
 
     impl NodePolyCache {
-        pub(super) fn new() -> Self {
-            Self(
-                (0..SHARDS)
-                    .map(|_| RwLock::new(FxHashMap::default()))
-                    .collect(),
-            )
+        /// The bound a cache starts with: 32768 polynomials, 256 MiB.
+        pub const DEFAULT_CAPACITY: usize = SHARDS * 512;
+
+        /// The cache every proof and witness creation in this process reads and fills.
+        pub fn global() -> &'static Self {
+            &CACHE
         }
 
-        fn shard(&self, node: NodeId) -> &Shard {
-            &self.0[(node % SHARDS as NodeId) as usize]
+        /// The most polynomials the cache holds, at 8 KiB each.
+        pub fn capacity(&self) -> usize {
+            self.max_per_shard.load(Ordering::Relaxed) * SHARDS
+        }
+
+        /// Bounds the cache to `polynomials` entries, rounded up to a multiple of its 64
+        /// shards. Zero turns it off: nothing is cached, and proof creation skips the check
+        /// that caching a polynomial needs. A shard that holds more than its new share is
+        /// emptied.
+        pub fn set_capacity(&self, polynomials: usize) {
+            let max = polynomials.div_ceil(SHARDS);
+            // Stored before the shards are trimmed: `insert` reads it under the shard lock,
+            // so an insert that follows a shard's trim sees the new bound.
+            self.max_per_shard.store(max, Ordering::Relaxed);
+            for shard in &self.shards {
+                let mut guard = shard.write();
+                let trimmed = (guard.slots.len() > max).then(|| core::mem::take(&mut *guard));
+                drop(guard);
+                drop(trimmed);
+            }
+        }
+
+        /// Drops every cached polynomial, each shard's after its lock is released.
+        pub fn clear(&self) {
+            for shard in &self.shards {
+                let mut guard = shard.write();
+                let dropped = core::mem::take(&mut *guard);
+                drop(guard);
+                drop(dropped);
+            }
+        }
+
+        pub(super) fn with_capacity(polynomials: usize) -> Self {
+            Self {
+                shards: (0..SHARDS).map(|_| RwLock::new(Shard::default())).collect(),
+                max_per_shard: AtomicUsize::new(polynomials.div_ceil(SHARDS)),
+            }
+        }
+
+        fn shard(&self, node: NodeId) -> &RwLock<Shard> {
+            &self.shards[(node % SHARDS as NodeId) as usize]
+        }
+
+        /// The nodes the cache holds, in ascending order. Unlike `get`, looking does not
+        /// count as a use.
+        #[cfg(test)]
+        pub(super) fn nodes(&self) -> Vec<NodeId> {
+            let mut nodes: Vec<NodeId> = self
+                .shards
+                .iter()
+                .flat_map(|shard| shard.read().index.keys().copied().collect::<Vec<_>>())
+                .collect();
+            nodes.sort_unstable();
+            nodes
         }
 
         /// The cached polynomial of `node`, if it was built for exactly this commitment.
@@ -95,11 +178,17 @@ mod node_poly_cache {
             node: NodeId,
             commitment: &CommitmentBytes,
         ) -> Option<Arc<LagrangeBasis>> {
-            let guard = self.shard(node).read();
-            guard
-                .get(&node)
-                .filter(|(seen, _)| seen == commitment)
-                .map(|(_, poly)| Arc::clone(poly))
+            let shard = self.shard(node).read();
+            let slot = &shard.slots[*shard.index.get(&node)?];
+            if slot.commitment != *commitment {
+                return None;
+            }
+            // Written only when it changes, so the readers of a polynomial every proof uses
+            // do not pass its cache line back and forth.
+            if !slot.used.load(Ordering::Relaxed) {
+                slot.used.store(true, Ordering::Relaxed);
+            }
+            Some(Arc::clone(&slot.poly))
         }
 
         pub(super) fn insert(
@@ -109,20 +198,47 @@ mod node_poly_cache {
             poly: Arc<LagrangeBasis>,
         ) {
             let mut guard = self.shard(node).write();
-            // Only a new node grows the shard. Whatever the insert evicts or replaces is dropped
-            // after the lock is released, so readers do not wait on the frees.
-            let evicted = (guard.len() >= MAX_PER_SHARD && !guard.contains_key(&node)).then(|| {
-                core::mem::replace(
-                    &mut *guard,
-                    FxHashMap::with_capacity_and_hasher(MAX_PER_SHARD, FxBuildHasher),
-                )
-            });
-            let replaced = guard.insert(node, (commitment, poly));
+            let max = self.max_per_shard.load(Ordering::Relaxed);
+            if max == 0 {
+                return;
+            }
+            let shard = &mut *guard;
+            let slot = |used| Slot {
+                node,
+                commitment,
+                poly,
+                used: AtomicBool::new(used),
+            };
+            // Whatever the insert replaces or evicts is dropped after the lock is released,
+            // so readers do not wait on the free.
+            let dropped = if let Some(&at) = shard.index.get(&node) {
+                // A node cached again was resolved again, which is a use.
+                Some(core::mem::replace(&mut shard.slots[at], slot(true)))
+            } else if shard.slots.len() < max {
+                shard.index.insert(node, shard.slots.len());
+                shard.slots.push(slot(false));
+                None
+            } else {
+                // The hand passes over the polynomials used since its last visit, clearing
+                // their mark, and takes the first one it finds unused: the one it started
+                // at, after a full turn, if every mark was set.
+                let len = shard.slots.len();
+                let at = (0..=len)
+                    .map(|step| (shard.hand + step) % len)
+                    .find(|&at| !core::mem::take(shard.slots[at].used.get_mut()))
+                    .expect("a full turn clears every mark");
+                shard.hand = at + 1;
+                let evicted = core::mem::replace(&mut shard.slots[at], slot(false));
+                shard.index.remove(&evicted.node);
+                shard.index.insert(node, at);
+                Some(evicted)
+            };
             drop(guard);
-            drop((evicted, replaced));
+            drop(dropped);
         }
     }
 }
+pub use node_poly_cache::NodePolyCache;
 
 // Constants for improved code readability
 pub(crate) const METADATA_BUCKET_LEVEL: u8 = 1;
@@ -355,14 +471,15 @@ where
     // Step 5: Resolve the polynomial of every parent, internal nodes in parallel chunks and
     // leaves one per task.
     let (internal_parents, leaf_parents) = parents.split_at(internal_nodes.len());
-    let internal_polys = resolve_polys(internal_parents, |missing| {
+    let cache = NodePolyCache::global();
+    let internal_polys = resolve_polys(cache, internal_parents, |missing| {
         let chunk_size = thread_chunk_size!(missing.len());
         let chunks = chunks!(missing, chunk_size)
             .map(|nodes| internal_polynomials(store, nodes))
             .collect::<ProofResult<Vec<_>>>()?;
         Ok(chunks.into_iter().flatten().collect())
     })?;
-    let leaf_polys = resolve_polys(leaf_parents, |missing| {
+    let leaf_polys = resolve_polys(cache, leaf_parents, |missing| {
         iter!(missing)
             .map(|&node| leaf_polynomial(store, node))
             .collect()
@@ -381,16 +498,17 @@ where
 
 /// The polynomial of every parent in `parents`, in order: query order is node order, which
 /// the transcript hashes, so a cache hit must not reorder the proof. A parent whose polynomial
-/// the cache holds for the commitment it was read at skips `rebuild`; the misses are rebuilt
+/// `cache` holds for the commitment it was read at skips `rebuild`; the misses are rebuilt
 /// in one call (by logical id, one polynomial per miss) and cached under that commitment, but
 /// only if the polynomial opens to it.
 fn resolve_polys(
+    cache: &NodePolyCache,
     parents: &[ParentNode],
     rebuild: impl FnOnce(&[NodeId]) -> ProofResult<Vec<LagrangeBasis>>,
 ) -> ProofResult<Vec<Arc<LagrangeBasis>>> {
     let hits: Vec<Option<Arc<LagrangeBasis>>> = parents
         .iter()
-        .map(|parent| node_poly_cache::CACHE.get(parent.physical, &parent.bytes))
+        .map(|parent| cache.get(parent.physical, &parent.bytes))
         .collect();
     let misses: Vec<&ParentNode> = parents
         .iter()
@@ -403,14 +521,22 @@ fn resolve_polys(
 
     // A polynomial rebuilt from a store that does not match the commitment must not be cached
     // under it: the cache is process-wide, so every later proof reading that commitment would
-    // reuse it.
-    let consistent: Vec<bool> = iter!(misses)
-        .zip(iter!(rebuilt))
-        .map(|(parent, poly)| opens_to(poly, &parent.commitment))
-        .collect();
-    for ((parent, poly), consistent) in misses.iter().zip(&rebuilt).zip(consistent) {
-        if consistent {
-            node_poly_cache::CACHE.insert(parent.physical, parent.bytes, Arc::clone(poly));
+    // reuse it. A consistent store passes the one check for the whole call; only a call that
+    // fails it is gone through node by node, to cache the polynomials that do open. A cache
+    // that is turned off takes nothing, so there is nothing to check.
+    if cache.capacity() != 0 {
+        let consistent: Vec<bool> = if batch_opens(&misses, &rebuilt) {
+            vec![true; misses.len()]
+        } else {
+            iter!(misses)
+                .zip(iter!(rebuilt))
+                .map(|(parent, poly)| opens_to(poly, &parent.commitment))
+                .collect()
+        };
+        for ((parent, poly), consistent) in misses.iter().zip(&rebuilt).zip(consistent) {
+            if consistent {
+                cache.insert(parent.physical, parent.bytes, Arc::clone(poly));
+            }
         }
     }
 
@@ -421,12 +547,85 @@ fn resolve_polys(
         .collect())
 }
 
+/// Whether every polynomial in `rebuilt` opens to the commitment its node was read at,
+/// decided for all of them at once.
+///
+/// Checking a node on its own costs a 256-term fixed-base MSM ([`opens_to`]), and one per
+/// miss is most of the work of a cold proof. Here every node gets a challenge `r_i`, and
+/// `Σ r_i·poly_i` is committed once and compared with `Σ r_i·C_i`. The two are equal when
+/// every polynomial opens to its commitment. When one does not, they are equal only if the
+/// challenges cancel the differences, and the challenges are 128 bits drawn from a hash of
+/// the very commitments and polynomials being checked ([`batch_challenges`]), so that happens
+/// with probability about 2^-128.
+fn batch_opens(misses: &[&ParentNode], rebuilt: &[Arc<LagrangeBasis>]) -> bool {
+    let challenges = batch_challenges(misses, rebuilt);
+
+    // Σ r_i·poly_i, one partial sum per thread.
+    let chunk_size = thread_chunk_size!(rebuilt.len());
+    let combined = reduce!(
+        chunks!(rebuilt, chunk_size)
+            .zip(chunks!(challenges, chunk_size))
+            .map(|(polys, challenges)| {
+                let mut sum = [Fr::zero(); DOMAIN_SIZE];
+                for (poly, challenge) in polys.iter().zip(challenges) {
+                    for (term, value) in sum.iter_mut().zip(poly.values()) {
+                        *term += *value * challenge;
+                    }
+                }
+                sum
+            }),
+        || [Fr::zero(); DOMAIN_SIZE],
+        |mut sum, part| {
+            for (term, part) in sum.iter_mut().zip(part) {
+                *term += part;
+            }
+            sum
+        }
+    );
+
+    let commitments: Vec<Element> = misses.iter().map(|parent| parent.commitment).collect();
+    shared_committer().msm_dense(&combined) == multi_scalar_mul(&commitments, &challenges)
+}
+
+/// One 128-bit challenge per miss, drawn from a hash of the whole batch: each node's
+/// commitment bytes and the 256 evaluations of its polynomial, in node order.
+fn batch_challenges(misses: &[&ParentNode], rebuilt: &[Arc<LagrangeBasis>]) -> Vec<Fr> {
+    const SCALAR_BYTES: usize = 32;
+
+    // Each node is hashed on its own, so the polynomials (8 KiB apiece) are absorbed in
+    // parallel and the batch hash below only reads a digest per node.
+    let digests: Vec<[u8; blake3::OUT_LEN]> = iter!(misses)
+        .zip(iter!(rebuilt))
+        .map(|(parent, poly)| {
+            let mut evaluations = [0u8; DOMAIN_SIZE * SCALAR_BYTES];
+            let limbs = poly.values().iter().flat_map(|value| value.into_bigint().0);
+            for (bytes, limb) in evaluations.chunks_exact_mut(8).zip(limbs) {
+                bytes.copy_from_slice(&limb.to_le_bytes());
+            }
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&parent.bytes).update(&evaluations);
+            *hasher.finalize().as_bytes()
+        })
+        .collect();
+
+    let mut hasher = blake3::Hasher::new();
+    for digest in &digests {
+        hasher.update(digest);
+    }
+    let mut output = hasher.finalize_xof();
+    digests
+        .iter()
+        .map(|_| {
+            let mut challenge = [0u8; 16];
+            output.fill(&mut challenge);
+            Fr::from(u128::from_le_bytes(challenge))
+        })
+        .collect()
+}
+
 /// Whether `poly` commits to `commitment` under the shared CRS.
 fn opens_to(poly: &LagrangeBasis, commitment: &Element) -> bool {
-    let terms: Vec<(usize, Fr)> = (0..DOMAIN_SIZE)
-        .map(|i| (i, poly.evaluate_in_domain(i)))
-        .collect();
-    shared_committer().msm(&terms) == *commitment
+    shared_committer().msm_dense(poly.values()) == *commitment
 }
 
 /// The 256-slot polynomial of a leaf node: every slot's value hashed to the field, with the
@@ -487,8 +686,10 @@ mod tests {
     use crate::constant::{META_BUCKET_SIZE, ROOT_NODE_ID};
     use crate::proof::test_utils::*;
     use crate::{
-        mem_store::MemStore, proof::prover::PRECOMPUTED_WEIGHTS, state::state::EphemeralSaltState,
-        trie::trie::StateRoot,
+        mem_store::MemStore,
+        proof::prover::PRECOMPUTED_WEIGHTS,
+        state::state::EphemeralSaltState,
+        trie::trie::{StateRoot, DEFAULT_CRS},
     };
     use ark_ff::BigInt;
     use banderwagon::{Fr, Zero};
@@ -657,32 +858,122 @@ mod tests {
         assert!(queries.iter().all(|q| q.result == empty_default));
     }
 
-    /// A full shard is cleared only by a node it does not hold: re-inserting a node it holds
-    /// replaces that entry and keeps the rest, and a lookup at another commitment misses.
+    /// A cache bounded to four polynomials per shard, with the pieces the cache tests share:
+    /// node `i` of one shard, a commitment made of one byte, and a polynomial to store.
+    fn small_cache() -> (
+        NodePolyCache,
+        impl Fn(usize) -> NodeId,
+        impl Fn(u8) -> CommitmentBytes,
+        Arc<LagrangeBasis>,
+    ) {
+        use node_poly_cache::SHARDS;
+        (
+            NodePolyCache::with_capacity(4 * SHARDS),
+            // Nodes `7 + i * SHARDS` share one shard.
+            |i| (7 + i * SHARDS) as NodeId,
+            |byte| [byte; 64],
+            Arc::new(LagrangeBasis::new(vec![Fr::zero(); DOMAIN_SIZE])),
+        )
+    }
+
+    /// A full shard evicts one polynomial per new node: the first the hand finds unused since
+    /// its last visit. A polynomial served, or a node cached again, counts as used; a lookup
+    /// at another commitment does not, and neither is a use that the hand has already passed.
     #[test]
-    fn node_poly_cache_clears_a_full_shard_only_for_a_new_node() {
-        use node_poly_cache::{NodePolyCache, MAX_PER_SHARD, SHARDS};
+    fn node_poly_cache_evicts_what_was_not_used_since_the_hand_passed() {
+        let (cache, node, commitment, poly) = small_cache();
+        let nodes = |held: &[usize]| held.iter().map(|&i| node(i)).collect::<Vec<_>>();
+        let insert = |i: usize, byte: u8| cache.insert(node(i), commitment(byte), poly.clone());
+        let hit = |i: usize, byte: u8| cache.get(node(i), &commitment(byte)).is_some();
 
-        let cache = NodePolyCache::new();
-        let poly = Arc::new(LagrangeBasis::new(vec![Fr::zero(); DOMAIN_SIZE]));
-        let commitment = |byte: u8| -> CommitmentBytes { [byte; 64] };
-        // Nodes `7 + i * SHARDS` share one shard.
-        let node = |i: usize| (7 + i * SHARDS) as NodeId;
+        // A node of another shard, which nothing below disturbs.
+        cache.insert(8, commitment(1), poly.clone());
+        let with_other_shard = |held: &[usize]| {
+            let mut all = nodes(held);
+            all.push(8);
+            all.sort_unstable();
+            all
+        };
 
-        for i in 0..MAX_PER_SHARD {
-            cache.insert(node(i), commitment(1), Arc::clone(&poly));
-        }
-        assert!((0..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_some()));
-        assert!(cache.get(node(0), &commitment(2)).is_none());
+        (0..4).for_each(|i| insert(i, 1));
+        assert_eq!(cache.nodes(), with_other_shard(&[0, 1, 2, 3]));
+        assert!(hit(0, 1) && hit(2, 1));
+        assert!(!hit(1, 2), "another commitment is a miss");
+        assert!(!hit(9, 1), "a node the cache does not hold is a miss");
 
-        cache.insert(node(0), commitment(2), Arc::clone(&poly));
-        assert!(cache.get(node(0), &commitment(2)).is_some());
-        assert!(cache.get(node(0), &commitment(1)).is_none());
-        assert!((1..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_some()));
+        // The hand passes node 0 (used) and evicts node 1, then passes node 2 and evicts 3.
+        insert(4, 1);
+        assert_eq!(cache.nodes(), with_other_shard(&[0, 2, 3, 4]));
+        insert(5, 1);
+        assert_eq!(cache.nodes(), with_other_shard(&[0, 2, 4, 5]));
+        // Back at node 0, whose use it has already passed over once.
+        insert(6, 1);
+        assert_eq!(cache.nodes(), with_other_shard(&[2, 4, 5, 6]));
 
-        cache.insert(node(MAX_PER_SHARD), commitment(1), Arc::clone(&poly));
-        assert!(cache.get(node(MAX_PER_SHARD), &commitment(1)).is_some());
-        assert!((0..MAX_PER_SHARD).all(|i| cache.get(node(i), &commitment(1)).is_none()));
+        // Caching node 4 again replaces its polynomial in place and counts as a use, so the
+        // hand passes it and evicts node 2.
+        insert(4, 2);
+        assert_eq!(cache.nodes(), with_other_shard(&[2, 4, 5, 6]));
+        insert(7, 1);
+        assert_eq!(cache.nodes(), with_other_shard(&[4, 5, 6, 7]));
+        assert!(hit(4, 2) && !hit(4, 1));
+
+        // With every polynomial used, the hand makes a full turn and evicts where it began.
+        assert!(hit(5, 1) && hit(6, 1) && hit(7, 1));
+        insert(9, 1);
+        assert_eq!(cache.nodes(), with_other_shard(&[4, 6, 7, 9]));
+    }
+
+    /// The capacity is a bound per shard, rounded up. Lowering it empties the shards that hold
+    /// more than their new share and leaves the rest; zero turns the cache off, and raising
+    /// it again turns it back on. Clearing drops everything and changes no bound.
+    #[test]
+    fn node_poly_cache_capacity_bounds_trims_and_turns_the_cache_off() {
+        use node_poly_cache::SHARDS;
+
+        let (cache, node, commitment, poly) = small_cache();
+        assert_eq!(cache.capacity(), 4 * SHARDS);
+        assert_eq!(NodePolyCache::DEFAULT_CAPACITY, 32768);
+        assert_eq!(
+            NodePolyCache::global().capacity(),
+            NodePolyCache::DEFAULT_CAPACITY
+        );
+
+        // Three nodes in one shard, one in another.
+        (0..3).for_each(|i| cache.insert(node(i), commitment(1), poly.clone()));
+        cache.insert(8, commitment(1), poly.clone());
+        let everything = vec![node(0), 8, node(1), node(2)];
+        assert_eq!(cache.nodes(), everything);
+
+        cache.set_capacity(2 * SHARDS + 1);
+        assert_eq!(cache.capacity(), 3 * SHARDS);
+        assert_eq!(cache.nodes(), everything, "no shard is over three");
+        cache.set_capacity(2 * SHARDS);
+        assert_eq!(cache.nodes(), [8], "the shard holding three is emptied");
+
+        cache.set_capacity(0);
+        assert_eq!(cache.capacity(), 0);
+        assert!(cache.nodes().is_empty());
+        cache.insert(node(0), commitment(1), poly.clone());
+        assert!(
+            cache.nodes().is_empty(),
+            "a cache that is off takes nothing"
+        );
+
+        cache.set_capacity(1);
+        assert_eq!(cache.capacity(), SHARDS);
+        cache.insert(node(0), commitment(1), poly.clone());
+        cache.insert(8, commitment(1), poly.clone());
+        assert_eq!(cache.nodes(), [node(0), 8]);
+        // One polynomial per shard: a second node of a shard takes the first one's place.
+        cache.insert(node(1), commitment(1), poly.clone());
+        assert_eq!(cache.nodes(), [8, node(1)]);
+
+        cache.clear();
+        assert!(cache.nodes().is_empty());
+        assert_eq!(cache.capacity(), SHARDS);
+        cache.insert(node(0), commitment(1), poly);
+        assert_eq!(cache.nodes(), [node(0)]);
     }
 
     /// Regression test for PR #152 review comment r4080228453: a store whose trie and state
@@ -742,6 +1033,187 @@ mod tests {
             "a witness from a consistent store must verify, \
              whatever other stores the process has proven before",
         );
+    }
+
+    /// `count` nodes with random polynomials, each read at the commitment its polynomial
+    /// opens to. The commitments come from the CRS directly, not from the committer the
+    /// checks under test use, and a node's physical id differs from its logical one.
+    fn committed_nodes(seed: u64, count: usize) -> (Vec<ParentNode>, Vec<Arc<LagrangeBasis>>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..count as NodeId)
+            .map(|logical| {
+                let poly = LagrangeBasis::new(
+                    (0..DOMAIN_SIZE)
+                        .map(|_| Fr::from_le_bytes_mod_order(&mock_data(&mut rng, 32)))
+                        .collect(),
+                );
+                let bytes = DEFAULT_CRS
+                    .commit_lagrange_poly(&poly)
+                    .to_bytes_uncompressed();
+                let node = ParentNode {
+                    logical,
+                    physical: logical + 1000,
+                    bytes,
+                    commitment: Element::from_bytes_unchecked_uncompressed(bytes),
+                };
+                (node, Arc::new(poly))
+            })
+            .unzip()
+    }
+
+    /// `poly` with the evaluation at `index` zeroed, which no longer opens to `poly`'s
+    /// commitment: a random evaluation is not zero.
+    fn zeroed_at(poly: &LagrangeBasis, index: usize) -> LagrangeBasis {
+        let mut evaluations: Vec<Fr> = (0..DOMAIN_SIZE)
+            .map(|i| poly.evaluate_in_domain(i))
+            .collect();
+        assert!(!evaluations[index].is_zero());
+        evaluations[index] = Fr::zero();
+        LagrangeBasis::new(evaluations)
+    }
+
+    /// The batch check passes when every polynomial opens to its node's commitment, and fails
+    /// when any does not, however small the difference and wherever it sits in the batch.
+    #[test]
+    fn batch_check_passes_only_when_every_polynomial_opens_to_its_commitment() {
+        let (nodes, polys) = committed_nodes(0xBA7C, 5);
+        let misses: Vec<&ParentNode> = nodes.iter().collect();
+
+        assert!(batch_opens(&misses, &polys));
+        assert!(batch_opens(&misses[..1], &polys[..1]));
+        assert!(batch_opens(&[], &[]));
+
+        // One evaluation of one polynomial differs.
+        for (node, index) in [(0, 0), (3, DOMAIN_SIZE - 1), (4, 17)] {
+            let mut off = polys.clone();
+            off[node] = Arc::new(zeroed_at(&polys[node], index));
+            assert!(!batch_opens(&misses, &off), "node {node}, index {index}");
+            assert!(!batch_opens(&misses[node..=node], &off[node..=node]));
+        }
+
+        // Two polynomials trade places. Each still opens to a commitment of the batch, so
+        // the plain sums of the two sides agree; it is the per-node challenges that tell.
+        let mut swapped = polys.clone();
+        swapped.swap(1, 2);
+        assert!(!batch_opens(&misses, &swapped));
+    }
+
+    /// The challenges are drawn from the batch itself: one per node, 128 bits each, and any
+    /// change to a commitment, a polynomial or the node order moves every one of them.
+    #[test]
+    fn batch_challenges_depend_on_every_commitment_and_polynomial() {
+        let (nodes, polys) = committed_nodes(0xC4A1, 3);
+        let misses: Vec<&ParentNode> = nodes.iter().collect();
+        let challenges = batch_challenges(&misses, &polys);
+
+        assert_eq!(challenges.len(), 3);
+        assert_eq!(challenges, batch_challenges(&misses, &polys));
+        for (i, challenge) in challenges.iter().enumerate() {
+            assert!(!challenge.is_zero());
+            assert_eq!(challenge.into_bigint().0[2..], [0, 0], "128 bits");
+            assert!(!challenges[..i].contains(challenge));
+        }
+        let all_moved =
+            |other: Vec<Fr>| other.len() == 3 && other.iter().zip(&challenges).all(|(a, b)| a != b);
+
+        // The first and the last evaluation of a polynomial.
+        for (node, index) in [(0, 0), (2, DOMAIN_SIZE - 1)] {
+            let mut changed = polys.clone();
+            changed[node] = Arc::new(zeroed_at(&polys[node], index));
+            assert!(all_moved(batch_challenges(&misses, &changed)));
+        }
+
+        // One bit of a commitment's bytes.
+        let mut bytes = nodes[1].bytes;
+        bytes[63] ^= 1;
+        let rewritten = ParentNode {
+            logical: nodes[1].logical,
+            physical: nodes[1].physical,
+            bytes,
+            commitment: nodes[1].commitment,
+        };
+        assert!(all_moved(batch_challenges(
+            &[&nodes[0], &rewritten, &nodes[2]],
+            &polys
+        )));
+
+        // The order of the nodes.
+        let reversed: Vec<Arc<LagrangeBasis>> = polys.iter().rev().cloned().collect();
+        assert!(all_moved(batch_challenges(
+            &[&nodes[2], &nodes[1], &nodes[0]],
+            &reversed
+        )));
+    }
+
+    /// `resolve_polys` hands the proof every polynomial it rebuilt, but caches only those that
+    /// open to the commitment their node was read at: one that does not is rebuilt again by
+    /// the next call, and the ones that do are served from the cache from then on.
+    #[test]
+    fn resolve_polys_caches_only_the_rebuilds_that_open_to_their_commitment() {
+        let cache = NodePolyCache::with_capacity(NodePolyCache::DEFAULT_CAPACITY);
+        let (nodes, polys) = committed_nodes(0x0152, 4);
+        let rebuild = |poly: &Arc<LagrangeBasis>| LagrangeBasis::clone(poly);
+        // What an inconsistent store rebuilds for node 2.
+        let stale = zeroed_at(&polys[2], 0);
+
+        let logical_ids: Vec<NodeId> = nodes.iter().map(|node| node.logical).collect();
+        let first = resolve_polys(&cache, &nodes, |missing| {
+            assert_eq!(missing, logical_ids);
+            Ok(vec![
+                rebuild(&polys[0]),
+                rebuild(&polys[1]),
+                stale.clone(),
+                rebuild(&polys[3]),
+            ])
+        })
+        .unwrap();
+        assert_eq!(*first[2], stale);
+        for (i, node) in nodes.iter().enumerate() {
+            let cached = cache.get(node.physical, &node.bytes);
+            if i == 2 {
+                assert!(cached.is_none());
+            } else {
+                assert_eq!(first[i], polys[i]);
+                assert_eq!(cached.as_ref(), Some(&polys[i]));
+            }
+            assert!(cache.get(node.logical, &node.bytes).is_none());
+        }
+
+        // Node 2 alone is rebuilt again, this time from a consistent store.
+        let second = resolve_polys(&cache, &nodes, |missing| {
+            assert_eq!(missing, [nodes[2].logical]);
+            Ok(vec![rebuild(&polys[2])])
+        })
+        .unwrap();
+        assert_eq!(second, polys);
+
+        let third = resolve_polys(&cache, &nodes, |missing| {
+            assert!(missing.is_empty());
+            Ok(Vec::new())
+        })
+        .unwrap();
+        assert_eq!(third, polys);
+    }
+
+    /// A cache that is turned off serves and takes nothing: every call rebuilds every node.
+    #[test]
+    fn resolve_polys_rebuilds_everything_when_the_cache_is_off() {
+        let cache = NodePolyCache::with_capacity(0);
+        let (nodes, polys) = committed_nodes(0x0FF, 3);
+        let logical_ids: Vec<NodeId> = nodes.iter().map(|node| node.logical).collect();
+
+        for _ in 0..2 {
+            let resolved = resolve_polys(&cache, &nodes, |missing| {
+                assert_eq!(missing, logical_ids);
+                Ok(polys
+                    .iter()
+                    .map(|poly| LagrangeBasis::clone(poly))
+                    .collect())
+            })
+            .unwrap();
+            assert_eq!(resolved, polys);
+            assert!(cache.nodes().is_empty());
+        }
     }
 
     #[test]
