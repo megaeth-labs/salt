@@ -16,7 +16,7 @@ type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, chunks_mut, into_iter, iter, reduce, thread_chunk_size};
-use std::{sync::Arc, vec, vec::Vec};
+use std::{borrow::Cow, sync::Arc, vec, vec::Vec};
 
 pub struct MultiPoint;
 
@@ -24,7 +24,8 @@ pub struct MultiPoint;
 pub struct ProverQuery {
     pub commitment: Element,
     /// Shared so that opening one polynomial at several points does not clone
-    /// its 256 coefficients per point.
+    /// its 256 coefficients per point. A caller that owns a `LagrangeBasis`
+    /// passes `poly.into()`.
     pub poly: Arc<LagrangeBasis>,
     // Given a function f, we use z_i to denote the input point and y_i to denote the output, ie f(z_i) = y_i
     pub point: usize,
@@ -76,7 +77,7 @@ impl MultiPoint {
         transcript: &mut Transcript,
         queries: Vec<ProverQuery>,
     ) -> MultiPointProof {
-        Self::open_inner(&crs, None, precomp, transcript, queries)
+        Self::open_inner(Cow::Owned(crs), None, precomp, transcript, queries)
     }
 
     /// Same proof as [`MultiPoint::open`] (byte-identical output), but every
@@ -99,11 +100,19 @@ impl MultiPoint {
             crs.n + 1,
             "the committer must hold the CRS `G` vector followed by `Q`"
         );
-        Self::open_inner(crs, Some(committer), precomp, transcript, queries)
+        Self::open_inner(
+            Cow::Borrowed(crs),
+            Some(committer),
+            precomp,
+            transcript,
+            queries,
+        )
     }
 
+    /// `crs` is owned on the path without a committer, whose IPA folds the generators in
+    /// place and so takes the CRS by value; borrowed, that path would have to clone it.
     fn open_inner(
-        crs: &CRS,
+        crs: Cow<'_, CRS>,
         committer: Option<&Committer>,
         precomp: &PrecomputedWeights,
         transcript: &mut Transcript,
@@ -161,7 +170,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g_x_comm = commit_dense(crs, committer, &g_x);
+        let g_x_comm = commit_dense(&crs, committer, &g_x);
 
         transcript.append_point(b"D", &g_x_comm);
 
@@ -192,7 +201,7 @@ impl MultiPoint {
             |a, b| a + b
         );
 
-        let g1_comm = commit_dense(crs, committer, &g1_x);
+        let g1_comm = commit_dense(&crs, committer, &g1_x);
 
         transcript.append_point(b"E", &g1_comm);
 
@@ -208,7 +217,7 @@ impl MultiPoint {
             Some(committer) => {
                 crate::ipa::create_with_precomp(transcript, committer, a, g_3_x_comm, b, t)
             }
-            None => crate::ipa::create(transcript, crs.clone(), a, g_3_x_comm, b, t),
+            None => crate::ipa::create(transcript, crs.into_owned(), a, g_3_x_comm, b, t),
         };
 
         MultiPointProof {
@@ -222,10 +231,7 @@ impl MultiPoint {
 /// when available, otherwise via the generic variable-base MSM.
 fn commit_dense(crs: &CRS, committer: Option<&Committer>, poly: &LagrangeBasis) -> Element {
     match committer {
-        Some(committer) => {
-            let terms: Vec<(usize, Fr)> = poly.values().iter().copied().enumerate().collect();
-            committer.msm(&terms)
-        }
+        Some(committer) => committer.msm_dense(poly.values()),
         None => crs.commit_lagrange_poly(poly),
     }
 }

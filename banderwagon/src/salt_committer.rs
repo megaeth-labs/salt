@@ -353,6 +353,28 @@ impl Committer {
             })
             .sum()
     }
+
+    /// Sums `scalars[i] · G[i]`, splitting the scalars across threads: [`Committer::msm`] for
+    /// a dense vector over the first `scalars.len()` bases, without a list of terms to build.
+    ///
+    /// # Panics
+    ///
+    /// If there are more scalars than bases.
+    pub fn msm_dense(&self, scalars: &[Fr]) -> Element {
+        let chunk_size = thread_chunk_size!(scalars.len());
+        chunks!(scalars, chunk_size)
+            .enumerate()
+            .map(|(chunk, scalars)| {
+                let mut acc = Element::zero();
+                for (offset, scalar) in scalars.iter().enumerate() {
+                    if !scalar.is_zero() {
+                        acc += self.mul_index(scalar, chunk * chunk_size + offset);
+                    }
+                }
+                acc
+            })
+            .sum()
+    }
 }
 
 /// Adds an affine point to a projective point using extended Edwards coordinates.
@@ -502,6 +524,34 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use std::str::FromStr;
     use std::string::ToString;
+
+    /// `msm_dense` is `msm` over the scalars' own positions: for a full vector, a shorter
+    /// one, a single scalar and none, it gives what `msm` gives for the same terms and what
+    /// the reference MSM gives, zero scalars included.
+    #[test]
+    fn msm_dense_matches_msm_and_the_reference() {
+        let crs: Vec<Element> = (0..256)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
+            .collect();
+        let committer = Committer::new(&crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let mut scalars: Vec<Fr> = (0..256).map(|_| Fr::rand(&mut rng)).collect();
+        scalars[3] = Fr::zero();
+        scalars[255] = Fr::zero();
+
+        for len in [256, 100, 1, 0] {
+            let scalars = &scalars[..len];
+            let terms: Vec<(usize, Fr)> = scalars.iter().copied().enumerate().collect();
+            let dense = committer.msm_dense(scalars);
+            assert_eq!(dense, committer.msm(&terms), "{len} scalars");
+            assert_eq!(
+                dense,
+                multi_scalar_mul(&crs[..len], scalars),
+                "{len} scalars"
+            );
+        }
+    }
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
     ///
