@@ -7,13 +7,21 @@
 //! - `Witness::create`    — block witness generation (lookups + updates)
 //! - `Witness::verify`    — block witness verification (stateless validator)
 //!
+//! Creation is timed twice. The plain groups repeat one input, so after the first iteration
+//! every node polynomial is served from the cache; the `-cold` groups clear the cache before
+//! each iteration, so every node is rebuilt from the store and checked before it is cached.
+//! A caller sees something in between.
+//!
 //! ```bash
 //! cargo bench --package salt --bench proof
 //! ```
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use salt::{types::*, EphemeralSaltState, MemStore, SaltProof, SaltWitness, StateRoot, Witness};
+use salt::{
+    types::*, EphemeralSaltState, MemStore, NodePolyCache, SaltProof, SaltWitness, StateRoot,
+    Witness,
+};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::OnceLock;
@@ -100,6 +108,21 @@ fn bench_salt_proof(c: &mut Criterion) {
     }
     group.finish();
 
+    let mut group = c.benchmark_group("salt_proof/create-cold");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    for n in [16usize, 256, 2048] {
+        let keys = proof_keys(s, n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &keys, |b, keys| {
+            b.iter_batched(
+                || NodePolyCache::global().clear(),
+                |()| black_box(SaltProof::create(keys.iter().copied(), &s.store).unwrap()),
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+
     let mut group = c.benchmark_group("salt_proof/check");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
@@ -165,6 +188,25 @@ fn bench_witness(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(Witness::create([], lookups.iter(), updates, &s.store).unwrap())
                 });
+            },
+        );
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("witness/create-cold");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(15));
+    for n in [256usize, 1024] {
+        let (lookups, updates) = witness_workload(s, n, &mut rng);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(n),
+            &(lookups, updates),
+            |b, (lookups, updates)| {
+                b.iter_batched(
+                    || NodePolyCache::global().clear(),
+                    |()| black_box(Witness::create([], lookups.iter(), updates, &s.store).unwrap()),
+                    BatchSize::PerIteration,
+                );
             },
         );
     }
