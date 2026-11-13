@@ -17,10 +17,11 @@
 //! chunk's cost does not depend on the points beyond the batch at which its last lane's Jacobi symbol
 //! settles. The result on every input is the scalar path's (`legendre()` for the subgroup check, one
 //! `d^(p-2)` per chunk, a root that squares back to `n/d`), which the tests check on accepted points,
-//! off-curve `x` and out-of-subgroup points; a lane whose table lookup misses (never on a residue of a
-//! field element) is reported undecided and takes the scalar path, and a lane whose Jacobi symbol has
-//! not settled after the fixed batches (none in 40,000 sampled inputs) takes its group's Euler
-//! exponentiation.
+//! off-curve `x` and out-of-subgroup points; a lane whose Jacobi symbol has not settled after the fixed
+//! batches (none in 40,000 sampled inputs) takes its group's Euler exponentiation. A lane that yields no
+//! point (no root, off the subgroup, or a table lookup that misses, which never happens on a residue
+//! of a field element) is decoded again on the scalar path by the caller
+//! ([`crate::Element::from_bytes_batch`]), so these lanes only ever accept.
 //!
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].

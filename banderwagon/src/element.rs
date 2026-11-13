@@ -125,9 +125,9 @@ impl Element {
     /// On an `x86_64` host with AVX-512 IFMA the three exponentiations every point pays (the subgroup
     /// check's Legendre symbol, the inversion in `y² = n/d`, the Tonelli–Shanks square root) run eight
     /// points per vector register in [`crate::ifma`], in chunks of [`crate::ifma::CHUNK`]; the chunk's
-    /// tail, any input whose bytes are not a canonical `x`, and any lane the vector path does not decide
-    /// go through [`Element::from_bytes`] itself. Everywhere else this is [`Element::from_bytes`] mapped
-    /// over the inputs.
+    /// tail, any input whose bytes are not a canonical `x`, and any lane the vector path does not
+    /// accept go through [`Element::from_bytes`] itself, so the vector path never rejects an input on
+    /// its own. Everywhere else this is [`Element::from_bytes`] mapped over the inputs.
     pub fn from_bytes_batch(bytes: &[[u8; 32]]) -> Vec<Result<Element, SerializationError>> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
         if crate::ifma::available() {
@@ -182,14 +182,15 @@ impl Element {
                     out.extend(chunk.iter().map(|b| Self::from_bytes(*b)));
                     continue;
                 }
-                let (chunk, (points, undecided)) = lanes.next().expect("a lane chunk per index");
+                let (chunk, (points, _)) = lanes.next().expect("a lane chunk per index");
                 for i in 0..CHUNK {
-                    out.push(if undecided[i] {
-                        Self::from_bytes(chunk[i])
-                    } else {
-                        points[i]
-                            .map(|(x, y)| Element(EdwardsAffine::new_unchecked(x, y).into()))
-                            .ok_or(SerializationError::InvalidData)
+                    // The lanes only accept. A point they do not return (no root, off the
+                    // subgroup, or undecided) is decoded again by the scalar path, so every
+                    // rejection is `from_bytes`'s own and no fault in the lanes can turn an
+                    // input the scalar path accepts into an error.
+                    out.push(match points[i] {
+                        Some((x, y)) => Ok(Element(EdwardsAffine::new_unchecked(x, y).into())),
+                        None => Self::from_bytes(chunk[i]),
                     });
                 }
             }
@@ -711,6 +712,116 @@ mod tests {
     use ark_ff::AdditiveGroup;
     use ark_serialize::CanonicalSerialize;
     use std::vec;
+
+    /// The `x` coordinates a decoder is most likely to get wrong (zero, ±1, small values and
+    /// their negations, the powers of two with their neighbours, the middle of the field, the
+    /// `x` of points that decode and its negation), followed by `random` uniform ones.
+    fn decode_test_xs(random: usize) -> Vec<Fq> {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(41);
+        let mut xs = vec![Fq::zero(), Fq::one(), -Fq::one()];
+        for k in 2..=32u64 {
+            xs.extend([Fq::from(k), -Fq::from(k)]);
+        }
+        let mut power = Fq::one();
+        for _ in 0..255 {
+            power.double_in_place();
+            xs.extend([power - Fq::one(), power, power + Fq::one()]);
+        }
+        let half = Fq::from(2u64).inverse().unwrap();
+        xs.extend([half, -half, half - Fq::one()]);
+        for _ in 0..64 {
+            let x = (Element::prime_subgroup_generator() * Fr::rand(&mut rng))
+                .0
+                .into_affine()
+                .x;
+            xs.extend([x, -x]);
+        }
+        xs.extend((0..random).map(|_| Fq::rand(&mut rng)));
+        xs
+    }
+
+    /// The 32 bytes `from_bytes` reads `x` from.
+    fn x_to_bytes(x: Fq) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        x.serialize_compressed(&mut bytes[..]).unwrap();
+        bytes.reverse();
+        bytes
+    }
+
+    /// What `from_bytes` returns for `x`, as affine coordinates.
+    fn decode(x: Fq) -> Option<(Fq, Fq)> {
+        Element::from_bytes(x_to_bytes(x)).ok().map(|element| {
+            let point = element.0.into_affine();
+            (point.x, point.y)
+        })
+    }
+
+    /// The decode on arkworks' own square root and Legendre symbol, which `from_bytes` used
+    /// before `decoder_arithmetic` replaced them.
+    fn arkworks_decode(x: Fq) -> Option<(Fq, Fq)> {
+        let x_sq = x.square();
+        let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one())
+            / (BandersnatchConfig::COEFF_D * x_sq - Fq::one());
+        let mut y = y_squared.sqrt()?;
+        if !is_positive(y) {
+            y = -y;
+        }
+        (Fq::one() - BandersnatchConfig::COEFF_A * x_sq)
+            .legendre()
+            .is_qr()
+            .then_some((x, y))
+    }
+
+    /// `from_bytes` accepts exactly the `x` the arkworks decode accepts and returns the same point.
+    #[test]
+    fn from_bytes_matches_the_arkworks_decode() {
+        let xs = decode_test_xs(4096);
+        let mut accepted = 0;
+        for (i, x) in xs.iter().enumerate() {
+            let got = decode(*x);
+            assert_eq!(got, arkworks_decode(*x), "input {i}");
+            accepted += usize::from(got.is_some());
+        }
+        assert!(accepted > 500, "{accepted} accepted");
+        assert!(xs.len() - accepted > 500, "{accepted} accepted");
+    }
+
+    /// The lanes return a point exactly where `from_bytes` accepts, and the same point, with every
+    /// edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever the
+    /// lanes do not return, which would hide a lane that wrongly returns nothing; this reads the
+    /// lanes' own answer.
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[test]
+    fn lane_decode_accepts_exactly_what_from_bytes_accepts() {
+        use crate::ifma::{available, decode_chunks, CHUNK};
+        if !available() {
+            return;
+        }
+        let xs = decode_test_xs(2048);
+        let expected: Vec<Option<(Fq, Fq)>> = xs.iter().map(|x| decode(*x)).collect();
+        // Shift the inputs through the lane positions, padding both ends with ones.
+        for shift in 0..CHUNK {
+            let mut padded = vec![Fq::one(); shift];
+            padded.extend_from_slice(&xs);
+            padded.resize(padded.len().next_multiple_of(CHUNK), Fq::one());
+            for (k, chunk) in padded.chunks_exact(CHUNK).enumerate() {
+                let chunk: [Fq; CHUNK] = chunk.try_into().unwrap();
+                // SAFETY: `available()` returned true.
+                let (points, undecided) = unsafe { decode_chunks(&[chunk]) }[0];
+                assert_eq!(undecided, [false; CHUNK], "chunk {k} at shift {shift}");
+                for (lane, point) in points.iter().enumerate() {
+                    let Some(i) = (k * CHUNK + lane).checked_sub(shift) else {
+                        continue;
+                    };
+                    if let Some(want) = expected.get(i) {
+                        assert_eq!(point, want, "input {i} in lane {lane}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn consistent_group_to_field() {
