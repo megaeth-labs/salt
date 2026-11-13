@@ -236,7 +236,8 @@ impl LagrangeBasis {
         self.values[index]
     }
 
-    pub(crate) fn values(&self) -> &[Fr] {
+    /// The polynomial's evaluations over the domain, in order.
+    pub fn values(&self) -> &[Fr] {
         &self.values
     }
 
