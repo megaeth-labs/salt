@@ -85,6 +85,34 @@ jobs:
           RANDOM_OPS: 100
           RANDOM_LOOKUPS: 50
 
+  # banderwagon's vector paths run only on a CPU with AVX-512 IFMA, and their tests return early
+  # on one without it, so the suite above passes without exercising them on such a runner.
+  # This job runs the suite on a host that has the extension and fails if the host does not.
+  test-avx512-ifma:
+    name: Test Suite (AVX-512 IFMA)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Require AVX-512 IFMA
+        run: |
+          grep -m 1 "model name" /proc/cpuinfo
+          grep -qw avx512f /proc/cpuinfo && grep -qw avx512ifma /proc/cpuinfo || {
+            echo "::error::this runner has no AVX-512 IFMA, so the vector paths would go untested"
+            exit 1
+          }
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+
   test-no-std:
     name: Test no_std
     runs-on: ubuntu-latest
