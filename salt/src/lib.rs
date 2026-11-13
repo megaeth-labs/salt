@@ -15,10 +15,40 @@ pub(crate) type Lazy<T> = std::sync::LazyLock<T>;
 #[cfg(not(feature = "std"))]
 pub(crate) type Lazy<T> = spin::Lazy<T>;
 
+/// Reader-writer lock for process-wide state, under the same policy as [`Lazy`]: waiters
+/// park under `std`, and spin only on `no_std` targets, which have nothing to park on.
+///
+/// The `std` lock's poisoning is ignored: what these locks guard is written one whole
+/// entry at a time, so the data a panicking holder leaves behind is still valid.
+#[cfg(feature = "std")]
+pub(crate) struct RwLock<T>(std::sync::RwLock<T>);
+
+#[cfg(feature = "std")]
+impl<T> RwLock<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(std::sync::RwLock::new(value))
+    }
+
+    pub(crate) fn read(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn write(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) type RwLock<T> = spin::RwLock<T>;
+
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;
-pub use proof::{fx_hashmap_serde, ProofError, SaltProof, SaltWitness, Witness};
+pub use proof::{fx_hashmap_serde, NodePolyCache, ProofError, SaltProof, SaltWitness, Witness};
 pub mod state;
 pub use state::{
     hasher, state::EphemeralSaltState, state::PlainStateProvider, updates::StateUpdates,

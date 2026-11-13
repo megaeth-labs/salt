@@ -26,6 +26,15 @@ macro_rules! num_threads {
     }};
 }
 
+/// The chunk size that spreads `len` items over the threads [`num_threads!`] reports, never
+/// zero: `chunks!`/`chunks_mut!` panic on a zero size, and an empty slice still has to chunk.
+#[macro_export]
+macro_rules! thread_chunk_size {
+    ($len: expr) => {
+        ($len).div_ceil($crate::num_threads!()).max(1)
+    };
+}
+
 /// Chooses between parallel and sequential `into_iter`.
 /// Uses `into_par_iter()` if the "parallel" feature is enabled, otherwise uses `into_iter()`.
 #[macro_export]
