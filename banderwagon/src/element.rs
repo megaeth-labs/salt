@@ -494,18 +494,17 @@ fn subgroup_check(point: &EdwardsProjective) -> bool {
         .is_qr()
 }
 
-/// The multi-scalar multiplication, run eight windows per vector register where the host has
-/// AVX-512 IFMA ([`crate::ifma_msm`]); [`crate::msm::msm_windowed`] (salt PR #152's window-parallel
-/// Pippenger) everywhere else, with its error on mismatched lengths.
-/// Small inputs keep the scalar path to avoid vector transposition and bucket-setup overhead.
-/// The cutoff is 8,192 points with a multithreaded pool and 128 with one thread, where scalar
-/// windows cannot run concurrently. The size tested here is the MSM input after any commitment
-/// coalescing, not the number of proof queries: repeated-polynomial benchmark fixtures can
-/// collapse to a small MSM even when they contain thousands of queries. Workload-level timing
-/// comparisons and their source revisions are recorded separately in the optimization report.
+/// The smallest multi-scalar multiplication the vector path ([`crate::ifma_msm`]) takes. Below
+/// it the transposition and bucket setup cost more than the lanes save, and
+/// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
+///
+/// The size compared is the MSM's own input, after a proof check has coalesced repeated
+/// commitments, not the number of proof queries.
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 pub const LANE_MSM_MIN_POINTS: usize = 8192;
 
+/// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
+/// IFMA from [`LANE_MSM_MIN_POINTS`] points up, and [`crate::msm::msm_windowed`] everywhere else.
 fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
     assert_eq!(
         bases.len(),
@@ -513,29 +512,26 @@ fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
         "number of bases should equal number of scalars"
     );
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
-    if bases.len() >= 128 && crate::ifma::available() {
-        let minimum = if salt_macros::num_threads!() == 1 {
-            128
-        } else {
-            LANE_MSM_MIN_POINTS
-        };
-        if bases.len() >= minimum {
-            // SAFETY: `available()` checked the host's features.
-            // Keep vector arithmetic across threads: the scalar fallback also parallelizes.
-            // Rayon can distribute chunks for one proof or run them within concurrent proofs.
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                let chunk = bases.len().div_ceil(rayon::current_num_threads()).max(8192);
-                return bases
-                    .par_chunks(chunk)
-                    .zip(scalars.par_chunks(chunk))
-                    .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s) })
-                    .reduce(EdwardsProjective::zero, |a, b| a + b);
-            }
-            #[cfg(not(feature = "parallel"))]
-            return unsafe { crate::ifma_msm::msm(bases, scalars) };
+    if bases.len() >= LANE_MSM_MIN_POINTS && crate::ifma::available() {
+        // Keep vector arithmetic across threads: the scalar fallback also parallelizes.
+        // Rayon can distribute chunks for one proof or run them within concurrent proofs.
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk = bases
+                .len()
+                .div_ceil(rayon::current_num_threads())
+                .max(LANE_MSM_MIN_POINTS);
+            return bases
+                .par_chunks(chunk)
+                .zip(scalars.par_chunks(chunk))
+                // SAFETY: `available()` checked the host's features.
+                .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s) })
+                .reduce(EdwardsProjective::zero, |a, b| a + b);
         }
+        // SAFETY: `available()` checked the host's features.
+        #[cfg(not(feature = "parallel"))]
+        return unsafe { crate::ifma_msm::msm(bases, scalars) };
     }
     crate::msm::msm_windowed(bases, scalars)
 }
