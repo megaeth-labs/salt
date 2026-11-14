@@ -215,14 +215,18 @@ pub(crate) fn sorted_parents_and_points(
         let level = levels[&bucket_id];
 
         // Phase 1: the bucket root's path through the main trie, once per run of one bucket.
+        // The main trie has a fixed depth, so the walk is exactly `MAIN_TRIE_LEVELS - 1`
+        // steps; bounding it by that count rather than by reaching the root keeps a corrupt
+        // parent id from spinning forever (as in `record_key_paths`).
         if previous_bucket != Some(bucket_id) {
             previous_bucket = Some(bucket_id);
             let mut node = bucket_root_node_id(bucket_id);
-            while node != 0 {
+            for _ in 0..MAIN_TRIE_LEVELS - 1 {
                 let parent_node = get_parent_node(&node);
                 internal_nodes.push((parent_node, vc_position_in_parent(&node) as u8));
                 node = parent_node;
             }
+            debug_assert_eq!(node, ROOT_NODE_ID);
         }
 
         // Phases 2 and 3: the bucket subtree's path and its bridge, once per run of one segment.
