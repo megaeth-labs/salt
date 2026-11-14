@@ -15,7 +15,6 @@
 //! random points, the identity, points with a negative `y`, and batches of every length modulo eight.
 #![allow(clippy::needless_range_loop)]
 use crate::ifma::*;
-use crate::ifma_committer::words_to_limbs;
 use crate::ifma_msm::transpose8;
 use crate::{AffineElement, Element};
 use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq, Fr};

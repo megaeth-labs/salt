@@ -856,6 +856,30 @@ pub(crate) unsafe fn limbs_to_words(l: &L5) -> [__m512i; 4] {
     ]
 }
 
+/// Four 64-bit words (ark's Montgomery representation, gathered one word per register) as five
+/// 52-bit limbs; the inverse of [`limbs_to_words`].
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn words_to_limbs(c: &Ctx, w: &[__m512i; 4]) -> L5 {
+    let m = c.mask;
+    [
+        _mm512_and_si512(w[0], m),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[0], 52), _mm512_slli_epi64(w[1], 12)),
+            m,
+        ),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[1], 40), _mm512_slli_epi64(w[2], 24)),
+            m,
+        ),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[2], 28), _mm512_slli_epi64(w[3], 36)),
+            m,
+        ),
+        _mm512_srli_epi64(w[3], 16),
+    ]
+}
+
 /// A field element (ark Montgomery form, R = 2^256) as the lane form's limbs (R = 2^260): the lane
 /// integer is x·2^260 mod p = the ark representation of 16·x.
 pub(crate) fn bcast_limbs(x: &Fq) -> [u64; 5] {
