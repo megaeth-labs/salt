@@ -9,6 +9,8 @@ mod decoder_arithmetic;
 mod element;
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod ifma;
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod ifma_msm;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, Element, Fr};

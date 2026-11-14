@@ -494,6 +494,48 @@ fn subgroup_check(point: &EdwardsProjective) -> bool {
         .is_qr()
 }
 
+/// The smallest multi-scalar multiplication the vector path ([`crate::ifma_msm`]) takes. Below
+/// it the transposition and bucket setup cost more than the lanes save, and
+/// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
+///
+/// The size compared is the MSM's own input, after a proof check has coalesced repeated
+/// commitments, not the number of proof queries.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+pub const LANE_MSM_MIN_POINTS: usize = 8192;
+
+/// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
+/// IFMA from [`LANE_MSM_MIN_POINTS`] points up, and [`crate::msm::msm_windowed`] everywhere else.
+fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    if bases.len() >= LANE_MSM_MIN_POINTS && crate::ifma::available() {
+        // Keep vector arithmetic across threads: the scalar fallback also parallelizes.
+        // Rayon can distribute chunks for one proof or run them within concurrent proofs.
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            let chunk = bases
+                .len()
+                .div_ceil(rayon::current_num_threads())
+                .max(LANE_MSM_MIN_POINTS);
+            return bases
+                .par_chunks(chunk)
+                .zip(scalars.par_chunks(chunk))
+                // SAFETY: `available()` checked the host's features.
+                .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s) })
+                .reduce(EdwardsProjective::zero, |a, b| a + b);
+        }
+        // SAFETY: `available()` checked the host's features.
+        #[cfg(not(feature = "parallel"))]
+        return unsafe { crate::ifma_msm::msm(bases, scalars) };
+    }
+    crate::msm::msm_windowed(bases, scalars)
+}
+
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
     assert_eq!(
         bases.len(),
@@ -514,7 +556,7 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
     };
 
-    Element(crate::msm::msm_windowed(&bases, scalars))
+    Element(msm(&bases, scalars))
 }
 
 /// Multiplies an `Element` by a scalar field element.
@@ -609,6 +651,49 @@ impl Hash for Element {
 mod tests {
     extern crate std;
     use self::std::println;
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn msm_pool_crossover_preserves_group_result() {
+        use ark_ec::VariableBaseMSM;
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xf21);
+        let mut bases: Vec<EdwardsAffine> =
+            (0..16385).map(|_| EdwardsAffine::rand(&mut rng)).collect();
+        let mut scalars: Vec<Fr> = (0..16385).map(|_| Fr::rand(&mut rng)).collect();
+        bases[1] = EdwardsAffine::zero();
+        scalars[2] = Fr::zero();
+        scalars[3] = -Fr::one();
+
+        for n in [0, 127, 128, 1023, 1024, 4351, 8191, 8192, 8193, 16385] {
+            let reference = Element(EdwardsProjective::msm(&bases[..n], &scalars[..n]).unwrap());
+            let projective: Vec<_> = bases[..n]
+                .iter()
+                .map(|point| Element((*point).into()))
+                .collect();
+            for threads in [1, 2, 8] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    assert_eq!(
+                        multi_scalar_mul(&projective, &scalars[..n]),
+                        reference,
+                        "projective n={n} threads={threads}"
+                    );
+                    assert_eq!(
+                        Element(msm(&bases[..n], &scalars[..n])),
+                        reference,
+                        "affine n={n} threads={threads}"
+                    );
+                });
+            }
+        }
+    }
+
     /// `from_bytes_batch` returns `from_bytes`'s result on every input: accepted points, canonical `x`
     /// with no square root, points off the prime subgroup, non-canonical bytes, and a tail shorter than
     /// a chunk.
