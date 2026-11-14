@@ -50,28 +50,13 @@ unsafe fn build_committer_consts() -> CommitterConsts {
     }
 }
 
-/// Four 64-bit words (ark's Montgomery representation, gathered one word per register) as five 52-bit limbs.
-#[inline]
-#[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn words_to_limbs(c: &Ctx, w: &[__m512i; 4]) -> L5 {
-    let m = c.mask;
-    [
-        _mm512_and_si512(w[0], m),
-        _mm512_and_si512(
-            _mm512_or_si512(_mm512_srli_epi64(w[0], 52), _mm512_slli_epi64(w[1], 12)),
-            m,
-        ),
-        _mm512_and_si512(
-            _mm512_or_si512(_mm512_srli_epi64(w[1], 40), _mm512_slli_epi64(w[2], 24)),
-            m,
-        ),
-        _mm512_and_si512(
-            _mm512_or_si512(_mm512_srli_epi64(w[2], 28), _mm512_slli_epi64(w[3], 36)),
-            m,
-        ),
-        _mm512_srli_epi64(w[3], 16),
-    ]
-}
+/// The gathers of [`mul_index8`] read a table point as the 64-byte record `x` then `y` (ark's
+/// `Affine { x, y }`, four 64-bit words each); a different layout must not compile.
+const _: () = assert!(
+    core::mem::size_of::<EdwardsAffine>() == 64
+        && core::mem::offset_of!(EdwardsAffine, x) == 0
+        && core::mem::offset_of!(EdwardsAffine, y) == 32
+);
 
 /// Per-lane table addresses for one chain step: the byte address of the table point each lane adds, and
 /// whether the lane adds its negation (the signed-digit carry rule of `mul_index`).
@@ -206,7 +191,7 @@ mod tests {
         let bases: Vec<Element> = (0..16)
             .map(|_| Element(EdwardsProjective::rand(&mut rng)))
             .collect();
-        for &w in &[11usize, 8, 9] {
+        for &w in &[11usize, 8, 9, crate::platform::LANE_PRECOMP_WINDOW_SIZE] {
             let committer = Committer::new(&bases, w);
             let mut scalars: Vec<Fr> = (0..8).map(|_| Fr::rand(&mut rng)).collect();
             scalars[1] = Fr::zero();
