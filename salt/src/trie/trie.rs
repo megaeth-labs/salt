@@ -70,7 +70,7 @@ pub(crate) fn shared_committer() -> &'static Committer {
 ///   touches `SHARED_COMMITTER` would re-enter this initialization on the
 ///   same stack and deadlock.
 fn build_shared_committer() -> Committer {
-    let build = || DEFAULT_CRS.committer(platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+    let build = || DEFAULT_CRS.committer(platform::precomp_window_size());
     #[cfg(feature = "parallel")]
     {
         // Never run `build` inline here: under `parallel` it would par_iter
@@ -232,7 +232,7 @@ where
 
     /// Configure the minimum task batch size for parallel processing.
     pub fn with_min_par_batch_size(mut self, min_task_size: usize) -> Self {
-        self.min_par_batch_size = min_task_size;
+        self.min_par_batch_size = min_task_size.max(1);
         self
     }
 
@@ -752,17 +752,25 @@ where
             (a.slot_id() % TRIE_WIDTH as SlotId).cmp(&(b.slot_id() % TRIE_WIDTH as SlotId))
         });
 
-        // Compute the commitment deltas to be applied to the parent nodes.
+        // Compute the commitment deltas to be applied to the parent nodes: one fixed-base
+        // multiplication per update, issued per chunk so that the committer can run them in lanes.
         let batch_size = self.par_batch_size(state_updates.len());
-        let c_deltas: DeltaList = iter!(state_updates, batch_size)
-            .map(|(salt_key, (old_value, new_value))| {
-                (
-                    to_node_id(salt_key),
-                    self.committer.mul_index(
-                        &(kv_hash(new_value) - kv_hash(old_value)),
-                        (salt_key.slot_id() % TRIE_WIDTH as SlotId) as usize,
-                    ),
-                )
+        let c_deltas: DeltaList = chunks!(state_updates, batch_size)
+            .flat_map(|updates| {
+                let (scalars, positions): (Vec<Fr>, Vec<usize>) = updates
+                    .iter()
+                    .map(|(salt_key, (old_value, new_value))| {
+                        (
+                            kv_hash(new_value) - kv_hash(old_value),
+                            (salt_key.slot_id() % TRIE_WIDTH as SlotId) as usize,
+                        )
+                    })
+                    .unzip();
+                updates
+                    .iter()
+                    .map(|(salt_key, _)| to_node_id(salt_key))
+                    .zip(self.committer.mul_index_batch(&scalars, &positions))
+                    .collect::<Vec<_>>()
             })
             .collect();
 
@@ -808,16 +816,15 @@ where
                         .collect::<Vec<_>>(),
                 );
 
-                c_updates
+                let (scalars, positions): (Vec<Fr>, Vec<usize>) = c_updates
                     .iter()
                     .zip(hashes.chunks_exact(2))
-                    .map(|((id, _), h)| {
-                        (
-                            get_parent_node(id),
-                            self.committer
-                                .mul_index(&(h[1] - h[0]), vc_position_in_parent(id)),
-                        )
-                    })
+                    .map(|((id, _), h)| (h[1] - h[0], vc_position_in_parent(id)))
+                    .unzip();
+                c_updates
+                    .iter()
+                    .map(|(id, _)| get_parent_node(id))
+                    .zip(self.committer.mul_index_batch(&scalars, &positions))
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -1469,6 +1476,16 @@ mod tests {
         let (strict_root, _) = StateRoot::new(&strict).update_fin(&rehash).unwrap();
         let (root, _) = StateRoot::new(&store).update_fin(&rehash).unwrap();
         assert_eq!(strict_root, root);
+    }
+
+    #[test]
+    fn zero_batch_size_accepts_empty_updates() {
+        let mut trie = StateRoot::new(&EmptySalt).with_min_par_batch_size(0);
+        assert_eq!(trie.par_batch_size(0), 1);
+        let empty = StateUpdates::default();
+        let actual = trie.update_fin(&empty).unwrap();
+        let expected = StateRoot::new(&EmptySalt).update_fin(&empty).unwrap();
+        assert_eq!(actual.0, expected.0);
     }
 
     #[test]
