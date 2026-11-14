@@ -496,6 +496,8 @@ pub(crate) unsafe fn msm_runs(
         b.as_mut_ptr()
     });
     let mut nonempty = vec![0u8; groups * nb];
+    // the highest non-empty bucket of each group's windows: the reduction starts there
+    let mut top = vec![0usize; groups];
     // per-window scratch
     let mut cnt = vec![0u32; nb];
     let mut cursor = vec![0u32; nb];
@@ -536,6 +538,7 @@ pub(crate) unsafe fn msm_runs(
             if len > 0 {
                 by_len[(len as usize).min(LMAX - 1)].push((b as u32, start, len));
                 start += len;
+                top[g] = top[g].max(b);
             }
         }
         // batches of eight runs, longest bins first
@@ -578,7 +581,9 @@ pub(crate) unsafe fn msm_runs(
         }
     }
     // reduction per group: running sums over the buckets high to low, lanes = windows; empty buckets read
-    // as the identity through the non-empty mask
+    // as the identity through the non-empty mask. The walk starts at the group's highest non-empty
+    // bucket, since above it both sums are still the identity. A signed digit's magnitude is at most
+    // half the radix, so the upper half of the buckets is never reached and the walk is half as long.
     let id_words = [
         zero, zero, zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4], zero, zero,
         zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4],
@@ -587,7 +592,7 @@ pub(crate) unsafe fn msm_runs(
     for g in 0..groups {
         let mut running = k.id;
         let mut res = k.id;
-        for b in (1..nb).rev() {
+        for b in (1..=top[g]).rev() {
             let ne: __mmask8 = nonempty[g * nb + b];
             let base = bptr.add((g * nb + b) * BW);
             let mut wv = [zero; 20];
