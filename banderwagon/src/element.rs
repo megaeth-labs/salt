@@ -361,26 +361,46 @@ impl Element {
     /// # Returns
     ///
     /// Vector of scalar field elements, one for each input Element
+    ///
+    /// On an `x86_64` host with AVX-512 IFMA the inversions and products run eight elements per vector
+    /// register ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar
+    /// path; the values are the same.
     pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
-        let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
-
-        serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
-
-        xs.into_iter()
-            .zip(ys)
-            .map(|(x, y_inv)| base_to_scalar(x * y_inv))
-            .collect()
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if elements.len() >= 8 && crate::ifma::available() {
+            let head = elements.len() / 8 * 8;
+            let mut out = vec![Fr::zero(); elements.len()];
+            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
+            unsafe {
+                crate::ifma_normalize::batch_map_to_scalar_field(
+                    &elements[..head],
+                    &mut out[..head],
+                )
+            };
+            out.truncate(head);
+            out.extend(batch_map_to_scalar_field_scalar(&elements[head..]));
+            return out;
+        }
+        batch_map_to_scalar_field_scalar(elements)
     }
 
     /// Takes uncompressed element bytes (64 bytes each) and returns scalar field elements.
     /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
+    ///
+    /// On an `x86_64` host with AVX-512 IFMA the bytes are read straight into the lanes
+    /// ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar path.
     pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
-        let elements: Vec<Element> = elements
-            .iter()
-            .map(|&bytes| Element::from_bytes_unchecked_uncompressed(bytes))
-            .collect();
-
-        Self::batch_map_to_scalar_field(&elements)
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if elements.len() >= 8 && crate::ifma::available() {
+            let head = elements.len() / 8 * 8;
+            let mut out = vec![Fr::zero(); elements.len()];
+            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
+            unsafe { crate::ifma_normalize::hash_commitments(&elements[..head], &mut out[..head]) };
+            out.truncate(head);
+            out.extend(hash_commitments_scalar(&elements[head..]));
+            return out;
+        }
+        hash_commitments_scalar(elements)
     }
 
     /// Converts banderwagon elements to their 64-byte commitment representations.
@@ -398,12 +418,24 @@ impl Element {
     /// Vector of 64-byte arrays, each containing canonicalized uncompressed coordinates:
     /// - Bytes 0-31: X-coordinate (little-endian)
     /// - Bytes 32-63: Y-coordinate (little-endian, always positive)
+    ///
+    /// On an `x86_64` host with AVX-512 IFMA the normalization runs eight points per vector register
+    /// ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar path; the
+    /// bytes are the same.
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
-        let points: Vec<_> = elements.iter().map(|e| e.0).collect();
-        EdwardsProjective::normalize_batch(&points)
-            .into_iter()
-            .map(affine_to_canonical_bytes)
-            .collect()
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if elements.len() >= 8 && crate::ifma::available() {
+            let head = elements.len() / 8 * 8;
+            let mut out = vec![[0u8; 64]; elements.len()];
+            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
+            unsafe {
+                crate::ifma_normalize::batch_to_commitments(&elements[..head], &mut out[..head])
+            };
+            out.truncate(head);
+            out.extend(batch_to_commitments_scalar(&elements[head..]));
+            return out;
+        }
+        batch_to_commitments_scalar(elements)
     }
 
     pub fn zero() -> Element {
@@ -441,6 +473,240 @@ impl Element {
 // The lexographically largest value is defined to be the positive value
 pub(crate) fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
+}
+
+/// [`Element::batch_map_to_scalar_field`] on the scalar field arithmetic: one batch inversion of the `y`
+/// coordinates, then `x · y⁻¹` reinterpreted. Single-threaded on purpose (small batches).
+pub(crate) fn batch_map_to_scalar_field_scalar(elements: &[Element]) -> Vec<Fr> {
+    let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
+
+    serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
+
+    xs.into_iter()
+        .zip(ys)
+        .map(|(x, y_inv)| base_to_scalar(x * y_inv))
+        .collect()
+}
+
+/// [`Element::hash_commitments`] on the scalar field arithmetic.
+pub(crate) fn hash_commitments_scalar(elements: &[[u8; 64]]) -> Vec<Fr> {
+    let elements: Vec<Element> = elements
+        .iter()
+        .map(|&bytes| Element::from_bytes_unchecked_uncompressed(bytes))
+        .collect();
+
+    batch_map_to_scalar_field_scalar(&elements)
+}
+
+/// [`Element::batch_to_commitments`] on the scalar field arithmetic: ark's batch normalization, then the
+/// canonical bytes of each affine point.
+pub(crate) fn batch_to_commitments_scalar(elements: &[Element]) -> Vec<[u8; 64]> {
+    let points: Vec<_> = elements.iter().map(|e| e.0).collect();
+    EdwardsProjective::normalize_batch(&points)
+        .into_iter()
+        .map(affine_to_canonical_bytes)
+        .collect()
+}
+
+/// A banderwagon element in affine coordinates: the 64 bytes `(x, y)` (Montgomery words) instead of the
+/// 128-byte projective `(X, Y, T, Z)` an [`Element`] carries. The form a witness holds its commitments in:
+/// every decoded point is affine already (`Z = 1`), the verifier's multi-scalar multiplication takes
+/// affine bases, the transcript and the scalar-field map read `x` and `y` only, and the one consumer that
+/// adds to a commitment (the trie update) re-enters projective form with a single multiplication
+/// (`T = x · y`, [`AffineElement::to_element`]). Equality is the quotient group's, as [`Element`]'s.
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct AffineElement(pub(crate) EdwardsAffine);
+
+impl PartialEq for AffineElement {
+    /// [`Element`]'s equality: `x₁ · y₂ == x₂ · y₁`, `(0, 0)` equal to nothing.
+    fn eq(&self, other: &Self) -> bool {
+        let (x1, y1) = (self.0.x, self.0.y);
+        let (x2, y2) = (other.0.x, other.0.y);
+        if x1.is_zero() & y1.is_zero() {
+            return false;
+        }
+        if x2.is_zero() & y2.is_zero() {
+            return false;
+        }
+        (x1 * y2) == (x2 * y1)
+    }
+}
+
+impl From<Element> for AffineElement {
+    /// `Z = 1` (every decoded or normalized point) costs nothing; otherwise one inversion.
+    fn from(e: Element) -> Self {
+        AffineElement(e.0.into())
+    }
+}
+
+impl From<AffineElement> for Element {
+    fn from(a: AffineElement) -> Self {
+        a.to_element()
+    }
+}
+
+impl AffineElement {
+    /// The projective element: `(x, y, x · y, 1)`.
+    pub fn to_element(&self) -> Element {
+        Element(self.0.into())
+    }
+
+    /// The identity, `(0, 1)`.
+    pub fn zero() -> Self {
+        AffineElement(EdwardsAffine::zero())
+    }
+
+    pub fn is_zero(&self) -> bool {
+        *self == Self::zero()
+    }
+
+    /// [`Element::to_bytes`]: `sign(y) · x`, big-endian.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let x = if is_positive(self.0.y) {
+            self.0.x
+        } else {
+            -self.0.x
+        };
+        let mut bytes = [0u8; 32];
+        x.serialize_compressed(&mut bytes[..])
+            .expect("serialization failed");
+        bytes.reverse();
+        bytes
+    }
+
+    /// [`Element::to_bytes_uncompressed`]: the representative with positive `y`, little-endian `x` then `y`.
+    pub fn to_bytes_uncompressed(&self) -> [u8; 64] {
+        affine_to_canonical_bytes(self.0)
+    }
+
+    /// [`Element::from_bytes`], affine.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, SerializationError> {
+        Element::from_bytes(bytes).map(Self::from)
+    }
+
+    /// [`Element::from_bytes_batch`], affine: the lane decode yields `(x, y)` and stores it as is.
+    pub fn from_bytes_batch(bytes: &[[u8; 32]]) -> Vec<Result<Self, SerializationError>> {
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if crate::ifma::available() {
+            return Self::from_bytes_batch_lanes(bytes);
+        }
+        bytes.iter().map(|b| Self::from_bytes(*b)).collect()
+    }
+
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    fn from_bytes_batch_lanes(bytes: &[[u8; 32]]) -> Vec<Result<Self, SerializationError>> {
+        use crate::ifma::{CHUNK, TASK_CHUNKS};
+        let mut out = Vec::with_capacity(bytes.len());
+        for task in bytes.chunks(CHUNK * TASK_CHUNKS) {
+            let mut chunks = task.chunks_exact(CHUNK);
+            let mut xs: Vec<[Fq; CHUNK]> = Vec::with_capacity(TASK_CHUNKS);
+            let mut lane_chunks: Vec<&[[u8; 32]]> = Vec::with_capacity(TASK_CHUNKS);
+            let mut scalar_chunks: Vec<(usize, &[[u8; 32]])> = Vec::new();
+            for (k, chunk) in (&mut chunks).enumerate() {
+                let mut x = [Fq::zero(); CHUNK];
+                let mut parsed = true;
+                for (x, b) in x.iter_mut().zip(chunk) {
+                    let mut le = *b;
+                    le.reverse();
+                    match Fq::deserialize_compressed(&le[..]) {
+                        Ok(v) => *x = v,
+                        Err(_) => {
+                            parsed = false;
+                            break;
+                        }
+                    }
+                }
+                if parsed {
+                    xs.push(x);
+                    lane_chunks.push(chunk);
+                } else {
+                    scalar_chunks.push((k, chunk));
+                }
+            }
+            let decoded = if xs.is_empty() {
+                Vec::new()
+            } else {
+                // SAFETY: `available()` was checked by the caller.
+                unsafe { crate::ifma::decode_chunks(&xs) }
+            };
+            let mut lanes = lane_chunks.iter().zip(decoded);
+            let mut scalars = scalar_chunks.iter().peekable();
+            for k in 0..task.len() / CHUNK {
+                if scalars.peek().is_some_and(|(sk, _)| *sk == k) {
+                    let (_, chunk) = scalars.next().unwrap();
+                    out.extend(chunk.iter().map(|b| Self::from_bytes(*b)));
+                    continue;
+                }
+                let (chunk, (points, undecided)) = lanes.next().expect("a lane chunk per index");
+                for i in 0..CHUNK {
+                    out.push(if undecided[i] {
+                        Self::from_bytes(chunk[i])
+                    } else {
+                        points[i]
+                            .map(|(x, y)| AffineElement(EdwardsAffine::new_unchecked(x, y)))
+                            .ok_or(SerializationError::InvalidData)
+                    });
+                }
+            }
+            out.extend(chunks.remainder().iter().map(|b| Self::from_bytes(*b)));
+        }
+        out
+    }
+
+    /// [`Element::map_to_scalar_field`] on an affine point: `x / y` reinterpreted.
+    pub fn map_to_scalar_field(&self) -> Fr {
+        base_to_scalar(self.0.x / self.0.y)
+    }
+
+    /// [`Element::batch_map_to_scalar_field`] on affine points: the same values, the lanes reading the
+    /// 64-byte records where the host has AVX-512 IFMA.
+    pub fn batch_map_to_scalar_field(elements: &[AffineElement]) -> Vec<Fr> {
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if elements.len() >= 8 && crate::ifma::available() {
+            let head = elements.len() / 8 * 8;
+            let mut out = vec![Fr::zero(); elements.len()];
+            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
+            unsafe {
+                crate::ifma_normalize::batch_map_to_scalar_field_affine(
+                    &elements[..head],
+                    &mut out[..head],
+                )
+            };
+            out.truncate(head);
+            out.extend(batch_map_to_scalar_field_affine_scalar(&elements[head..]));
+            return out;
+        }
+        batch_map_to_scalar_field_affine_scalar(elements)
+    }
+}
+
+/// [`AffineElement::batch_map_to_scalar_field`] on the scalar field arithmetic.
+pub(crate) fn batch_map_to_scalar_field_affine_scalar(elements: &[AffineElement]) -> Vec<Fr> {
+    let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
+    serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
+    xs.into_iter()
+        .zip(ys)
+        .map(|(x, y_inv)| base_to_scalar(x * y_inv))
+        .collect()
+}
+
+/// [`multi_scalar_mul`] on affine bases: no conversion, the bases as they are.
+pub fn multi_scalar_mul_affine(bases: &[AffineElement], scalars: &[Fr]) -> Element {
+    // SAFETY: `AffineElement` is `repr(transparent)` over `EdwardsAffine`.
+    let bases: &[EdwardsAffine] =
+        unsafe { core::slice::from_raw_parts(bases.as_ptr() as *const EdwardsAffine, bases.len()) };
+    Element(msm(bases, scalars))
+}
+
+/// The canonical little-endian bytes of a base field element (tests).
+#[cfg(test)]
+#[allow(dead_code)] // used by the std decoder path only; the test target builds this crate with -D warnings
+pub(crate) fn fq_to_le_bytes(x: Fq) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    x.serialize_compressed(&mut bytes[..])
+        .expect("32 bytes hold a field element");
+    bytes
 }
 
 /// Canonicalizes an affine point and serializes it to 64 bytes.
@@ -556,6 +822,12 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
     };
 
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
+
     Element(msm(&bases, scalars))
 }
 
@@ -651,6 +923,30 @@ impl Hash for Element {
 mod tests {
     extern crate std;
     use self::std::println;
+
+    #[test]
+    fn hash_commitments_rejects_noncanonical_coordinates() {
+        use ark_ff::{BigInteger, PrimeField};
+        let valid = Element::prime_subgroup_generator().to_bytes_uncompressed();
+        let modulus = Fq::MODULUS.to_bytes_le();
+        for n in [1, 7, 8, 9, 16, 17] {
+            for index in 0..n {
+                for offset in [0, 32] {
+                    for bad in [modulus.as_slice(), &[0xff; 32]] {
+                        let mut bytes = vec![valid; n];
+                        bytes[index][offset..offset + 32].copy_from_slice(bad);
+                        assert!(
+                            std::panic::catch_unwind(|| hash_commitments_scalar(&bytes)).is_err()
+                        );
+                        assert!(
+                            std::panic::catch_unwind(|| Element::hash_commitments(&bytes)).is_err(),
+                            "n={n} index={index} offset={offset}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[cfg(feature = "parallel")]
     #[test]
@@ -761,6 +1057,88 @@ mod tests {
                 .collect();
             assert_eq!(got, expected, "bad chunk {bad_chunk}");
         }
+    }
+
+    /// The affine element is the projective one on every path: the batch decode (accepted points,
+    /// canonical `x` with no square root, off-subgroup points, non-canonical bytes, a short tail), the
+    /// compressed and uncompressed bytes, the scalar-field map in batches of every length modulo eight,
+    /// the multi-scalar multiplication, and equality including the `(x, y) ~ (-x, -y)` identification.
+    #[test]
+    fn affine_element_matches_element() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(11);
+        let mut inputs: Vec<[u8; 32]> = Vec::new();
+        for _ in 0..300 {
+            inputs.push((Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes());
+        }
+        for _ in 0..100 {
+            let x = Fq::rand(&mut rng);
+            let mut b = [0u8; 32];
+            x.serialize_compressed(&mut b[..]).unwrap();
+            b.reverse();
+            inputs.push(b);
+        }
+        for _ in 0..10 {
+            inputs.push([0xff; 32]);
+            let mut b = [0u8; 32];
+            rng.fill_bytes(&mut b);
+            inputs.push(b);
+        }
+        inputs.push(Element::zero().to_bytes());
+        let expected = Element::from_bytes_batch(&inputs);
+        let got = AffineElement::from_bytes_batch(&inputs);
+        assert_eq!(got.len(), expected.len());
+        let mut points: Vec<Element> = Vec::new();
+        let mut affine: Vec<AffineElement> = Vec::new();
+        for (e, a) in expected.into_iter().zip(got) {
+            match (e, a) {
+                (Ok(e), Ok(a)) => {
+                    assert_eq!(a.to_element(), e);
+                    assert_eq!(AffineElement::from(e), a);
+                    assert_eq!(a.to_bytes(), e.to_bytes());
+                    assert_eq!(a.to_bytes_uncompressed(), e.to_bytes_uncompressed());
+                    assert_eq!(a.map_to_scalar_field(), e.map_to_scalar_field());
+                    assert_eq!(a.is_zero(), e.is_zero());
+                    points.push(e);
+                    affine.push(a);
+                }
+                (Err(_), Err(_)) => {}
+                (e, a) => panic!("affine {a:?} vs projective {e:?}"),
+            }
+        }
+        assert!(points.len() >= 300);
+        for n in [0usize, 1, 7, 8, 9, 15, 16, 17, 100, points.len()] {
+            assert_eq!(
+                AffineElement::batch_map_to_scalar_field(&affine[..n]),
+                Element::batch_map_to_scalar_field(&points[..n]),
+                "batch of {n}"
+            );
+        }
+        let scalars: Vec<Fr> = (0..points.len()).map(|_| Fr::rand(&mut rng)).collect();
+        assert_eq!(
+            multi_scalar_mul_affine(&affine, &scalars),
+            multi_scalar_mul(&points, &scalars)
+        );
+        assert_eq!(
+            multi_scalar_mul_affine(&affine[..5], &scalars[..5]),
+            multi_scalar_mul(&points[..5], &scalars[..5])
+        );
+        // the other representative of a point is the same affine element, with the same bytes
+        let neg = AffineElement(EdwardsAffine::new_unchecked(-affine[0].0.x, -affine[0].0.y));
+        assert_eq!(neg, affine[0]);
+        assert_eq!(neg.to_bytes(), affine[0].to_bytes());
+        assert_eq!(
+            neg.to_bytes_uncompressed(),
+            affine[0].to_bytes_uncompressed()
+        );
+        assert_ne!(affine[0], affine[1]);
+        assert_eq!(AffineElement::zero().to_element(), Element::zero());
+        assert!(AffineElement::zero().is_zero());
+        // a projective point with Z ≠ 1 (a sum) converts by its affine coordinates
+        let sum = points[0] + points[1];
+        assert_eq!(AffineElement::from(sum).to_element(), sum);
+        assert_eq!(AffineElement::from(sum).to_bytes(), sum.to_bytes());
     }
 
     /// Decode cost per point, lanes against the scalar path, one thread (run with `--ignored --nocapture`).

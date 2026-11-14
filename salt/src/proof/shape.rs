@@ -188,6 +188,83 @@ pub(super) fn slot_position(key: &SaltKey) -> usize {
     (key.slot_id() & 0xFF) as usize
 }
 
+/// The internal `(node, position)` pairs and the leaf `(node, position, key index)` triples of
+/// [`sorted_parents_and_points`].
+pub(crate) type SortedParentsAndPoints = (Vec<(NodeId, u8)>, Vec<(NodeId, u8, u32)>);
+
+/// [`parents_and_points`] as two sorted, deduplicated vectors of `(node, position)` pairs, the
+/// order a walk of the two maps visits them (node ascending, then position ascending), without
+/// building a map and a set per key and folding them. A position is below 256 by construction
+/// (`vc_position_in_parent` is taken modulo the trie width; a slot position is the low 8 bits).
+///
+/// Each leaf pair carries the index in `salt_keys` of a key that produced it, so a caller
+/// holding the keys in order reads the key's value by position instead of by a map lookup.
+/// Consecutive keys in one bucket (or one bucket segment) share their main-trie (or subtree)
+/// path, which is then pushed once; any order of `salt_keys` gives the same result.
+pub(crate) fn sorted_parents_and_points(
+    salt_keys: &[SaltKey],
+    levels: &FxHashMap<BucketId, u8>,
+) -> SortedParentsAndPoints {
+    let mut internal_nodes: Vec<(NodeId, u8)> = Vec::with_capacity(salt_keys.len() * 2 + 8);
+    let mut slot_position_nodes: Vec<(NodeId, u8, u32)> = Vec::with_capacity(salt_keys.len());
+    let mut previous_bucket = None;
+    let mut previous_leaf = None;
+
+    for (index, salt_key) in salt_keys.iter().enumerate() {
+        let bucket_id = salt_key.bucket_id();
+        let level = levels[&bucket_id];
+
+        // Phase 1: the bucket root's path through the main trie, once per run of one bucket.
+        // The main trie has a fixed depth, so the walk is exactly `MAIN_TRIE_LEVELS - 1`
+        // steps; bounding it by that count rather than by reaching the root keeps a corrupt
+        // parent id from spinning forever (as in `record_key_paths`).
+        if previous_bucket != Some(bucket_id) {
+            previous_bucket = Some(bucket_id);
+            let mut node = bucket_root_node_id(bucket_id);
+            for _ in 0..MAIN_TRIE_LEVELS - 1 {
+                let parent_node = get_parent_node(&node);
+                internal_nodes.push((parent_node, vc_position_in_parent(&node) as u8));
+                node = parent_node;
+            }
+            debug_assert_eq!(node, ROOT_NODE_ID);
+        }
+
+        // Phases 2 and 3: the bucket subtree's path and its bridge, once per run of one segment.
+        let leaf = subtree_leaf_for_key(salt_key);
+        if previous_leaf != Some((leaf, level)) {
+            previous_leaf = Some((leaf, level));
+            let mut node = leaf;
+            let mut count = level;
+            while count > 2 {
+                let parent_node = get_parent_node(&node);
+                internal_nodes.push((parent_node, vc_position_in_parent(&node) as u8));
+                node = parent_node;
+                count -= 1;
+            }
+            if count == 2 {
+                internal_nodes.push((
+                    encode_parent(bucket_root_node_id(bucket_id), level),
+                    vc_position_in_parent(&node) as u8,
+                ));
+            }
+        }
+
+        // Phase 4: the key's slot position in its segment.
+        let node = if level == 1 {
+            bucket_root_node_id(bucket_id)
+        } else {
+            leaf
+        };
+        slot_position_nodes.push((node, (salt_key.slot_id() & 0xFF) as u8, index as u32));
+    }
+
+    internal_nodes.sort_unstable();
+    internal_nodes.dedup();
+    slot_position_nodes.sort_unstable();
+    slot_position_nodes.dedup_by(|a, b| (a.0, a.1) == (b.0, b.1));
+    (internal_nodes, slot_position_nodes)
+}
+
 /// Encodes bucket tree level information into a main trie node ID.
 ///
 /// SALT's dual addressing system requires bridging between the main trie and bucket
@@ -401,6 +478,68 @@ mod tests {
             .for_each(|&(node, level)| {
                 assert!(!internal_nodes[&encode_parent(node, level)].is_empty());
             });
+    }
+
+    /// The sorted pairs are the maps' walk, pair for pair, for keys in any order, with
+    /// duplicates, over every level, and with slot ids that collide on one position of a
+    /// level-1 bucket; each leaf pair's key produces that pair.
+    #[test]
+    fn test_sorted_parents_and_points_equals_maps() {
+        let test_cases = [
+            (0, 1, 0xFF),
+            (256, 1, 0xFF),
+            (65535, 1, 0xFFFF),
+            (65536, 1, 0xFF),
+            (65540, 2, 0xFFFF),
+            (1_000_000, 3, 0xFFFFFF),
+            (5_000_000, 4, 0xFFFFFFFF),
+            (16_777_215, 5, 0xFFFFFFFF),
+        ];
+        let mut rng = StdRng::seed_from_u64(11);
+        for round in 0..20 {
+            let mut levels = FxHashMap::default();
+            let mut salt_keys = Vec::new();
+            for &(bucket_id, level, slot_mask) in &test_cases {
+                levels.insert(bucket_id, level);
+                for _ in 0..(1 + round * 3) {
+                    let slot_id = rng.random::<u64>() & slot_mask;
+                    salt_keys.push(SaltKey::from((bucket_id, slot_id)));
+                    if rng.random::<u8>() < 40 {
+                        salt_keys.push(SaltKey::from((bucket_id, slot_id)));
+                    }
+                }
+            }
+            if round % 2 == 1 {
+                salt_keys.sort_unstable();
+            }
+
+            let (internal_map, slot_map) = parents_and_points(&salt_keys, &levels);
+            let (internal, slots) = sorted_parents_and_points(&salt_keys, &levels);
+
+            let expected_internal: Vec<(NodeId, u8)> = internal_map
+                .iter()
+                .flat_map(|(&n, ps)| ps.iter().map(move |&p| (n, p as u8)))
+                .collect();
+            let expected_slots: Vec<(NodeId, u8)> = slot_map
+                .iter()
+                .flat_map(|(&n, ps)| ps.iter().map(move |&p| (n, p as u8)))
+                .collect();
+            assert_eq!(internal, expected_internal);
+            assert_eq!(
+                slots.iter().map(|&(n, p, _)| (n, p)).collect::<Vec<_>>(),
+                expected_slots
+            );
+            for &(node, position, index) in &slots {
+                let key = &salt_keys[index as usize];
+                let level = levels[&key.bucket_id()];
+                let key_node = if level == 1 {
+                    bucket_root_node_id(key.bucket_id())
+                } else {
+                    subtree_leaf_for_key(key)
+                };
+                assert_eq!((key_node, (key.slot_id() & 0xFF) as u8), (node, position));
+            }
+        }
     }
 
     #[test]

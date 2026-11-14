@@ -217,6 +217,8 @@ pub(crate) struct Ctx {
     trace_minus_one_div_two: [u64; 4],
     modulus_minus_one_div_two: [u64; 4],
     pub(crate) modulus_minus_two: [u64; 4],
+    /// `(p − 1) / 2` as lane limbs: a canonical `y` is positive (`y > −y`) iff `y` exceeds it.
+    half_p: L5,
     /// The order-256 subgroup `⟨g^(2^24)⟩` (g the 2^32-th root of unity): the canonical Montgomery low
     /// limb of each element, sorted, and the exponent it belongs to.
     dlog_keys: [u64; 256],
@@ -278,6 +280,7 @@ unsafe fn ctx() -> Ctx {
         trace_minus_one_div_two: Fq::TRACE_MINUS_ONE_DIV_TWO.0,
         modulus_minus_one_div_two: Fq::MODULUS_MINUS_ONE_DIV_TWO.0,
         modulus_minus_two: [0; 4],
+        half_p: bcast(&to_limbs52(&Fq::MODULUS_MINUS_ONE_DIV_TWO)),
         dlog_keys: [0; 256],
         dlog_vals: [0; 256],
         neg_pow: Vec::new(),
@@ -788,6 +791,15 @@ pub(crate) unsafe fn sub(c: &Ctx, a: &L5, b: &L5) -> L5 {
     r
 }
 
+/// The plain (non-Montgomery) canonical integer of each lane's value: `a · R⁻¹ mod p`, in `[0, p)`.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn to_plain(c: &Ctx, a: &L5) -> L5 {
+    let mut one_int = [_mm512_setzero_si512(); 5];
+    one_int[0] = _mm512_set1_epi64(1);
+    canon(c, &mont_mul(c, a, &one_int))
+}
+
 /// Lane mask: which lanes of canonical `a` are zero.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -798,6 +810,74 @@ pub(crate) unsafe fn is_zero(a: &L5) -> __mmask8 {
         m &= _mm512_cmpeq_epi64_mask(a[j], zero);
     }
     m
+}
+
+/// Lane mask: which lanes of canonical `a` exceed `(p − 1) / 2`, i.e. are "positive" in the sense of
+/// [`crate::element::is_positive`] (`a > −a` as canonical integers).
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn is_positive(c: &Ctx, a: &L5) -> __mmask8 {
+    let mut gt: __mmask8 = 0;
+    let mut decided: __mmask8 = 0;
+    for j in (0..5).rev() {
+        let g = _mm512_cmpgt_epu64_mask(a[j], c.half_p[j]);
+        let l = _mm512_cmplt_epu64_mask(a[j], c.half_p[j]);
+        gt |= g & !decided;
+        decided |= g | l;
+    }
+    gt
+}
+
+/// `p − a` canonical for canonical `a` (zero stays zero): the field negation on plain or Montgomery lanes.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn neg_canon(c: &Ctx, a: &L5) -> L5 {
+    let z = is_zero(a);
+    let mut r = [_mm512_setzero_si512(); 5];
+    let mut borrow = _mm512_setzero_si512();
+    for j in 0..5 {
+        let d = _mm512_sub_epi64(_mm512_sub_epi64(c.p[j], a[j]), borrow);
+        borrow = _mm512_srli_epi64(d, 63);
+        r[j] = _mm512_and_si512(d, c.mask);
+    }
+    let zero = [_mm512_setzero_si512(); 5];
+    sel(z, &r, &zero)
+}
+
+/// Five 52-bit limbs (a canonical value < 2^255) as four 64-bit words, the little-endian integer.
+#[inline]
+#[target_feature(enable = "avx512f")]
+pub(crate) unsafe fn limbs_to_words(l: &L5) -> [__m512i; 4] {
+    [
+        _mm512_or_si512(l[0], _mm512_slli_epi64(l[1], 52)),
+        _mm512_or_si512(_mm512_srli_epi64(l[1], 12), _mm512_slli_epi64(l[2], 40)),
+        _mm512_or_si512(_mm512_srli_epi64(l[2], 24), _mm512_slli_epi64(l[3], 28)),
+        _mm512_or_si512(_mm512_srli_epi64(l[3], 36), _mm512_slli_epi64(l[4], 16)),
+    ]
+}
+
+/// Four 64-bit words (ark's Montgomery representation, gathered one word per register) as five
+/// 52-bit limbs; the inverse of [`limbs_to_words`].
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn words_to_limbs(c: &Ctx, w: &[__m512i; 4]) -> L5 {
+    let m = c.mask;
+    [
+        _mm512_and_si512(w[0], m),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[0], 52), _mm512_slli_epi64(w[1], 12)),
+            m,
+        ),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[1], 40), _mm512_slli_epi64(w[2], 24)),
+            m,
+        ),
+        _mm512_and_si512(
+            _mm512_or_si512(_mm512_srli_epi64(w[2], 28), _mm512_slli_epi64(w[3], 36)),
+            m,
+        ),
+        _mm512_srli_epi64(w[3], 16),
+    ]
 }
 
 /// A field element (ark Montgomery form, R = 2^256) as the lane form's limbs (R = 2^260): the lane

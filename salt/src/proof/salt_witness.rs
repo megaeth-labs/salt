@@ -292,7 +292,7 @@ impl TrieReader for SaltWitness {
     /// - Returns the commitment if the node is witnessed in the proof
     /// - Returns an error if the node is not included in the witness
     fn commitment(&self, node_id: NodeId) -> Result<CommitmentBytes, Self::Error> {
-        match self.proof.parents_commitments.get(&node_id) {
+        match self.proof.parents_commitments.get(node_id) {
             Some(commitment) => Ok(commitment.as_bytes()),
             None => Err(SaltError::NotInWitness { what: "Trie node" }),
         }
@@ -682,7 +682,7 @@ mod tests {
             Some(BucketMeta::default()),
             vec![(0, None), (1, None)],
         );
-        witness.proof.parents_commitments.remove(&ROOT_NODE_ID);
+        witness.proof.parents_commitments.remove(ROOT_NODE_ID);
 
         assert!(matches!(
             witness.state_root(),
@@ -872,9 +872,9 @@ mod tests {
         // Build witness with two witnessed nodes
         let mut proof = create_mock_proof();
         let gen = Element::prime_subgroup_generator();
-        let c1 = SerdeCommitment(gen * Fr::from(1u64));
-        let c2 = SerdeCommitment(gen * Fr::from(2u64));
-        proof.parents_commitments = [(12345, c1.clone()), (67890, c2.clone())].into();
+        let c1 = SerdeCommitment::from(gen * Fr::from(1u64));
+        let c2 = SerdeCommitment::from(gen * Fr::from(2u64));
+        proof.parents_commitments = [(12345, c1), (67890, c2)].into();
 
         let witness = SaltWitness {
             kvs: BTreeMap::new(),

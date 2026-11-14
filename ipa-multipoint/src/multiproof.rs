@@ -9,7 +9,10 @@ use crate::math_utils::powers_of_par;
 use crate::transcript::Transcript;
 use crate::transcript::TranscriptProtocol;
 
-use banderwagon::{multi_scalar_mul, salt_committer::Committer, trait_defs::*, Element, Fr};
+use banderwagon::{
+    multi_scalar_mul, multi_scalar_mul_affine, salt_committer::Committer, trait_defs::*,
+    AffineElement, Element, Fr,
+};
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
@@ -45,6 +48,21 @@ impl From<ProverQuery> for VerifierQuery {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifierQuery {
     pub commitment: Element,
+    pub point: Fr,
+    pub result: Fr,
+}
+
+/// A verifier query whose commitment is an index into a shared slice of commitments
+/// (`MultiPointProof::check_indexed`), for callers whose queries open a small set of
+/// polynomials at many points each: a trie witness opens each node's polynomial at every
+/// child or slot the proof touches, so a `VerifierQuery` per opening carries the node's
+/// 128-byte commitment once per opening — the same point copied into every query, then copied
+/// again into the multiexp's point vector. Here the node's commitment is stored once, the
+/// query is 72 bytes, and the multiexp runs over the commitment slice itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexedQuery {
+    /// Index into the `commitments` slice handed to `check_indexed`.
+    pub commitment: u32,
     pub point: Fr,
     pub result: Fr,
 }
@@ -271,37 +289,84 @@ impl QueryData for VerifierQuery {
     }
 }
 
+const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
+
+/// Queries per transcript chunk: the chunk is serialized in parallel into one buffer and the
+/// buffer fed to the transcript's hash, so the transcript never holds more than this many
+/// queries' bytes (≈ 1.6 MB) however many queries a proof has. A 16K chunk halves the
+/// serialization-and-hash handoffs for large proofs while keeping memory bounded.
+const TRANSCRIPT_CHUNK_QUERIES: usize = 16384;
+
+#[inline(always)]
+fn write_query_bytes(chunk_res: &mut [u8], commitment: &[u8; 32], point: &Fr, result: &Fr) {
+    // Commitment
+    chunk_res[0] = b'C';
+    chunk_res[1..33].copy_from_slice(commitment);
+
+    // Point
+    chunk_res[33] = b'z';
+    point
+        .serialize_compressed(&mut chunk_res[34..66])
+        .expect("Failed to serialize point");
+
+    // Result
+    chunk_res[66] = b'y';
+    result
+        .serialize_compressed(&mut chunk_res[67..99])
+        .expect("Failed to serialize result");
+}
+
+/// Appends `n` queries' bytes to the transcript, `write(i, bytes)` producing query `i`'s
+/// 99 bytes, chunk by chunk: each chunk is written in parallel, then hashed in order.
+#[inline(always)]
+fn record_query_bytes(
+    transcript: &mut Transcript,
+    n: usize,
+    write: impl Fn(usize, &mut [u8]) + Sync,
+) {
+    let mut buffer = vec![0u8; n.min(TRANSCRIPT_CHUNK_QUERIES) * BYTES_PER_QUERY];
+    let mut base = 0;
+    while base < n {
+        let len = (n - base).min(TRANSCRIPT_CHUNK_QUERIES);
+        let slice = &mut buffer[..len * BYTES_PER_QUERY];
+        chunks_mut!(slice, BYTES_PER_QUERY)
+            .enumerate()
+            .for_each(|(j, chunk_res)| write(base + j, chunk_res));
+        transcript.append_raw(slice);
+        base += len;
+    }
+}
+
 #[inline(always)]
 fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, queries: &[T]) {
-    const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
-    let total_size = queries.len() * BYTES_PER_QUERY;
+    record_query_bytes(transcript, queries.len(), |i, chunk_res| {
+        let p = &queries[i];
+        write_query_bytes(
+            chunk_res,
+            &p.commitment().to_bytes(),
+            &p.point_as_fr(),
+            p.result(),
+        )
+    });
+}
 
-    let origin = transcript.state.len();
-    transcript.state.resize(origin + total_size, 0);
-
-    let state_slice = &mut transcript.state[origin..];
-
-    // Process chunks in parallel
-    chunks_mut!(state_slice, BYTES_PER_QUERY)
-        .zip(iter!(queries))
-        .for_each(|(chunk_res, p)| {
-            // Commitment
-            chunk_res[0] = b'C';
-            chunk_res[1..33].copy_from_slice(&p.commitment().to_bytes());
-
-            // Point
-            chunk_res[33] = b'z';
-            let point_scalar = p.point_as_fr();
-            point_scalar
-                .serialize_compressed(&mut chunk_res[34..66])
-                .expect("Failed to serialize point");
-
-            // Result
-            chunk_res[66] = b'y';
-            p.result()
-                .serialize_compressed(&mut chunk_res[67..99])
-                .expect("Failed to serialize result");
-        });
+/// The same transcript bytes as [`record_query_transcript`] for indexed queries: each
+/// commitment is serialized once (`commitment_bytes`, parallel to `commitments`).
+#[inline(always)]
+fn record_indexed_query_transcript(
+    transcript: &mut Transcript,
+    commitment_bytes: &[[u8; 32]],
+    queries: &[IndexedQuery],
+) {
+    record_query_bytes(transcript, queries.len(), |i, chunk_res| {
+        let q = &queries[i];
+        write_query_bytes(
+            chunk_res,
+            &commitment_bytes[q.commitment as usize],
+            &q.point,
+            &q.result,
+        )
+    });
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -403,6 +468,74 @@ impl MultiPointProof {
 
         // Check IPA
         let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t); // TODO: we could put this as a method on PrecomputedWeights
+
+        self.open_proof
+            .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t)
+    }
+
+    /// [`Self::check`] over indexed queries: the same transcript, the same challenges and the
+    /// same acceptance for the queries `(commitments[q.commitment], q.point, q.result)`, with
+    /// the multiexp over `commitments` itself — each commitment's scalar the sum of its
+    /// queries' `r^i / (t − z_i)` — instead of over one copied point per query. Returns
+    /// `false` for an index outside `commitments`.
+    pub fn check_indexed(
+        &self,
+        crs: &CRS,
+        precomp: &PrecomputedWeights,
+        commitments: &[AffineElement],
+        queries: &[IndexedQuery],
+        transcript: &mut Transcript,
+    ) -> bool {
+        if queries
+            .iter()
+            .any(|q| q.commitment as usize >= commitments.len())
+        {
+            return false;
+        }
+
+        transcript.domain_sep(b"multiproof");
+        // 1. Compute `r`
+        //
+        // Add points and evaluations
+        let commitment_bytes: Vec<[u8; 32]> = iter!(commitments).map(|c| c.to_bytes()).collect();
+        record_indexed_query_transcript(transcript, &commitment_bytes, queries);
+        drop(commitment_bytes);
+
+        let r = transcript.challenge_scalar(b"r");
+
+        // 2. Compute `t`
+        transcript.append_point(b"D", &self.g_x_comm);
+        let t = transcript.challenge_scalar(b"t");
+
+        // 3. Compute g_2(t), and each commitment's scalar for [g_1(X)]
+        //
+        // helper_i = r^i / (t − z_i); g_2(t) = Σ helper_i · y_i; the multiexp scalar of a
+        // commitment is the sum of the helpers of the queries that open it. One serial pass:
+        // a handful of field operations per query, and the powers of r taken as it goes.
+        let mut g2_den: Vec<_> = queries.iter().map(|query| t - query.point).collect();
+
+        serial_batch_inversion_and_mul(&mut g2_den, &Fr::one());
+
+        let mut comm_scalars = vec![Fr::zero(); commitments.len()];
+        let mut g2_t = Fr::zero();
+        let mut r_i = Fr::one();
+        for (query, den_inv) in queries.iter().zip(g2_den) {
+            let helper = den_inv * r_i;
+            g2_t += helper * query.result;
+            comm_scalars[query.commitment as usize] += helper;
+            r_i *= r;
+        }
+
+        //4. Compute [g_1(X)] = E
+        let g1_comm = multi_scalar_mul_affine(commitments, &comm_scalars);
+
+        transcript.append_point(b"E", &g1_comm);
+
+        // E - D
+        let g3_comm = g1_comm - self.g_x_comm;
+
+        // Check IPA
+        let b = LagrangeBasis::evaluate_lagrange_coefficients(precomp, crs.n, t);
 
         self.open_proof
             .verify_multiexp(transcript, crs, b, g3_comm, t, g2_t)
@@ -715,15 +848,104 @@ mod tests {
 
         let mut transcript = Transcript::new(b"");
         record_query_transcript(&mut transcript, &prover_queries);
-        let prover_state2 = transcript.state;
+        let prover_state2 = transcript.pending_digest();
 
         assert_eq!(prover_state, prover_state2);
 
         let mut transcript = Transcript::new(b"");
         record_query_transcript(&mut transcript, &verifier_queries);
-        let verifier_state2 = transcript.state;
+        let verifier_state2 = transcript.pending_digest();
 
         assert_eq!(verifier_state, verifier_state2);
+
+        // Indexed queries over a shared commitment slice: the same bytes again, across chunk
+        // boundaries (more queries than one transcript chunk, each commitment opened at
+        // several points).
+        let (_, verifier_queries) = generate_test_queries(3 * TRANSCRIPT_CHUNK_QUERIES + 17);
+        let mut commitments: Vec<Element> = Vec::new();
+        let indexed: Vec<IndexedQuery> = verifier_queries
+            .iter()
+            .map(|q| {
+                let idx = match commitments.iter().position(|c| *c == q.commitment) {
+                    Some(i) => i,
+                    None => {
+                        commitments.push(q.commitment);
+                        commitments.len() - 1
+                    }
+                };
+                IndexedQuery {
+                    commitment: idx as u32,
+                    point: q.point,
+                    result: q.result,
+                }
+            })
+            .collect();
+        let bytes: Vec<[u8; 32]> = commitments.iter().map(|c| c.to_bytes()).collect();
+        let mut transcript = Transcript::new(b"");
+        record_indexed_query_transcript(&mut transcript, &bytes, &indexed);
+        let mut expected = Transcript::new(b"");
+        record_query_transcript(&mut expected, &verifier_queries);
+        assert_eq!(transcript.pending_digest(), expected.pending_digest());
+    }
+
+    /// `check_indexed` accepts exactly what `check` accepts, on a proof whose queries open a
+    /// few polynomials at many points (the trie witness shape), and refuses a tampered result.
+    #[test]
+    fn check_indexed_matches_check() {
+        let mut rng = test_rng();
+        let crs = CRS::new(32, b"random seed");
+        let precomp = PrecomputedWeights::new(32);
+
+        let polys: Vec<LagrangeBasis> = (0..5)
+            .map(|_| LagrangeBasis::new((0..32).map(|_| Fr::rand(&mut rng)).collect()))
+            .collect();
+        let comms: Vec<Element> = polys.iter().map(|p| crs.commit_lagrange_poly(p)).collect();
+
+        let mut prover_queries = Vec::new();
+        let mut indexed = Vec::new();
+        for (i, poly) in polys.iter().enumerate() {
+            for point in (0..32).step_by(1 + i) {
+                let result = poly.evaluate_in_domain(point);
+                prover_queries.push(ProverQuery {
+                    commitment: comms[i],
+                    poly: poly.clone().into(),
+                    point,
+                    result,
+                });
+                indexed.push(IndexedQuery {
+                    commitment: i as u32,
+                    point: Fr::from(point as u128),
+                    result,
+                });
+            }
+        }
+        let verifier_queries: Vec<VerifierQuery> =
+            prover_queries.iter().cloned().map(Into::into).collect();
+
+        let mut prover_transcript = Transcript::new(b"test");
+        let proof = MultiPoint::open(
+            crs.clone(),
+            &precomp,
+            &mut prover_transcript,
+            prover_queries,
+        );
+
+        let mut t1 = Transcript::new(b"test");
+        assert!(proof.check(&crs, &precomp, &verifier_queries, &mut t1));
+        let affine: Vec<AffineElement> = comms.iter().map(|c| AffineElement::from(*c)).collect();
+        let mut t2 = Transcript::new(b"test");
+        assert!(proof.check_indexed(&crs, &precomp, &affine, &indexed, &mut t2));
+        assert_eq!(t1.pending_digest(), t2.pending_digest());
+
+        let mut tampered = indexed.clone();
+        tampered[3].result += Fr::one();
+        let mut t3 = Transcript::new(b"test");
+        assert!(!proof.check_indexed(&crs, &precomp, &affine, &tampered, &mut t3));
+
+        let mut out_of_range = indexed.clone();
+        out_of_range[0].commitment = comms.len() as u32;
+        let mut t4 = Transcript::new(b"test");
+        assert!(!proof.check_indexed(&crs, &precomp, &affine, &out_of_range, &mut t4));
     }
 
     fn generate_test_queries(size: usize) -> (Vec<ProverQuery>, Vec<VerifierQuery>) {
@@ -765,8 +987,8 @@ mod tests {
         (prover_queries, verifier_queries)
     }
 
-    fn prover_query_transcript(queries: &[ProverQuery]) -> Vec<u8> {
-        let mut transcript = Transcript { state: Vec::new() };
+    fn prover_query_transcript(queries: &[ProverQuery]) -> [u8; 32] {
+        let mut transcript = Transcript::new(b"");
 
         for query in queries.iter() {
             transcript.append_point(b"C", &query.commitment);
@@ -776,17 +998,17 @@ mod tests {
             // It's just an index operation on the lagrange basis
             transcript.append_scalar(b"y", &query.result)
         }
-        transcript.state
+        transcript.pending_digest()
     }
 
-    fn verifier_query_transcript(queries: &[VerifierQuery]) -> Vec<u8> {
-        let mut transcript = Transcript { state: Vec::new() };
+    fn verifier_query_transcript(queries: &[VerifierQuery]) -> [u8; 32] {
+        let mut transcript = Transcript::new(b"");
 
         for query in queries.iter() {
             transcript.append_point(b"C", &query.commitment);
             transcript.append_scalar(b"z", &query.point);
             transcript.append_scalar(b"y", &query.result);
         }
-        transcript.state
+        transcript.pending_digest()
     }
 }
