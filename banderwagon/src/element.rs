@@ -112,9 +112,91 @@ impl Element {
         let point = Self::get_point_from_x(x).ok_or(SerializationError::InvalidData)?;
 
         // Verify point is in the correct subgroup
-        subgroup_check(&point)
-            .then_some(Element(point))
-            .ok_or(SerializationError::InvalidData)
+        crate::decoder_arithmetic::is_nonzero_square(
+            Fq::one() - BandersnatchConfig::COEFF_A * point.x.square(),
+        )
+        .then_some(Element(point))
+        .ok_or(SerializationError::InvalidData)
+    }
+
+    /// Deserializes many 32-byte compressed elements, one result per input in order, each equal to
+    /// what [`Element::from_bytes`] returns for it.
+    ///
+    /// On an `x86_64` host with AVX-512 IFMA the three exponentiations every point pays (the subgroup
+    /// check's Legendre symbol, the inversion in `y² = n/d`, the Tonelli–Shanks square root) run eight
+    /// points per vector register in [`crate::ifma`], in chunks of [`crate::ifma::CHUNK`]; the chunk's
+    /// tail, any input whose bytes are not a canonical `x`, and any lane the vector path does not
+    /// accept go through [`Element::from_bytes`] itself, so the vector path never rejects an input on
+    /// its own. Everywhere else this is [`Element::from_bytes`] mapped over the inputs.
+    pub fn from_bytes_batch(bytes: &[[u8; 32]]) -> Vec<Result<Element, SerializationError>> {
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if crate::ifma::available() {
+            return Self::from_bytes_batch_lanes(bytes);
+        }
+        bytes.iter().map(|b| Self::from_bytes(*b)).collect()
+    }
+
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    fn from_bytes_batch_lanes(bytes: &[[u8; 32]]) -> Vec<Result<Element, SerializationError>> {
+        use crate::ifma::{CHUNK, TASK_CHUNKS};
+        let mut out = Vec::with_capacity(bytes.len());
+        // the whole chunks of each task decoded together (one inversion per task), any chunk with
+        // a non-canonical input and the tail shorter than a chunk through the scalar path
+        for task in bytes.chunks(CHUNK * TASK_CHUNKS) {
+            let mut chunks = task.chunks_exact(CHUNK);
+            let mut xs: Vec<[Fq; CHUNK]> = Vec::with_capacity(TASK_CHUNKS);
+            let mut lane_chunks: Vec<&[[u8; 32]]> = Vec::with_capacity(TASK_CHUNKS);
+            let mut scalar_chunks: Vec<(usize, &[[u8; 32]])> = Vec::new();
+            for (k, chunk) in (&mut chunks).enumerate() {
+                let mut x = [Fq::zero(); CHUNK];
+                let mut parsed = true;
+                for (x, b) in x.iter_mut().zip(chunk) {
+                    let mut le = *b;
+                    le.reverse();
+                    match Fq::deserialize_compressed(&le[..]) {
+                        Ok(v) => *x = v,
+                        Err(_) => {
+                            parsed = false;
+                            break;
+                        }
+                    }
+                }
+                if parsed {
+                    xs.push(x);
+                    lane_chunks.push(chunk);
+                } else {
+                    scalar_chunks.push((k, chunk));
+                }
+            }
+            let decoded = if xs.is_empty() {
+                Vec::new()
+            } else {
+                // SAFETY: `available()` was checked by the caller.
+                unsafe { crate::ifma::decode_chunks(&xs) }
+            };
+            let mut lanes = lane_chunks.iter().zip(decoded);
+            let mut scalars = scalar_chunks.iter().peekable();
+            for k in 0..task.len() / CHUNK {
+                if scalars.peek().is_some_and(|(sk, _)| *sk == k) {
+                    let (_, chunk) = scalars.next().unwrap();
+                    out.extend(chunk.iter().map(|b| Self::from_bytes(*b)));
+                    continue;
+                }
+                let (chunk, (points, _)) = lanes.next().expect("a lane chunk per index");
+                for i in 0..CHUNK {
+                    // The lanes only accept. A point they do not return (no root, off the
+                    // subgroup, or undecided) is decoded again by the scalar path, so every
+                    // rejection is `from_bytes`'s own and no fault in the lanes can turn an
+                    // input the scalar path accepts into an error.
+                    out.push(match points[i] {
+                        Some((x, y)) => Ok(Element(EdwardsAffine::new_unchecked(x, y).into())),
+                        None => Self::from_bytes(chunk[i]),
+                    });
+                }
+            }
+            out.extend(chunks.remainder().iter().map(|b| Self::from_bytes(*b)));
+        }
+        out
     }
 
     /// Serializes this element to a 64-byte uncompressed representation.
@@ -217,7 +299,7 @@ impl Element {
         let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one())
             / (BandersnatchConfig::COEFF_D * x_sq - Fq::one());
 
-        let mut y = y_squared.sqrt()?;
+        let mut y = crate::decoder_arithmetic::sqrt(y_squared)?;
         if !is_positive(y) {
             y = -y;
         }
@@ -357,7 +439,7 @@ impl Element {
 }
 
 // The lexographically largest value is defined to be the positive value
-fn is_positive(coordinate: Fq) -> bool {
+pub(crate) fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
 }
 
@@ -525,10 +607,221 @@ impl Hash for Element {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use self::std::println;
+    /// `from_bytes_batch` returns `from_bytes`'s result on every input: accepted points, canonical `x`
+    /// with no square root, points off the prime subgroup, non-canonical bytes, and a tail shorter than
+    /// a chunk.
+    #[test]
+    fn from_bytes_batch_matches_from_bytes() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(7);
+        let mut inputs: Vec<[u8; 32]> = Vec::new();
+        for _ in 0..200 {
+            inputs.push((Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes());
+        }
+        for _ in 0..200 {
+            let x = Fq::rand(&mut rng);
+            let mut b = [0u8; 32];
+            x.serialize_compressed(&mut b[..]).unwrap();
+            b.reverse();
+            inputs.push(b);
+        }
+        for _ in 0..20 {
+            inputs.push([0xff; 32]);
+            let mut b = [0u8; 32];
+            rng.fill_bytes(&mut b);
+            inputs.push(b);
+        }
+        let expected: Vec<Option<[u8; 64]>> = inputs
+            .iter()
+            .map(|b| {
+                Element::from_bytes(*b)
+                    .ok()
+                    .map(|e| e.to_bytes_uncompressed())
+            })
+            .collect();
+        let got: Vec<Option<[u8; 64]>> = Element::from_bytes_batch(&inputs)
+            .into_iter()
+            .map(|r| r.ok().map(|e| e.to_bytes_uncompressed()))
+            .collect();
+        assert_eq!(got.len(), expected.len());
+        assert_eq!(got, expected);
+        assert!(expected.iter().filter(|p| p.is_some()).count() >= 200);
+        assert!(expected.iter().filter(|p| p.is_none()).count() >= 100);
+        // a decode task whose chunks mix canonical and non-canonical inputs in every position keeps
+        // its outputs in order
+        let good: Vec<[u8; 32]> = inputs[..32].to_vec();
+        for bad_chunk in 0..4 {
+            let mut mixed: Vec<[u8; 32]> = Vec::new();
+            for k in 0..5 {
+                mixed.extend_from_slice(&good);
+                if k == bad_chunk {
+                    mixed[k * 32 + 5] = [0xff; 32];
+                }
+            }
+            mixed.extend_from_slice(&inputs[200..210]);
+            let expected: Vec<Option<[u8; 64]>> = mixed
+                .iter()
+                .map(|b| {
+                    Element::from_bytes(*b)
+                        .ok()
+                        .map(|e| e.to_bytes_uncompressed())
+                })
+                .collect();
+            let got: Vec<Option<[u8; 64]>> = Element::from_bytes_batch(&mixed)
+                .into_iter()
+                .map(|r| r.ok().map(|e| e.to_bytes_uncompressed()))
+                .collect();
+            assert_eq!(got, expected, "bad chunk {bad_chunk}");
+        }
+    }
+
+    /// Decode cost per point, lanes against the scalar path, one thread (run with `--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn bench_from_bytes_batch() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(11);
+        let inputs: Vec<[u8; 32]> = (0..4096)
+            .map(|_| (Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes())
+            .collect();
+        for rep in 0..3 {
+            let t = std::time::Instant::now();
+            let got = Element::from_bytes_batch(&inputs);
+            let batch_ns = t.elapsed().as_nanos() as f64 / inputs.len() as f64;
+            let t = std::time::Instant::now();
+            let scalar: Vec<_> = inputs.iter().map(|b| Element::from_bytes(*b)).collect();
+            let scalar_ns = t.elapsed().as_nanos() as f64 / inputs.len() as f64;
+            assert_eq!(got.len(), scalar.len());
+            assert!(got
+                .iter()
+                .zip(&scalar)
+                .all(|(a, b)| a.as_ref().ok() == b.as_ref().ok()));
+            println!(
+                "decode rep {rep}: {} points, one thread: scalar from_bytes {scalar_ns:.0} ns/point, from_bytes_batch {batch_ns:.0} ns/point, x{:.2}",
+                inputs.len(),
+                scalar_ns / batch_ns
+            );
+        }
+    }
+
     use super::*;
     use ark_ff::AdditiveGroup;
     use ark_serialize::CanonicalSerialize;
     use std::vec;
+
+    /// The `x` coordinates a decoder is most likely to get wrong (zero, ±1, small values and
+    /// their negations, the powers of two with their neighbours, the middle of the field, the
+    /// `x` of points that decode and its negation), followed by `random` uniform ones.
+    fn decode_test_xs(random: usize) -> Vec<Fq> {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(41);
+        let mut xs = vec![Fq::zero(), Fq::one(), -Fq::one()];
+        for k in 2..=32u64 {
+            xs.extend([Fq::from(k), -Fq::from(k)]);
+        }
+        let mut power = Fq::one();
+        for _ in 0..255 {
+            power.double_in_place();
+            xs.extend([power - Fq::one(), power, power + Fq::one()]);
+        }
+        let half = Fq::from(2u64).inverse().unwrap();
+        xs.extend([half, -half, half - Fq::one()]);
+        for _ in 0..64 {
+            let x = (Element::prime_subgroup_generator() * Fr::rand(&mut rng))
+                .0
+                .into_affine()
+                .x;
+            xs.extend([x, -x]);
+        }
+        xs.extend((0..random).map(|_| Fq::rand(&mut rng)));
+        xs
+    }
+
+    /// The 32 bytes `from_bytes` reads `x` from.
+    fn x_to_bytes(x: Fq) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        x.serialize_compressed(&mut bytes[..]).unwrap();
+        bytes.reverse();
+        bytes
+    }
+
+    /// What `from_bytes` returns for `x`, as affine coordinates.
+    fn decode(x: Fq) -> Option<(Fq, Fq)> {
+        Element::from_bytes(x_to_bytes(x)).ok().map(|element| {
+            let point = element.0.into_affine();
+            (point.x, point.y)
+        })
+    }
+
+    /// The decode on arkworks' own square root and Legendre symbol, which `from_bytes` used
+    /// before `decoder_arithmetic` replaced them.
+    fn arkworks_decode(x: Fq) -> Option<(Fq, Fq)> {
+        let x_sq = x.square();
+        let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one())
+            / (BandersnatchConfig::COEFF_D * x_sq - Fq::one());
+        let mut y = y_squared.sqrt()?;
+        if !is_positive(y) {
+            y = -y;
+        }
+        (Fq::one() - BandersnatchConfig::COEFF_A * x_sq)
+            .legendre()
+            .is_qr()
+            .then_some((x, y))
+    }
+
+    /// `from_bytes` accepts exactly the `x` the arkworks decode accepts and returns the same point.
+    #[test]
+    fn from_bytes_matches_the_arkworks_decode() {
+        let xs = decode_test_xs(4096);
+        let mut accepted = 0;
+        for (i, x) in xs.iter().enumerate() {
+            let got = decode(*x);
+            assert_eq!(got, arkworks_decode(*x), "input {i}");
+            accepted += usize::from(got.is_some());
+        }
+        assert!(accepted > 500, "{accepted} accepted");
+        assert!(xs.len() - accepted > 500, "{accepted} accepted");
+    }
+
+    /// The lanes return a point exactly where `from_bytes` accepts, and the same point, with every
+    /// edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever the
+    /// lanes do not return, which would hide a lane that wrongly returns nothing; this reads the
+    /// lanes' own answer.
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[test]
+    fn lane_decode_accepts_exactly_what_from_bytes_accepts() {
+        use crate::ifma::{available, decode_chunks, CHUNK};
+        if !available() {
+            return;
+        }
+        let xs = decode_test_xs(2048);
+        let expected: Vec<Option<(Fq, Fq)>> = xs.iter().map(|x| decode(*x)).collect();
+        // Shift the inputs through the lane positions, padding both ends with ones.
+        for shift in 0..CHUNK {
+            let mut padded = vec![Fq::one(); shift];
+            padded.extend_from_slice(&xs);
+            padded.resize(padded.len().next_multiple_of(CHUNK), Fq::one());
+            for (k, chunk) in padded.chunks_exact(CHUNK).enumerate() {
+                let chunk: [Fq; CHUNK] = chunk.try_into().unwrap();
+                // SAFETY: `available()` returned true.
+                let (points, undecided) = unsafe { decode_chunks(&[chunk]) }[0];
+                assert_eq!(undecided, [false; CHUNK], "chunk {k} at shift {shift}");
+                for (lane, point) in points.iter().enumerate() {
+                    let Some(i) = (k * CHUNK + lane).checked_sub(shift) else {
+                        continue;
+                    };
+                    if let Some(want) = expected.get(i) {
+                        assert_eq!(point, want, "input {i} in lane {lane}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn consistent_group_to_field() {
