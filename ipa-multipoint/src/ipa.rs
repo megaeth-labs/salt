@@ -231,8 +231,9 @@ pub fn create_with_precomp(
     transcript.append_scalar(b"output point", &output_point);
 
     let w = transcript.challenge_scalar(b"w");
-    // `Q` is base `n` of the tables, so the blinding term `z·(w·Q) = (w·z)·Q` is fixed-base too.
-    let blind = |z: Fr| precomp.mul_index(&(w * z), n);
+    // `Q` is base `n` of the tables, so the blinding term `z·(w·Q) = (w·z)·Q` is fixed-base too:
+    // one more term of the round's sum, batched with the others where the committer batches.
+    let blind = |z: Fr| (n, w * z);
 
     let num_rounds = log2(n);
 
@@ -244,8 +245,8 @@ pub fn create_with_precomp(
     let mut coeff = vec![Fr::one(); n];
     let mut len = n;
     // This round's L/R terms over the original generators; each index lands in one of them.
-    let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
-    let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2);
+    let mut l_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2 + 1);
+    let mut r_terms: Vec<(usize, Fr)> = Vec::with_capacity(n / 2 + 1);
 
     for _ in 0..num_rounds {
         let half = len / 2;
@@ -267,11 +268,13 @@ pub fn create_with_precomp(
 
         let left_compute = || -> Element {
             let z_L = inner_product(a_R, b_L);
-            precomp.msm(&l_terms) + blind(z_L)
+            l_terms.push(blind(z_L));
+            precomp.msm(&l_terms)
         };
         let right_compute = || -> Element {
             let z_R = inner_product(a_L, b_R);
-            precomp.msm(&r_terms) + blind(z_R)
+            r_terms.push(blind(z_R));
+            precomp.msm(&r_terms)
         };
 
         let (L, R) = join!(left_compute, right_compute);
