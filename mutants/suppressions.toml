@@ -86,9 +86,33 @@ reviewer = "full-run triage 2026-07-08 (issue #144)"
 kind = "line"
 category = "equivalent"
 file = "salt/src/proof/prover.rs"
-mutant = "replace < with <= in create_leaf_node_queries"
-justification = "parent_node == BUCKET_SLOT_ID_MASK is unreachable: main-trie ids are < 2^25 and subtree ids carry a data bucket id (>= 65536) in the top 24 bits, so they exceed the mask."
-reviewer = "full-run triage 2026-07-08 (issue #144)"
+mutant = "replace < with <= in SaltProof::create_indexed_queries"
+justification = "parent_node == BUCKET_SLOT_ID_MASK is unreachable: main-trie ids are < 2^25 and subtree ids carry a data bucket id (>= 65536) in the top 24 bits, so they exceed the mask. (The same site was reviewed in create_leaf_node_queries, now test-only.)"
+reviewer = "full-run triage 2026-07-08 (issue #144); moved with the code 2026-11-14"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "canon required_node_ids.dedup(); ->"
+justification = "The ids pushed are already distinct, so the dedup removes nothing. A node is pushed once per run of its id in the two sorted pair lists, whose node sets are disjoint, and connect_parent_id changes only a bridge id (a bucket root tagged with the bucket's level), mapping it to that bucket root. A bucket root is otherwise pushed only as the leaf of a one-level bucket, and a bucket has one level, so no two pushed ids are equal. If one ever repeated, dropping the dedup would make the comparison with the proof's strictly ascending ids fail, which rejects the proof."
+reviewer = "compact witness storage port 2026-11-14"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace match guard node == encode_node with false in SaltProof::create_indexed_queries"
+justification = "The guard only reuses the commitment position found for the previous pair of the same node. With it false every pair looks its node up again and gets the same position (or the same error), so the queries are unchanged."
+reviewer = "compact witness storage port 2026-11-14"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "salt/src/proof/prover.rs"
+mutant = "replace match guard node == parent_node with false in SaltProof::create_indexed_queries"
+justification = "The guard only reuses the commitment position and segment start key computed for the previous pair of the same leaf. With it false every pair computes both again from the same node id and gets the same values, so the queries are unchanged."
+reviewer = "compact witness storage port 2026-11-14"
 
 [[suppress]]
 kind = "line"

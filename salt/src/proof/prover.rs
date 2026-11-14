@@ -1613,6 +1613,121 @@ mod tests {
         }
     }
 
+    /// A proof may declare one level for a bucket and be checked against a key beyond that
+    /// bucket's first segment. The pair such a key yields names the slot at the key's low byte
+    /// in the bucket root, which is another key's slot: the queries take that key's entry from
+    /// `kvs` and refuse when there is none, as the reference form does. They never fall back
+    /// to the value of the key that yielded the pair.
+    #[test]
+    fn indexed_queries_read_the_slot_a_pair_names() {
+        let bucket_id: BucketId = 70_000;
+        let far_key = SaltKey::from((bucket_id, 300));
+        let near_key = SaltKey::from((bucket_id, 300 & 0xFF));
+        let levels: FxHashMap<BucketId, u8> = [(bucket_id, 1)].into_iter().collect();
+
+        let (internal_nodes, leaf_nodes) = parents_and_points(&[far_key], &levels);
+        let mut proof = crate::proof::salt_witness::create_mock_proof();
+        proof.parents_commitments = internal_nodes
+            .keys()
+            .chain(leaf_nodes.keys())
+            .map(|node| (connect_parent_id(*node), mock_commitment()))
+            .collect();
+        proof.levels = levels;
+
+        // Only the far key: its pair names the near key's slot, which `kvs` does not hold.
+        let mut kvs = BTreeMap::from([(far_key, Some(mock_salt_value()))]);
+        let refused = proof
+            .create_indexed_queries(&kvs)
+            .map(|(_, queries)| queries);
+        assert!(
+            matches!(
+                &refused,
+                Err(ProofError::StateReadError { reason })
+                    if reason.contains("Missing key-value entry")
+            ),
+            "{refused:?}"
+        );
+        let reference = reference_indexed_queries(&proof, &kvs);
+        assert_eq!(format!("{refused:?}"), format!("{reference:?}"));
+
+        // With the near key held too, the pair's query carries the near key's value.
+        let near_value = Some(SaltValue::new(&[3u8; 32], &[4u8; 32]));
+        kvs.insert(near_key, near_value.clone());
+        let (_, queries) = proof.create_indexed_queries(&kvs).unwrap();
+        assert!(queries == reference_indexed_queries(&proof, &kvs).unwrap());
+        assert_eq!(queries.last().unwrap().result, slot_to_field(&near_value));
+    }
+
+    /// `PathCommitments` answers as the map it replaced: empty until an entry is inserted,
+    /// holding the ids inserted and no others, an insert under a held id replacing its entry.
+    #[test]
+    fn path_commitments_answer_as_a_map() {
+        let generator = Element::prime_subgroup_generator();
+        let first = SerdeCommitment::from(generator * Fr::from(2u64));
+        let second = SerdeCommitment::from(generator * Fr::from(3u64));
+
+        let mut commitments = PathCommitments::new();
+        assert!(commitments.is_empty());
+        assert_eq!(commitments.len(), 0);
+        assert!(!commitments.contains_key(7));
+
+        assert_eq!(commitments.insert(7, first), None);
+        assert_eq!(commitments.insert(3, second), None);
+        assert!(!commitments.is_empty());
+        assert_eq!(commitments.ids(), &[3, 7]);
+        assert!(commitments.contains_key(7));
+        assert!(!commitments.contains_key(5));
+        assert_eq!(commitments.get(7), Some(&first));
+
+        assert_eq!(commitments.insert(7, second), Some(first));
+        assert_eq!(commitments.len(), 2);
+        assert_eq!(commitments.remove(3), Some(second));
+        assert_eq!(commitments.remove(3), None);
+        assert_eq!(commitments.ids(), &[7]);
+    }
+
+    /// `PathCommitments` decodes a wire map as a `BTreeMap` of the same entries does: in key
+    /// order whatever the wire order, a repeated id keeping its last entry.
+    #[test]
+    fn path_commitments_decode_as_a_map_in_any_wire_order() {
+        // (node id, the multiple of the generator its commitment is)
+        let cases: [&[(NodeId, u64)]; 5] = [
+            &[],
+            &[(1, 10), (3, 30), (5, 50)],
+            &[(5, 50), (3, 30), (1, 10)],
+            &[(5, 50), (5, 51)],
+            &[(5, 50), (1, 10), (5, 51), (3, 30)],
+        ];
+        for case in cases {
+            let mut wire = (case.len() as u64).to_le_bytes().to_vec();
+            for &(id, multiple) in case {
+                let point = Element::prime_subgroup_generator() * Fr::from(multiple);
+                wire.extend_from_slice(&id.to_le_bytes());
+                wire.extend_from_slice(&point.to_bytes());
+            }
+
+            let (decoded, consumed): (PathCommitments, usize) =
+                bincode::serde::decode_from_slice(&wire, bincode::config::legacy()).unwrap();
+            assert_eq!(consumed, wire.len(), "{case:?}");
+            let (reference, _): (BTreeMap<NodeId, SerdeCommitment>, usize) =
+                bincode::serde::decode_from_slice(&wire, bincode::config::legacy()).unwrap();
+            assert_eq!(decoded.len(), reference.len(), "{case:?}");
+            assert!(decoded.iter().eq(reference.iter()), "{case:?}");
+        }
+    }
+
+    /// A value that is not a map is refused with what was expected in its place.
+    #[test]
+    fn path_commitments_decode_names_the_expected_map() {
+        let error = serde_json::from_str::<PathCommitments>("7")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("a map of node id to 32-byte commitment"),
+            "{error}"
+        );
+    }
+
     /// Tests successful commitment retrieval for existing node IDs.
     #[test]
     fn test_get_commitment_safe_success() {
