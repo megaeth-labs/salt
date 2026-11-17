@@ -613,16 +613,35 @@ pub(crate) fn lanes_available() -> bool {
 /// task per thread the slowest thread sets the decode's time.
 const TASKS_PER_THREAD: usize = 4;
 
-/// The length of the tasks [`Element::from_bytes_batch`] splits `total` points into: about
+/// The length of the tasks [`Element::from_bytes_batch`] splits `total` points into, on this
+/// host: see [`task_len`].
+fn decode_task_len(total: usize) -> usize {
+    task_len(total, num_threads!(), lanes_available())
+}
+
+/// The length of the tasks a batch of `total` points is split into for `threads` threads: about
 /// [`TASKS_PER_THREAD`] per thread, so that a small batch still spreads over every thread, and at
 /// most `CHUNK * TASK_CHUNKS` (128) points, past which sharing the inversion saves nothing measurable
-/// and a large batch is left with few tasks to balance. On the vector lanes it is rounded up to whole
-/// [`CHUNK`]s.
-fn decode_task_len(total: usize) -> usize {
-    let len = total
-        .div_ceil(TASKS_PER_THREAD * num_threads!())
-        .clamp(1, CHUNK * TASK_CHUNKS);
-    if lanes_available() {
+/// and a large batch is left with few tasks to balance. On the vector lanes (`lanes`) it is rounded
+/// up to whole [`CHUNK`]s.
+///
+/// One thread has nothing to balance, and every task it is given costs an inversion, so it takes
+/// the batch in tasks as long as they go.
+///
+/// With several threads a small batch is cut down to tasks of a single point, which share no
+/// inversion. That is the faster split all the same: on an M4 (ten performance and four efficiency
+/// cores) 50 points take 71 µs in one-point tasks and 93 µs in four-point tasks, and 100 points take
+/// 110 µs in two-point tasks and 145 µs in eight-point ones. A longer task saves up to a fifth of a
+/// point's decode (10.0 µs alone, 8.4 µs in a task of four, 7.9 µs in one of 128), but it leaves
+/// the slowest core holding a whole task. A one-point task costs 0.7% more than `from_bytes`.
+fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
+    let tasks = if threads == 1 {
+        1
+    } else {
+        TASKS_PER_THREAD * threads
+    };
+    let len = total.div_ceil(tasks).clamp(1, CHUNK * TASK_CHUNKS);
+    if lanes {
         len.next_multiple_of(CHUNK)
     } else {
         len
@@ -969,6 +988,63 @@ pub(crate) mod tests {
             assert_eq!(outcome(got), expected(&input));
             assert!(expected(&input).is_err());
             assert_eq!(lane_calls, calls);
+        }
+    }
+
+    /// The split of a batch into tasks: one thread takes it in the longest tasks, several threads
+    /// in about four tasks each, never longer than a lane call and never empty, and on the lanes
+    /// in whole chunks.
+    #[test]
+    fn task_length_follows_the_threads() {
+        let call = CHUNK * TASK_CHUNKS;
+        // one thread: nothing is split below a call
+        for (total, len) in [
+            (0, 1),
+            (1, 1),
+            (4, 4),
+            (100, 100),
+            (call, call),
+            (1000, call),
+        ] {
+            assert_eq!(task_len(total, 1, false), len, "{total} points, one thread");
+        }
+        // several threads: about `TASKS_PER_THREAD` tasks each
+        for (total, threads, len) in [
+            (0, 14, 1),
+            (1, 14, 1),
+            (50, 14, 1),
+            (56, 14, 1),
+            (57, 14, 2),
+            (100, 14, 2),
+            (300, 14, 6),
+            (1000, 14, 18),
+            (20_000, 14, call),
+            (9, 2, 2),
+            (1000, 2, 125),
+            (1025, 2, call),
+        ] {
+            assert_eq!(
+                task_len(total, threads, false),
+                len,
+                "{total} points, {threads} threads"
+            );
+        }
+        // on the lanes: whole chunks
+        for (total, threads, len) in [
+            (0, 32, CHUNK),
+            (1, 32, CHUNK),
+            (50, 32, CHUNK),
+            (4096, 32, CHUNK),
+            (4097, 32, 2 * CHUNK),
+            (20_000, 32, call),
+            (40, 1, 2 * CHUNK),
+            (1000, 1, call),
+        ] {
+            assert_eq!(
+                task_len(total, threads, true),
+                len,
+                "{total} points, {threads} threads, lanes"
+            );
         }
     }
 
