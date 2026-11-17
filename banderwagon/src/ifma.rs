@@ -32,13 +32,13 @@ use ark_ff::{BigInt, FftField, Field, One, PrimeField, Zero};
 use core::arch::x86_64::*;
 use std::sync::OnceLock;
 
+use crate::element::{ChunkDecode, CHUNK, TASK_CHUNKS};
+
 pub(crate) type Fq = ark_ed_on_bls12_381_bandersnatch::Fq;
 const MASK52: u64 = (1u64 << 52) - 1;
 pub(crate) type L5 = [__m512i; 5];
 
-/// Points per lane-decoded chunk: four interleaved groups of eight lanes, enough independent
-/// multiplication chains to cover the IFMA latency.
-pub(crate) const CHUNK: usize = 32;
+/// Groups of eight lanes per chunk.
 const GROUPS: usize = CHUNK / 8;
 
 /// Whether this host executes the lane path (`avx512f` + `avx512ifma`), detected once.
@@ -49,19 +49,19 @@ pub(crate) fn available() -> bool {
     })
 }
 
+/// The lane constants, built on first use.
+///
+/// # Panics
+/// On a host without AVX-512 IFMA ([`available`] false), where building them would execute
+/// instructions the CPU does not have.
 pub(crate) fn context() -> &'static Ctx {
     static CTX: OnceLock<Ctx> = OnceLock::new();
-    // SAFETY: callers check `available()` first; the context only broadcasts constants.
-    CTX.get_or_init(|| unsafe { ctx() })
+    CTX.get_or_init(|| {
+        assert!(available(), "the lane context needs AVX-512 IFMA");
+        // SAFETY: `available()` returned true just above.
+        unsafe { ctx() }
+    })
 }
-
-/// Lane chunks decoded together by [`decode_chunks`]: the parallel decode's task (four chunks, 128
-/// points) shares one inversion exponentiation across its chunks.
-pub(crate) const TASK_CHUNKS: usize = 4;
-
-/// The decode of one chunk: `(x, y)` with positive `y` per point where the scalar path accepts, and the
-/// lanes the vector path did not decide.
-pub(crate) type ChunkDecode = ([Option<(Fq, Fq)>; CHUNK], [bool; CHUNK]);
 
 /// Decodes up to [`TASK_CHUNKS`] chunks of `CHUNK` canonical `x` coordinates into `(x, y)` with
 /// positive `y`, exactly where the scalar path accepts: `None` where no square root exists or the
@@ -131,23 +131,9 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
             }
         }
     }
-    // y² = n / d: the task's inversions share one d^(p-2)
-    let mut dinv = [c.one; GROUPS * TASK_CHUNKS];
-    match n {
-        1 => dinv[..GROUPS].copy_from_slice(&batch_inverse::<GROUPS>(
-            c,
-            dsafe[..GROUPS].try_into().unwrap(),
-        )),
-        2 => dinv[..2 * GROUPS].copy_from_slice(&batch_inverse::<{ 2 * GROUPS }>(
-            c,
-            dsafe[..2 * GROUPS].try_into().unwrap(),
-        )),
-        3 => dinv[..3 * GROUPS].copy_from_slice(&batch_inverse::<{ 3 * GROUPS }>(
-            c,
-            dsafe[..3 * GROUPS].try_into().unwrap(),
-        )),
-        _ => dinv = batch_inverse::<{ 4 * GROUPS }>(c, &dsafe),
-    }
+    // y² = n / d: the task's inversions share one d^(p-2); the groups of chunks past `n` are ones,
+    // whose inverses go unused
+    let dinv = batch_inverse::<{ TASK_CHUNKS * GROUPS }>(c, &dsafe);
     let mut out = Vec::with_capacity(n);
     for (k, chunk) in xs.iter().enumerate() {
         let mut y2: [L5; GROUPS] = [c.one; GROUPS];
@@ -793,7 +779,7 @@ mod tests {
     /// settles, and the few structured ones that do not are the fallback's.
     #[test]
     fn jacobi_matches_legendre() {
-        if !available() {
+        if !crate::element::tests::lanes_under_test() {
             return;
         }
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(23);
@@ -838,7 +824,7 @@ mod tests {
     /// equals the decode at the full count: the exponentiation fallback decides the same lanes.
     #[test]
     fn decode_fallback_matches_settled_decode() {
-        if !available() {
+        if !crate::element::tests::lanes_under_test() {
             return;
         }
         use ark_ec::CurveGroup;

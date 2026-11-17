@@ -113,35 +113,19 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
 pub mod parents_commitments_serde {
     use super::*;
 
-    /// Points per decode task: four lane chunks of [`Element::from_bytes_batch`], so a task is
-    /// long enough (~1 ms) that scheduling it costs nothing against the exponentiations it carries.
-    const DECODE_TASK: usize = 128;
-
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<BTreeMap<NodeId, SerdeCommitment>, D::Error> {
         let raw = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?;
         let (ids, bytes): (Vec<NodeId>, Vec<[u8; 32]>) = raw.into_iter().unzip();
 
-        // Decode in tasks of many points: on a host with AVX-512 IFMA the points of a task share
-        // vector registers for their exponentiations; elsewhere this is `Element::from_bytes` per point.
-        let decoded: Result<Vec<Vec<Element>>, ()> = chunks!(bytes, DECODE_TASK)
-            .map(|task| {
-                Element::from_bytes_batch(task)
-                    .into_iter()
-                    .collect::<Result<Vec<Element>, _>>()
-                    .map_err(|_| ())
-            })
-            .collect();
-
-        decoded
-            .map_err(|()| serde::de::Error::custom("invalid element bytes"))
-            .map(|tasks| {
-                ids.into_iter()
-                    .zip(tasks.into_iter().flatten())
-                    .map(|(id, e)| (id, SerdeCommitment(e)))
-                    .collect()
-            })
+        // The batch decode splits the points over the threads itself, in tasks sized for this host
+        // (on one with AVX-512 IFMA, whole chunks of the vector lanes), and returns them in order.
+        ids.into_iter()
+            .zip(Element::from_bytes_batch(&bytes))
+            .map(|(id, decoded)| decoded.map(|e| (id, SerdeCommitment(e))))
+            .collect::<Result<_, _>>()
+            .map_err(|_| serde::de::Error::custom("invalid element bytes"))
     }
 }
 
