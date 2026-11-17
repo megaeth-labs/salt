@@ -52,7 +52,8 @@ pub struct SaltWitness {
     ///
     /// Unlike regular data buckets, metadata bucket slots can never be empty.
     /// Default metadata is stored explicity as `Some(SaltValue)`, not `None`,
-    /// to simplify the witness code.
+    /// to simplify the witness code. A witness that maps a metadata key to
+    /// `None` is malformed, and reading that metadata returns an error.
     pub kvs: BTreeMap<SaltKey, Option<SaltValue>>,
 
     /// Cryptographic proof authenticating all witnessed data
@@ -191,7 +192,9 @@ impl StateReader for SaltWitness {
     ///
     /// # Returns
     /// - `Ok(BucketMeta)` - The bucket's metadata if it was included in the proof
-    /// - `Err(str)` - If the bucket was not included in the proof
+    /// - `Err(NotInWitness)` - If the bucket was not included in the proof
+    /// - `Err(InvalidFormat)` - If the witnessed metadata does not decode, or its slot is
+    ///   witnessed as empty
     ///
     /// # Note
     /// This method will never fabricate metadata for unknown buckets, ensuring proof integrity.
@@ -203,7 +206,13 @@ impl StateReader for SaltWitness {
                     message: "Failed to decode metadata from SaltValue",
                 })
             }
-            Some(None) => unreachable!("Metadata should never be stored as None in witness"),
+            // A witness builder always stores metadata explicitly, even the default, and the
+            // proof check rejects an empty metadata slot. A witness can be read before it is
+            // verified, though, so this is a malformed witness to report, not an invariant to
+            // panic on.
+            Some(None) => Err(SaltError::InvalidFormat {
+                message: "Metadata slot is empty in witness",
+            }),
             None => Err(SaltError::NotInWitness { what: "Metadata" }),
         }
     }
@@ -739,18 +748,55 @@ mod tests {
         );
     }
 
+    /// Witness bytes come from the network, so malformed metadata must come back as an error
+    /// from `metadata` and from the used-slot scan that reads it, never as a panic. The data
+    /// slots are all witnessed, so the metadata alone decides the outcome.
     #[test]
-    #[should_panic(expected = "Metadata should never be stored as None")]
-    fn test_metadata_none_entry_panics() {
+    fn test_malformed_metadata_is_an_error() {
         let bucket_id = NUM_META_BUCKETS as BucketId;
-        let mut kvs = BTreeMap::new();
-        kvs.insert(bucket_metadata_key(bucket_id), None);
-        let witness = SaltWitness {
-            kvs,
-            proof: create_mock_proof(),
+        let oversized = BucketMeta {
+            capacity: u64::MAX,
+            ..BucketMeta::default()
         };
+        let undecodable = "Failed to decode metadata from SaltValue";
+        for (metadata, message) in [
+            (None, "Metadata slot is empty in witness"),
+            (Some(SaltValue::new(&[9u8; 3], &[])), undecodable),
+            (Some(SaltValue::from(oversized)), undecodable),
+        ] {
+            let slots = (0..MIN_BUCKET_SIZE as u64)
+                .map(|slot| (slot, None))
+                .collect();
+            let mut witness = create_witness(bucket_id, None, slots);
+            witness.kvs.insert(bucket_metadata_key(bucket_id), metadata);
 
-        let _ = witness.metadata(bucket_id);
+            let expected = SaltError::InvalidFormat { message };
+            assert_eq!(witness.metadata(bucket_id), Err(expected.clone()));
+            assert_eq!(witness.bucket_used_slots(bucket_id), Err(expected));
+        }
+    }
+
+    /// An empty metadata slot does not pass for the default metadata: the proof check rejects
+    /// the witness. Reading the metadata of such a witness is an error either way.
+    #[test]
+    fn test_empty_metadata_slot_fails_the_proof_check() {
+        // The store holds no metadata, so every bucket's metadata is the default.
+        let store = MemStore::new();
+        let bucket_id = NUM_META_BUCKETS as BucketId;
+        let metadata_key = bucket_metadata_key(bucket_id);
+
+        let mut witness = SaltWitness::create(&[metadata_key], &store).unwrap();
+        witness.verify_proof().unwrap();
+        assert_eq!(witness.metadata(bucket_id), Ok(BucketMeta::default()));
+
+        witness.kvs.insert(metadata_key, None);
+        assert!(witness.verify_proof().is_err());
+        assert_eq!(
+            witness.metadata(bucket_id),
+            Err(SaltError::InvalidFormat {
+                message: "Metadata slot is empty in witness"
+            })
+        );
     }
 
     #[test]
