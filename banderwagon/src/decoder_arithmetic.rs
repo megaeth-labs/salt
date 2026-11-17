@@ -1,91 +1,99 @@
-//! Exact public-input decoder arithmetic for the pinned Banderwagon base field.
-//! This isolated prototype changes arithmetic only. Canonical parsing, positive-y
-//! selection, point construction and block/proof verification remain outside it.
+//! The scalar arithmetic [`crate::Element::from_bytes`] decodes a compressed point with, exact on
+//! every input and specialized to the Banderwagon base field (`p − 1 = 2^32 · t`): the square
+//! root of `y² = n/d` and the residue test of the subgroup check. Canonical parsing, the choice
+//! of the positive `y` and the construction of the point stay in `element.rs`.
 //! Both helpers are variable-time and are intended for public compressed points.
 use ark_ed_on_bls12_381_bandersnatch::Fq;
 #[cfg(test)]
 use ark_ff::One;
 use ark_ff::{BigInteger256, Field, PrimeField, Zero};
 
-use core::cmp::Ordering;
+/// The Jacobi symbol by the binary algorithm on 256-bit integers. Compiled where
+/// [`is_nonzero_square`] uses it, and for the tests of every target.
+#[cfg(any(test, target_arch = "x86_64", target_arch = "aarch64"))]
+mod jacobi {
+    use core::cmp::Ordering;
 
-type Limbs = [u64; 4]; // little-endian limbs, canonical unsigned integer (not Montgomery form).
+    type Limbs = [u64; 4]; // little-endian limbs, canonical unsigned integer (not Montgomery form).
 
-#[inline(always)]
-fn cmp_limbs(a: &Limbs, b: &Limbs) -> Ordering {
-    for i in (0..4).rev() {
-        match a[i].cmp(&b[i]) {
-            Ordering::Equal => {}
-            other => return other,
+    #[inline(always)]
+    fn cmp_limbs(a: &Limbs, b: &Limbs) -> Ordering {
+        for i in (0..4).rev() {
+            match a[i].cmp(&b[i]) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+        }
+        Ordering::Equal
+    }
+
+    #[inline(always)]
+    fn sub_once(a: &mut Limbs, b: &Limbs) {
+        // Caller has established a >= b; propagate both subtrahend and incoming borrow.
+        let mut borrow = false;
+        for i in 0..4 {
+            let (first, b1) = a[i].overflowing_sub(b[i]);
+            let (value, b2) = first.overflowing_sub(u64::from(borrow));
+            a[i] = value;
+            borrow = b1 || b2;
+        }
+        debug_assert!(!borrow);
+    }
+
+    #[inline(always)]
+    fn trailing_zeros(a: &Limbs) -> u32 {
+        for (i, limb) in a.iter().enumerate() {
+            if *limb != 0 {
+                return (i as u32) * 64 + limb.trailing_zeros();
+            }
+        }
+        256
+    }
+
+    #[inline(always)]
+    fn shift_right(a: &mut Limbs, bits: u32) {
+        debug_assert!(bits < 256);
+        let words = (bits / 64) as usize;
+        let shift = bits % 64;
+        let old = *a;
+        for (i, limb) in a.iter_mut().enumerate() {
+            let source = i + words;
+            *limb = if source < 4 { old[source] >> shift } else { 0 };
+            if shift != 0 && source + 1 < 4 {
+                *limb |= old[source + 1] << (64 - shift);
+            }
         }
     }
-    Ordering::Equal
-}
 
-#[inline(always)]
-fn sub_once(a: &mut Limbs, b: &Limbs) {
-    // Caller has established a >= b; propagate both subtrahend and incoming borrow.
-    let mut borrow = false;
-    for i in 0..4 {
-        let (first, b1) = a[i].overflowing_sub(b[i]);
-        let (value, b2) = first.overflowing_sub(u64::from(borrow));
-        a[i] = value;
-        borrow = b1 || b2;
-    }
-    debug_assert!(!borrow);
-}
-
-#[inline(always)]
-fn trailing_zeros(a: &Limbs) -> u32 {
-    for (i, limb) in a.iter().enumerate() {
-        if *limb != 0 {
-            return (i as u32) * 64 + limb.trailing_zeros();
-        }
-    }
-    256
-}
-
-#[inline(always)]
-fn shift_right(a: &mut Limbs, bits: u32) {
-    debug_assert!(bits < 256);
-    let words = (bits / 64) as usize;
-    let shift = bits % 64;
-    let old = *a;
-    for (i, limb) in a.iter_mut().enumerate() {
-        let source = i + words;
-        *limb = if source < 4 { old[source] >> shift } else { 0 };
-        if shift != 0 && source + 1 < 4 {
-            *limb |= old[source + 1] << (64 - shift);
-        }
-    }
-}
-
-#[inline]
-fn binary_jacobi(mut a: Limbs, mut n: Limbs) -> i8 {
-    // The decoder supplies the positive odd Fq modulus and canonical field value.
-    debug_assert!(n[0] & 1 == 1);
-    let mut sign = 1_i8;
-    while a != [0; 4] {
-        let twos = trailing_zeros(&a);
-        if twos & 1 == 1 && matches!(n[0] & 7, 3 | 5) {
-            sign = -sign;
-        }
-        shift_right(&mut a, twos);
-        // Both operands are now odd. The denominator remains positive and odd.
-        if cmp_limbs(&a, &n) == Ordering::Less {
-            if a[0] & 3 == 3 && n[0] & 3 == 3 {
+    /// The Jacobi symbol `(a | n)` of a canonical field value `a` and the odd modulus `n`: 1, −1,
+    /// or 0 where they share a factor (`a = 0`, `n` being prime).
+    #[inline]
+    pub(super) fn binary_jacobi(mut a: Limbs, mut n: Limbs) -> i8 {
+        // The decoder supplies the positive odd Fq modulus and canonical field value.
+        debug_assert!(n[0] & 1 == 1);
+        let mut sign = 1_i8;
+        while a != [0; 4] {
+            let twos = trailing_zeros(&a);
+            if twos & 1 == 1 && matches!(n[0] & 7, 3 | 5) {
                 sign = -sign;
             }
-            core::mem::swap(&mut a, &mut n);
+            shift_right(&mut a, twos);
+            // Both operands are now odd. The denominator remains positive and odd.
+            if cmp_limbs(&a, &n) == Ordering::Less {
+                if a[0] & 3 == 3 && n[0] & 3 == 3 {
+                    sign = -sign;
+                }
+                core::mem::swap(&mut a, &mut n);
+            }
+            // a >= n and both are odd, so a-n is even or zero. There is no repeated-
+            // subtraction modulo loop: the NEXT iteration removes every factor of two.
+            sub_once(&mut a, &n);
         }
-        // a >= n and both are odd, so a-n is even or zero. There is no repeated-
-        // subtraction modulo loop: the NEXT iteration removes every factor of two.
-        sub_once(&mut a, &n);
-    }
-    if n == [1, 0, 0, 0] {
-        sign
-    } else {
-        0
+        if n == [1, 0, 0, 0] {
+            sign
+        } else {
+            0
+        }
     }
 }
 
@@ -186,12 +194,7 @@ impl SqrtTable {
 }
 
 static SQRT_TABLE: SqrtTable = SqrtTable {
-    trace_half: [
-        9223141137265459199,
-        347036667491570177,
-        10722717374829358084,
-        972477353,
-    ],
+    trace_half: Fq::TRACE_MINUS_ONE_DIV_TWO.0,
     lookup: [
         Fq::new(BigInteger256::new([
             0x0000000000000001,
@@ -1083,14 +1086,30 @@ pub(super) fn sqrt(value: Fq) -> Option<Fq> {
     SQRT_TABLE.sqrt(value)
 }
 
+/// Whether `value` is a nonzero square: the residue test of the subgroup check.
+///
+/// On `x86_64` and `aarch64`, the native targets the decode was measured on, this is the binary
+/// Jacobi symbol: 1.6 µs on an M4, where the exponentiation takes 4.6 µs. Every other target
+/// keeps arkworks' Legendre exponentiation, the test this module replaced. That covers the zkVM
+/// guests: a proof pays for every instruction of the Jacobi loop's several hundred
+/// data-dependent iterations, a guest may run field multiplication as a precompile, and the two
+/// have not been measured there. Add a target to the list once they have been.
 #[inline]
 pub(super) fn is_nonzero_square(value: Fq) -> bool {
-    binary_jacobi(value.into_bigint().0, Fq::MODULUS.0) == 1
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        jacobi::binary_jacobi(value.into_bigint().0, Fq::MODULUS.0) == 1
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        value.legendre().is_qr()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ff::LegendreSymbol;
     #[test]
     fn generated_constants_match_original_runtime_constructor() {
         let expected = SqrtTable::new();
@@ -1109,6 +1128,17 @@ mod tests {
                 assert!(a == b || a == -b);
             }
             assert_eq!(is_nonzero_square(value), value.legendre().is_qr());
+            // the Jacobi symbol itself, on the targets whose `is_nonzero_square` is the
+            // exponentiation too
+            let symbol = match value.legendre() {
+                LegendreSymbol::Zero => 0,
+                LegendreSymbol::QuadraticResidue => 1,
+                LegendreSymbol::QuadraticNonResidue => -1,
+            };
+            assert_eq!(
+                jacobi::binary_jacobi(value.into_bigint().0, Fq::MODULUS.0),
+                symbol
+            );
         };
         check(Fq::zero());
         check(Fq::one());

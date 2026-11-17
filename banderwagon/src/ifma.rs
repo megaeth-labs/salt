@@ -19,9 +19,11 @@
 //! `d^(p-2)` per chunk, a root that squares back to `n/d`), which the tests check on accepted points,
 //! off-curve `x` and out-of-subgroup points; a lane whose Jacobi symbol has not settled after the fixed
 //! batches (none in 40,000 sampled inputs) takes its group's Euler exponentiation. A lane that yields no
-//! point (no root, off the subgroup, or a table lookup that misses, which never happens on a residue
+//! root (none exists, off the subgroup, or a table lookup that misses, which never happens on a residue
 //! of a field element) is decoded again on the scalar path by the caller
-//! ([`crate::Element::from_bytes_batch`]), so these lanes only ever accept.
+//! ([`crate::Element::from_bytes_batch`]), so these lanes only ever accept; a root they do yield the
+//! caller checks against the curve equation in scalar arithmetic, so what an accepted point takes from
+//! these lanes unchecked is its subgroup symbol.
 //!
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].
@@ -41,12 +43,10 @@ pub(crate) type L5 = [__m512i; 5];
 /// Groups of eight lanes per chunk.
 const GROUPS: usize = CHUNK / 8;
 
-/// Whether this host executes the lane path (`avx512f` + `avx512ifma`), detected once.
+/// Whether this host executes the lane path (`avx512f` + `avx512ifma`); the detection macro caches
+/// what the CPU reports.
 pub(crate) fn available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512ifma")
-    })
+    std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512ifma")
 }
 
 /// The lane constants, built on first use.
@@ -63,12 +63,13 @@ pub(crate) fn context() -> &'static Ctx {
     })
 }
 
-/// Decodes up to [`TASK_CHUNKS`] chunks of `CHUNK` canonical `x` coordinates into `(x, y)` with
-/// positive `y`, exactly where the scalar path accepts: `None` where no square root exists or the
-/// subgroup check fails. Lanes whose denominator `d·x² − 1` is zero are reported undecided too; the
-/// caller sends those to the scalar path so that its behavior (a division by zero) is preserved, but no
-/// canonical `x` reaches them on Bandersnatch (`d` is a non-residue, so `1/d` has no root). The chunks'
-/// inversions share one exponentiation.
+/// Decodes up to [`TASK_CHUNKS`] chunks of `CHUNK` canonical `x` coordinates into a root `y` of
+/// `y² = n/d` (of either sign; the caller takes the positive one), exactly where the scalar path
+/// accepts: `None` where no square root exists or the subgroup check fails. A lane whose denominator
+/// `d·x² − 1` is zero yields `None` as well; the caller sends every `None` to the scalar path, which
+/// keeps that path's behavior (a division by zero), but no canonical `x` has such a denominator on
+/// Bandersnatch (`d` is a non-residue, so `1/d` has no root). The chunks' inversions share one
+/// exponentiation.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
@@ -131,17 +132,17 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
             }
         }
     }
-    // y² = n / d: the task's inversions share one d^(p-2); the groups of chunks past `n` are ones,
-    // whose inverses go unused
-    let dinv = batch_inverse::<{ TASK_CHUNKS * GROUPS }>(c, &dsafe);
+    // y² = n / d: the inversions of the task's `n` chunks share one d^(p-2)
+    let dinv = &mut dsafe[..n * GROUPS];
+    batch_inverse(c, dinv);
     let mut out = Vec::with_capacity(n);
-    for (k, chunk) in xs.iter().enumerate() {
+    for k in 0..n {
         let mut y2: [L5; GROUPS] = [c.one; GROUPS];
         for g in 0..GROUPS {
             y2[g] = mont_mul(c, &nv[k][g], &dinv[k * GROUPS + g]);
         }
         let (y, ok) = sqrt_dlog::<GROUPS>(c, &y2);
-        let mut points = [None; CHUNK];
+        let mut roots = [None; CHUNK];
         for g in 0..GROUPS {
             let qr = qr_mask[k][g];
             let ys = store(c, &y[g]);
@@ -151,14 +152,10 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
                 if den_zero[k][i] || qr & bit == 0 || ok[g] & bit == 0 {
                     continue;
                 }
-                let mut yy = ys[j];
-                if !crate::element::is_positive(yy) {
-                    yy = -yy;
-                }
-                points[i] = Some((chunk[i], yy));
+                roots[i] = Some(ys[j]);
             }
         }
-        out.push((points, den_zero[k]));
+        out.push(roots);
     }
     out
 }
@@ -209,10 +206,6 @@ pub(crate) struct Ctx {
     /// `g^(−j·2^(8i))` for window `i` in 0..4 and `j` in 0..256, lane limbs, entry `(i·256 + j)·5`.
     neg_pow: Vec<u64>,
 }
-
-// SAFETY: __m512i is plain data; the context is built once and only read afterwards.
-unsafe impl Sync for Ctx {}
-unsafe impl Send for Ctx {}
 
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn ctx() -> Ctx {
@@ -583,23 +576,26 @@ pub(crate) unsafe fn pow_multi<const G: usize>(c: &Ctx, x: &[L5; G], e: &[u64; 4
     acc
 }
 
-/// The inverses of `G` groups of eight nonzero lanes with one exponentiation: prefix products across the
-/// groups, `d^(p-2)` of the last, back-substitution (Montgomery's trick; 3(G−1) products + one
-/// exponentiation instead of G).
+/// Inverts, in place, one to `TASK_CHUNKS * GROUPS` groups of eight nonzero lanes with one
+/// exponentiation: prefix products across the groups, `d^(p-2)` of the last, back-substitution
+/// (Montgomery's trick; for `G` groups, 3(G−1) products + one exponentiation instead of G). Taking the
+/// groups as a slice lets a task of fewer than [`TASK_CHUNKS`] chunks invert only the groups it has.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn batch_inverse<const G: usize>(c: &Ctx, d: &[L5; G]) -> [L5; G] {
-    let mut prefix = *d;
-    for g in 1..G {
+pub(crate) unsafe fn batch_inverse(c: &Ctx, d: &mut [L5]) {
+    let groups = d.len();
+    assert!((1..=TASK_CHUNKS * GROUPS).contains(&groups));
+    let mut prefix = [c.one; TASK_CHUNKS * GROUPS];
+    prefix[0] = d[0];
+    for g in 1..groups {
         prefix[g] = mont_mul(c, &prefix[g - 1], &d[g]);
     }
-    let mut inv = pow_multi::<1>(c, &[prefix[G - 1]], &c.modulus_minus_two)[0];
-    let mut out = [c.one; G];
-    for g in (1..G).rev() {
-        out[g] = mont_mul(c, &inv, &prefix[g - 1]);
-        inv = mont_mul(c, &inv, &d[g]);
+    let mut inv = pow_multi::<1>(c, &[prefix[groups - 1]], &c.modulus_minus_two)[0];
+    for g in (1..groups).rev() {
+        let d_g = d[g];
+        d[g] = mont_mul(c, &inv, &prefix[g - 1]);
+        inv = mont_mul(c, &inv, &d_g);
     }
-    out[0] = inv;
-    out
+    d[0] = inv;
 }
 
 /// `log_{g^(2^24)}` of eight elements of the order-256 subgroup (binary search over the sorted canonical
@@ -848,12 +844,8 @@ mod tests {
                 for batches in [0usize, 14] {
                     let forced = unsafe { decode_chunks_with(&xs[..n], batches) };
                     for k in 0..n {
-                        assert_eq!(forced[k].1, full[k].1);
                         for i in 0..CHUNK {
-                            assert_eq!(
-                                forced[k].0[i], full[k].0[i],
-                                "point {i} at {batches} batches"
-                            );
+                            assert_eq!(forced[k][i], full[k][i], "point {i} at {batches} batches");
                         }
                     }
                 }
@@ -864,7 +856,7 @@ mod tests {
                     single, full,
                     "the shared inversion equals the per-chunk one"
                 );
-                assert!(full[0].0.iter().filter(|p| p.is_some()).count() >= CHUNK / 3);
+                assert!(full[0].iter().filter(|y| y.is_some()).count() >= CHUNK / 3);
             }
         }
     }

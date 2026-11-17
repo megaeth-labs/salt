@@ -108,30 +108,41 @@ impl Element {
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Element, SerializationError> {
         let x = x_from_bytes(bytes)?;
         let x_sq = x.square();
-        // `d` is not a square, so `d·x² − 1` is never zero; were it zero, this panics as the
-        // division `n / d` it replaces did
-        let den_inv = denominator(x_sq)
-            .inverse()
-            .expect("d·x² − 1 is nonzero: d is not a square");
-        Self::from_x(x, x_sq, den_inv)
+        Self::from_x(x, x_sq, || {
+            // `d` is not a square, so `d·x² − 1` is never zero; were it zero, this panics as the
+            // division `n / d` it replaces did
+            denominator(x_sq)
+                .inverse()
+                .expect("d·x² − 1 is nonzero: d is not a square")
+        })
     }
 
-    /// The decode [`Element::from_bytes`] runs on a parsed `x`, given `x_sq = x²` and
-    /// `den_inv = 1 / (d·x² − 1)` so that a batch can share the inversion: the point with positive
-    /// `y` if one exists and lies in the prime subgroup.
-    fn from_x(x: Fq, x_sq: Fq, den_inv: Fq) -> Result<Element, SerializationError> {
-        // Construct a point that is on the curve
-        let point =
-            Self::get_point_from_x(x, x_sq, den_inv).ok_or(SerializationError::InvalidData)?;
+    /// The decode [`Element::from_bytes`] runs on a parsed `x`, given `x_sq = x²`: the point with
+    /// positive `y` if one exists and lies in the prime subgroup. `den_inv` yields
+    /// `1 / (d·x² − 1)`, so that a batch can share the inversion.
+    ///
+    /// The subgroup check runs first: it needs neither the inverse nor the square root and costs
+    /// less than the two of them, so an `x` off the subgroup is rejected without them (`den_inv`
+    /// is not called for it).
+    fn from_x(
+        x: Fq,
+        x_sq: Fq,
+        den_inv: impl FnOnce() -> Fq,
+    ) -> Result<Element, SerializationError> {
+        // Verify the point `x` belongs to is in the correct subgroup
+        if !subgroup_check(x_sq) {
+            return Err(SerializationError::InvalidData);
+        }
 
-        // Verify point is in the correct subgroup
-        subgroup_check(x_sq)
-            .then_some(Element(point))
+        // Construct a point that is on the curve
+        Self::get_point_from_x(x, x_sq, den_inv())
+            .map(Element)
             .ok_or(SerializationError::InvalidData)
     }
 
-    /// Deserializes many 32-byte compressed elements, one result per input in order, each equal to
-    /// what [`Element::from_bytes`] returns for it.
+    /// Deserializes many 32-byte compressed elements: all of them, in input order, where
+    /// [`Element::from_bytes`] accepts every input, and otherwise the error it returns for an input
+    /// it rejects.
     ///
     /// The inputs are split into tasks decoded in parallel with the `parallel` feature: about four
     /// per thread, at most 128 points each, and on the vector path whole chunks of 32 points. Within
@@ -139,26 +150,34 @@ impl Element {
     ///
     /// On an `x86_64` host with AVX-512 IFMA (and the `std` feature) the subgroup check, the inversion
     /// and the square root run eight points per vector register, 32 points per chunk, a short last
-    /// chunk padded. An input whose bytes are not a canonical `x`, and any point the vector path does
-    /// not accept, is decoded by [`Element::from_bytes`] itself, so every rejection is the scalar
-    /// decoder's and the vector path cannot reject an input the scalar path accepts.
+    /// chunk padded unless the scalar path decodes its few points for less. A point the vector path
+    /// returns no root for is decoded by [`Element::from_bytes`] itself, so every rejection is the
+    /// scalar decoder's and the vector path cannot reject an input the scalar path accepts. A root
+    /// it does return is checked against the curve equation in scalar arithmetic before it is
+    /// accepted; the subgroup check of an accepted point is the vector path's own (see
+    /// `decode_task_lanes`).
     ///
-    /// Every input is decoded before this returns. The results come back as an iterator over the
-    /// tasks' outputs rather than one `Vec`, so that a caller collecting them (into a map, say) copies
-    /// each result once: gathering them into a single vector first is a serial copy that measured
-    /// 15% of the whole decode on 20,000 points with the vector lanes.
+    /// The decode stops at the first input it rejects: its task ends there, and no task starts
+    /// after one has failed (a task already running on another thread ends at its own first
+    /// rejection, or completes). A batch with an invalid input is therefore not decoded to its end.
+    ///
+    /// The elements come back as an iterator over the tasks' outputs rather than one `Vec`, so that
+    /// a caller collecting them (into a map, say) copies each element once: gathering them into a
+    /// single vector first is a serial copy that measured 15% of the whole decode on 20,000 points
+    /// with the vector lanes.
     pub fn from_bytes_batch(
         bytes: &[[u8; 32]],
-    ) -> impl Iterator<Item = Result<Element, SerializationError>> {
-        let tasks: Vec<Vec<Result<Element, SerializationError>>> =
-            chunks!(bytes, decode_task_len(bytes.len()))
-                .map(Self::decode_task)
-                .collect();
-        tasks.into_iter().flatten()
+    ) -> Result<impl Iterator<Item = Element>, SerializationError> {
+        // collecting into a `Result` is what stops the decode: rayon schedules no further task
+        // once one has returned an error, and a serial iterator stops at it
+        let tasks: Vec<Vec<Element>> = chunks!(bytes, decode_task_len(bytes.len()))
+            .map(Self::decode_task)
+            .collect::<Result<_, _>>()?;
+        Ok(tasks.into_iter().flatten())
     }
 
     /// One task of [`Element::from_bytes_batch`], on the vector lanes where this host has them.
-    fn decode_task(bytes: &[[u8; 32]]) -> Vec<Result<Element, SerializationError>> {
+    fn decode_task(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
         if lanes_available() {
             // SAFETY: on this target `lanes_available()` is `ifma::available()`, which returned true.
@@ -167,72 +186,90 @@ impl Element {
         Self::decode_task_scalar(bytes)
     }
 
-    /// [`Element::from_bytes`] on every input, with the inversions of `y² = n/d` shared by the
-    /// task: one inversion and three products per point instead of an inversion each. Bytes that are
-    /// not a canonical `x`, and a zero denominator (which no `x` has, `d` not being a square), go
-    /// through `from_bytes` itself, so its error and its behavior are kept exactly.
-    fn decode_task_scalar(bytes: &[[u8; 32]]) -> Vec<Result<Element, SerializationError>> {
-        // (x, x², d·x² − 1) where the input parses and the denominator is nonzero
-        let parsed: Vec<Option<(Fq, Fq, Fq)>> = bytes
-            .iter()
-            .map(|b| {
-                let x = x_from_bytes(*b).ok()?;
-                let x_sq = x.square();
-                let den = denominator(x_sq);
-                (!den.is_zero()).then_some((x, x_sq, den))
-            })
-            .collect();
+    /// [`Element::from_bytes`] on every input up to the first it rejects, with the inversions of
+    /// `y² = n/d` shared by the task: one inversion and three products per point instead of an
+    /// inversion each. Bytes that are not a canonical `x` end the task with `from_bytes`'s error
+    /// before anything is inverted. A zero denominator (which no `x` has, `d` not being a square)
+    /// goes through `from_bytes` itself, so its behavior is kept exactly.
+    fn decode_task_scalar(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
+        // (x, x², d·x² − 1) per input, `None` where the denominator is zero
+        let mut parsed: Vec<Option<(Fq, Fq, Fq)>> = Vec::with_capacity(bytes.len());
+        for b in bytes {
+            let x = x_from_bytes(*b)?;
+            let x_sq = x.square();
+            let den = denominator(x_sq);
+            parsed.push((!den.is_zero()).then_some((x, x_sq, den)));
+        }
         let mut den_inv: Vec<Fq> = parsed.iter().flatten().map(|(_, _, den)| *den).collect();
         serial_batch_inversion_and_mul(&mut den_inv, &Fq::one());
         let mut den_inv = den_inv.into_iter();
         bytes
             .iter()
             .zip(parsed)
-            .map(|(b, parsed)| match parsed {
-                Some((x, x_sq, _)) => Self::from_x(
-                    x,
-                    x_sq,
-                    den_inv.next().expect("an inverse per parsed input"),
-                ),
-                None => Self::from_bytes(*b),
+            .map(|(b, parsed)| {
+                let Some((x, x_sq, _)) = parsed else {
+                    return Self::from_bytes(*b);
+                };
+                let den_inv = den_inv.next().expect("an inverse per nonzero denominator");
+                Self::from_x(x, x_sq, || den_inv)
             })
             .collect()
     }
 
-    /// [`Element::from_bytes`] on every input, the canonical ones decoded by `decode_chunks` (the
-    /// vector lanes, a stand-in in tests) in chunks of [`CHUNK`], at most [`TASK_CHUNKS`] chunks per
-    /// call. A position whose bytes are not a canonical `x`, and the padding of a short last chunk,
-    /// carry `x = 0` (the identity, whose lane settles first) and their lanes' answers are discarded.
+    /// [`Element::from_bytes`] on every input up to the first it rejects, the inputs decoded by
+    /// `decode_chunks` (the vector lanes, a stand-in in tests) in chunks of [`CHUNK`], at most
+    /// [`TASK_CHUNKS`] chunks per call. Bytes that are not a canonical `x` end the task with
+    /// `from_bytes`'s error before the lanes run. A short last chunk is padded with `x = 0` (the
+    /// identity, whose lane settles first; the padding lanes' answers are discarded), unless it
+    /// holds fewer than [`MIN_PADDED_CHUNK`] points, which the scalar task decodes instead.
     ///
-    /// The lanes only accept, and only inputs that parse: every other input is decoded by
-    /// `from_bytes` itself, so every rejection is the scalar decoder's and no fault in the lanes can
-    /// turn an input the scalar path accepts into an error.
+    /// The lanes never reject and never supply a coordinate unchecked:
+    ///
+    /// - An input they return no root for is decoded by `from_bytes` itself, so every rejection is
+    ///   the scalar decoder's and no fault in the lanes can turn an input the scalar path accepts
+    ///   into an error.
+    /// - A root they do return is accepted only once [`lane_point`] has confirmed in scalar
+    ///   arithmetic that it satisfies the curve equation; one that does not is `from_bytes`'s to
+    ///   decode as well. A fault in the lanes' inversion or square root therefore cannot produce a
+    ///   point the scalar path would not.
+    ///
+    /// What an accepted point does take on the lanes' word is its subgroup check, the residue
+    /// symbol of `1 − a·x²`. Nothing short of computing the symbol again confirms it, and the
+    /// scalar symbol alone (1.6 µs on an M4) costs more than the lanes spend on the whole point
+    /// (1.34 µs on an EPYC 9B45), so it is covered by the lane tests, which compare the lanes'
+    /// symbol with the scalar one, and not by a check here.
     #[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
     fn decode_task_lanes(
         bytes: &[[u8; 32]],
         mut decode_chunks: impl FnMut(&[[Fq; CHUNK]]) -> Vec<ChunkDecode>,
-    ) -> Vec<Result<Element, SerializationError>> {
+    ) -> Result<Vec<Element>, SerializationError> {
         let mut out = Vec::with_capacity(bytes.len());
         for group in bytes.chunks(CHUNK * TASK_CHUNKS) {
-            let xs: Vec<Option<Fq>> = group.iter().map(|b| x_from_bytes(*b).ok()).collect();
-            let mut lanes = std::vec![[Fq::zero(); CHUNK]; group.len().div_ceil(CHUNK)];
-            for (i, x) in xs.iter().enumerate() {
-                if let Some(x) = x {
+            let tail = group.len() % CHUNK;
+            let scalar_tail = if tail < MIN_PADDED_CHUNK { tail } else { 0 };
+            let (group, scalar_tail) = group.split_at(group.len() - scalar_tail);
+            if !group.is_empty() {
+                let xs = group
+                    .iter()
+                    .map(|b| x_from_bytes(*b))
+                    .collect::<Result<Vec<Fq>, _>>()?;
+                let mut lanes = std::vec![[Fq::zero(); CHUNK]; xs.len().div_ceil(CHUNK)];
+                for (i, x) in xs.iter().enumerate() {
                     lanes[i / CHUNK][i % CHUNK] = *x;
                 }
+                let decoded = decode_chunks(&lanes);
+                assert_eq!(decoded.len(), lanes.len(), "one decode per lane chunk");
+                for (i, (b, x)) in group.iter().zip(xs).enumerate() {
+                    let point = decoded[i / CHUNK][i % CHUNK].and_then(|y| lane_point(x, y));
+                    out.push(match point {
+                        Some(point) => point,
+                        None => Self::from_bytes(*b)?,
+                    });
+                }
             }
-            let decoded = decode_chunks(&lanes);
-            assert_eq!(decoded.len(), lanes.len(), "one decode per lane chunk");
-            for (i, (b, x)) in group.iter().zip(&xs).enumerate() {
-                out.push(match (x, decoded[i / CHUNK].0[i % CHUNK]) {
-                    (Some(x), Some((_, y))) => {
-                        Ok(Element(EdwardsAffine::new_unchecked(*x, y).into()))
-                    }
-                    _ => Self::from_bytes(*b),
-                });
-            }
+            out.extend(Self::decode_task_scalar(scalar_tail)?);
         }
-        out
+        Ok(out)
     }
 
     /// Serializes this element to a 64-byte uncompressed representation.
@@ -478,7 +515,7 @@ impl Element {
 }
 
 // The lexographically largest value is defined to be the positive value
-pub(crate) fn is_positive(coordinate: Fq) -> bool {
+fn is_positive(coordinate: Fq) -> bool {
     coordinate > -coordinate
 }
 
@@ -527,8 +564,9 @@ fn base_to_scalar(base_field: Fq) -> Fr {
 /// Invalid points not on the curve may pass this check. For example, (0, 0) passes
 /// because `1 - a·0² = 1` is a QR, despite not being on the curve.
 ///
-/// Used during deserialization to ensure valid banderwagon elements, and by the debug check of
-/// [`Element::from_bytes_unchecked_uncompressed`].
+/// Used during deserialization to ensure valid banderwagon elements (which runs it before it
+/// looks for the point on the curve, and accepts only an `x` that passes both), and by the debug
+/// check of [`Element::from_bytes_unchecked_uncompressed`].
 fn subgroup_check(x_sq: Fq) -> bool {
     crate::decoder_arithmetic::is_nonzero_square(Fq::one() - BandersnatchConfig::COEFF_A * x_sq)
 }
@@ -554,10 +592,32 @@ pub(crate) const CHUNK: usize = 32;
 /// exponentiation.
 pub(crate) const TASK_CHUNKS: usize = 4;
 
-/// The vector decode of one chunk: `(x, y)` with positive `y` per point where the scalar path
-/// accepts, and the lanes the vector path did not decide.
+/// The fewest points a short last chunk is padded to a whole chunk for. A padded chunk costs what
+/// 32 points cost in the lanes, whatever it holds, and fewer points than this cost less on the
+/// scalar task. With the per-point costs measured on an EPYC 9B45 (1.34 µs in the lanes, 10.8 µs
+/// on the scalar task plus its 4.3 µs inversion) the two cross between three and four points.
 #[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
-pub(crate) type ChunkDecode = ([Option<(Fq, Fq)>; CHUNK], [bool; CHUNK]);
+const MIN_PADDED_CHUNK: usize = 4;
+
+/// The vector decode of one chunk: per point, a `y` of either sign where the lanes found a root
+/// of `y² = n/d` and `1 − a·x²` to be a nonzero residue, `None` otherwise.
+#[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
+pub(crate) type ChunkDecode = [Option<Fq>; CHUNK];
+
+/// The element of `x` and a root `y` the vector lanes returned for it, or `None` if `(x, y)` is not
+/// on the curve: `y²·(d·x² − 1) = a·x² − 1`, in scalar arithmetic that shares nothing with the
+/// lanes. The `y` taken is the positive one, as [`Element::from_bytes`] takes it, so a root that
+/// passes gives the point `from_bytes` constructs. The subgroup check is not repeated (see
+/// [`Element::decode_task_lanes`]).
+#[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
+fn lane_point(x: Fq, y: Fq) -> Option<Element> {
+    let x_sq = x.square();
+    let on_curve = y.square() * denominator(x_sq) == BandersnatchConfig::COEFF_A * x_sq - Fq::one();
+    on_curve.then(|| {
+        let y = if is_positive(y) { y } else { -y };
+        Element(EdwardsAffine::new_unchecked(x, y).into())
+    })
+}
 
 /// Whether [`Element::from_bytes_batch`] decodes on the AVX-512 IFMA lanes on this host: the lane
 /// module is compiled (`x86_64` with `std`) and the CPU reports the extension. The batch decode
@@ -709,50 +769,60 @@ impl Hash for Element {
 pub(crate) mod tests {
     extern crate std;
     use self::std::println;
-    /// `from_bytes_batch` returns `from_bytes`'s result on every input: accepted points, canonical `x`
-    /// with no square root, points off the prime subgroup, and non-canonical bytes.
+    /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its
+    /// error where it rejects one, wherever that one is: a canonical `x` with no square root or
+    /// off the prime subgroup, or bytes that are not a canonical `x`.
     #[test]
     fn from_bytes_batch_matches_from_bytes() {
-        use ark_ff::UniformRand;
-        use rand_chacha::rand_core::{RngCore, SeedableRng};
-        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(7);
-        let mut inputs: Vec<[u8; 32]> = Vec::new();
-        for _ in 0..200 {
-            inputs.push((Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes());
+        let (accepted, rejected) = accepted_and_rejected(1500);
+        assert!(accepted.len() >= 500, "{} accepted", accepted.len());
+        assert!(rejected.len() >= 500, "{} rejected", rejected.len());
+        let batch = |inputs: &[[u8; 32]]| {
+            outcome(Element::from_bytes_batch(inputs).map(|elements| elements.collect()))
+        };
+        assert_eq!(batch(&accepted), expected(&accepted));
+        assert_eq!(
+            batch(&accepted).map(|points| points.len()),
+            Ok(accepted.len())
+        );
+
+        // one rejected input among accepted ones, at a position that moves through the tasks
+        let accepted = &accepted[..300];
+        for (k, bad) in rejected.iter().enumerate().take(120) {
+            let mut inputs = accepted.to_vec();
+            inputs[(k * 37) % accepted.len()] = *bad;
+            assert_eq!(batch(&inputs), expected(&inputs), "rejected input {k}");
+            assert!(batch(&inputs).is_err(), "rejected input {k}");
         }
-        for _ in 0..200 {
-            let x = Fq::rand(&mut rng);
-            let mut b = [0u8; 32];
-            x.serialize_compressed(&mut b[..]).unwrap();
-            b.reverse();
-            inputs.push(b);
-        }
-        for _ in 0..20 {
-            inputs.push([0xff; 32]);
-            let mut b = [0u8; 32];
-            rng.fill_bytes(&mut b);
-            inputs.push(b);
-        }
-        let expected: Vec<_> = inputs
-            .iter()
-            .map(|b| outcome(Element::from_bytes(*b)))
-            .collect();
-        let got: Vec<_> = Element::from_bytes_batch(&inputs).map(outcome).collect();
-        assert_eq!(got, expected);
-        assert!(expected.iter().filter(|p| p.is_ok()).count() >= 200);
-        assert!(expected.iter().filter(|p| p.is_err()).count() >= 100);
+
+        // and many of them
+        let mixed = decode_test_inputs(600);
+        assert_eq!(batch(&mixed), expected(&mixed));
+        assert!(batch(&mixed).is_err());
     }
 
-    /// What a decode returns, comparable: the affine point, or the error's debug form.
+    /// What a decode returns, comparable: the affine points, or the error's debug form.
     fn outcome(
-        decoded: Result<Element, SerializationError>,
-    ) -> Result<(Fq, Fq), std::string::String> {
+        decoded: Result<Vec<Element>, SerializationError>,
+    ) -> Result<Vec<(Fq, Fq)>, std::string::String> {
         decoded
-            .map(|element| {
-                let point = element.0.into_affine();
-                (point.x, point.y)
+            .map(|elements| {
+                elements
+                    .iter()
+                    .map(|element| {
+                        let point = element.0.into_affine();
+                        (point.x, point.y)
+                    })
+                    .collect()
             })
             .map_err(|error| std::format!("{error:?}"))
+    }
+
+    /// What `from_bytes` returns for the inputs one by one: every point, or its first error (it
+    /// has one error for every input it rejects, so whichever a batch decoder meets first is the
+    /// same).
+    fn expected(inputs: &[[u8; 32]]) -> Result<Vec<(Fq, Fq)>, std::string::String> {
+        outcome(inputs.iter().map(|b| Element::from_bytes(*b)).collect())
     }
 
     /// The big-endian bytes of the modulus: the smallest input that is not a canonical `x`.
@@ -780,81 +850,231 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// The first `len` inputs of [`decode_test_inputs`], split into those `from_bytes` accepts
+    /// and those it rejects, each in order and so each with its kinds interleaved.
+    fn accepted_and_rejected(len: usize) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+        decode_test_inputs(len)
+            .into_iter()
+            .partition(|b| Element::from_bytes(*b).is_ok())
+    }
+
     /// A stand-in for the vector lanes that answers what `from_bytes` answers for every lane's `x`,
-    /// so its padding lanes (`x = 0`, the identity) and the lanes of non-canonical inputs return a
-    /// point the task decoder must discard.
+    /// so its padding lanes (`x = 0`, the identity) return a root the task decoder must discard.
     fn stand_in_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
-        assert!(
-            !xs.is_empty() && xs.len() <= TASK_CHUNKS,
-            "{} chunks",
-            xs.len()
-        );
-        xs.iter()
-            .map(|chunk| (chunk.map(decode), [false; CHUNK]))
-            .collect()
+        lanes_answering(xs, |x| decode(x).map(|(_, y)| y))
     }
 
     /// A stand-in for the vector lanes that accepts nothing: every input falls back to `from_bytes`.
     fn rejecting_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
+        lanes_answering(xs, |_| None)
+    }
+
+    /// A stand-in for faulty vector lanes: a `y` in every lane and a root of `y² = n/d` in none.
+    fn wrong_root_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
+        lanes_answering(xs, |x| {
+            Some(decode(x).map_or(Fq::one(), |(_, y)| y + Fq::one()))
+        })
+    }
+
+    /// A stand-in for the vector lanes that returns the negative root where `from_bytes` accepts.
+    fn negative_root_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
+        lanes_answering(xs, |x| decode(x).map(|(_, y)| -y))
+    }
+
+    /// The chunks a lane stand-in returns, `answer` giving each lane's; the task decoder calls the
+    /// lanes with one to [`TASK_CHUNKS`] chunks.
+    fn lanes_answering(xs: &[[Fq; CHUNK]], answer: impl Fn(Fq) -> Option<Fq>) -> Vec<ChunkDecode> {
         assert!(
             !xs.is_empty() && xs.len() <= TASK_CHUNKS,
             "{} chunks",
             xs.len()
         );
-        std::vec![([None; CHUNK], [false; CHUNK]); xs.len()]
+        xs.iter().map(|chunk| chunk.map(&answer)).collect()
     }
 
-    /// Each task decoder returns `from_bytes`'s outcome on every input, in order, at every length
-    /// around the chunk and call boundaries, with non-canonical inputs mixed in and on those
-    /// boundaries: the scalar task, the lane task on stand-in lanes (and on the real lanes where this
-    /// host has them), and the whole batch.
+    /// Each task decoder returns `from_bytes`'s elements, in order, at every length around the
+    /// chunk, padding and call boundaries, and its error once an input it rejects is put on one of
+    /// those boundaries: the scalar task, the lane task on stand-in lanes (and on the real lanes
+    /// where this host has them), and the whole batch. Lanes that return a wrong root in every lane
+    /// change nothing, and neither do lanes that return the negative root.
     #[test]
     fn decode_tasks_match_from_bytes() {
-        let pool = decode_test_inputs(600);
-        let lengths = (0..=33).chain([63, 64, 65, 96, 127, 128, 129, 160, 255, 256, 257]);
+        let (accepted, rejected) = accepted_and_rejected(1200);
+        let mut rejected = rejected.iter().cycle();
+        let lengths = (0..=36).chain([
+            63, 64, 65, 67, 68, 96, 127, 128, 129, 131, 132, 160, 255, 256, 257,
+        ]);
         for len in lengths {
-            for on_boundaries in [false, true] {
-                let mut input: Vec<[u8; 32]> = pool[len % 97..][..len].to_vec();
-                if on_boundaries {
-                    let positions = [0, len.saturating_sub(1), 31, 32, 127, 128, 129];
-                    for (k, i) in positions.into_iter().enumerate() {
-                        if i < len {
-                            input[i] = if k % 2 == 0 {
-                                [0xff; 32]
-                            } else {
-                                modulus_bytes()
-                            };
-                        }
-                    }
+            let valid = &accepted[len % 97..][..len];
+            // the accepted inputs, then one rejected input on each boundary in turn
+            let mut cases = vec![valid.to_vec()];
+            for position in [0, len / 2, len.saturating_sub(1), 31, 32, 127, 128, 129] {
+                if position < len {
+                    let mut input = valid.to_vec();
+                    input[position] = *rejected.next().unwrap();
+                    cases.push(input);
                 }
-                let want: Vec<_> = input
-                    .iter()
-                    .map(|b| outcome(Element::from_bytes(*b)))
-                    .collect();
-                let check = |decoder: &str, got: Vec<Result<Element, SerializationError>>| {
-                    let got: Vec<_> = got.into_iter().map(outcome).collect();
-                    assert_eq!(
-                        got, want,
-                        "{decoder}, length {len}, on boundaries {on_boundaries}"
-                    );
+            }
+            for (case, input) in cases.iter().enumerate() {
+                let want = expected(input);
+                assert_eq!(want.is_ok(), case == 0, "length {len}, case {case}");
+                let check = |decoder: &str, got: Result<Vec<Element>, SerializationError>| {
+                    assert_eq!(outcome(got), want, "{decoder}, length {len}, case {case}");
                 };
-                check("scalar task", Element::decode_task_scalar(&input));
+                check("scalar task", Element::decode_task_scalar(input));
                 check(
                     "stand-in lanes",
-                    Element::decode_task_lanes(&input, stand_in_lanes),
+                    Element::decode_task_lanes(input, stand_in_lanes),
                 );
                 check(
                     "rejecting lanes",
-                    Element::decode_task_lanes(&input, rejecting_lanes),
+                    Element::decode_task_lanes(input, rejecting_lanes),
+                );
+                check(
+                    "lanes with wrong roots",
+                    Element::decode_task_lanes(input, wrong_root_lanes),
+                );
+                check(
+                    "lanes with negative roots",
+                    Element::decode_task_lanes(input, negative_root_lanes),
                 );
                 #[cfg(all(feature = "std", target_arch = "x86_64"))]
                 if lanes_under_test() {
                     // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                     let lanes = |xs: &[[Fq; CHUNK]]| unsafe { crate::ifma::decode_chunks(xs) };
-                    check("lanes", Element::decode_task_lanes(&input, lanes));
+                    check("lanes", Element::decode_task_lanes(input, lanes));
                 }
-                check("batch", Element::from_bytes_batch(&input).collect());
+                check(
+                    "batch",
+                    Element::from_bytes_batch(input).map(|elements| elements.collect()),
+                );
             }
+        }
+    }
+
+    /// A root the lanes return is accepted only on the curve, and with the positive `y`: the
+    /// check `from_bytes_batch` makes of every lane's answer before it uses it.
+    #[test]
+    fn lane_point_accepts_only_roots() {
+        let xs = decode_test_xs(256);
+        let mut accepted = 0;
+        for x in xs {
+            let Some((_, y)) = decode(x) else {
+                // `y = 1` is on the curve for `x = 0` alone, which decodes
+                assert!(lane_point(x, Fq::one()).is_none());
+                continue;
+            };
+            accepted += 1;
+            for root in [y, -y] {
+                let point = lane_point(x, root).expect("a root is on the curve");
+                let point = point.0.into_affine();
+                assert_eq!((point.x, point.y), (x, y));
+            }
+            for wrong in [y + Fq::one(), y.double(), Fq::zero(), x] {
+                if wrong != y && wrong != -y {
+                    assert!(lane_point(x, wrong).is_none());
+                }
+            }
+        }
+        assert!(accepted > 100, "{accepted} accepted");
+    }
+
+    /// What an accepted point takes on the lanes' word: its subgroup check. A root the lanes
+    /// return for an `x` that is on the curve but off the subgroup passes the curve check, so the
+    /// task accepts the point although `from_bytes` rejects it. The real lanes return no root
+    /// there (`lane_decode_accepts_exactly_what_from_bytes_accepts`); this pins where the scalar
+    /// check ends, so that moving that line is a deliberate change, and it shows that the task
+    /// uses the lane's own root for each input and does not fall back for all of them.
+    #[test]
+    fn the_subgroup_check_of_a_lane_root_is_the_lanes() {
+        // the positive root of `y² = n/d`, whether or not `x` is in the subgroup
+        let on_curve = |x: Fq| {
+            let x_sq = x.square();
+            let y_sq = (BandersnatchConfig::COEFF_A * x_sq - Fq::one()) / denominator(x_sq);
+            y_sq.sqrt().map(|y| if is_positive(y) { y } else { -y })
+        };
+        let off_subgroup = decode_test_xs(64)
+            .into_iter()
+            .find(|x| decode(*x).is_none() && on_curve(*x).is_some())
+            .expect("an x on the curve and off the subgroup");
+        let (accepted, _) = accepted_and_rejected(400);
+        for position in [5, CHUNK + 1, 2 * CHUNK + 9] {
+            let mut input = accepted[..3 * CHUNK].to_vec();
+            input[position] = x_to_bytes(off_subgroup);
+            assert!(Element::from_bytes(input[position]).is_err());
+
+            let vouching_lanes = |xs: &[[Fq; CHUNK]]| lanes_answering(xs, on_curve);
+            let points = outcome(Element::decode_task_lanes(&input, vouching_lanes))
+                .expect("the lanes vouch for every input");
+            assert_eq!(
+                points[position],
+                (off_subgroup, on_curve(off_subgroup).unwrap())
+            );
+            // every other input is `from_bytes`'s point
+            input.remove(position);
+            let mut others = points;
+            others.remove(position);
+            assert_eq!(Ok(others), expected(&input));
+
+            // lanes that answer as `from_bytes` does leave the rejection to it
+            input.insert(position, x_to_bytes(off_subgroup));
+            assert!(Element::decode_task_lanes(&input, stand_in_lanes).is_err());
+        }
+    }
+
+    /// A last chunk of fewer than [`MIN_PADDED_CHUNK`] points is decoded by the scalar task and
+    /// does not reach the lanes; a longer one is padded into them.
+    #[test]
+    fn a_short_last_chunk_takes_the_scalar_task() {
+        let (accepted, _) = accepted_and_rejected(600);
+        let call = CHUNK * TASK_CHUNKS;
+        for (len, chunks) in [
+            (0, 0),
+            (1, 0),
+            (MIN_PADDED_CHUNK - 1, 0),
+            (MIN_PADDED_CHUNK, 1),
+            (CHUNK, 1),
+            (CHUNK + MIN_PADDED_CHUNK - 1, 1),
+            (CHUNK + MIN_PADDED_CHUNK, 2),
+            (call, TASK_CHUNKS),
+            (call + MIN_PADDED_CHUNK - 1, TASK_CHUNKS),
+            (call + MIN_PADDED_CHUNK, TASK_CHUNKS + 1),
+        ] {
+            let input = &accepted[..len];
+            let mut in_lanes = 0;
+            let got = Element::decode_task_lanes(input, |xs| {
+                in_lanes += xs.len();
+                stand_in_lanes(xs)
+            });
+            assert_eq!(outcome(got), expected(input), "length {len}");
+            assert_eq!(in_lanes, chunks, "length {len}");
+        }
+    }
+
+    /// A task ends at the first input it rejects: the lanes are not called for a batch whose
+    /// bytes do not all parse, nor for the calls after the one that holds a rejected point.
+    #[test]
+    fn a_task_stops_at_its_first_rejection() {
+        let (accepted, _) = accepted_and_rejected(1200);
+        let call = CHUNK * TASK_CHUNKS;
+        // a canonical `x` that is no point's: the lanes run before it is rejected
+        let no_point = x_to_bytes(
+            decode_test_xs(64)
+                .into_iter()
+                .find(|x| decode(*x).is_none())
+                .unwrap(),
+        );
+        for (bad, calls) in [(modulus_bytes(), 0), (no_point, 1)] {
+            let mut input = accepted[..3 * call].to_vec();
+            input[5] = bad;
+            let mut lane_calls = 0;
+            let got = Element::decode_task_lanes(&input, |xs| {
+                lane_calls += 1;
+                stand_in_lanes(xs)
+            });
+            assert_eq!(outcome(got), expected(&input));
+            assert!(expected(&input).is_err());
+            assert_eq!(lane_calls, calls);
         }
     }
 
@@ -901,35 +1121,27 @@ pub(crate) mod tests {
         let inputs: Vec<[u8; 32]> = (0..4096)
             .map(|_| (Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes())
             .collect();
-        let want: Vec<_> = inputs
-            .iter()
-            .map(|b| outcome(Element::from_bytes(*b)))
-            .collect();
-        let ns_per_point = |decode: &dyn Fn() -> Vec<Result<Element, SerializationError>>| {
+        let want = expected(&inputs);
+        let ns_per_point = |decode: &dyn Fn() -> Result<Vec<Element>, SerializationError>| {
             let t = std::time::Instant::now();
             let got = decode();
             let ns = t.elapsed().as_nanos() as f64 / inputs.len() as f64;
-            assert_eq!(got.into_iter().map(outcome).collect::<Vec<_>>(), want);
+            assert_eq!(outcome(got), want);
             ns
+        };
+        // the inputs through `task`, `len` at a time
+        type Task = fn(&[[u8; 32]]) -> Result<Vec<Element>, SerializationError>;
+        let in_tasks = |len: usize, task: Task| {
+            let tasks: Result<Vec<Vec<Element>>, _> = inputs.chunks(len).map(task).collect();
+            tasks.map(|tasks| tasks.into_iter().flatten().collect())
         };
         let full = CHUNK * TASK_CHUNKS;
         let short = CHUNK / 4;
         for rep in 0..5 {
             let point = ns_per_point(&|| inputs.iter().map(|b| Element::from_bytes(*b)).collect());
-            let scalar = ns_per_point(&|| {
-                inputs
-                    .chunks(full)
-                    .flat_map(Element::decode_task_scalar)
-                    .collect()
-            });
-            let task =
-                ns_per_point(&|| inputs.chunks(full).flat_map(Element::decode_task).collect());
-            let padded = ns_per_point(&|| {
-                inputs
-                    .chunks(short)
-                    .flat_map(Element::decode_task)
-                    .collect()
-            });
+            let scalar = ns_per_point(&|| in_tasks(full, Element::decode_task_scalar));
+            let task = ns_per_point(&|| in_tasks(full, Element::decode_task));
+            let padded = ns_per_point(&|| in_tasks(short, Element::decode_task));
             println!(
                 "decode rep {rep}, one thread, lanes {}: from_bytes {point:.0} ns/point, scalar task of {full} {scalar:.0} (x{:.2}), task of {full} {task:.0} (x{:.2}), task of {short} {padded:.0} (x{:.2})",
                 lanes_available(),
@@ -1020,10 +1232,10 @@ pub(crate) mod tests {
         assert!(xs.len() - accepted > 500, "{accepted} accepted");
     }
 
-    /// The lanes return a point exactly where `from_bytes` accepts, and the same point, with every
-    /// edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever the
-    /// lanes do not return, which would hide a lane that wrongly returns nothing; this reads the
-    /// lanes' own answer.
+    /// The lanes return a root exactly where `from_bytes` accepts, and a root of its point, with
+    /// every edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever
+    /// the lanes do not return, which would hide a lane that wrongly returns nothing, and it takes
+    /// the subgroup check of a root they do return on their word; this reads the lanes' own answer.
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn lane_decode_accepts_exactly_what_from_bytes_accepts() {
@@ -1032,7 +1244,8 @@ pub(crate) mod tests {
             return;
         }
         let xs = decode_test_xs(2048);
-        let expected: Vec<Option<(Fq, Fq)>> = xs.iter().map(|x| decode(*x)).collect();
+        // the positive `y` where `from_bytes` accepts
+        let expected: Vec<Option<Fq>> = xs.iter().map(|x| decode(*x).map(|(_, y)| y)).collect();
         // Shift the inputs through the lane positions, padding both ends with ones.
         for shift in 0..CHUNK {
             let mut padded = vec![Fq::one(); shift];
@@ -1041,14 +1254,15 @@ pub(crate) mod tests {
             for (k, chunk) in padded.chunks_exact(CHUNK).enumerate() {
                 let chunk: [Fq; CHUNK] = chunk.try_into().unwrap();
                 // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
-                let (points, undecided) = unsafe { decode_chunks(&[chunk]) }[0];
-                assert_eq!(undecided, [false; CHUNK], "chunk {k} at shift {shift}");
-                for (lane, point) in points.iter().enumerate() {
+                let roots = unsafe { decode_chunks(&[chunk]) }[0];
+                for (lane, root) in roots.into_iter().enumerate() {
                     let Some(i) = (k * CHUNK + lane).checked_sub(shift) else {
                         continue;
                     };
                     if let Some(want) = expected.get(i) {
-                        assert_eq!(point, want, "input {i} in lane {lane}");
+                        // the lanes return a root of either sign
+                        let got = root.map(|y| if is_positive(y) { y } else { -y });
+                        assert_eq!(got, *want, "input {i} in lane {lane}");
                     }
                 }
             }
