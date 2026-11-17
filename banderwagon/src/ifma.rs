@@ -21,9 +21,7 @@
 //! batches (none in 40,000 sampled inputs) takes its group's Euler exponentiation. A lane that yields no
 //! root (none exists, off the subgroup, or a table lookup that misses, which never happens on a residue
 //! of a field element) is decoded again on the scalar path by the caller
-//! ([`crate::Element::from_bytes_batch`]), so these lanes only ever accept; a root they do yield the
-//! caller checks against the curve equation in scalar arithmetic, so what an accepted point takes from
-//! these lanes unchecked is its subgroup symbol.
+//! ([`crate::Element::from_bytes_batch`]), so these lanes only ever accept.
 //!
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].

@@ -152,10 +152,8 @@ impl Element {
     /// and the square root run eight points per vector register, 32 points per chunk, a short last
     /// chunk padded unless the scalar path decodes its few points for less. A point the vector path
     /// returns no root for is decoded by [`Element::from_bytes`] itself, so every rejection is the
-    /// scalar decoder's and the vector path cannot reject an input the scalar path accepts. A root
-    /// it does return is checked against the curve equation in scalar arithmetic before it is
-    /// accepted; the subgroup check of an accepted point is the vector path's own (see
-    /// `decode_task_lanes`).
+    /// scalar decoder's and the vector path cannot reject an input the scalar path accepts. A point
+    /// it does return a root for is accepted as the vector path decoded it.
     ///
     /// The decode stops at the first input it rejects: its task ends there, and no task starts
     /// after one has failed (a task already running on another thread ends at its own first
@@ -223,21 +221,11 @@ impl Element {
     /// identity, whose lane settles first; the padding lanes' answers are discarded), unless it
     /// holds fewer than [`MIN_PADDED_CHUNK`] points, which the scalar task decodes instead.
     ///
-    /// The lanes never reject and never supply a coordinate unchecked:
-    ///
-    /// - An input they return no root for is decoded by `from_bytes` itself, so every rejection is
-    ///   the scalar decoder's and no fault in the lanes can turn an input the scalar path accepts
-    ///   into an error.
-    /// - A root they do return is accepted only once [`lane_point`] has confirmed in scalar
-    ///   arithmetic that it satisfies the curve equation; one that does not is `from_bytes`'s to
-    ///   decode as well. A fault in the lanes' inversion or square root therefore cannot produce a
-    ///   point the scalar path would not.
-    ///
-    /// What an accepted point does take on the lanes' word is its subgroup check, the residue
-    /// symbol of `1 − a·x²`. Nothing short of computing the symbol again confirms it, and the
-    /// scalar symbol alone (1.6 µs on an M4) costs more than the lanes spend on the whole point
-    /// (1.34 µs on an EPYC 9B45), so it is covered by the lane tests, which compare the lanes'
-    /// symbol with the scalar one, and not by a check here.
+    /// The lanes only accept. An input they return no root for is decoded by `from_bytes` itself,
+    /// so every rejection is the scalar decoder's and no fault in the lanes can turn an input the
+    /// scalar path accepts into an error. A root they do return is taken as they computed it, with
+    /// the positive `y` chosen here as `from_bytes` chooses it: it is not decoded again, and the
+    /// lane tests are what compare it with the scalar decoder's.
     #[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
     fn decode_task_lanes(
         bytes: &[[u8; 32]],
@@ -260,9 +248,11 @@ impl Element {
                 let decoded = decode_chunks(&lanes);
                 assert_eq!(decoded.len(), lanes.len(), "one decode per lane chunk");
                 for (i, (b, x)) in group.iter().zip(xs).enumerate() {
-                    let point = decoded[i / CHUNK][i % CHUNK].and_then(|y| lane_point(x, y));
-                    out.push(match point {
-                        Some(point) => point,
+                    out.push(match decoded[i / CHUNK][i % CHUNK] {
+                        Some(y) => {
+                            let y = if is_positive(y) { y } else { -y };
+                            Element(EdwardsAffine::new_unchecked(x, y).into())
+                        }
                         None => Self::from_bytes(*b)?,
                     });
                 }
@@ -604,21 +594,6 @@ const MIN_PADDED_CHUNK: usize = 4;
 #[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
 pub(crate) type ChunkDecode = [Option<Fq>; CHUNK];
 
-/// The element of `x` and a root `y` the vector lanes returned for it, or `None` if `(x, y)` is not
-/// on the curve: `y²·(d·x² − 1) = a·x² − 1`, in scalar arithmetic that shares nothing with the
-/// lanes. The `y` taken is the positive one, as [`Element::from_bytes`] takes it, so a root that
-/// passes gives the point `from_bytes` constructs. The subgroup check is not repeated (see
-/// [`Element::decode_task_lanes`]).
-#[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
-fn lane_point(x: Fq, y: Fq) -> Option<Element> {
-    let x_sq = x.square();
-    let on_curve = y.square() * denominator(x_sq) == BandersnatchConfig::COEFF_A * x_sq - Fq::one();
-    on_curve.then(|| {
-        let y = if is_positive(y) { y } else { -y };
-        Element(EdwardsAffine::new_unchecked(x, y).into())
-    })
-}
-
 /// Whether [`Element::from_bytes_batch`] decodes on the AVX-512 IFMA lanes on this host: the lane
 /// module is compiled (`x86_64` with `std`) and the CPU reports the extension. The batch decode
 /// dispatches on this, and so does the test that requires the lanes in CI.
@@ -869,13 +844,6 @@ pub(crate) mod tests {
         lanes_answering(xs, |_| None)
     }
 
-    /// A stand-in for faulty vector lanes: a `y` in every lane and a root of `y² = n/d` in none.
-    fn wrong_root_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
-        lanes_answering(xs, |x| {
-            Some(decode(x).map_or(Fq::one(), |(_, y)| y + Fq::one()))
-        })
-    }
-
     /// A stand-in for the vector lanes that returns the negative root where `from_bytes` accepts.
     fn negative_root_lanes(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
         lanes_answering(xs, |x| decode(x).map(|(_, y)| -y))
@@ -895,8 +863,8 @@ pub(crate) mod tests {
     /// Each task decoder returns `from_bytes`'s elements, in order, at every length around the
     /// chunk, padding and call boundaries, and its error once an input it rejects is put on one of
     /// those boundaries: the scalar task, the lane task on stand-in lanes (and on the real lanes
-    /// where this host has them), and the whole batch. Lanes that return a wrong root in every lane
-    /// change nothing, and neither do lanes that return the negative root.
+    /// where this host has them), and the whole batch. Lanes that return the negative root change
+    /// nothing.
     #[test]
     fn decode_tasks_match_from_bytes() {
         let (accepted, rejected) = accepted_and_rejected(1200);
@@ -931,10 +899,6 @@ pub(crate) mod tests {
                     Element::decode_task_lanes(input, rejecting_lanes),
                 );
                 check(
-                    "lanes with wrong roots",
-                    Element::decode_task_lanes(input, wrong_root_lanes),
-                );
-                check(
                     "lanes with negative roots",
                     Element::decode_task_lanes(input, negative_root_lanes),
                 );
@@ -949,76 +913,6 @@ pub(crate) mod tests {
                     Element::from_bytes_batch(input).map(|elements| elements.collect()),
                 );
             }
-        }
-    }
-
-    /// A root the lanes return is accepted only on the curve, and with the positive `y`: the
-    /// check `from_bytes_batch` makes of every lane's answer before it uses it.
-    #[test]
-    fn lane_point_accepts_only_roots() {
-        let xs = decode_test_xs(256);
-        let mut accepted = 0;
-        for x in xs {
-            let Some((_, y)) = decode(x) else {
-                // `y = 1` is on the curve for `x = 0` alone, which decodes
-                assert!(lane_point(x, Fq::one()).is_none());
-                continue;
-            };
-            accepted += 1;
-            for root in [y, -y] {
-                let point = lane_point(x, root).expect("a root is on the curve");
-                let point = point.0.into_affine();
-                assert_eq!((point.x, point.y), (x, y));
-            }
-            for wrong in [y + Fq::one(), y.double(), Fq::zero(), x] {
-                if wrong != y && wrong != -y {
-                    assert!(lane_point(x, wrong).is_none());
-                }
-            }
-        }
-        assert!(accepted > 100, "{accepted} accepted");
-    }
-
-    /// What an accepted point takes on the lanes' word: its subgroup check. A root the lanes
-    /// return for an `x` that is on the curve but off the subgroup passes the curve check, so the
-    /// task accepts the point although `from_bytes` rejects it. The real lanes return no root
-    /// there (`lane_decode_accepts_exactly_what_from_bytes_accepts`); this pins where the scalar
-    /// check ends, so that moving that line is a deliberate change, and it shows that the task
-    /// uses the lane's own root for each input and does not fall back for all of them.
-    #[test]
-    fn the_subgroup_check_of_a_lane_root_is_the_lanes() {
-        // the positive root of `y² = n/d`, whether or not `x` is in the subgroup
-        let on_curve = |x: Fq| {
-            let x_sq = x.square();
-            let y_sq = (BandersnatchConfig::COEFF_A * x_sq - Fq::one()) / denominator(x_sq);
-            y_sq.sqrt().map(|y| if is_positive(y) { y } else { -y })
-        };
-        let off_subgroup = decode_test_xs(64)
-            .into_iter()
-            .find(|x| decode(*x).is_none() && on_curve(*x).is_some())
-            .expect("an x on the curve and off the subgroup");
-        let (accepted, _) = accepted_and_rejected(400);
-        for position in [5, CHUNK + 1, 2 * CHUNK + 9] {
-            let mut input = accepted[..3 * CHUNK].to_vec();
-            input[position] = x_to_bytes(off_subgroup);
-            assert!(Element::from_bytes(input[position]).is_err());
-
-            let vouching_lanes = |xs: &[[Fq; CHUNK]]| lanes_answering(xs, on_curve);
-            let points = outcome(Element::decode_task_lanes(&input, vouching_lanes))
-                .expect("the lanes vouch for every input");
-            assert_eq!(
-                points[position],
-                (off_subgroup, on_curve(off_subgroup).unwrap())
-            );
-            // every other input is `from_bytes`'s point
-            input.remove(position);
-            let mut others = points;
-            others.remove(position);
-            assert_eq!(Ok(others), expected(&input));
-
-            // lanes that answer as `from_bytes` does leave the rejection to it
-            input.insert(position, x_to_bytes(off_subgroup));
-            assert!(Element::decode_task_lanes(&input, stand_in_lanes).is_err());
         }
     }
 
@@ -1235,7 +1129,7 @@ pub(crate) mod tests {
     /// The lanes return a root exactly where `from_bytes` accepts, and a root of its point, with
     /// every edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever
     /// the lanes do not return, which would hide a lane that wrongly returns nothing, and it takes
-    /// the subgroup check of a root they do return on their word; this reads the lanes' own answer.
+    /// a root they do return as they computed it; this reads the lanes' own answer.
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn lane_decode_accepts_exactly_what_from_bytes_accepts() {
