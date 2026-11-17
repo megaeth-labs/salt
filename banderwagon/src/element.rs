@@ -893,6 +893,7 @@ pub(crate) mod tests {
     /// at a short length padded to a chunk (run with `--ignored --nocapture`).
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_decode_task() {
         use ark_ff::UniformRand;
         use rand_chacha::rand_core::SeedableRng;

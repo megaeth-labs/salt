@@ -1,4 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// cargo-llvm-cov sets `coverage_nightly` on a nightly toolchain: the manual benches are left out of
+// the coverage report, where as ignored tests they would count as uncovered lines
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;

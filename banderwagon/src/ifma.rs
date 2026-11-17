@@ -873,6 +873,7 @@ mod tests {
     /// replaces (run with `--ignored --nocapture`).
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_jacobi() {
         if !available() {
             return;
