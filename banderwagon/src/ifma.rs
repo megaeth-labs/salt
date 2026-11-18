@@ -33,8 +33,8 @@ use core::arch::x86_64::*;
 use std::sync::OnceLock;
 
 use crate::element::{ChunkDecode, CHUNK, TASK_CHUNKS};
+use crate::Fq;
 
-pub(crate) type Fq = ark_ed_on_bls12_381_bandersnatch::Fq;
 const MASK52: u64 = (1u64 << 52) - 1;
 pub(crate) type L5 = [__m512i; 5];
 
@@ -63,11 +63,12 @@ pub(crate) fn context() -> &'static Ctx {
 
 /// Decodes up to [`TASK_CHUNKS`] chunks of `CHUNK` canonical `x` coordinates into a root `y` of
 /// `y² = n/d` (of either sign; the caller takes the positive one), exactly where the scalar path
-/// accepts: `None` where no square root exists or the subgroup check fails. A lane whose denominator
-/// `d·x² − 1` is zero yields `None` as well; the caller sends every `None` to the scalar path, which
-/// keeps that path's behavior (a division by zero), but no canonical `x` has such a denominator on
-/// Bandersnatch (`d` is a non-residue, so `1/d` has no root). The chunks' inversions share one
-/// exponentiation.
+/// accepts: `None` where no square root exists or the subgroup check fails; the caller sends every
+/// `None` to the scalar path. The chunks' inversions share one exponentiation.
+///
+/// # Panics
+/// On a zero denominator `d·x² − 1`, which no canonical `x` has on Bandersnatch (`d` is a
+/// non-residue, so `1/d` has no root).
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
@@ -85,53 +86,44 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
     let a = BandersnatchConfig::COEFF_A;
     let d = BandersnatchConfig::COEFF_D;
     let n = xs.len();
-    let mut den_zero = [[false; CHUNK]; TASK_CHUNKS];
     let mut nv = [[c.one; GROUPS]; TASK_CHUNKS];
-    let mut dsafe = [c.one; GROUPS * TASK_CHUNKS];
+    let mut dv = [c.one; GROUPS * TASK_CHUNKS];
     let mut qr_mask = [[0u8; GROUPS]; TASK_CHUNKS];
     for (k, chunk) in xs.iter().enumerate() {
-        let mut e = [Fq::one(); CHUNK];
         let mut nn = [Fq::one(); CHUNK];
         let mut den = [Fq::one(); CHUNK];
         for i in 0..CHUNK {
             let x2 = chunk[i].square();
             nn[i] = a * x2 - Fq::one();
             den[i] = d * x2 - Fq::one();
-            e[i] = Fq::one() - a * x2;
-            den_zero[k][i] = den[i].is_zero();
+            // a zero here would not stop the shared inversion: it would turn every inverse of the
+            // task into zero
+            assert!(!den[i].is_zero(), "d·x² − 1 is nonzero: d is not a square");
         }
-        let mut ev: [L5; GROUPS] = [c.one; GROUPS];
         for g in 0..GROUPS {
-            ev[g] = load(c, e[g * 8..g * 8 + 8].try_into().unwrap());
             nv[k][g] = load(c, nn[g * 8..g * 8 + 8].try_into().unwrap());
-            let dv = load(c, den[g * 8..g * 8 + 8].try_into().unwrap());
-            // a zero denominator is set to one here and reported undecided below
-            let mut zero: __mmask8 = 0;
-            for j in 0..8 {
-                if den_zero[k][g * 8 + j] {
-                    zero |= 1 << j;
-                }
-            }
-            dsafe[k * GROUPS + g] = sel(zero, &dv, &c.one);
+            dv[k * GROUPS + g] = load(c, den[g * 8..g * 8 + 8].try_into().unwrap());
         }
-        // subgroup check: (1 - a x²) is a quadratic residue, its Jacobi symbol in lanes (two groups at
-        // a time keep the divstep state in registers); a lane the divsteps leave unsettled takes its
-        // group's Euler exponentiation, the same test as the scalar path's `legendre()`
+        // subgroup check: 1 − a·x² is a nonzero quadratic residue. That is −n for the numerator
+        // n = a·x² − 1 already in lanes, and −1 is a square (p ≡ 1 mod 4), so the symbol taken is
+        // n's: its Jacobi symbol in lanes (two groups at a time keep the divstep state in
+        // registers); a lane the divsteps leave unsettled takes its group's Euler exponentiation,
+        // the same test as the scalar path's `legendre()`
         for pair in 0..GROUPS / 2 {
             let (res, dec) =
-                jacobi_multi::<2>(c, &[ev[2 * pair], ev[2 * pair + 1]], jacobi_batches);
+                jacobi_multi::<2>(c, &[nv[k][2 * pair], nv[k][2 * pair + 1]], jacobi_batches);
             for j in 0..2 {
                 let g = 2 * pair + j;
                 qr_mask[k][g] = res[j];
                 if dec[j] != 0xff {
-                    let leg = pow_multi::<1>(c, &[ev[g]], &c.modulus_minus_one_div_two);
+                    let leg = pow_multi::<1>(c, &[nv[k][g]], &c.modulus_minus_one_div_two);
                     qr_mask[k][g] = (res[j] & dec[j]) | (eq_one(c, &leg[0]) & !dec[j]);
                 }
             }
         }
     }
     // y² = n / d: the inversions of the task's `n` chunks share one d^(p-2)
-    let dinv = &mut dsafe[..n * GROUPS];
+    let dinv = &mut dv[..n * GROUPS];
     batch_inverse(c, dinv);
     let mut out = Vec::with_capacity(n);
     for k in 0..n {
@@ -147,7 +139,7 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
             for j in 0..8 {
                 let i = g * 8 + j;
                 let bit = 1u8 << j;
-                if den_zero[k][i] || qr & bit == 0 || ok[g] & bit == 0 {
+                if qr & bit == 0 || ok[g] & bit == 0 {
                     continue;
                 }
                 roots[i] = Some(ys[j]);
@@ -192,7 +184,8 @@ pub(crate) struct Ctx {
     n0: __m512i,
     pub(crate) mask: __m512i,
     pub(crate) one: L5,
-    one_p: L5, // one + p: the other representative of 1 below 2p
+    one_p: L5,   // one + p: the other representative of 1 below 2p
+    neg_one: L5, // −1, canonical (< p)
     r2: [u64; 5],
     trace_minus_one_div_two: [u64; 4],
     modulus_minus_one_div_two: [u64; 4],
@@ -217,6 +210,7 @@ unsafe fn ctx() -> Ctx {
     let r = two.pow([260u64]).into_bigint();
     let r2 = two.pow([520u64]).into_bigint();
     let one_l = to_limbs52(&r);
+    let neg_one_l = to_limbs52(&(-two.pow([260u64])).into_bigint());
     // one + p as 52-bit limbs
     let mut one_p_l = [0u64; 5];
     let mut carry = 0u64;
@@ -228,10 +222,12 @@ unsafe fn ctx() -> Ctx {
     let mut p = [_mm512_setzero_si512(); 5];
     let mut one = [_mm512_setzero_si512(); 5];
     let mut one_p = [_mm512_setzero_si512(); 5];
+    let mut neg_one = [_mm512_setzero_si512(); 5];
     for i in 0..5 {
         p[i] = _mm512_set1_epi64(p_scalar[i] as i64);
         one[i] = _mm512_set1_epi64(one_l[i] as i64);
         one_p[i] = _mm512_set1_epi64(one_p_l[i] as i64);
+        neg_one[i] = _mm512_set1_epi64(neg_one_l[i] as i64);
     }
     let mut c = Ctx {
         p,
@@ -239,6 +235,7 @@ unsafe fn ctx() -> Ctx {
         mask: _mm512_set1_epi64(MASK52 as i64),
         one,
         one_p,
+        neg_one,
         r2: to_limbs52(&r2),
         trace_minus_one_div_two: Fq::TRACE_MINUS_ONE_DIV_TWO.0,
         modulus_minus_one_div_two: Fq::MODULUS_MINUS_ONE_DIV_TWO.0,
@@ -351,11 +348,16 @@ unsafe fn eq_one(c: &Ctx, a: &L5) -> __mmask8 {
 unsafe fn eq_lanes(c: &Ctx, a: &L5, b: &L5) -> __mmask8 {
     // a - b ∈ (-2p, 2p); equal iff a == b or a == b ± p as integers. Compare the three cases limbwise
     // after canonicalizing both (subtract p where >= p): cheaper to canonicalize.
-    let ca = canon(c, a);
-    let cb = canon(c, b);
+    eq_canon(&canon(c, a), &canon(c, b))
+}
+
+/// Lane mask: which lanes of canonical `a` and `b` (< p, normalized limbs) are equal.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+unsafe fn eq_canon(a: &L5, b: &L5) -> __mmask8 {
     let mut m: __mmask8 = 0xff;
     for j in 0..5 {
-        m &= _mm512_cmpeq_epi64_mask(ca[j], cb[j]);
+        m &= _mm512_cmpeq_epi64_mask(a[j], b[j]);
     }
     m
 }
@@ -382,17 +384,6 @@ pub(crate) unsafe fn canon(c: &Ctx, a: &L5) -> L5 {
         borrow = _mm512_srli_epi64(d, 63); // 1 where the subtraction wrapped
         let fixed = _mm512_and_si512(d, c.mask); // wrapped values: d + 2^64 ≡ d + 2^52 mod 2^52 in the low 52 bits
         r[j] = _mm512_mask_blend_epi64(ge, a[j], fixed);
-    }
-    r
-}
-
-#[inline]
-#[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn sel(m: __mmask8, a: &L5, b: &L5) -> L5 {
-    // lanes with the mask bit set take b, others a
-    let mut r = *a;
-    for j in 0..5 {
-        r[j] = _mm512_mask_blend_epi64(m, a[j], b[j]);
     }
     r
 }
@@ -440,12 +431,14 @@ pub(crate) unsafe fn jacobi_multi<const G: usize>(
     let mut jac = [zero; G];
     let mut decided = zero_in;
     let mut residue = [0u8; G];
-    // the field's one (x = 0: the identity commitment, common in a witness) is a residue outright;
-    // as a Montgomery representative it is one of the slowest inputs to settle
+    // one and −1 are residues outright (−1 because p ≡ 1 mod 4: `ctx()` asserts p − 1 = 2^32·t).
+    // The decode passes n = a·x² − 1, which is −1 at x = 0: the identity commitment, common in a
+    // witness, and the padding of a short chunk. As Montgomery representatives both are among the
+    // slowest inputs to settle
     for i in 0..G {
-        let one_in = eq_one(c, &x[i]);
-        residue[i] |= one_in;
-        decided[i] |= one_in;
+        let unit_in = eq_one(c, &x[i]) | eq_canon(&g[i], &c.neg_one);
+        residue[i] |= unit_in;
+        decided[i] |= unit_in;
     }
     for _ in 0..batches {
         let mut f0 = [zero; G];
@@ -812,6 +805,26 @@ mod tests {
         );
         assert!(want.iter().filter(|q| **q).count() > 2000);
         assert!(want.iter().filter(|q| !**q).count() > 2000);
+    }
+
+    /// Zero, one and −1 are decided before any divstep, one and −1 as residues: with no batches
+    /// at all they come back settled, and no other input does. The decode's numerator `a·x² − 1`
+    /// is −1 at `x = 0` (the identity, and the padding of a short chunk), so a −1 left to the
+    /// divsteps would hold every such chunk to the batches the slowest inputs take.
+    #[test]
+    fn jacobi_decides_zero_and_the_units_outright() {
+        if !crate::element::tests::lanes_under_test() {
+            return;
+        }
+        let c = context();
+        let mut xs = [Fq::from(3u64); 8];
+        xs[0] = Fq::zero();
+        xs[1] = Fq::one();
+        xs[2] = -Fq::one();
+        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
+        let (res, dec) = unsafe { jacobi_multi::<1>(c, &[load(c, &xs)], 0) };
+        assert_eq!(dec, [0b111], "the lanes settled without a divstep");
+        assert_eq!(res, [0b110], "the residues among them");
     }
 
     /// The decode with the Jacobi lanes forced unsettled (no batches, then too few for most lanes)

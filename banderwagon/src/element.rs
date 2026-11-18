@@ -187,30 +187,28 @@ impl Element {
     /// [`Element::from_bytes`] on every input up to the first it rejects, with the inversions of
     /// `y² = n/d` shared by the task: one inversion and three products per point instead of an
     /// inversion each. Bytes that are not a canonical `x` end the task with `from_bytes`'s error
-    /// before anything is inverted. A zero denominator (which no `x` has, `d` not being a square)
-    /// goes through `from_bytes` itself, so its behavior is kept exactly.
+    /// before anything is inverted.
+    ///
+    /// # Panics
+    ///
+    /// On a zero denominator `d·x² − 1`, which no `x` has: `d` is not a square.
     fn decode_task_scalar(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
-        // (x, x², d·x² − 1) per input, `None` where the denominator is zero
-        let mut parsed: Vec<Option<(Fq, Fq, Fq)>> = Vec::with_capacity(bytes.len());
+        // (x, x²) per input, and its denominator d·x² − 1, inverted in place below
+        let mut xs: Vec<(Fq, Fq)> = Vec::with_capacity(bytes.len());
+        let mut den_inv: Vec<Fq> = Vec::with_capacity(bytes.len());
         for b in bytes {
             let x = x_from_bytes(*b)?;
             let x_sq = x.square();
             let den = denominator(x_sq);
-            parsed.push((!den.is_zero()).then_some((x, x_sq, den)));
+            // the batch inversion leaves a zero as it is, where `from_bytes` panics on one
+            assert!(!den.is_zero(), "d·x² − 1 is nonzero: d is not a square");
+            xs.push((x, x_sq));
+            den_inv.push(den);
         }
-        let mut den_inv: Vec<Fq> = parsed.iter().flatten().map(|(_, _, den)| *den).collect();
         serial_batch_inversion_and_mul(&mut den_inv, &Fq::one());
-        let mut den_inv = den_inv.into_iter();
-        bytes
-            .iter()
-            .zip(parsed)
-            .map(|(b, parsed)| {
-                let Some((x, x_sq, _)) = parsed else {
-                    return Self::from_bytes(*b);
-                };
-                let den_inv = den_inv.next().expect("an inverse per nonzero denominator");
-                Self::from_x(x, x_sq, || den_inv)
-            })
+        xs.into_iter()
+            .zip(den_inv)
+            .map(|((x, x_sq), den_inv)| Self::from_x(x, x_sq, || den_inv))
             .collect()
     }
 
@@ -257,7 +255,11 @@ impl Element {
                     });
                 }
             }
-            out.extend(Self::decode_task_scalar(scalar_tail)?);
+            // a group of whole chunks has no such tail, and a scalar task costs an inversion even
+            // when it is given nothing to decode
+            if !scalar_tail.is_empty() {
+                out.extend(Self::decode_task_scalar(scalar_tail)?);
+            }
         }
         Ok(out)
     }
@@ -1071,8 +1073,8 @@ pub(crate) mod tests {
         lanes_under_test();
     }
 
-    /// `d` is not a square, so no `x` makes the denominator `d·x² − 1` zero (the decoders send such
-    /// an input to `from_bytes` all the same).
+    /// `d` is not a square, so no `x` makes the denominator `d·x² − 1` zero (the decoders panic on
+    /// one all the same: it would mean this no longer holds).
     #[test]
     fn d_is_not_a_square() {
         assert!(BandersnatchConfig::COEFF_D.legendre().is_qnr());
