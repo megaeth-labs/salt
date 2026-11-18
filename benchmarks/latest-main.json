@@ -1,42 +1,42 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-13T08:04:14.997878+00:00",
+  "generated_at": "2026-11-18T08:08:56.063384+00:00",
   "source_file": "output.txt",
   "benchmarks": [
     {
       "name": "update 10000 KVs/1 threads",
-      "time_ns": 119740000.0,
-      "throughput_value": 83.518,
+      "time_ns": 124130000.0,
+      "throughput_value": 80.559,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 83518.0
+      "throughput_elem_per_sec": 80559.0
     },
     {
       "name": "update 10000 KVs/2 threads",
-      "time_ns": 62377000.0,
-      "throughput_value": 160.32,
+      "time_ns": 64923000.0,
+      "throughput_value": 154.03,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 160320.0
+      "throughput_elem_per_sec": 154030.0
     },
     {
       "name": "update 10000 KVs/4 threads",
-      "time_ns": 33340000.000000004,
-      "throughput_value": 299.94,
+      "time_ns": 35431000.0,
+      "throughput_value": 282.24,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 299940.0
+      "throughput_elem_per_sec": 282240.0
     },
     {
       "name": "update 10000 KVs/8 threads",
-      "time_ns": 20379000.0,
-      "throughput_value": 490.69,
+      "time_ns": 21886000.0,
+      "throughput_value": 456.92,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 490690.0
+      "throughput_elem_per_sec": 456920.0
     },
     {
       "name": "update 10000 KVs/16 threads",
-      "time_ns": 16197000.0,
-      "throughput_value": 617.42,
+      "time_ns": 16799000.0,
+      "throughput_value": 595.27,
       "throughput_unit": "Kelem/s",
-      "throughput_elem_per_sec": 617420.0
+      "throughput_elem_per_sec": 595270.0
     }
   ]
 }
