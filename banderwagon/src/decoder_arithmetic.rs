@@ -145,7 +145,7 @@ impl SqrtTable {
         if u.is_zero() {
             return Some(u);
         }
-        let w = u.pow(Fq::TRACE_MINUS_ONE_DIV_TWO);
+        let w = pow_trace_minus_one_div_two(u);
         let mut x = w * u;
         let mut b = x * w;
         for row in 0..8 {
@@ -166,6 +166,37 @@ impl SqrtTable {
         }
         (x.square() == u).then_some(x)
     }
+}
+
+/// `u^((t − 1)/2)`, the exponentiation that dominates the square root (`p − 1 = 2^32 · t`), by a
+/// four-bit fixed window as the vector lanes run it: 220 squarings and 64 products, where the
+/// bit-at-a-time `Field::pow` takes 222 and 132.
+#[inline]
+fn pow_trace_minus_one_div_two(u: Fq) -> Fq {
+    const E: [u64; 4] = Fq::TRACE_MINUS_ONE_DIV_TWO.0;
+    let mut table = [Fq::ONE; 16];
+    table[1] = u;
+    for i in 2..16 {
+        table[i] = table[i - 1] * u;
+    }
+    // the exponent's windows from the top, past the leading zero ones
+    let mut windows = (0..64)
+        .rev()
+        .map(|w| (E[w / 16] >> (w % 16 * 4)) as usize & 0xf)
+        .skip_while(|d| *d == 0);
+    let Some(top) = windows.next() else {
+        return Fq::ONE;
+    };
+    let mut acc = table[top];
+    for d in windows {
+        for _ in 0..4 {
+            acc.square_in_place();
+        }
+        if d != 0 {
+            acc *= table[d];
+        }
+    }
+    acc
 }
 
 static SQRT_TABLE: SqrtTable = SqrtTable {
