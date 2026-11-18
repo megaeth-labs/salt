@@ -1125,7 +1125,8 @@ mod tests {
     }
 
     /// Verifies that `Witness::bucket_used_slots` does not use the default
-    /// implementation. It delegates to `SaltWitness::slots`.
+    /// implementation. Every slot of this bucket is witnessed, so the answer is the
+    /// count `Witness::from` took.
     #[test]
     fn test_witness_bucket_used_slots() {
         let bucket_id = 100_000;
