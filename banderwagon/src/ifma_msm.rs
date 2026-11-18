@@ -20,6 +20,7 @@
 //! Dawson 2008, `a = -5`): mixed addition 9 lane products, full addition 11.
 #![allow(clippy::needless_range_loop)]
 use crate::ifma::*;
+use crate::Fq;
 use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ec::AdditiveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fr};

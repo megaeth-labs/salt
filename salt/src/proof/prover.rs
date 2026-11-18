@@ -113,35 +113,21 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
 pub mod parents_commitments_serde {
     use super::*;
 
-    /// Points per decode task: four lane chunks of [`Element::from_bytes_batch`], so a task is
-    /// long enough (~1 ms) that scheduling it costs nothing against the exponentiations it carries.
-    const DECODE_TASK: usize = 128;
-
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<BTreeMap<NodeId, SerdeCommitment>, D::Error> {
         let raw = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?;
         let (ids, bytes): (Vec<NodeId>, Vec<[u8; 32]>) = raw.into_iter().unzip();
 
-        // Decode in tasks of many points: on a host with AVX-512 IFMA the points of a task share
-        // vector registers for their exponentiations; elsewhere this is `Element::from_bytes` per point.
-        let decoded: Result<Vec<Vec<Element>>, ()> = chunks!(bytes, DECODE_TASK)
-            .map(|task| {
-                Element::from_bytes_batch(task)
-                    .into_iter()
-                    .collect::<Result<Vec<Element>, _>>()
-                    .map_err(|_| ())
-            })
-            .collect();
-
-        decoded
-            .map_err(|()| serde::de::Error::custom("invalid element bytes"))
-            .map(|tasks| {
-                ids.into_iter()
-                    .zip(tasks.into_iter().flatten())
-                    .map(|(id, e)| (id, SerdeCommitment(e)))
-                    .collect()
-            })
+        // The batch decode returns the elements in the order of `bytes`, which the `zip` with `ids`
+        // relies on, and stops at the first point it rejects.
+        let commitments = Element::from_bytes_batch(&bytes)
+            .map_err(|_| serde::de::Error::custom("invalid element bytes"))?;
+        Ok(ids
+            .into_iter()
+            .zip(commitments)
+            .map(|(id, e)| (id, SerdeCommitment(e)))
+            .collect())
     }
 }
 
@@ -1353,6 +1339,65 @@ mod tests {
             bincode::serde::decode_from_slice(&bytes, bincode::config::legacy());
 
         assert!(result.is_err());
+    }
+
+    /// The `parents_commitments` map decodes through the batch path to the commitments it was
+    /// encoded from, and a single invalid compressed point fails the whole map, wherever it is:
+    /// bytes that are not a field element, or an `x` no point of the subgroup has.
+    #[test]
+    fn test_parents_commitments_serde_rejects_an_invalid_point() {
+        #[derive(Deserialize)]
+        struct Parents(
+            #[serde(deserialize_with = "parents_commitments_serde::deserialize")]
+            BTreeMap<NodeId, SerdeCommitment>,
+        );
+        fn encode<T: Serialize>(map: &BTreeMap<NodeId, T>) -> Vec<u8> {
+            bincode::serde::encode_to_vec(map, bincode::config::legacy()).unwrap()
+        }
+        fn decode(
+            points: &BTreeMap<NodeId, [u8; 32]>,
+        ) -> Result<BTreeMap<NodeId, SerdeCommitment>, bincode::error::DecodeError> {
+            bincode::serde::decode_from_slice::<Parents, _>(
+                &encode(points),
+                bincode::config::legacy(),
+            )
+            .map(|(parents, _)| parents.0)
+        }
+
+        // more points than one decode task holds, so that the batch splits them
+        let commitments: BTreeMap<NodeId, SerdeCommitment> = (0..300u64)
+            .map(|i| {
+                let element = Element::prime_subgroup_generator() * Fr::from(i + 1);
+                (i, SerdeCommitment(element))
+            })
+            .collect();
+        let points: BTreeMap<NodeId, [u8; 32]> = commitments
+            .iter()
+            .map(|(id, commitment)| (*id, commitment.0.to_bytes()))
+            .collect();
+        assert_eq!(encode(&points), encode(&commitments));
+        assert_eq!(decode(&points).unwrap(), commitments);
+
+        let not_a_field_element = [0xffu8; 32];
+        let off_the_subgroup = (2..u8::MAX)
+            .map(|x| {
+                let mut bytes = [0u8; 32];
+                bytes[31] = x;
+                bytes
+            })
+            .find(|bytes| Element::from_bytes(*bytes).is_err())
+            .expect("a small x that does not decode");
+        for invalid in [not_a_field_element, off_the_subgroup] {
+            for id in [0, 150, 299] {
+                let mut points = points.clone();
+                points.insert(id, invalid);
+                let error = decode(&points).expect_err("an invalid point fails the map");
+                assert!(
+                    error.to_string().contains("invalid element bytes"),
+                    "{error}"
+                );
+            }
+        }
     }
 
     /// Tests main function behavior with empty inputs (edge case).
