@@ -586,9 +586,9 @@ pub(crate) const TASK_CHUNKS: usize = 4;
 
 /// The fewest points a short last chunk is padded to a whole chunk for. A padded chunk costs what
 /// 32 points cost in the lanes, whatever it holds, and fewer points than this cost less on the
-/// scalar task. Timed on one thread of an EPYC 9754, a padded chunk takes 82 µs whatever it holds,
-/// and the scalar task 75 µs for five points and 89 µs for six.
-const MIN_PADDED_CHUNK: usize = 6;
+/// scalar task. Timed on one thread of an EPYC 9B45, a padded chunk takes 41 µs whatever it holds,
+/// and the scalar task 40 µs for four points and 49 µs for five.
+const MIN_PADDED_CHUNK: usize = 5;
 
 /// The vector decode of one chunk: per point, a `y` of either sign where the lanes found a root
 /// of `y² = n/d` and `1 − a·x²` to be a nonzero residue, `None` otherwise.
