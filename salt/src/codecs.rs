@@ -2,8 +2,13 @@
 //! feature.
 //!
 //! These encodings are persisted by downstream databases, so the byte layouts below are a
-//! storage format: changing them, or [`MAX_SALT_VALUE_BYTES`], silently reinterprets existing
-//! rows.
+//! storage format. Changes to the layouts or [`MAX_SALT_VALUE_BYTES`] require explicit
+//! handling of existing rows.
+//!
+//! [`Decompress`] requires a complete database record: exactly 8 bytes for [`SaltKey`]
+//! or [`MAX_SALT_VALUE_BYTES`] bytes for [`SaltValue`]. A different length violates the
+//! storage invariant and panics. [`Compact::from_compact`] can decode a prefix and return
+//! the remaining bytes for use in compound encodings.
 
 use crate::{SaltKey, SaltValue, MAX_SALT_VALUE_BYTES};
 use bytes::{Buf, BufMut};
@@ -48,7 +53,7 @@ impl Compact for SaltValue {
 }
 
 macro_rules! impl_compression_for_compact {
-    ($($name:ty),+) => {
+    ($($name:ty => $width:expr),+) => {
         $(
             impl Compress for $name {
                 type Compressed = Vec<u8>;
@@ -59,7 +64,17 @@ macro_rules! impl_compression_for_compact {
             }
 
             impl Decompress for $name {
+                /// Decodes a complete fixed-width database record.
+                ///
+                /// # Panics
+                ///
+                /// Panics if the input length differs from the type's encoded width.
                 fn decompress(value: &[u8]) -> Result<Self, DecompressError> {
+                    assert_eq!(
+                        value.len(),
+                        $width,
+                        concat!("invalid ", stringify!($name), " encoded length"),
+                    );
                     let (obj, _) = Compact::from_compact(value, value.len());
                     Ok(obj)
                 }
@@ -68,7 +83,7 @@ macro_rules! impl_compression_for_compact {
     };
 }
 
-impl_compression_for_compact!(SaltKey, SaltValue);
+impl_compression_for_compact!(SaltKey => 8, SaltValue => MAX_SALT_VALUE_BYTES);
 
 #[cfg(test)]
 mod tests {
@@ -129,5 +144,41 @@ mod tests {
         value.to_compact(&mut value_compact);
         assert_eq!(value.clone().compress(), value_compact);
         assert_eq!(SaltValue::decompress(&value_compact).unwrap(), value);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltKey encoded length")]
+    fn decompress_salt_key_panics_on_empty_input() {
+        let _ = SaltKey::decompress(&[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltKey encoded length")]
+    fn decompress_salt_key_panics_on_short_input() {
+        let _ = SaltKey::decompress(&[0; 7]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltKey encoded length")]
+    fn decompress_salt_key_panics_on_long_input() {
+        let _ = SaltKey::decompress(&[0; 9]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltValue encoded length")]
+    fn decompress_salt_value_panics_on_empty_input() {
+        let _ = SaltValue::decompress(&[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltValue encoded length")]
+    fn decompress_salt_value_panics_on_short_input() {
+        let _ = SaltValue::decompress(&[0; 93]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SaltValue encoded length")]
+    fn decompress_salt_value_panics_on_long_input() {
+        let _ = SaltValue::decompress(&[0; 95]);
     }
 }
