@@ -170,8 +170,8 @@ impl SqrtTable {
 
 /// `u^((t − 1)/2)`, the exponentiation that dominates the square root (`p − 1 = 2^32 · t`), by a
 /// four-bit fixed window as the vector lanes run it: 220 squarings and 64 products, where the
-/// bit-at-a-time `Field::pow` takes 222 and 132. On an EPYC 9754 the root takes 10.4 µs with it
-/// and 12.7 µs without; arkworks' square root takes 18.3 µs.
+/// bit-at-a-time `Field::pow` takes 222 and 132. On an EPYC 9B45 the root takes 6.3 µs with it
+/// and 7.6 µs without; arkworks' square root takes 11.1 µs.
 #[inline]
 fn pow_trace_minus_one_div_two(u: Fq) -> Fq {
     const E: [u64; 4] = Fq::TRACE_MINUS_ONE_DIV_TWO.0;
@@ -1095,7 +1095,7 @@ pub(super) fn sqrt(value: Fq) -> Option<Fq> {
 /// Whether `value` is a nonzero square: the residue test of the subgroup check.
 ///
 /// On `x86_64` and `aarch64`, the native targets the decode was measured on, this is the binary
-/// Jacobi symbol: 3.1 µs on an EPYC 9754, where the exponentiation takes 10.2 µs. Every other
+/// Jacobi symbol: 2.4 µs on an EPYC 9B45, where the exponentiation takes 6.2 µs. Every other
 /// target keeps arkworks' Legendre exponentiation, the test this module replaced. That covers the
 /// zkVM guests: a proof pays for every instruction of the Jacobi loop's several hundred
 /// data-dependent iterations, a guest may run field multiplication as a precompile, and the two

@@ -160,8 +160,8 @@ impl Element {
     ///
     /// The elements come back as an iterator over the tasks' outputs rather than one `Vec`, so that
     /// a caller collecting them (into a map, say) copies each element once: gathering them into a
-    /// single vector first is a serial copy, 0.3 ms for 20,000 points on an EPYC 9754, where the
-    /// vector lanes decode them in 4.9 ms on 32 threads.
+    /// single vector first is a serial copy, 0.14 ms for 20,000 points on an EPYC 9B45, where the
+    /// vector lanes decode them into a map in 1.8 ms on 32 threads.
     pub fn from_bytes_batch(
         bytes: &[[u8; 32]],
     ) -> Result<impl Iterator<Item = Element>, SerializationError> {
@@ -632,14 +632,17 @@ fn decode_task_len(total: usize) -> usize {
 /// the batch in tasks as long as they go.
 ///
 /// With several threads a small batch is cut down to tasks of a single point, which share no
-/// inversion. A longer task saves up to a quarter of a point's decode (on one thread of an EPYC
-/// 9754: 19.0 µs alone, 15.3 µs in a task of four, 14.0 µs in one of 128; a one-point task costs
+/// inversion. A longer task saves up to a third of a point's decode (on one thread of an EPYC
+/// 9B45: 13.3 µs alone, 10.1 µs in a task of four, 9.0 µs in one of 128; a one-point task costs
 /// 1% more than `from_bytes`), but it leaves a thread that is slow or busy elsewhere holding a
-/// whole task. Which of the two weighs more depends on the host. On that EPYC (16 cores, 32
-/// threads, shared with other jobs), with the scalar tasks, the finer split was not the faster one
-/// for a small batch: 50 points took 120 µs in one-point tasks, 105 µs in two-point tasks and
-/// 162 µs in four-point ones, and 100 points 216 µs in one-point tasks and 157 µs in four-point
-/// ones. That host has the lanes, so its own batches are split into whole chunks.
+/// whole task. Which of the two weighs more depends on the host and on whether the pool is awake.
+/// On that EPYC (16 cores, 32 threads, nothing else running), with the scalar tasks: decoding
+/// batch after batch, the finer split was not the faster one (50 points took 72 µs in one-point
+/// tasks, 67 µs in two-point tasks and 93 µs in four-point ones; 100 points 138 µs in one-point
+/// tasks and 95 µs in four-point ones); with the pool's threads asleep when the batch arrives,
+/// waking them adds about 110 µs and the splits are close (50 points 180 µs, 183 µs and 193 µs;
+/// 100 points 245 µs and 216 µs). That host has the lanes, so its own batches are split into
+/// whole chunks.
 fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
     let tasks = if threads == 1 {
         1
