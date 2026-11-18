@@ -7,14 +7,13 @@
 
 use crate::types::{bucket_id_from_metadata_key, METADATA_KEYS_RANGE};
 use crate::{
+    constant::MIN_BUCKET_SIZE,
     proof::salt_witness::SaltWitness,
     proof::ProofError,
     state::{hasher, state::EphemeralSaltState},
     traits::{StateReader, TrieReader},
     types::*,
-    RwLock,
 };
-use core::fmt;
 use core::ops::{Range, RangeInclusive};
 use hashbrown::HashMap;
 use std::{collections::BTreeMap, format, string::String, vec, vec::Vec};
@@ -29,6 +28,7 @@ use std::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 /// Critically, the witness contains the minimal partial trie with all internal nodes
 /// necessary to recompute the state root after applying state updates. This enables
 /// stateless nodes to not only re-execute transactions but also produce new state roots.
+#[derive(Clone, Debug)]
 pub struct Witness {
     /// Direct mapping from plain keys to their salt key locations.
     /// Only contains keys that exist.
@@ -39,42 +39,73 @@ pub struct Witness {
     /// - Their values (or None for empty slots)
     /// - Cryptographic commitments proving authenticity
     ///
-    /// Do not change it once this witness has answered
-    /// [`StateReader::bucket_used_slots`]: a count already taken is kept in `used_slots`
-    /// and does not follow the change.
+    /// Do not change it on a built witness: `used_slots` is taken from it when the
+    /// witness is built and does not follow a later change.
     pub salt_witness: SaltWitness,
 
-    /// The used-slot count of every bucket that [`StateReader::bucket_used_slots`] has
-    /// counted successfully.
+    /// The used-slot count of every bucket whose slots are all witnessed, taken when the
+    /// witness is built from a [`SaltWitness`].
     ///
     /// Counting a bucket visits every slot of it. Replaying a block that resizes a
     /// bucket asks for that bucket's count once for every key it reinserts, so the count
-    /// is taken once and reused. A count that fails, because the bucket is not fully
-    /// witnessed, is not kept.
+    /// is taken once, ahead of the replay.
     ///
-    /// The counts follow from `salt_witness` alone: a clone starts with none, and
-    /// comparison and `Debug` output leave them out.
-    used_slots: RwLock<HashMap<BucketId, u64>>,
-}
-
-impl Clone for Witness {
-    fn clone(&self) -> Self {
-        Self::new(self.direct_lookup_tbl.clone(), self.salt_witness.clone())
-    }
-}
-
-impl fmt::Debug for Witness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Witness")
-            .field("direct_lookup_tbl", &self.direct_lookup_tbl)
-            .field("salt_witness", &self.salt_witness)
-            .finish()
-    }
+    /// A bucket without an entry is counted by [`SaltWitness::bucket_used_slots`] on
+    /// each call. That covers a bucket that is not fully witnessed, where the count
+    /// fails, and every bucket of a witness from [`Witness::create`], which takes no
+    /// counts because its builder does not replay on it.
+    ///
+    /// The counts follow from `salt_witness` alone, so comparison leaves them out.
+    used_slots: HashMap<BucketId, u64>,
 }
 
 impl PartialEq for Witness {
     fn eq(&self, other: &Self) -> bool {
         self.direct_lookup_tbl == other.direct_lookup_tbl && self.salt_witness == other.salt_witness
+    }
+}
+
+/// The witnessed slots of one data bucket, gathered while walking a witness in key order.
+#[derive(Default)]
+struct WitnessedBucket {
+    id: BucketId,
+    /// How many of the bucket's slots are witnessed.
+    slots: u64,
+    /// How many of those hold a value.
+    used: u64,
+    /// The highest witnessed slot.
+    last_slot: SlotId,
+}
+
+impl WitnessedBucket {
+    /// Records the bucket's used-slot count in `used_slots` if every slot of the bucket
+    /// is witnessed, which is when [`SaltWitness::bucket_used_slots`] can count it.
+    ///
+    /// This runs on a witness that may not be verified yet, so it must not panic. It
+    /// reads the metadata from `kvs` itself, not through [`SaltWitness::metadata`]:
+    /// metadata that is missing, empty or undecodable leaves the bucket out.
+    fn keep_count_if_complete(
+        &self,
+        kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
+        used_slots: &mut HashMap<BucketId, u64>,
+    ) {
+        // No bucket is smaller than `MIN_BUCKET_SIZE`, so fewer slots cannot be all of
+        // one. This spares the metadata lookup for the usual bucket, of which a block
+        // touches a few slots.
+        if self.slots < MIN_BUCKET_SIZE as u64 {
+            return;
+        }
+        let Some(Some(metadata)) = kvs.get(&bucket_metadata_key(self.id)) else {
+            return;
+        };
+        let Ok(metadata) = BucketMeta::try_from(metadata) else {
+            return;
+        };
+        // The slots are distinct and in order: `capacity` of them, the last being
+        // `capacity - 1`, are exactly the slots `0..capacity`.
+        if self.slots == metadata.capacity && self.last_slot + 1 == metadata.capacity {
+            used_slots.insert(self.id, self.used);
+        }
     }
 }
 
@@ -85,33 +116,46 @@ impl From<SaltWitness> for Witness {
     /// redundant storage of plain keys. The direct_lookup_tbl is rebuilt by:
     /// - Extracting plain keys from SaltValue data (where they're already stored)
     /// - Skipping metadata entries (which don't contain plain key-value pairs)
+    ///
+    /// The same pass takes the used-slot count of every fully witnessed bucket.
     fn from(salt_witness: SaltWitness) -> Self {
         let mut direct_lookup_tbl = HashMap::new();
+        let mut used_slots = HashMap::new();
+        // Keys come in order, so the slots of one bucket follow each other. The first
+        // data key starts a bucket of its own: no data key has the default bucket id.
+        let mut bucket = WitnessedBucket::default();
         for (salt_key, value) in &salt_witness.kvs {
             if salt_key.is_in_meta_bucket() {
                 continue;
             }
 
+            if salt_key.bucket_id() != bucket.id {
+                bucket.keep_count_if_complete(&salt_witness.kvs, &mut used_slots);
+                bucket = WitnessedBucket {
+                    id: salt_key.bucket_id(),
+                    ..Default::default()
+                };
+            }
+            bucket.slots += 1;
+            bucket.last_slot = salt_key.slot_id();
+
             if let Some(salt_value) = value {
+                bucket.used += 1;
                 let plain_key = salt_value.key().to_vec();
                 direct_lookup_tbl.insert(plain_key, *salt_key);
             }
         }
+        bucket.keep_count_if_complete(&salt_witness.kvs, &mut used_slots);
 
-        Witness::new(direct_lookup_tbl, salt_witness)
+        Witness {
+            direct_lookup_tbl,
+            salt_witness,
+            used_slots,
+        }
     }
 }
 
 impl Witness {
-    /// Builds a witness that has counted no bucket yet.
-    fn new(direct_lookup_tbl: HashMap<Vec<u8>, SaltKey>, salt_witness: SaltWitness) -> Self {
-        Self {
-            direct_lookup_tbl,
-            salt_witness,
-            used_slots: RwLock::new(HashMap::new()),
-        }
-    }
-
     /// Creates a comprehensive cryptographic witness for stateless validators.
     ///
     /// This method generates a witness that enables stateless validators to both
@@ -239,10 +283,11 @@ impl Witness {
             reason: format!("{e:?}"),
         })?;
 
-        Ok(Witness::new(
+        Ok(Witness {
             direct_lookup_tbl,
-            SaltWitness::create(&witnessed_keys, store)?,
-        ))
+            salt_witness: SaltWitness::create(&witnessed_keys, store)?,
+            used_slots: HashMap::new(),
+        })
     }
 
     /// Returns the state root computed from the witness's root commitment.
@@ -332,14 +377,13 @@ impl StateReader for Witness {
         self.salt_witness.get_subtree_levels(bucket_id)
     }
 
-    /// Counts the bucket's used slots once and answers later calls from `used_slots`.
+    /// Answers from `used_slots` where the count was taken when the witness was built,
+    /// and counts as [`SaltWitness`] does otherwise.
     fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-        if let Some(&count) = self.used_slots.read().get(&bucket_id) {
-            return Ok(count);
+        match self.used_slots.get(&bucket_id) {
+            Some(&count) => Ok(count),
+            None => self.salt_witness.bucket_used_slots(bucket_id),
         }
-        let count = self.salt_witness.bucket_used_slots(bucket_id)?;
-        self.used_slots.write().insert(bucket_id, count);
-        Ok(count)
     }
 
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
@@ -525,13 +569,10 @@ mod tests {
 
     #[test]
     fn test_plain_value_fast_unknown_key_is_not_in_witness() {
-        let witness = Witness::new(
-            HashMap::new(),
-            SaltWitness {
-                kvs: BTreeMap::new(),
-                proof: crate::proof::salt_witness::create_mock_proof(),
-            },
-        );
+        let witness = Witness::from(SaltWitness {
+            kvs: BTreeMap::new(),
+            proof: crate::proof::salt_witness::create_mock_proof(),
+        });
 
         assert_eq!(
             witness.plain_value_fast(b"unknown"),
@@ -1114,70 +1155,150 @@ mod tests {
         assert_eq!(witness.bucket_used_slots(bucket_id).unwrap(), used_slots);
     }
 
-    /// A witness of one bucket of the minimum size: its metadata, its first `witnessed`
-    /// slots, and a value in the first `used` of those.
-    fn witness_of_bucket(bucket_id: BucketId, witnessed: u64, used: u64) -> Witness {
-        let mut kvs = BTreeMap::new();
-        kvs.insert(
-            bucket_metadata_key(bucket_id),
-            Some(BucketMeta::default().into()),
-        );
-        for slot in 0..witnessed {
+    /// Adds one bucket to a witness's key-values: its metadata with `capacity`, the given
+    /// `slots`, and a value in every one of them below `used`.
+    fn witness_bucket(
+        kvs: &mut BTreeMap<SaltKey, Option<SaltValue>>,
+        bucket_id: BucketId,
+        capacity: u64,
+        slots: impl IntoIterator<Item = u64>,
+        used: u64,
+    ) {
+        let metadata = BucketMeta {
+            capacity,
+            ..BucketMeta::default()
+        };
+        kvs.insert(bucket_metadata_key(bucket_id), Some(metadata.into()));
+        for slot in slots {
             let value = (slot < used).then(|| SaltValue::new(&slot.to_le_bytes(), &[2u8; 32]));
             kvs.insert(SaltKey::from((bucket_id, slot)), value);
         }
+    }
+
+    fn witness_of(kvs: BTreeMap<SaltKey, Option<SaltValue>>) -> Witness {
         Witness::from(SaltWitness {
             kvs,
             proof: create_mock_proof(),
         })
     }
 
-    /// A bucket is counted on the first call only: the count is kept, and later calls
-    /// answer from it.
+    /// `Witness::from` takes the count of a bucket exactly when every slot of it is
+    /// witnessed, and each bucket answers as a scan of the witness does.
     #[test]
-    fn test_bucket_used_slots_is_counted_once() {
-        let bucket_id = 100_000;
-        let witness = witness_of_bucket(bucket_id, MIN_BUCKET_SIZE as u64, 3);
-        assert!(witness.used_slots.read().is_empty());
+    fn test_from_takes_the_count_of_every_fully_witnessed_bucket() {
+        const MIN: u64 = MIN_BUCKET_SIZE as u64;
+        let mut kvs = BTreeMap::new();
 
-        assert_eq!(witness.bucket_used_slots(bucket_id), Ok(3));
-        assert_eq!(witness.used_slots.read().get(&bucket_id), Some(&3));
+        // Fully witnessed, at the smallest capacity and at a larger one. The two are
+        // neighbours in key order.
+        witness_bucket(&mut kvs, 100_000, MIN, 0..MIN, 3);
+        witness_bucket(&mut kvs, 100_001, 2 * MIN, 0..2 * MIN, 300);
+        // One slot short.
+        witness_bucket(&mut kvs, 100_002, MIN, 0..MIN - 1, 3);
+        // As many slots as the capacity, but one of them lies past it.
+        witness_bucket(&mut kvs, 200_000, MIN, (0..MIN - 1).chain([300]), 3);
+        // The highest slot is witnessed, but slots below it are missing.
+        witness_bucket(&mut kvs, 200_001, 2 * MIN, (0..MIN).chain([2 * MIN - 1]), 3);
+        // Fully witnessed and empty, as the last bucket of the witness.
+        witness_bucket(&mut kvs, 300_000, MIN, 0..MIN, 0);
 
-        // A kept count that the slots themselves would not give shows where the answer
-        // comes from.
-        witness.used_slots.write().insert(bucket_id, 7);
-        assert_eq!(witness.bucket_used_slots(bucket_id), Ok(7));
-    }
+        let witness = witness_of(kvs);
 
-    /// A bucket that is not fully witnessed cannot be counted. The failure is not kept,
-    /// and every call reports it.
-    #[test]
-    fn test_bucket_used_slots_does_not_keep_a_failed_count() {
-        let bucket_id = 100_000;
-        let witness = witness_of_bucket(bucket_id, MIN_BUCKET_SIZE as u64 - 1, 3);
-
-        for _ in 0..2 {
+        assert_eq!(
+            witness.used_slots,
+            HashMap::from([(100_000, 3), (100_001, 300), (300_000, 0)])
+        );
+        let unknown = Err(SaltError::NotInWitness { what: "Key" });
+        for (bucket_id, expected) in [
+            (100_000, Ok(3)),
+            (100_001, Ok(300)),
+            (100_002, unknown.clone()),
+            (200_000, unknown.clone()),
+            (200_001, unknown),
+            (300_000, Ok(0)),
+        ] {
+            assert_eq!(witness.bucket_used_slots(bucket_id), expected);
             assert_eq!(
-                witness.bucket_used_slots(bucket_id),
-                Err(SaltError::NotInWitness { what: "Key" })
+                witness.salt_witness.bucket_used_slots(bucket_id),
+                expected,
+                "a scan of bucket {bucket_id}"
             );
-            assert!(witness.used_slots.read().is_empty());
         }
     }
 
-    /// The kept counts are no part of a witness's value: a clone starts without them,
-    /// and comparison and `Debug` output leave them out.
+    /// `Witness::from` runs before the witness is verified. Metadata that is missing,
+    /// empty or undecodable must leave the bucket out, without a panic.
     #[test]
-    fn test_kept_counts_are_left_out_of_clone_eq_and_debug() {
+    fn test_from_leaves_out_a_bucket_without_usable_metadata() {
+        const MIN: u64 = MIN_BUCKET_SIZE as u64;
+        let (missing, empty, undecodable) = (100_000, 200_000, 300_000);
+        let mut kvs = BTreeMap::new();
+        for bucket_id in [missing, empty, undecodable] {
+            witness_bucket(&mut kvs, bucket_id, MIN, 0..MIN, 3);
+        }
+        kvs.remove(&bucket_metadata_key(missing));
+        kvs.insert(bucket_metadata_key(empty), None);
+        kvs.insert(
+            bucket_metadata_key(undecodable),
+            Some(SaltValue::new(&[9u8; 3], &[])),
+        );
+
+        let witness = witness_of(kvs);
+
+        assert!(witness.used_slots.is_empty());
+        // The count then fails as it does on a `SaltWitness`.
+        assert_eq!(
+            witness.bucket_used_slots(missing),
+            Err(SaltError::NotInWitness { what: "Metadata" })
+        );
+        assert!(matches!(
+            witness.bucket_used_slots(undecodable),
+            Err(SaltError::InvalidFormat { .. })
+        ));
+    }
+
+    /// A count taken when the witness was built is the answer; the slots are not
+    /// counted again.
+    #[test]
+    fn test_bucket_used_slots_answers_from_the_taken_count() {
         let bucket_id = 100_000;
-        let witness = witness_of_bucket(bucket_id, MIN_BUCKET_SIZE as u64, 3);
-        witness.bucket_used_slots(bucket_id).unwrap();
+        let mut kvs = BTreeMap::new();
+        witness_bucket(
+            &mut kvs,
+            bucket_id,
+            MIN_BUCKET_SIZE as u64,
+            0..MIN_BUCKET_SIZE as u64,
+            3,
+        );
+        let mut witness = witness_of(kvs);
+        assert_eq!(witness.bucket_used_slots(bucket_id), Ok(3));
 
-        let clone = witness.clone();
-        assert!(clone.used_slots.read().is_empty());
-        assert_eq!(clone, witness);
+        // A count that the slots themselves would not give shows where the answer
+        // comes from.
+        witness.used_slots.insert(bucket_id, 7);
+        assert_eq!(witness.bucket_used_slots(bucket_id), Ok(7));
+    }
 
-        // Each field alone decides the comparison.
+    /// The counts are no part of a witness's value: two witnesses that differ only in
+    /// them are equal, and each of the other fields alone decides the comparison.
+    #[test]
+    fn test_comparison_leaves_the_counts_out() {
+        let bucket_id = 100_000;
+        let mut kvs = BTreeMap::new();
+        witness_bucket(
+            &mut kvs,
+            bucket_id,
+            MIN_BUCKET_SIZE as u64,
+            0..MIN_BUCKET_SIZE as u64,
+            3,
+        );
+        let witness = witness_of(kvs);
+        assert!(!witness.used_slots.is_empty());
+
+        let mut without_counts = witness.clone();
+        without_counts.used_slots.clear();
+        assert_eq!(without_counts, witness);
+
         let mut other_table = witness.clone();
         other_table
             .direct_lookup_tbl
@@ -1190,11 +1311,6 @@ mod tests {
             Some(BucketMeta::default().into()),
         );
         assert_ne!(other_salt_witness, witness);
-
-        let debug = format!("{witness:?}");
-        assert!(debug.starts_with("Witness { direct_lookup_tbl: "));
-        assert!(debug.contains("salt_witness: SaltWitness"));
-        assert!(!debug.contains("used_slots"));
     }
 
     /// Verifies that witnesses contain sufficient data to correctly compute new
@@ -1331,23 +1447,27 @@ mod tests {
         );
         let (expected_root, _) = StateRoot::new(&store).update_fin(&expected).unwrap();
 
-        let witness = Witness::create([], block.keys(), &block, &store).unwrap();
-        let witness = Witness::from(witness.salt_witness);
+        // The builder does not replay on its witness, and takes no counts.
+        let created = Witness::create([], block.keys(), &block, &store).unwrap();
+        assert!(created.used_slots.is_empty());
+
+        // The validator's witness holds the store's count of every bucket the block
+        // resizes, before the replay starts.
+        let witness = Witness::from(created.salt_witness);
+        for metadata_key in expected.data.keys().filter(|k| k.is_in_meta_bucket()) {
+            let bucket_id = bucket_id_from_metadata_key(*metadata_key);
+            assert_eq!(
+                witness.used_slots.get(&bucket_id).copied(),
+                Some(store.bucket_used_slots(bucket_id).unwrap())
+            );
+        }
+
         let replayed = EphemeralSaltState::new(&witness)
             .update_fin(&block)
             .unwrap();
         assert_eq!(replayed, expected);
         let (root, _) = StateRoot::new(&witness).update_fin(&replayed).unwrap();
         assert_eq!(root, expected_root);
-
-        // The replay counted every bucket it resized, got the store's count, and kept it.
-        for metadata_key in expected.data.keys().filter(|k| k.is_in_meta_bucket()) {
-            let bucket_id = bucket_id_from_metadata_key(*metadata_key);
-            assert_eq!(
-                witness.used_slots.read().get(&bucket_id).copied(),
-                Some(store.bucket_used_slots(bucket_id).unwrap())
-            );
-        }
     }
 
     /// The bytes of `witness`'s SALT witness, as the proof byte-identity tests compare them.
