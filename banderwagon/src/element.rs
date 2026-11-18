@@ -160,8 +160,8 @@ impl Element {
     ///
     /// The elements come back as an iterator over the tasks' outputs rather than one `Vec`, so that
     /// a caller collecting them (into a map, say) copies each element once: gathering them into a
-    /// single vector first is a serial copy that measured 15% of the whole decode on 20,000 points
-    /// with the vector lanes.
+    /// single vector first is a serial copy, 0.3 ms for 20,000 points on an EPYC 9754, where the
+    /// vector lanes decode them in 4.9 ms on 32 threads.
     pub fn from_bytes_batch(
         bytes: &[[u8; 32]],
     ) -> Result<impl Iterator<Item = Element>, SerializationError> {
@@ -632,11 +632,14 @@ fn decode_task_len(total: usize) -> usize {
 /// the batch in tasks as long as they go.
 ///
 /// With several threads a small batch is cut down to tasks of a single point, which share no
-/// inversion. That is the faster split all the same: on an M4 (ten performance and four efficiency
-/// cores) 50 points take 71 µs in one-point tasks and 93 µs in four-point tasks, and 100 points take
-/// 110 µs in two-point tasks and 145 µs in eight-point ones. A longer task saves up to a fifth of a
-/// point's decode (10.0 µs alone, 8.4 µs in a task of four, 7.9 µs in one of 128), but it leaves
-/// the slowest core holding a whole task. A one-point task costs 0.7% more than `from_bytes`.
+/// inversion. A longer task saves up to a quarter of a point's decode (on one thread of an EPYC
+/// 9754: 19.0 µs alone, 15.3 µs in a task of four, 14.0 µs in one of 128; a one-point task costs
+/// 1% more than `from_bytes`), but it leaves a thread that is slow or busy elsewhere holding a
+/// whole task. Which of the two weighs more depends on the host. On that EPYC (16 cores, 32
+/// threads, shared with other jobs), with the scalar tasks, the finer split was not the faster one
+/// for a small batch: 50 points took 120 µs in one-point tasks, 105 µs in two-point tasks and
+/// 162 µs in four-point ones, and 100 points 216 µs in one-point tasks and 157 µs in four-point
+/// ones. That host has the lanes, so its own batches are split into whole chunks.
 fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
     let tasks = if threads == 1 {
         1
