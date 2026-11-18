@@ -65,14 +65,17 @@ pub(crate) struct Consts {
     k264: L5,
 }
 
-// SAFETY: __m512i is plain data; the constants are built once and only read afterwards.
-unsafe impl Sync for Consts {}
-unsafe impl Send for Consts {}
-
+/// The lane MSM's constants, built on first use.
+///
+/// # Panics
+/// On a host without AVX-512 IFMA, as [`context`] does.
 pub(crate) fn consts() -> &'static Consts {
     static K: OnceLock<Consts> = OnceLock::new();
-    // SAFETY: callers check `available()` first; this only broadcasts constants.
-    K.get_or_init(|| unsafe { build_consts(context()) })
+    K.get_or_init(|| {
+        let c = context();
+        // SAFETY: `context()` returned, so the host has the extension.
+        unsafe { build_consts(c) }
+    })
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -779,6 +782,7 @@ mod tests {
     /// (n, c). `cargo test --release -p banderwagon bench_lane_msm -- --ignored --nocapture`.
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_lane_msm() {
         if !available() {
             println!("no IFMA on this host");
@@ -814,7 +818,7 @@ mod tests {
 
     #[test]
     fn lane_msm_matches_ark_msm() {
-        if !available() {
+        if !crate::element::tests::lanes_under_test() {
             return;
         }
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xc2);
