@@ -666,6 +666,16 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 pub const LANE_MSM_MIN_POINTS: usize = 8192;
 
+/// The tasks the vector path splits `points` into on `threads` threads: as few as keep every
+/// task at [`LANE_MSM_MIN_POINTS`] points or fewer, and no more than one per thread. The caller
+/// spreads the points evenly over them, so that no task is left a short remainder beside full
+/// ones: 8,193 points on two threads are 4,097 and 4,096, not 8,192 and 1. An MSM takes as long
+/// as its longest task.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+fn lane_msm_tasks(points: usize, threads: usize) -> usize {
+    points.div_ceil(LANE_MSM_MIN_POINTS).min(threads).max(1)
+}
+
 /// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
 /// IFMA from [`LANE_MSM_MIN_POINTS`] points up, and [`crate::msm::msm_windowed`] everywhere else.
 fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
@@ -676,25 +686,14 @@ fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
     );
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     if bases.len() >= LANE_MSM_MIN_POINTS && crate::ifma::available() {
-        // Keep vector arithmetic across threads: the scalar fallback also parallelizes.
-        // Rayon can distribute chunks for one proof or run them within concurrent proofs.
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            let chunk = bases
-                .len()
-                .div_ceil(rayon::current_num_threads())
-                .max(LANE_MSM_MIN_POINTS);
-            return bases
-                .par_chunks(chunk)
-                .zip(scalars.par_chunks(chunk))
-                // SAFETY: `available()` checked the host's features.
-                .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s) })
-                .reduce(EdwardsProjective::zero, |a, b| a + b);
-        }
-        // SAFETY: `available()` checked the host's features.
-        #[cfg(not(feature = "parallel"))]
-        return unsafe { crate::ifma_msm::msm(bases, scalars) };
+        let chunk = bases
+            .len()
+            .div_ceil(lane_msm_tasks(bases.len(), num_threads!()));
+        return chunks!(bases, chunk)
+            .zip(chunks!(scalars, chunk))
+            // SAFETY: `available()` returned true just above.
+            .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s) })
+            .sum();
     }
     crate::msm::msm_windowed(bases, scalars)
 }
@@ -855,6 +854,44 @@ pub(crate) mod tests {
                 });
             }
         }
+    }
+
+    /// The vector path's tasks are even: they differ by fewer points than there are tasks, none
+    /// is over the cutoff while threads remain, and a thread count the points do not fill gets
+    /// one task per [`LANE_MSM_MIN_POINTS`] points, rounded up.
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[test]
+    fn lane_msm_tasks_are_even() {
+        const CUT: usize = LANE_MSM_MIN_POINTS;
+        for threads in [1, 2, 8, 32] {
+            for points in [
+                CUT,
+                CUT + 1,
+                12_000,
+                2 * CUT - 1,
+                2 * CUT,
+                2 * CUT + 1,
+                50_000,
+                300_000,
+            ] {
+                let tasks = lane_msm_tasks(points, threads);
+                let chunk = points.div_ceil(tasks);
+                let last = points - (points.div_ceil(chunk) - 1) * chunk;
+                let what = format!("{points} points, {threads} threads");
+                assert_eq!(tasks, points.div_ceil(CUT).min(threads), "{what}");
+                assert_eq!(
+                    points.div_ceil(chunk),
+                    tasks,
+                    "{what}: every task has points"
+                );
+                assert!(chunk - last < tasks, "{what}: {chunk} and {last}");
+                assert!(chunk <= CUT || tasks == threads, "{what}: {chunk}");
+            }
+        }
+        // the cases a remainder split got wrong
+        assert_eq!(lane_msm_tasks(CUT + 1, 32), 2);
+        assert_eq!((CUT + 1).div_ceil(2), CUT / 2 + 1);
+        assert_eq!(lane_msm_tasks(2 * CUT - 1, 32), 2);
     }
 
     /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its
