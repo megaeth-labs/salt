@@ -93,19 +93,6 @@ pub struct EphemeralSaltState<'a, Store> {
     /// Without this delta tracking, computing the current bucket occupancy would require
     /// reconciling the base store's usage count with all cached modifications.
     pub usage_count_delta: HashMap<BucketId, i64>,
-    /// The base store's usage count of each bucket, kept after the first successful read.
-    ///
-    /// `store` must not change while this state borrows it. `usage_count_delta` already
-    /// relies on that: a change applied to the store under a live state would be counted
-    /// twice. A bucket's count in the store is therefore fixed for the lifetime of the
-    /// state, and one read of it is enough.
-    ///
-    /// Reading it on every insertion is costly for stores that count by visiting every
-    /// slot of the bucket, as a witness does: a block that resizes a bucket reinserts all
-    /// of its keys, each of which asks for the count.
-    ///
-    /// A failed read is not kept, so a store that cannot serve the count is asked again.
-    pub base_usage_count: HashMap<BucketId, u64>,
     /// Tracks which buckets have had their metadata changed (rehashed) during this session.
     pub rehashed_buckets: HashSet<BucketId>,
     /// Whether to cache values read from the store for subsequent access
@@ -194,7 +181,6 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
             store,
             cache: HashMap::new(),
             usage_count_delta: HashMap::new(),
-            base_usage_count: HashMap::new(),
             rehashed_buckets: HashSet::new(),
             cache_read: false,
         }
@@ -418,24 +404,14 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// any tracked deltas from `usage_count_delta` to the base count from the underlying store,
     /// ensuring you get the most up-to-date count that reflects all cached insertions and deletions.
     ///
-    /// The store is asked for a bucket's base count until it first answers; the answer is
-    /// kept in `base_usage_count` and reused from then on.
-    ///
     /// # Arguments
     /// * `bucket_id` - The bucket ID to get the usage count for
     ///
     /// # Returns
     /// * `Ok(count)` - The current number of used slots in the bucket
     /// * `Err(error)` - If the store query fails
-    fn usage_count(&mut self, bucket_id: BucketId) -> Result<u64, Store::Error> {
-        let base_count = match self.base_usage_count.get(&bucket_id) {
-            Some(&count) => count,
-            None => {
-                let count = self.store.bucket_used_slots(bucket_id)?;
-                self.base_usage_count.insert(bucket_id, count);
-                count
-            }
-        };
+    fn usage_count(&self, bucket_id: BucketId) -> Result<u64, Store::Error> {
+        let base_count = self.store.bucket_used_slots(bucket_id)?;
         let result = base_count as i64 + self.usage_count_delta.get(&bucket_id).unwrap_or(&0);
         Ok(result
             .try_into()
@@ -1380,58 +1356,6 @@ mod tests {
             .collect()
     }
 
-    /// A full store that counts the `bucket_used_slots` calls it receives, and fails them
-    /// when `fail_used_slots` is set.
-    #[derive(Debug, Default)]
-    struct CountingStore {
-        inner: MemStore,
-        used_slots_reads: core::sync::atomic::AtomicUsize,
-        fail_used_slots: bool,
-    }
-
-    impl CountingStore {
-        const USED_SLOTS_ERROR: SaltError = SaltError::UnsupportedOperation {
-            operation: "CountingStore::bucket_used_slots",
-        };
-
-        fn used_slots_reads(&self) -> usize {
-            self.used_slots_reads
-                .load(core::sync::atomic::Ordering::Relaxed)
-        }
-    }
-
-    impl StateReader for CountingStore {
-        type Error = SaltError;
-
-        fn value(&self, key: SaltKey) -> Result<Option<SaltValue>, Self::Error> {
-            self.inner.value(key)
-        }
-
-        fn entries(
-            &self,
-            range: core::ops::RangeInclusive<SaltKey>,
-        ) -> Result<Vec<(SaltKey, SaltValue)>, Self::Error> {
-            self.inner.entries(range)
-        }
-
-        fn metadata(&self, bucket_id: BucketId) -> Result<BucketMeta, Self::Error> {
-            self.inner.metadata(bucket_id)
-        }
-
-        fn bucket_used_slots(&self, bucket_id: BucketId) -> Result<u64, Self::Error> {
-            self.used_slots_reads
-                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if self.fail_used_slots {
-                return Err(Self::USED_SLOTS_ERROR);
-            }
-            self.inner.bucket_used_slots(bucket_id)
-        }
-
-        fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error> {
-            self.inner.plain_value_fast(plain_key)
-        }
-    }
-
     #[derive(Debug)]
     struct FastLookupStore {
         inner: MemStore,
@@ -2356,13 +2280,12 @@ mod tests {
     #[test]
     fn test_usage_count() {
         let store = MemStore::new();
+        let mut state = EphemeralSaltState::new(&store);
 
         // Test 1: Empty bucket (base=0, delta=0) → 0
-        let mut state = EphemeralSaltState::new(&store);
         assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
 
-        // Test 2: Add base data (base=1, delta=0) → 1. A state reads a store that does not
-        // change under it, so the new base count is read through a new state.
+        // Test 2: Add base data (base=1, delta=0) → 1
         let test_key = SaltKey::from((TEST_BUCKET, 0u64));
         store.update_state(StateUpdates {
             data: [(
@@ -2371,7 +2294,6 @@ mod tests {
             )]
             .into(),
         });
-        let mut state = EphemeralSaltState::new(&store);
         assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 1);
 
         // Test 3: Positive delta (base=1, delta=+5) → 6
@@ -2381,73 +2303,6 @@ mod tests {
         // Test 4: Negative delta within bounds (base=1, delta=-1) → 0
         state.usage_count_delta.insert(TEST_BUCKET, -1);
         assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), 0);
-    }
-
-    /// A state reads the store's count of a bucket once, however many insertions ask for it.
-    /// Insertions that resize a bucket ask the most: each one needs the count, the rehash
-    /// needs it, and canonicalization reinserts every key.
-    #[test]
-    fn test_usage_count_reads_the_store_once_per_bucket() {
-        fn insert_all<S: StateReader>(
-            state: &mut EphemeralSaltState<'_, S>,
-            kvs: &[(Vec<u8>, Option<Vec<u8>>)],
-        ) -> StateUpdates {
-            let mut updates = StateUpdates::default();
-            for (key, value) in kvs {
-                state
-                    .shi_upsert(TEST_BUCKET, key, value.as_ref().unwrap(), &mut updates)
-                    .unwrap();
-            }
-            updates.merge(state.canonicalize().unwrap());
-            updates
-        }
-        let kvs = create_same_bucket_test_data(260);
-        let (existing, inserted) = kvs.split_at(50);
-
-        // The store starts with entries in the bucket, so the count read from it is not 0.
-        let store = CountingStore::default();
-        let seed = insert_all(&mut EphemeralSaltState::new(&store.inner), existing);
-        store.inner.update_state(seed);
-        assert_eq!(store.used_slots_reads(), 0);
-
-        let mut state = EphemeralSaltState::new(&store);
-        insert_all(&mut state, inserted);
-        assert!(
-            state.metadata(TEST_BUCKET, false).unwrap().capacity > MIN_BUCKET_SIZE as u64,
-            "the insertions must resize the bucket"
-        );
-        assert_eq!(state.usage_count(TEST_BUCKET).unwrap(), kvs.len() as u64);
-        assert_eq!(
-            state.base_usage_count.get(&TEST_BUCKET),
-            Some(&(existing.len() as u64))
-        );
-        assert_eq!(store.used_slots_reads(), 1);
-    }
-
-    /// A read of the count that fails is not kept: the store is asked again by the next
-    /// insertion, and a caller that needs the count gets the store's own error.
-    #[test]
-    fn test_usage_count_does_not_keep_a_failed_read() {
-        let store = CountingStore {
-            fail_used_slots: true,
-            ..CountingStore::default()
-        };
-        let mut state = EphemeralSaltState::new(&store);
-        let mut updates = StateUpdates::default();
-
-        // An insertion only skips the load-factor check when the count is unavailable.
-        for (reads, key) in [(1, 1u8), (2, 2u8)] {
-            state
-                .shi_upsert(TEST_BUCKET, &[key; 32], &[], &mut updates)
-                .unwrap();
-            assert_eq!(store.used_slots_reads(), reads);
-        }
-        assert!(state.base_usage_count.is_empty());
-
-        // A rehash needs the count, so it fails with the error the store returned.
-        let rehash = state.shi_rehash(TEST_BUCKET, 1, MIN_BUCKET_SIZE as u64, &mut updates);
-        assert_eq!(rehash, Err(CountingStore::USED_SLOTS_ERROR));
-        assert_eq!(store.used_slots_reads(), 3);
     }
 
     /// Tests that usage_count() panics when the result would be negative.
@@ -2496,9 +2351,6 @@ mod tests {
             data: [(meta_key, (None, Some(stored_meta.into())))].into(),
         });
 
-        // A state reads a store that does not change under it, so each change to the store
-        // is read through a new state.
-        let mut state = EphemeralSaltState::new(&store);
         let meta = state.metadata(TEST_BUCKET, true).unwrap();
         assert_eq!(meta.nonce, 123);
         assert_eq!(meta.capacity, 512);
@@ -2511,7 +2363,6 @@ mod tests {
             data: [(test_key, (None, Some(test_value)))].into(),
         });
 
-        let mut state = EphemeralSaltState::new(&store);
         let meta = state.metadata(TEST_BUCKET, true).unwrap();
         assert_eq!(meta.nonce, 123);
         assert_eq!(meta.capacity, 512);
