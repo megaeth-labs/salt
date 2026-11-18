@@ -109,8 +109,7 @@ impl Element {
         let x = x_from_bytes(bytes)?;
         let x_sq = x.square();
         Self::from_x(x, x_sq, || {
-            // `d` is not a square, so `d·x² − 1` is never zero; were it zero, this panics as the
-            // division `n / d` it replaces did
+            // `d` is not a square, so `d·x² − 1` is never zero; were it zero, this panics
             denominator(x_sq)
                 .inverse()
                 .expect("d·x² − 1 is nonzero: d is not a square")
@@ -176,12 +175,10 @@ impl Element {
 
     /// One task of [`Element::from_bytes_batch`], on the vector lanes where this host has them.
     fn decode_task(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
-        if lanes_available() {
-            // SAFETY: on this target `lanes_available()` is `ifma::available()`, which returned true.
-            return Self::decode_task_lanes(bytes, |xs| unsafe { crate::ifma::decode_chunks(xs) });
+        match lane_decoder() {
+            Some(lanes) => Self::decode_task_lanes(bytes, lanes),
+            None => Self::decode_task_scalar(bytes),
         }
-        Self::decode_task_scalar(bytes)
     }
 
     /// [`Element::from_bytes`] on every input up to the first it rejects, with the inversions of
@@ -224,7 +221,6 @@ impl Element {
     /// scalar path accepts into an error. A root they do return is taken as they computed it, with
     /// the positive `y` chosen here as `from_bytes` chooses it: it is not decoded again, and the
     /// lane tests are what compare it with the scalar decoder's.
-    #[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
     fn decode_task_lanes(
         bytes: &[[u8; 32]],
         mut decode_chunks: impl FnMut(&[[Fq; CHUNK]]) -> Vec<ChunkDecode>,
@@ -235,22 +231,20 @@ impl Element {
             let scalar_tail = if tail < MIN_PADDED_CHUNK { tail } else { 0 };
             let (group, scalar_tail) = group.split_at(group.len() - scalar_tail);
             if !group.is_empty() {
-                let xs = group
-                    .iter()
-                    .map(|b| x_from_bytes(*b))
-                    .collect::<Result<Vec<Fq>, _>>()?;
-                let mut lanes = std::vec![[Fq::zero(); CHUNK]; xs.len().div_ceil(CHUNK)];
-                for (i, x) in xs.iter().enumerate() {
-                    lanes[i / CHUNK][i % CHUNK] = *x;
+                let mut lanes = std::vec![[Fq::zero(); CHUNK]; group.len().div_ceil(CHUNK)];
+                for (x, b) in lanes.as_flattened_mut().iter_mut().zip(group) {
+                    *x = x_from_bytes(*b)?;
                 }
                 let decoded = decode_chunks(&lanes);
                 assert_eq!(decoded.len(), lanes.len(), "one decode per lane chunk");
-                for (i, (b, x)) in group.iter().zip(xs).enumerate() {
-                    out.push(match decoded[i / CHUNK][i % CHUNK] {
-                        Some(y) => {
-                            let y = if is_positive(y) { y } else { -y };
-                            Element(EdwardsAffine::new_unchecked(x, y).into())
-                        }
+                // the group is the shortest of the three: the padding lanes are not read
+                let points = group
+                    .iter()
+                    .zip(lanes.as_flattened())
+                    .zip(decoded.as_flattened());
+                for ((b, x), y) in points {
+                    out.push(match y {
+                        Some(y) => Element(point_with_positive_y(*x, *y)),
                         None => Self::from_bytes(*b)?,
                     });
                 }
@@ -365,14 +359,8 @@ impl Element {
     /// This function does **not** perform subgroup validation. The caller is responsible
     /// for ensuring the resulting point is in the correct subgroup if needed.
     fn get_point_from_x(x: Fq, x_sq: Fq, den_inv: Fq) -> Option<EdwardsProjective> {
-        let y_squared = (BandersnatchConfig::COEFF_A * x_sq - Fq::one()) * den_inv;
-
-        let mut y = crate::decoder_arithmetic::sqrt(y_squared)?;
-        if !is_positive(y) {
-            y = -y;
-        }
-
-        Some(EdwardsAffine::new_unchecked(x, y).into())
+        let y_squared = numerator(x_sq) * den_inv;
+        crate::decoder_arithmetic::sqrt(y_squared).map(|y| point_with_positive_y(x, y))
     }
 
     /// Maps an elliptic curve point to a scalar field element.
@@ -571,9 +559,21 @@ fn x_from_bytes(mut bytes: [u8; 32]) -> Result<Fq, SerializationError> {
     Fq::deserialize_compressed(&bytes[..])
 }
 
+/// The numerator `a·x² − 1` of `y² = (a·x² − 1) / (d·x² − 1)`, given `x_sq = x²`.
+pub(crate) fn numerator(x_sq: Fq) -> Fq {
+    BandersnatchConfig::COEFF_A * x_sq - Fq::one()
+}
+
 /// The denominator `d·x² − 1` of `y² = (a·x² − 1) / (d·x² − 1)`, given `x_sq = x²`.
-fn denominator(x_sq: Fq) -> Fq {
+pub(crate) fn denominator(x_sq: Fq) -> Fq {
     BandersnatchConfig::COEFF_D * x_sq - Fq::one()
+}
+
+/// The point at `x` with the positive one of `±y`: the choice [`Element::from_bytes`] makes for the
+/// root it computes, and the batch decode for a root of the vector lanes.
+fn point_with_positive_y(x: Fq, y: Fq) -> EdwardsProjective {
+    let y = if is_positive(y) { y } else { -y };
+    EdwardsAffine::new_unchecked(x, y).into()
 }
 
 /// Points per vector-lane chunk of the batch decode: four interleaved groups of eight lanes, enough
@@ -588,25 +588,26 @@ pub(crate) const TASK_CHUNKS: usize = 4;
 /// 32 points cost in the lanes, whatever it holds, and fewer points than this cost less on the
 /// scalar task. With the per-point costs measured on an EPYC 9B45 (1.34 µs in the lanes, 10.8 µs
 /// on the scalar task plus its 4.3 µs inversion) the two cross between three and four points.
-#[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
 const MIN_PADDED_CHUNK: usize = 4;
 
 /// The vector decode of one chunk: per point, a `y` of either sign where the lanes found a root
 /// of `y² = n/d` and `1 − a·x²` to be a nonzero residue, `None` otherwise.
-#[cfg(any(test, all(feature = "std", target_arch = "x86_64")))]
 pub(crate) type ChunkDecode = [Option<Fq>; CHUNK];
 
-/// Whether [`Element::from_bytes_batch`] decodes on the AVX-512 IFMA lanes on this host: the lane
-/// module is compiled (`x86_64` with `std`) and the CPU reports the extension. The batch decode
-/// dispatches on this, and so does the test that requires the lanes in CI.
-pub(crate) fn lanes_available() -> bool {
+/// The vector lanes' decode of one to [`TASK_CHUNKS`] chunks.
+pub(crate) type LaneDecoder = fn(&[[Fq; CHUNK]]) -> Vec<ChunkDecode>;
+
+/// The AVX-512 IFMA lanes [`Element::from_bytes_batch`] decodes on, where this host has them: the
+/// lane module is compiled (`x86_64` with `std`) and the CPU reports the extension. The batch
+/// decode dispatches on this, and so does the test that requires the lanes in CI.
+fn lane_decoder() -> Option<LaneDecoder> {
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     {
-        crate::ifma::available()
+        crate::ifma::decoder()
     }
     #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
     {
-        false
+        None
     }
 }
 
@@ -618,7 +619,7 @@ const TASKS_PER_THREAD: usize = 4;
 /// The length of the tasks [`Element::from_bytes_batch`] splits `total` points into, on this
 /// host: see [`task_len`].
 fn decode_task_len(total: usize) -> usize {
-    task_len(total, num_threads!(), lanes_available())
+    task_len(total, num_threads!(), lane_decoder().is_some())
 }
 
 /// The length of the tasks a batch of `total` points is split into for `threads` threads: about
@@ -777,24 +778,22 @@ pub(crate) mod tests {
             outcome(Element::from_bytes_batch(inputs).map(|elements| elements.collect()))
         };
         assert_eq!(batch(&accepted), expected(&accepted));
-        assert_eq!(
-            batch(&accepted).map(|points| points.len()),
-            Ok(accepted.len())
-        );
 
         // one rejected input among accepted ones, at a position that moves through the tasks
         let accepted = &accepted[..300];
         for (k, bad) in rejected.iter().enumerate().take(120) {
             let mut inputs = accepted.to_vec();
             inputs[(k * 37) % accepted.len()] = *bad;
-            assert_eq!(batch(&inputs), expected(&inputs), "rejected input {k}");
-            assert!(batch(&inputs).is_err(), "rejected input {k}");
+            let got = batch(&inputs);
+            assert!(got.is_err(), "rejected input {k}");
+            assert_eq!(got, expected(&inputs), "rejected input {k}");
         }
 
         // and many of them
         let mixed = decode_test_inputs(600);
-        assert_eq!(batch(&mixed), expected(&mixed));
-        assert!(batch(&mixed).is_err());
+        let got = batch(&mixed);
+        assert!(got.is_err());
+        assert_eq!(got, expected(&mixed));
     }
 
     /// What a decode returns, comparable: the affine points, or the error's debug form.
@@ -923,10 +922,8 @@ pub(crate) mod tests {
                     "lanes with negative roots",
                     Element::decode_task_lanes(input, negative_root_lanes),
                 );
-                #[cfg(all(feature = "std", target_arch = "x86_64"))]
                 if lanes_under_test() {
-                    // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
-                    let lanes = |xs: &[[Fq; CHUNK]]| unsafe { crate::ifma::decode_chunks(xs) };
+                    let lanes = lane_decoder().expect("the lanes are under test");
                     check("lanes", Element::decode_task_lanes(input, lanes));
                 }
                 check(
@@ -987,8 +984,9 @@ pub(crate) mod tests {
                 lane_calls += 1;
                 stand_in_lanes(xs)
             });
-            assert_eq!(outcome(got), expected(&input));
-            assert!(expected(&input).is_err());
+            let want = expected(&input);
+            assert!(want.is_err());
+            assert_eq!(outcome(got), want);
             assert_eq!(lane_calls, calls);
         }
     }
@@ -1057,7 +1055,7 @@ pub(crate) mod tests {
     /// [`REQUIRE_LANES`] is set it fails instead of returning false, so that the lane tests of that
     /// job cannot turn into silent skips.
     pub(crate) fn lanes_under_test() -> bool {
-        let available = lanes_available();
+        let available = lane_decoder().is_some();
         assert!(
             available || std::env::var_os(REQUIRE_LANES).is_none(),
             "{REQUIRE_LANES} is set, but the batch decode does not take the AVX-512 IFMA lanes here"
@@ -1065,8 +1063,8 @@ pub(crate) mod tests {
         available
     }
 
-    /// Where CI requires the lanes, the batch decode takes them. Unlike the lane tests this one is
-    /// compiled on every target and feature set, so a `cfg` gate or a feature detection that stops
+    /// Where CI requires the lanes, the batch decode takes them. Unlike the lane module's tests this
+    /// one is compiled on every target and feature set, so a `cfg` gate or a feature detection that stops
     /// selecting the lanes on that runner fails it instead of removing or skipping the lane tests.
     #[test]
     fn batch_decode_takes_the_lanes_where_required() {
@@ -1116,7 +1114,7 @@ pub(crate) mod tests {
             let padded = ns_per_point(&|| in_tasks(short, Element::decode_task));
             println!(
                 "decode rep {rep}, one thread, lanes {}: from_bytes {point:.0} ns/point, scalar task of {full} {scalar:.0} (x{:.2}), task of {full} {task:.0} (x{:.2}), task of {short} {padded:.0} (x{:.2})",
-                lanes_available(),
+                lane_decoder().is_some(),
                 point / scalar,
                 point / task,
                 point / padded,
@@ -1208,13 +1206,12 @@ pub(crate) mod tests {
     /// every edge `x` in every lane position. `from_bytes_batch` decodes on the scalar path whatever
     /// the lanes do not return, which would hide a lane that wrongly returns nothing, and it takes
     /// a root they do return as they computed it; this reads the lanes' own answer.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn lane_decode_accepts_exactly_what_from_bytes_accepts() {
-        use crate::ifma::decode_chunks;
         if !lanes_under_test() {
             return;
         }
+        let decode_chunks = lane_decoder().expect("the lanes are under test");
         let xs = decode_test_xs(2048);
         // the positive `y` where `from_bytes` accepts
         let expected: Vec<Option<Fq>> = xs.iter().map(|x| decode(*x).map(|(_, y)| y)).collect();
@@ -1225,8 +1222,7 @@ pub(crate) mod tests {
             padded.resize(padded.len().next_multiple_of(CHUNK), Fq::one());
             for (k, chunk) in padded.chunks_exact(CHUNK).enumerate() {
                 let chunk: [Fq; CHUNK] = chunk.try_into().unwrap();
-                // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
-                let roots = unsafe { decode_chunks(&[chunk]) }[0];
+                let roots = decode_chunks(&[chunk])[0];
                 for (lane, root) in roots.into_iter().enumerate() {
                     let Some(i) = (k * CHUNK + lane).checked_sub(shift) else {
                         continue;

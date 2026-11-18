@@ -8,9 +8,7 @@ use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::One;
 use ark_ff::{BigInteger256, Field, PrimeField, Zero};
 
-/// The Jacobi symbol by the binary algorithm on 256-bit integers. Compiled where
-/// [`is_nonzero_square`] uses it, and for the tests of every target.
-#[cfg(any(test, target_arch = "x86_64", target_arch = "aarch64"))]
+/// The Jacobi symbol by the binary algorithm on 256-bit integers.
 mod jacobi {
     use core::cmp::Ordering;
 
@@ -98,19 +96,9 @@ mod jacobi {
 }
 
 struct SqrtTable {
-    trace_half: [u64; 4],
     lookup: [Fq; 16],
     /// `c^(−j·2^(4·row − 1))` (row 0: `c^(−⌊j/2⌋)`), whose square divides the window out of `b`.
     correction: [[Fq; 16]; 8],
-}
-#[cfg(test)]
-fn shr1(a: [u64; 4]) -> [u64; 4] {
-    [
-        a[0] >> 1 | a[1] << 63,
-        a[1] >> 1 | a[2] << 63,
-        a[2] >> 1 | a[3] << 63,
-        a[3] >> 1,
-    ]
 }
 impl SqrtTable {
     #[cfg(test)]
@@ -124,16 +112,7 @@ impl SqrtTable {
                 0x73eda753299d7d48
             ]
         );
-        let mut trace = Fq::MODULUS.0;
-        trace[0] -= 1;
-        for _ in 0..32 {
-            trace = shr1(trace)
-        }
-        assert_eq!(trace[0] & 1, 1);
-        let mut half = trace;
-        half[0] -= 1;
-        half = shr1(half);
-        let c = Fq::from(7u64).pow(trace);
+        let c = Fq::from(7u64).pow(Fq::TRACE);
         let mut check = c;
         for _ in 0..31 {
             check.square_in_place();
@@ -159,18 +138,14 @@ impl SqrtTable {
                 *entry = ci.pow([e]);
             }
         }
-        Self {
-            trace_half: half,
-            lookup,
-            correction,
-        }
+        Self { lookup, correction }
     }
     #[inline]
     fn sqrt(&self, u: Fq) -> Option<Fq> {
         if u.is_zero() {
             return Some(u);
         }
-        let w = u.pow(self.trace_half);
+        let w = u.pow(Fq::TRACE_MINUS_ONE_DIV_TWO);
         let mut x = w * u;
         let mut b = x * w;
         for row in 0..8 {
@@ -194,7 +169,6 @@ impl SqrtTable {
 }
 
 static SQRT_TABLE: SqrtTable = SqrtTable {
-    trace_half: Fq::TRACE_MINUS_ONE_DIV_TWO.0,
     lookup: [
         Fq::new(BigInteger256::new([
             0x0000000000000001,
@@ -1096,12 +1070,9 @@ pub(super) fn sqrt(value: Fq) -> Option<Fq> {
 /// have not been measured there. Add a target to the list once they have been.
 #[inline]
 pub(super) fn is_nonzero_square(value: Fq) -> bool {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         jacobi::binary_jacobi(value.into_bigint().0, Fq::MODULUS.0) == 1
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
+    } else {
         value.legendre().is_qr()
     }
 }
@@ -1109,11 +1080,11 @@ pub(super) fn is_nonzero_square(value: Fq) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ff::LegendreSymbol;
+    use ark_ff::{LegendreSymbol, UniformRand};
+    use rand_chacha::rand_core::SeedableRng;
     #[test]
     fn generated_constants_match_original_runtime_constructor() {
         let expected = SqrtTable::new();
-        assert_eq!(SQRT_TABLE.trace_half, expected.trace_half);
         assert_eq!(SQRT_TABLE.lookup, expected.lookup);
         assert_eq!(SQRT_TABLE.correction, expected.correction);
     }
@@ -1150,17 +1121,9 @@ mod tests {
             check(power + Fq::one());
             power += power;
         }
-        let mut seed = 0x9a1724f50c89e321_u64;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(47);
         for _ in 0..8192 {
-            let mut bytes = [0_u8; 32];
-            for chunk in bytes.chunks_exact_mut(8) {
-                seed = seed.wrapping_add(0x9e3779b97f4a7c15);
-                let mut z = seed;
-                z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-                chunk.copy_from_slice(&(z ^ (z >> 31)).to_le_bytes());
-            }
-            check(Fq::from_le_bytes_mod_order(&bytes));
+            check(Fq::rand(&mut rng));
         }
     }
 }

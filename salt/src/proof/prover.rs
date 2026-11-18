@@ -119,9 +119,8 @@ pub mod parents_commitments_serde {
         let raw = BTreeMap::<NodeId, [u8; 32]>::deserialize(d)?;
         let (ids, bytes): (Vec<NodeId>, Vec<[u8; 32]>) = raw.into_iter().unzip();
 
-        // The batch decode splits the points over the threads itself, in tasks sized for this host
-        // (on one with AVX-512 IFMA, whole chunks of the vector lanes), returns them in order, and
-        // stops at the first point it rejects.
+        // The batch decode returns the elements in the order of `bytes`, which the `zip` with `ids`
+        // relies on, and stops at the first point it rejects.
         let commitments = Element::from_bytes_batch(&bytes)
             .map_err(|_| serde::de::Error::custom("invalid element bytes"))?;
         Ok(ids

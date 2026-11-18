@@ -1,5 +1,5 @@
 //! Eight-lane AVX-512 IFMA arithmetic in the Bandersnatch base field `Fq` (= BLS12-381 `Fr`, 255 bits) for
-//! the witness decode's per-point work in [`crate::Element::from_bytes`]: the Legendre symbol of the
+//! the witness decode's per-point work in [`crate::Element::from_bytes_batch`]: the Legendre symbol of the
 //! subgroup check, the inversion in `y² = n / d`, and the square root. Eight points share one vector
 //! register: radix 2^52, five limbs, Montgomery form with `R = 2^260` (> 4p, so every product of inputs
 //! < 2p is again < 2p without a final subtraction; values are canonicalized on store).
@@ -26,13 +26,11 @@
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].
 #![allow(clippy::needless_range_loop)]
-use ark_ec::twisted_edwards::TECurveConfig;
-use ark_ed_on_bls12_381_bandersnatch::BandersnatchConfig;
 use ark_ff::{BigInt, FftField, Field, One, PrimeField, Zero};
 use core::arch::x86_64::*;
 use std::sync::OnceLock;
 
-use crate::element::{ChunkDecode, CHUNK, TASK_CHUNKS};
+use crate::element::{denominator, numerator, ChunkDecode, LaneDecoder, CHUNK, TASK_CHUNKS};
 use crate::Fq;
 
 const MASK52: u64 = (1u64 << 52) - 1;
@@ -45,6 +43,15 @@ const GROUPS: usize = CHUNK / 8;
 /// what the CPU reports.
 pub(crate) fn available() -> bool {
     std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512ifma")
+}
+
+/// The lane decode ([`decode_chunks`]) where this host executes it, `None` where it does not.
+pub(crate) fn decoder() -> Option<LaneDecoder> {
+    fn checked(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
+        // SAFETY: `decoder` hands this function out only where `available()` returned true.
+        unsafe { decode_chunks(xs) }
+    }
+    available().then_some(checked as LaneDecoder)
 }
 
 /// The lane constants, built on first use.
@@ -83,8 +90,6 @@ pub(crate) unsafe fn decode_chunks(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
 unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<ChunkDecode> {
     assert!(!xs.is_empty() && xs.len() <= TASK_CHUNKS);
     let c = context();
-    let a = BandersnatchConfig::COEFF_A;
-    let d = BandersnatchConfig::COEFF_D;
     let n = xs.len();
     let mut nv = [[c.one; GROUPS]; TASK_CHUNKS];
     let mut dv = [c.one; GROUPS * TASK_CHUNKS];
@@ -94,8 +99,8 @@ unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<C
         let mut den = [Fq::one(); CHUNK];
         for i in 0..CHUNK {
             let x2 = chunk[i].square();
-            nn[i] = a * x2 - Fq::one();
-            den[i] = d * x2 - Fq::one();
+            nn[i] = numerator(x2);
+            den[i] = denominator(x2);
             // a zero here would not stop the shared inversion: it would turn every inverse of the
             // task into zero
             assert!(!den[i].is_zero(), "d·x² − 1 is nonzero: d is not a square");
