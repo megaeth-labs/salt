@@ -78,7 +78,13 @@ fn msm_windowed_with_c(bases: &[EdwardsAffine], scalars: &[Fr], c: usize) -> Edw
         (0..digits_count).map(window_sum).collect()
     };
 
-    // Traverse windows from high to low, doubling `c` times between windows.
+    combine_windows(&window_sums, c)
+}
+
+/// The multi-scalar multiplication from its window sums, lowest window first: the windows are
+/// traversed from high to low, doubling `c` times between one window and the next. Shared with
+/// the vector path, whose windows are the same signed digits.
+pub(crate) fn combine_windows(window_sums: &[EdwardsProjective], c: usize) -> EdwardsProjective {
     let lowest = *window_sums.first().expect("digits_count >= 1");
     lowest
         + window_sums[1..]
@@ -115,7 +121,7 @@ fn bucket_len(c: usize, num_bits: usize, digits_count: usize, window: usize) -> 
 /// Decomposes a scalar into signed `w`-bit digits in `[-2^(w-1), 2^(w-1)]`,
 /// written into `digits`. Identical digit semantics to arkworks'
 /// `make_digits` (the final digit absorbs the outstanding carry).
-fn make_digits(scalar: &[u64], w: usize, digits: &mut [i64]) {
+pub(crate) fn make_digits(scalar: &[u64], w: usize, digits: &mut [i64]) {
     let radix: u64 = 1 << w;
     let window_mask: u64 = radix - 1;
 

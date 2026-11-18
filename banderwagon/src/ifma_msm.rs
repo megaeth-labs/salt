@@ -20,12 +20,12 @@
 //! Dawson 2008, `a = -5`): mixed addition 9 lane products, full addition 11.
 #![allow(clippy::needless_range_loop)]
 use crate::ifma::*;
+use crate::msm::{combine_windows, make_digits};
 use crate::Fq;
 use ark_ec::twisted_edwards::TECurveConfig;
-use ark_ec::AdditiveGroup;
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fr};
 use ark_ff::Field;
-use ark_ff::{BigInt, BigInteger, PrimeField, Zero};
+use ark_ff::{BigInt, PrimeField, Zero};
 use core::arch::x86_64::*;
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -146,30 +146,6 @@ unsafe fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u
     }
 }
 
-/// Per-point precomputation in lane form (x, y, x+y, d·x·y), 20 words (scalar; superseded by `prep_points`).
-#[cfg(test)]
-#[allow(dead_code)]
-fn prep_affine(p: &EdwardsAffine) -> [u64; 20] {
-    let mut out = [0u64; 20];
-    out[0..5].copy_from_slice(&bcast_limbs(&p.x));
-    out[5..10].copy_from_slice(&bcast_limbs(&p.y));
-    out[10..15].copy_from_slice(&bcast_limbs(&(p.x + p.y)));
-    out[15..20].copy_from_slice(&bcast_limbs(&(BandersnatchConfig::COEFF_D * p.x * p.y)));
-    out
-}
-
-#[cfg(test)]
-#[inline]
-#[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn bcast_aff(w: &[u64; 20]) -> AffL {
-    AffL {
-        x: bcast(w[0..5].try_into().unwrap()),
-        y: bcast(w[5..10].try_into().unwrap()),
-        xy: bcast(w[10..15].try_into().unwrap()),
-        dt: bcast(w[15..20].try_into().unwrap()),
-    }
-}
-
 /// Lanes of `q` negated where the mask bit is set: (-x, y), x+y -> y-x, d·x·y -> -d·x·y.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -238,44 +214,6 @@ pub(crate) unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
         out[i] = EdwardsProjective::new_unchecked(x[i], y[i], t[i], z[i]);
     }
     out
-}
-
-/// ark-ec's `make_digits` (scalar_mul/variable_base/mod.rs), so the bucket semantics match.
-fn make_digits(a: &impl BigInteger, w: usize, num_bits: usize, out: &mut [i64]) {
-    let scalar = a.as_ref();
-    let radix: u64 = 1 << w;
-    let window_mask: u64 = radix - 1;
-    let mut carry = 0u64;
-    let digits_count = num_bits.div_ceil(w);
-    for i in 0..digits_count {
-        let bit_offset = i * w;
-        let u64_idx = bit_offset / 64;
-        let bit_idx = bit_offset % 64;
-        let bit_buf = if bit_idx < 64 - w || u64_idx == scalar.len() - 1 {
-            scalar[u64_idx] >> bit_idx
-        } else {
-            (scalar[u64_idx] >> bit_idx) | (scalar[1 + u64_idx] << (64 - bit_idx))
-        };
-        let coef = carry + (bit_buf & window_mask);
-        carry = (coef + radix / 2) >> w;
-        let mut digit = (coef as i64) - (carry << w) as i64;
-        if i == digits_count - 1 {
-            digit += (carry << w) as i64;
-        }
-        out[i] = digit;
-    }
-}
-
-/// ark-ec's window-size rule: log2(a) * ln(2), integer (the C2 design's rule, kept for the bench).
-#[cfg(test)]
-fn ln_without_floats(a: usize) -> usize {
-    // ark_std::log2: the number of bits needed to represent a - 1, i.e. ceil(log2(a)); 0 for a <= 1
-    let log2 = if a <= 1 {
-        0
-    } else {
-        usize::BITS - (a - 1).leading_zeros()
-    };
-    (log2 * 69 / 100) as usize
 }
 
 /// Words per bucket in lane-major layout: 20 words × 8 lanes.
@@ -481,7 +419,7 @@ pub(crate) unsafe fn msm_runs(
         let mut tmp = vec![0i64; nwin];
         for (i, s) in scalars[..n].iter().enumerate() {
             let b: BigInt<4> = s.into_bigint();
-            make_digits(&b, cbits, num_bits, &mut tmp);
+            make_digits(&b.0, cbits, &mut tmp);
             for w in 0..nwin {
                 digits[i * nwin + w] = tmp[w] as i16;
             }
@@ -614,161 +552,7 @@ pub(crate) unsafe fn msm_runs(
         }
         window_sums[g * 8..g * 8 + 8].copy_from_slice(&unlane(c, &res));
     }
-    window_sums.truncate(nwin);
-    let lowest = window_sums[0];
-    let total = window_sums[1..]
-        .iter()
-        .rev()
-        .fold(EdwardsProjective::zero(), |mut total, s| {
-            total += s;
-            for _ in 0..cbits {
-                total.double_in_place();
-            }
-            total
-        });
-    lowest + total
-}
-
-/// The C2 design, kept for the equality test and the bench: lane = window, the bucket state gathered
-/// and scattered per point (superseded by `msm_runs`, which touches no bucket per point).
-///
-/// # Safety
-/// `available()` must have returned true on this host.
-#[cfg(test)]
-#[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn msm_with_window(
-    bases: &[EdwardsAffine],
-    scalars: &[Fr],
-    cbits: usize,
-) -> EdwardsProjective {
-    let c = context();
-    let k = consts();
-    let n = bases.len().min(scalars.len());
-    if n == 0 {
-        return EdwardsProjective::zero();
-    }
-    let num_bits = Fr::MODULUS_BIT_SIZE as usize;
-    let nwin = num_bits.div_ceil(cbits);
-    let groups = nwin.div_ceil(8);
-    let nb = 1usize << cbits;
-    // signed digits, padded to groups*8 per point
-    let stride = groups * 8;
-    let mut digits = vec![0i64; n * stride];
-    for (i, s) in scalars[..n].iter().enumerate() {
-        let b: BigInt<4> = s.into_bigint();
-        make_digits(
-            &b,
-            cbits,
-            num_bits,
-            &mut digits[i * stride..i * stride + nwin],
-        );
-    }
-    // buckets: groups × nb × 160 words, every lane the identity
-    let words = groups * nb * BW;
-    let bptr = BUCKET_SCRATCH.with(|b| {
-        let mut b = b.borrow_mut();
-        if b.len() < words {
-            b.resize(words, 0);
-        }
-        b.as_mut_ptr()
-    });
-    let buckets = core::slice::from_raw_parts_mut(bptr, words);
-    {
-        let one = to_words(&c.one);
-        for b in 0..groups * nb {
-            let base = b * BW;
-            for i in 0..5 {
-                for w in 0..8 {
-                    buckets[base + i * 8 + w] = 0; // x
-                    buckets[base + (5 + i) * 8 + w] = one[i][w]; // y
-                    buckets[base + (10 + i) * 8 + w] = 0; // t
-                    buckets[base + (15 + i) * 8 + w] = one[i][w]; // z
-                }
-            }
-        }
-    }
-    let lane_ids = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
-    let zero = _mm512_setzero_si512();
-    let one_v = _mm512_set1_epi64(1);
-    // prepared points, eight at a time in lanes (point-major table), broadcast per point below
-    let mut pts = vec![0u64; n * PW];
-    prep_points(c, k, &bases[..n], &mut pts);
-    for i in 0..n {
-        let q = bcast_aff(pts[i * PW..i * PW + 20].try_into().unwrap());
-        for g in 0..groups {
-            let d = _mm512_loadu_si512(digits.as_ptr().add(i * stride + g * 8) as *const _);
-            let m: __mmask8 = _mm512_cmpneq_epi64_mask(d, zero);
-            if m == 0 {
-                continue;
-            }
-            let neg: __mmask8 = _mm512_cmplt_epi64_mask(d, zero);
-            let idx = _mm512_sub_epi64(_mm512_abs_epi64(d), one_v);
-            // word index = (g*nb + idx) * 160 + lane
-            let v0 = _mm512_add_epi64(
-                _mm512_add_epi64(_mm512_slli_epi64(idx, 7), _mm512_slli_epi64(idx, 5)),
-                _mm512_add_epi64(lane_ids, _mm512_set1_epi64((g * nb * BW) as i64)),
-            );
-            let base = buckets.as_ptr();
-            let mut words = [zero; 20];
-            for kk in 0..20 {
-                let vi = _mm512_add_epi64(v0, _mm512_set1_epi64((kk * 8) as i64));
-                words[kk] = _mm512_mask_i64gather_epi64::<8>(zero, m, vi, base as *const _);
-            }
-            let p = PtL {
-                x: [words[0], words[1], words[2], words[3], words[4]],
-                y: [words[5], words[6], words[7], words[8], words[9]],
-                t: [words[10], words[11], words[12], words[13], words[14]],
-                z: [words[15], words[16], words[17], words[18], words[19]],
-            };
-            let qq = neg_aff(c, k, &q, neg);
-            let r = madd(c, k, &p, &qq);
-            let out = [
-                r.x[0], r.x[1], r.x[2], r.x[3], r.x[4], r.y[0], r.y[1], r.y[2], r.y[3], r.y[4],
-                r.t[0], r.t[1], r.t[2], r.t[3], r.t[4], r.z[0], r.z[1], r.z[2], r.z[3], r.z[4],
-            ];
-            let basem = buckets.as_mut_ptr();
-            for kk in 0..20 {
-                let vi = _mm512_add_epi64(v0, _mm512_set1_epi64((kk * 8) as i64));
-                _mm512_mask_i64scatter_epi64::<8>(basem as *mut _, m, vi, out[kk]);
-            }
-        }
-    }
-    // reduction per group: running sums over the buckets high to low, lanes = windows
-    let mut window_sums = vec![EdwardsProjective::zero(); groups * 8];
-    for g in 0..groups {
-        let mut running = k.id;
-        let mut res = k.id;
-        for b in (0..nb).rev() {
-            let base = buckets.as_ptr().add((g * nb + b) * BW);
-            let mut words = [zero; 20];
-            for kk in 0..20 {
-                words[kk] = _mm512_loadu_si512(base.add(kk * 8) as *const _);
-            }
-            let p = PtL {
-                x: [words[0], words[1], words[2], words[3], words[4]],
-                y: [words[5], words[6], words[7], words[8], words[9]],
-                t: [words[10], words[11], words[12], words[13], words[14]],
-                z: [words[15], words[16], words[17], words[18], words[19]],
-            };
-            running = padd(c, k, &running, &p);
-            res = padd(c, k, &res, &running);
-        }
-        window_sums[g * 8..g * 8 + 8].copy_from_slice(&unlane(c, &res));
-    }
-    window_sums.truncate(nwin);
-    // combine as ark: lowest window + fold from the top with cbits doublings per window
-    let lowest = window_sums[0];
-    let total = window_sums[1..]
-        .iter()
-        .rev()
-        .fold(EdwardsProjective::zero(), |mut total, s| {
-            total += s;
-            for _ in 0..cbits {
-                total.double_in_place();
-            }
-            total
-        });
-    lowest + total
+    combine_windows(&window_sums[..nwin], cbits)
 }
 
 #[cfg(test)]
@@ -804,15 +588,7 @@ mod tests {
                 let ns = t.elapsed().as_nanos() as f64 / (n * reps) as f64;
                 println!("lane msm n = {n}: c = {cb}: runs {ns:.0} ns/pt");
             }
-            let t = std::time::Instant::now();
-            for _ in 0..reps {
-                let _ = unsafe { msm_with_window(&bases, &scalars, ln_without_floats(n) + 2) };
-            }
-            let ns = t.elapsed().as_nanos() as f64 / (n * reps) as f64;
-            println!(
-                "lane msm n = {n}: C2 design at ark's window: {ns:.0} ns/pt; the rule now gives c = {}",
-                lane_window(n)
-            );
+            println!("lane msm n = {n}: the rule gives c = {}", lane_window(n));
         }
     }
 
@@ -837,8 +613,6 @@ mod tests {
             for cb in [3usize, 5, 8, 12] {
                 let got = unsafe { msm_runs(&bases, &scalars, cb) };
                 assert_eq!(got, want, "runs n = {n} c = {cb}");
-                let got = unsafe { msm_with_window(&bases, &scalars, cb) };
-                assert_eq!(got, want, "window n = {n} c = {cb}");
             }
         }
         // every point in one bucket (equal scalars) and long runs with the sign flipped
