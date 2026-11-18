@@ -235,20 +235,20 @@ pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProj
     msm_runs(bases, scalars, lane_window(n))
 }
 
-/// The window size for the lane accumulation. ark's rule (`ln_without_floats(n) + 2`: c = 10 at the
-/// verifier's per-thread chunk of ≈ 2,560 points) balances scalar bucket additions against the
-/// reduction; in lanes the reduction's two full additions per bucket are the dear part (≈ 1,400
-/// cycles per bucket, 22 products) and the bucket store must stay in cache, so the window is two sizes
-/// smaller than ark's at the chunk and grows with the point count — measured one thread on this host:
-/// n = 2,560: c = 8 2.0 µs/point, c = 9 2.3, c = 10 2.7; n = 40,960: c = 10 1.7, c = 11 1.5.
+/// The window size for the lane accumulation: 9 from 4,097 points, 8 from 32 points, 3 below. Every
+/// task the dispatch hands over has more than 4,096 points, apart from the 4,096-point half of an
+/// 8,193-point MSM, so its tasks run at window 9.
+///
+/// ark's rule (`ln(n) + 2`: 10 at 8,192 points) balances scalar bucket additions against the reduction.
+/// In lanes the reduction's two full additions per bucket are the dear part (22 lane products per
+/// bucket) and the bucket store must stay in cache, so the window is smaller than ark's.
 fn lane_window(n: usize) -> usize {
     if n < 32 {
         3
     } else {
         let log2 = usize::BITS - (n - 1).leading_zeros();
-        // Capped at 9 (a 2.6 MB bucket store): the store is thread-local and retained, and a
-        // whole-witness MSM (n ≈ 50k) on every resident validation's own thread at c = 11 would hold
-        // 10.5 MB per thread.
+        // Capped at 9 (a 1.3 MB bucket store): the store is thread-local and retained, and at
+        // window 11 every thread that has run a task would hold 7.9 MB.
         (log2 as usize).saturating_sub(4).clamp(8, 9)
     }
 }
@@ -392,11 +392,11 @@ unsafe fn run_batch(
 
 /// Bucket accumulation with lane = bucket over digit-sorted runs: for each window the points are
 /// counting-sorted by their digit, the non-empty buckets (runs) are ordered by length, and eight runs at a
-/// time are accumulated in registers — each step gathers one prepared point per lane from the point-major
-/// table and adds it (masked where a lane's run is exhausted); a finished batch's eight bucket sums are
-/// scattered once into the lane-major bucket store the reduction reads (lane = window there). No bucket
-/// state is gathered or scattered per point; empty buckets are never written and the reduction reads them
-/// as the identity through a mask.
+/// time are accumulated in registers — each step loads one prepared point per lane from the point-major
+/// table (row loads and a transpose in registers, not a gather) and adds it, masked where a lane's run is
+/// exhausted; a finished batch's eight bucket sums are scattered once into the lane-major bucket store
+/// the reduction reads (lane = window there). No bucket state is gathered or scattered per point; empty
+/// buckets are never written and the reduction reads them as the identity through a mask.
 ///
 /// # Panics
 /// On a window whose digits do not fit the `i16` they are kept in (`cbits` of 16 or more).
