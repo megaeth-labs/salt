@@ -110,7 +110,7 @@ pub(crate) fn combine_windows(window_sums: &[EdwardsProjective], c: usize) -> Ed
 /// `0..=2^last_bits`, where `last_bits` is what the modulus leaves for it.
 /// `last_bits == c` when `c` divides the modulus width (c = 11 and c = 23 at
 /// 253 bits), and then the last window does need all `2^c` buckets.
-fn bucket_len(c: usize, num_bits: usize, digits_count: usize, window: usize) -> usize {
+pub(crate) fn bucket_len(c: usize, num_bits: usize, digits_count: usize, window: usize) -> usize {
     if window == digits_count - 1 {
         1 << (num_bits - (digits_count - 1) * c)
     } else {

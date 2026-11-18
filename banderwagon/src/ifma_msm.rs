@@ -20,7 +20,7 @@
 //! Dawson 2008, `a = -5`): mixed addition 9 lane products, full addition 11.
 #![allow(clippy::needless_range_loop)]
 use crate::ifma::*;
-use crate::msm::{combine_windows, make_digits};
+use crate::msm::{bucket_len, combine_windows, make_digits};
 use crate::Fq;
 use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fr};
@@ -31,9 +31,12 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 
 thread_local! {
-    /// The bucket store, kept per thread across calls: a fresh multi-megabyte allocation per call is
-    /// re-faulted page by page on every call (glibc maps and unmaps it; jemalloc caches it for a while),
-    /// and the store is written before it is read, so it needs no clearing between calls.
+    /// The bucket store, kept per thread across calls. Its size follows the window, not the input
+    /// (1.3 MB at window 9), and it is written before it is read, so a call neither allocates nor clears
+    /// it. The tables whose size follows the input (the prepared points, the digits, the sort order:
+    /// 258 bytes per point at window 9) are allocated per call. Keeping them per thread as well changed
+    /// the time of a task of the dispatch's sizes by under 1%, on glibc's allocator and on jemalloc:
+    /// both hand the freed blocks back to the next call.
     static BUCKET_SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -395,6 +398,9 @@ unsafe fn run_batch(
 /// state is gathered or scattered per point; empty buckets are never written and the reduction reads them
 /// as the identity through a mask.
 ///
+/// # Panics
+/// On a window whose digits do not fit the `i16` they are kept in (`cbits` of 16 or more).
+///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -412,8 +418,18 @@ pub(crate) unsafe fn msm_runs(
     let num_bits = Fr::MODULUS_BIT_SIZE as usize;
     let nwin = num_bits.div_ceil(cbits);
     let groups = nwin.div_ceil(8);
-    let nb = 1usize << cbits;
-    // signed digits, window-minor per point (i16: |digit| <= 2^cbits, cbits <= 12)
+    // The largest digit magnitude: half the radix in every window but the last, which keeps its
+    // carry instead of being recentered and reaches `2^last_bits` (the whole radix where the
+    // window divides the scalar's bits, c = 11). A bucket is indexed by the magnitude and bucket 0
+    // is unused, so a window has one bucket more than that: 257 at c = 9, not 512.
+    let max_digit =
+        bucket_len(cbits, num_bits, nwin, 0).max(bucket_len(cbits, num_bits, nwin, nwin - 1));
+    assert!(
+        max_digit <= i16::MAX as usize,
+        "window {cbits}: a digit of up to {max_digit} does not fit the i16 it is kept in"
+    );
+    let nb = max_digit + 1;
+    // signed digits, window-minor per point
     let mut digits = vec![0i16; n * nwin];
     {
         let mut tmp = vec![0i64; nwin];
@@ -524,8 +540,7 @@ pub(crate) unsafe fn msm_runs(
     }
     // reduction per group: running sums over the buckets high to low, lanes = windows; empty buckets read
     // as the identity through the non-empty mask. The walk starts at the group's highest non-empty
-    // bucket, since above it both sums are still the identity. A signed digit's magnitude is at most
-    // half the radix, so the upper half of the buckets is never reached and the walk is half as long.
+    // bucket, since above it both sums are still the identity.
     let id_words = [
         zero, zero, zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4], zero, zero,
         zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4],
@@ -558,6 +573,7 @@ pub(crate) unsafe fn msm_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::tests::lanes_under_test;
     use ark_ec::VariableBaseMSM;
     use ark_ff::UniformRand;
     use rand_chacha::rand_core::SeedableRng;
@@ -594,7 +610,7 @@ mod tests {
 
     #[test]
     fn lane_msm_matches_ark_msm() {
-        if !crate::element::tests::lanes_under_test() {
+        if !lanes_under_test() {
             return;
         }
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xc2);
@@ -623,5 +639,22 @@ mod tests {
         let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
         let got = unsafe { msm_runs(&bases, &scalars, 10) };
         assert_eq!(got, want, "equal scalars");
+    }
+
+    /// A window whose digits do not fit the `i16` they are kept in is refused, not truncated into
+    /// other buckets: 16 is the first one (a digit of `2^15`).
+    #[test]
+    fn a_window_too_wide_for_its_digits_is_refused() {
+        if !lanes_under_test() {
+            return;
+        }
+        let bases = [EdwardsAffine::zero(); 2];
+        let scalars = [Fr::from(3u64); 2];
+        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
+        let at = |cbits: usize| {
+            std::panic::catch_unwind(|| unsafe { msm_runs(&bases, &scalars, cbits) })
+        };
+        assert_eq!(at(15).ok(), Some(EdwardsProjective::zero()));
+        assert!(at(16).is_err());
     }
 }
