@@ -1,11 +1,17 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// cargo-llvm-cov sets `coverage_nightly` on a nightly toolchain: the manual benches are left out of
+// the coverage report, where as ignored tests they would count as uncovered lines
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 pub mod msm;
 pub mod platform;
 
+mod decoder_arithmetic;
 mod element;
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod ifma;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, Element, Fr};
