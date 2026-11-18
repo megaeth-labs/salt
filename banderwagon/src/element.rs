@@ -814,6 +814,10 @@ pub(crate) mod tests {
     extern crate std;
     use self::std::println;
 
+    /// The dispatch returns what arkworks' MSM returns on both sides of the vector path's cutoff
+    /// and in pools of one, two and eight threads, which split the sizes above the cutoff into
+    /// one to three chunks: the affine entry the same curve point, the element entry the same
+    /// element.
     #[cfg(feature = "parallel")]
     #[test]
     fn msm_pool_crossover_preserves_group_result() {
@@ -821,6 +825,8 @@ pub(crate) mod tests {
         use ark_ff::UniformRand;
         use rand_chacha::rand_core::SeedableRng;
 
+        // where CI requires the lanes, the sizes from the cutoff up take them here
+        lanes_under_test();
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xf21);
         let mut bases: Vec<EdwardsAffine> =
             (0..16385).map(|_| EdwardsAffine::rand(&mut rng)).collect();
@@ -829,27 +835,30 @@ pub(crate) mod tests {
         scalars[2] = Fr::zero();
         scalars[3] = -Fr::one();
 
-        for n in [0, 127, 128, 1023, 1024, 4351, 8191, 8192, 8193, 16385] {
-            let reference = Element(EdwardsProjective::msm(&bases[..n], &scalars[..n]).unwrap());
+        let pools = [1, 2, 8].map(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+        });
+        for n in [0, 1024, 8191, 8192, 8193, 12289, 16385] {
+            let reference = EdwardsProjective::msm(&bases[..n], &scalars[..n]).unwrap();
             let projective: Vec<_> = bases[..n]
                 .iter()
                 .map(|point| Element((*point).into()))
                 .collect();
-            for threads in [1, 2, 8] {
-                let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .build()
-                    .unwrap();
+            for pool in &pools {
+                let threads = pool.current_num_threads();
                 pool.install(|| {
                     assert_eq!(
-                        multi_scalar_mul(&projective, &scalars[..n]),
-                        reference,
-                        "projective n={n} threads={threads}"
-                    );
-                    assert_eq!(
-                        Element(msm(&bases[..n], &scalars[..n])),
+                        msm(&bases[..n], &scalars[..n]),
                         reference,
                         "affine n={n} threads={threads}"
+                    );
+                    assert_eq!(
+                        multi_scalar_mul(&projective, &scalars[..n]),
+                        Element(reference),
+                        "projective n={n} threads={threads}"
                     );
                 });
             }

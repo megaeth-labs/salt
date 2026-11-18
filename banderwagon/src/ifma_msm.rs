@@ -14,7 +14,7 @@
 //! and the window combination are ark-ec's (`msm_bigint_wnaf`); the window size is the lanes' own
 //! (`lane_window`). The result is the same group element the scalar path computes, which the tests check
 //! against `EdwardsProjective::msm` on random inputs including zero scalars, the identity, equal scalars
-//! (every point in one bucket) and every window size.
+//! (every point in one bucket) and every window size from 3 to 12.
 //!
 //! Group additions are the unified twisted-Edwards formulas in extended coordinates (Hisil–Wong–Carter–
 //! Dawson 2008, `a = -5`): mixed addition 9 lane products, full addition 11.
@@ -578,8 +578,8 @@ mod tests {
     use ark_ff::UniformRand;
     use rand_chacha::rand_core::SeedableRng;
 
-    /// Lane MSM ns per point at the verifier's chunk sizes, one thread; equality with ark checked per
-    /// (n, c). `cargo test --release -p banderwagon bench_lane_msm -- --ignored --nocapture`.
+    /// Lane MSM ns per point on one thread, per window; equality with ark checked per (n, c).
+    /// `cargo test --release -p banderwagon bench_lane_msm -- --ignored --nocapture`.
     #[test]
     #[ignore]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -608,25 +608,33 @@ mod tests {
         }
     }
 
+    /// The lane MSM returns the curve point `EdwardsProjective::msm` returns: at the window
+    /// [`lane_window`] picks for each size, up to the sizes the dispatch hands over, and at every
+    /// window from 3 to 12 on the smaller ones. Window 9 is the one the dispatch's chunks get, and
+    /// window 11 the one whose last digit runs over the whole radix instead of half of it.
     #[test]
     fn lane_msm_matches_ark_msm() {
         if !lanes_under_test() {
             return;
         }
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xc2);
-        for &n in &[1usize, 2, 7, 31, 32, 33, 100, 1000, 2560] {
+        for &n in &[1usize, 2, 7, 31, 32, 33, 100, 1000, 2560, 4096, 4097, 8192] {
             let mut bases: Vec<EdwardsAffine> =
                 (0..n).map(|_| EdwardsAffine::rand(&mut rng)).collect();
             let mut scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
             if n > 3 {
                 bases[1] = EdwardsAffine::zero();
                 scalars[2] = Fr::zero();
+                // r − 1: the largest last digit
                 scalars[3] = -Fr::from(1u64);
             }
             let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
             let got = unsafe { msm(&bases, &scalars) };
             assert_eq!(got, want, "n = {n}");
-            for cb in [3usize, 5, 8, 12] {
+            if n > 2560 {
+                continue;
+            }
+            for cb in 3usize..=12 {
                 let got = unsafe { msm_runs(&bases, &scalars, cb) };
                 assert_eq!(got, want, "runs n = {n} c = {cb}");
             }
