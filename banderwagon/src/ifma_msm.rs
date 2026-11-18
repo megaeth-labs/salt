@@ -242,13 +242,16 @@ pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProj
 /// ark's rule (`ln(n) + 2`: 10 at 8,192 points) balances scalar bucket additions against the reduction.
 /// In lanes the reduction's two full additions per bucket are the dear part (22 lane products per
 /// bucket) and the bucket store must stay in cache, so the window is smaller than ark's.
+///
+/// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 1.03, 1.11, 1.03 and 1.21
+/// for 4,096 points; 1.08, 1.04, 0.94 and 0.97 for 8,192; 1.06, 1.06, 0.88 and 0.77 for 50,000.
 fn lane_window(n: usize) -> usize {
     if n < 32 {
         3
     } else {
         let log2 = usize::BITS - (n - 1).leading_zeros();
-        // Capped at 9 (a 1.3 MB bucket store): the store is thread-local and retained, and at
-        // window 11 every thread that has run a task would hold 7.9 MB.
+        // Capped at 9 (a 1.3 MB bucket store, against 2.6 MB at window 10 and 7.9 MB at 11):
+        // the store is thread-local, and every thread that has run a task keeps it.
         (log2 as usize).saturating_sub(4).clamp(8, 9)
     }
 }
