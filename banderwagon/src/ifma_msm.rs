@@ -245,12 +245,12 @@ const PW: usize = 24;
 /// Smaller tasks finish a large MSM sooner in an idle pool and take more thread time doing it:
 /// every task repeats the bucket reduction, and past one task per core the tasks share cores. On
 /// an EPYC 9B45 (a 32-thread KVM guest, 16 cores), in a pool of 32 threads that was asleep, 65,536
-/// points take 3.7 ms as 32 tasks of 2,048 points, with 116 ms of thread time, and 4.9 ms as 8
-/// tasks of 8,192, with 109 ms. With 64 such MSMs at once in that pool the batch takes 3.5 ms per
+/// points take 3.5 ms as 32 tasks of 2,048 points, with 109 ms of thread time, and 4.6 ms as 8
+/// tasks of 8,192, with 105 ms. With 64 such MSMs at once in that pool the batch takes 3.3 ms per
 /// MSM in the smaller tasks and 4.0 ms in the larger.
 ///
 /// Verifying 22 witnesses of 59,000 to 65,000 points with tasks of this size instead of 8,192
-/// points: one verification in an idle pool takes 73 ms instead of 74 ms, and 16 threads verifying
+/// points: one verification in an idle pool takes 74 ms instead of 75 ms, and 16 threads verifying
 /// at once do 87 a second instead of 83.
 const LANE_MSM_TASK_POINTS: usize = 1024;
 
@@ -276,9 +276,9 @@ fn lane_msm_task_len(points: usize, threads: usize) -> usize {
 /// groups of one that is not.
 ///
 /// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), verifying the witnesses of 62 mainnet
-/// blocks: one at a time in an idle pool, a verification takes 2.0 ms with its MSMs' groups spread
-/// and 2.8 ms without. With 16 threads verifying at once, spreading every MSM's groups does 2,850
-/// a second, and spreading only the ones that start alone 2,980, against 2,970 for none.
+/// blocks: one at a time in an idle pool, a verification takes 1.9 ms with its MSMs' groups spread
+/// and 2.6 ms without. With 16 threads verifying at once, spreading every MSM's groups does 2,970
+/// a second, and spreading only the ones that start alone 3,100, against 3,080 for none.
 static LANE_MSMS: AtomicUsize = AtomicUsize::new(0);
 
 /// One MSM's entry in a count of the MSMs in flight, taken out when the MSM ends, however it
@@ -360,10 +360,10 @@ unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr], spread: bool) -> EdwardsP
 /// In lanes the reduction's two full additions per bucket are the dear part (22 lane products per
 /// bucket) and the bucket store must stay in cache, so the window is smaller than ark's.
 ///
-/// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 1.00, 1.05, 1.01 and 1.16 for
-/// 4,096 points; 1.01, 0.98, 0.89 and 0.92 for 8,192; 1.00, 1.01, 0.88 and 0.74 for 50,000. At windows
-/// 6, 7, 8 and 9: 1.86, 1.88, 1.96 and 2.73 for 274 points; 1.40, 1.27, 1.14 and 1.37 for 1,024; 1.35,
-/// 1.16, 1.01 and 1.13 for 2,047.
+/// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 0.96, 0.99, 0.94 and 1.04 for
+/// 4,096 points; 0.98, 0.95, 0.85 and 0.85 for 8,192; 0.99, 0.99, 0.87 and 0.73 for 50,000. At windows
+/// 6, 7, 8 and 9: 1.76, 1.71, 1.73 and 2.42 for 274 points; 1.35, 1.22, 1.07 and 1.23 for 1,024; 1.31,
+/// 1.13, 0.96 and 1.04 for 2,047.
 fn lane_window(n: usize) -> usize {
     match n {
         0..32 => 3,

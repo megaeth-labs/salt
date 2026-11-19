@@ -661,21 +661,21 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 /// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
 ///
 /// The scalar path spreads its windows over every thread of the pool. A vector task runs on one
-/// thread, and on up to four when its MSM is the only one in flight (`LANE_MSMS` there). On one thread
-/// the lanes are the faster path from 128 points up, the smallest size timed. The cutoff is under
-/// the 274 points of the MSM every proof check ends with. A check's other MSM has a point per
-/// trie node, and is over the cutoff for all but the smallest witnesses.
+/// thread, and on up to four when its MSM is the only one in flight (`LANE_MSMS` there). On one
+/// thread the lanes are the faster path from 128 points up, the smallest size timed. The cutoff is
+/// under the 274 points of the MSM every proof check ends with. A check's other MSM has a point
+/// per trie node, and is over the cutoff for all but the smallest witnesses.
 ///
-/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), at 274 points: one thread takes 0.54 ms in
+/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), at 274 points: one thread takes 0.48 ms in
 /// lanes and 3.2 ms on the scalar path. In a pool of 32 threads that was asleep the lanes take
-/// 0.24 ms with 0.95 ms of thread time, and the scalar path 0.35 ms with 9.3 ms. With 64 of them
+/// 0.23 ms with 0.89 ms of thread time, and the scalar path 0.36 ms with 9.6 ms. With 64 of them
 /// at once in that pool the batch takes 0.03 ms per MSM in lanes and 0.17 ms on the scalar path.
-/// At 2,047 points, the largest MSM that is not split into tasks, those are 2.1 ms and 15 ms, 0.80
+/// At 2,047 points, the largest MSM that is not split into tasks, those are 2.0 ms and 14 ms, 0.78
 /// ms (2.5 ms) and 1.1 ms (25 ms), 0.11 ms and 0.72 ms.
 ///
 /// Verifying the witnesses of 62 mainnet blocks (MSMs of 67 to 3,127 points, and the 274-point one
 /// in each) with the vector path from here instead of from 8,192 points: 16 threads verifying at
-/// once do 2,980 a second instead of 1,300, and one verification in an idle pool takes 2.0 ms
+/// once do 3,090 a second instead of 1,320, and one verification in an idle pool takes 1.9 ms
 /// instead of 2.2 ms. With 16 at once, cutoffs of 64, 128 and 256 points timed alike, and one of
 /// 512, which leaves the 274-point MSM on the scalar path, gave about a quarter of the gain.
 ///
