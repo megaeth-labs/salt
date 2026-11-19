@@ -673,7 +673,7 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 /// that is not split, those are 2.1 ms and 14.5 ms, 2.1 ms and 1.1 ms (25 ms of thread time),
 /// 0.12 ms and 0.72 ms.
 ///
-/// Verifying the witnesses of 62 mainnet blocks (MSMs of 112 to 3,127 points, and the 274-point
+/// Verifying the witnesses of 62 mainnet blocks (MSMs of 67 to 3,127 points, and the 274-point
 /// one in each) with this cutoff instead of one at 8,192 points: 16 threads verifying at once do
 /// 2,950 a second instead of 1,310, and one verification in an idle pool takes 2.9 ms instead of
 /// 2.3 ms. Cutoffs of 64, 128 and 256 points timed alike there. One of 512, which leaves the
