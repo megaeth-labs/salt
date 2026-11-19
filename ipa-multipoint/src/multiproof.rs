@@ -376,16 +376,14 @@ pub struct MultiPointProof {
 }
 
 impl MultiPointProof {
+    /// `D`, then the IPA proof; `D` is decoded in the same batch as the proof's points.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` is not as long as a proof for `poly_degree`.
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
-        use crate::SerdeError;
-
-        let g_x_comm_bytes = &bytes[0..32];
-        let ipa_bytes = &bytes[32..]; // TODO: we should return a Result here incase the user gives us bad bytes
-        let point: Element = Element::from_bytes(g_x_comm_bytes.try_into().unwrap())
-            .map_err(|_| SerdeError::InvalidData)?;
-        let g_x_comm = point;
-
-        let open_proof = IPAProof::from_bytes(ipa_bytes, poly_degree)?;
+        let (mut leading, open_proof) = IPAProof::from_bytes_after(bytes, poly_degree, 1)?;
+        let g_x_comm = leading.pop().expect("one leading point");
         Ok(MultiPointProof {
             open_proof,
             g_x_comm,
@@ -783,6 +781,40 @@ mod tests {
         let got = hex::encode(bytes);
         let expected = "4f53588244efaf07a370ee3f9c467f933eed360d4fbf7a19dfc8bc49b67df47152d70c8ce788b897b4c7abc5dd8be1eeb658cc4f253501f2e0ee5c838ed5da6f397dc09a7a6624295fd10e174c5656b5c0e6ad9ca29a091019b1b2c9668869530e8b13a2358e4133feb463cfe86329fea452ca64965c31b7ec9538ad7f2fdd3f598b3add61473baa75951d0f58495be972283a2aee3c4c6e3655c4fce9a691d3719e7ec68e927e6ff6038f144820137f1aaba908daae8997abc1fda957f942703dd0e2b36facd51f62a16e5d6271f06cddf69766f525a3ba5c6ed7f0b8fa22d663e9b22a8c55c224115de6066e5cb497c16cfdf37757ebf22aa407f80b3cadf23cc3bd8f29b6c7ea4ae92167aecc02f9ab4421f7d8791bccb92a1c8c5e58373845f5ae0f83ec83311cc3e9a28a9b92d71a8238bd0bd21bd860ba4820e0f1bbc0387950897024ab43c09ba7a92c8522d165043e5da894d838db9f7a93ff7f98135faf4d94a84c0250bef4bfa4c7105c623da148b8fa5a674830839307d2f6bc2d4dfdc0a099347e37c64601bda2cfd456f7a5579d4d2cd0a102c0427bcb90d52b146d9cb14e30a39ea92e0461feb48d02874f5a37d930f026be83f5437e92b595340f4f2e4e1e308ca89fb02fc02e433f4b07949b1f3a6512045b92549096f6d60010d3d357dfeaf035d577e3c9b8715bd6feab808a3d392663159ef7c17c8a1c3c85d960bbb8581bbc344674b2d1e8c34293fdb8a39c53a4727b5637c5b4e69a83a34d1540c031ed38b50a6fc8717f0138136ef8661b38ceda6250053a08ba05";
         assert_eq!(got, expected)
+    }
+
+    /// The proof's points, `D` then the IPA's `L` and `R`, are decoded in one batch: a proof
+    /// decodes to the one it was encoded from, and bytes that are not a point in any of the
+    /// seventeen positions, or a scalar `a` that is not canonical, fail the whole proof.
+    #[test]
+    fn from_bytes_rejects_any_invalid_point() {
+        let n = 256;
+        let crs = CRS::new(n, b"random seed");
+        let precomp = PrecomputedWeights::new(n);
+        let poly = LagrangeBasis::new((0..n).map(|i| Fr::from(i as u128 + 1)).collect());
+        let query = ProverQuery {
+            commitment: crs.commit_lagrange_poly(&poly),
+            poly: poly.into(),
+            point: 3,
+            result: Fr::from(4u128),
+        };
+        let proof = MultiPoint::open(
+            crs.clone(),
+            &precomp,
+            &mut Transcript::new(b"t"),
+            vec![query],
+        );
+        let bytes = proof.to_bytes().unwrap();
+        assert_eq!(bytes.len(), (1 + 2 * 8 + 1) * 32);
+        assert_eq!(MultiPointProof::from_bytes(&bytes, n).unwrap(), proof);
+        for position in 0..18 {
+            let mut bad = bytes.clone();
+            bad[position * 32..(position + 1) * 32].copy_from_slice(&[0xff; 32]);
+            assert!(
+                MultiPointProof::from_bytes(&bad, n).is_err(),
+                "position {position}"
+            );
+        }
     }
 
     /// The committer-accelerated prover must emit byte-identical proofs to
