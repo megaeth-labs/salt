@@ -1,4 +1,4 @@
-use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup, ScalarMul};
+use ark_ec::{twisted_edwards::TECurveConfig, CurveGroup, PrimeGroup};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fq};
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -966,20 +966,40 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         "number of bases should equal number of scalars"
     );
 
-    // The MSM needs affine bases. Points loaded from storage or deserialized
-    // proofs already have `z = 1`, so skip the batch inversion entirely in
-    // that common case.
-    let bases: Vec<EdwardsAffine> = if bases.iter().all(|element| element.0.z.is_one()) {
-        bases
-            .iter()
-            .map(|element| EdwardsAffine::new_unchecked(element.0.x, element.0.y))
-            .collect()
-    } else {
-        let bases_inner: Vec<_> = bases.iter().map(|element| element.0).collect();
-        EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
-    };
+    Element(msm(&to_affine_bases(bases), scalars))
+}
 
-    Element(msm(&bases, scalars))
+/// The affine form of `bases`. A point loaded from storage or decoded from a proof has `Z = 1`
+/// and is its own affine form; the others (a sum, such as the one point of the IPA check's
+/// 274 that is computed rather than decoded) share one inversion, on this thread, and none is
+/// made when there are none. Converting
+/// every point because one needs it, through ark's batch normalization, cost a parallel
+/// inversion and a parallel map over all of them: two hand-offs to the thread pool, which a
+/// verifier called from outside the pool waits for.
+fn to_affine_bases(bases: &[Element]) -> Vec<EdwardsAffine> {
+    let mut z_inverses: Vec<Fq> = bases
+        .iter()
+        .filter(|element| !element.0.z.is_one())
+        .map(|element| element.0.z)
+        .collect();
+    // the batch inversion inverts once even when it is given nothing
+    if !z_inverses.is_empty() {
+        serial_batch_inversion_and_mul(&mut z_inverses, &Fq::one());
+    }
+    let mut z_inverses = z_inverses.into_iter();
+    bases
+        .iter()
+        .map(|element| {
+            let p = element.0;
+            if p.z.is_one() {
+                EdwardsAffine::new_unchecked(p.x, p.y)
+            } else {
+                // `Z` is never zero on a twisted Edwards curve in extended coordinates
+                let z_inv = z_inverses.next().expect("one inverse per point with Z ≠ 1");
+                EdwardsAffine::new_unchecked(p.x * z_inv, p.y * z_inv)
+            }
+        })
+        .collect()
 }
 
 /// Multiplies an `Element` by a scalar field element.
@@ -1543,6 +1563,33 @@ pub(crate) mod tests {
     #[test]
     fn batch_decode_takes_the_lanes_where_required() {
         lanes_under_test();
+    }
+
+    /// `to_affine_bases` gives each point's affine form, whether it has `Z = 1` (decoded,
+    /// normalized) or not (a sum, a multiple), the identity in either form included.
+    #[test]
+    fn to_affine_bases_matches_normalization() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(9);
+        let g = Element::prime_subgroup_generator();
+        let mut points: Vec<Element> = Vec::new();
+        for i in 0..40 {
+            let p = g * Fr::rand(&mut rng);
+            points.push(match i % 4 {
+                0 => p,
+                1 => Element(p.0.into_affine().into()),
+                2 => p + g,
+                _ => Element::zero(),
+            });
+        }
+        points.push(g + g - g - g);
+        let raw: Vec<EdwardsProjective> = points.iter().map(|p| p.0).collect();
+        assert_eq!(
+            to_affine_bases(&points),
+            EdwardsProjective::normalize_batch(&raw)
+        );
+        assert!(points.iter().any(|p| p.0.z.is_one()) && points.iter().any(|p| !p.0.z.is_one()));
     }
 
     /// `is_positive` is `x > −x` on field elements: on zero, one, the two sides of `(p − 1) / 2`,
