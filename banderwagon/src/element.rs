@@ -526,9 +526,13 @@ impl Element {
     }
 }
 
-// The lexographically largest value is defined to be the positive value
+/// Whether `coordinate` is the positive one of `±coordinate`: the larger of the two as canonical
+/// integers, which is the one above `(p − 1) / 2` (zero is not positive). The comparison of field
+/// elements this replaces, `coordinate > −coordinate`, converts both out of Montgomery form; this
+/// converts one.
 pub(crate) fn is_positive(coordinate: Fq) -> bool {
-    coordinate > -coordinate
+    use ark_ff::PrimeField;
+    coordinate.into_bigint() > Fq::MODULUS_MINUS_ONE_DIV_TWO
 }
 
 /// [`Element::batch_map_to_scalar_field`] on the scalar field arithmetic: one batch inversion of the `y`
@@ -1502,6 +1506,26 @@ pub(crate) mod tests {
     #[test]
     fn batch_decode_takes_the_lanes_where_required() {
         lanes_under_test();
+    }
+
+    /// `is_positive` is `x > −x` on field elements: on zero, one, the two sides of `(p − 1) / 2`,
+    /// `p − 1`, and random elements with their negations.
+    #[test]
+    fn is_positive_is_the_larger_of_the_pair() {
+        use ark_ff::{PrimeField, UniformRand};
+        use rand_chacha::rand_core::SeedableRng;
+        let half = Fq::from_bigint(Fq::MODULUS_MINUS_ONE_DIV_TWO).unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(5);
+        let mut xs = vec![Fq::zero(), Fq::one(), half, half + Fq::one(), -Fq::one()];
+        for _ in 0..1000 {
+            xs.push(Fq::rand(&mut rng));
+        }
+        for x in xs {
+            for v in [x, -x] {
+                assert_eq!(is_positive(v), v > -v, "{v}");
+            }
+        }
+        assert!(!is_positive(half) && is_positive(half + Fq::one()));
     }
 
     /// `d` is not a square, so no `x` makes the denominator `d·x² − 1` zero (the decoders panic on
