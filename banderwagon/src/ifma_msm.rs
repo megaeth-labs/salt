@@ -243,6 +243,9 @@ const PW: usize = 24;
 /// it, or without the `parallel` feature, the groups run one after another on this thread. The
 /// result is the same.
 ///
+/// # Panics
+/// If there are not as many scalars as bases.
+///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -251,8 +254,7 @@ pub(crate) unsafe fn msm(
     scalars: &[Fr],
     spread: bool,
 ) -> EdwardsProjective {
-    let n = bases.len().min(scalars.len());
-    msm_runs(bases, scalars, lane_window(n), spread)
+    msm_runs(bases, scalars, lane_window(bases.len()), spread)
 }
 
 /// The window size for the lane accumulation: 9 from 4,097 points, 8 from 32 points, 3 below. The
@@ -414,12 +416,13 @@ unsafe fn run_batch(
 /// The MSM at window size `cbits`: the signed digits and the prepared points are made once, each
 /// group of eight windows is summed by [`group_sums`], and the window sums are combined. With
 /// `spread` (and the `parallel` feature) the pool's idle threads are asked to take groups while
-/// this thread sums them, see [`spread()`]. No group does work another has done: what spreading
+/// this thread sums them, see `spread`. No group does work another has done: what spreading
 /// costs is the queueing, the tables read from several cores, and a bucket store on each thread
 /// that takes a group.
 ///
 /// # Panics
-/// On a window whose digits do not fit the `i16` they are kept in (`cbits` of 16 or more).
+/// If there are not as many scalars as bases, and on a window whose digits do not fit the `i16`
+/// they are kept in (`cbits` of 16 or more).
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
@@ -432,7 +435,12 @@ unsafe fn msm_runs(
 ) -> EdwardsProjective {
     let c = context();
     let k = consts();
-    let n = bases.len().min(scalars.len());
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
+    let n = bases.len();
     if n == 0 {
         return EdwardsProjective::zero();
     }
@@ -564,9 +572,9 @@ impl<T, F: Fn(usize) -> T> Spread<T, F> {
 /// for the helpers' groups without running other jobs.
 ///
 /// # Panics
-/// If `sum` panics, on this thread or on a helper's. The pool aborts the process on a panic in
-/// a queued job, so a helper catches its own, no further group is started, and this thread
-/// panics with it.
+/// If `sum` panics, on this thread or on a helper's, and no further group is started then. The
+/// pool aborts the process on a panic in a queued job, so a helper catches its own and this
+/// thread panics with it.
 #[cfg(feature = "parallel")]
 fn spread<T, F>(groups: usize, sum: F) -> Vec<T>
 where
@@ -601,6 +609,14 @@ where
             }
         });
     }
+    // However this thread leaves, by a panic in its own group too, no group is taken after it.
+    struct Stop<'a>(&'a AtomicUsize, usize);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_max(self.1, Ordering::Relaxed);
+        }
+    }
+    let _stop = Stop(&shared.next, groups);
     shared.work();
     let mut state = shared.state.lock().unwrap();
     while state.finished < groups && state.panic.is_none() {
@@ -923,27 +939,37 @@ mod tests {
 
     /// A group that panics on a helper's thread panics the caller with the same payload: the
     /// helper does not take the process down, and the caller does not wait for a group that
-    /// will never be done. The pool serves the next call.
+    /// will never be done. The pool serves the next call. The pool is the test's own, so that no
+    /// other test's work keeps the helper from its group.
     #[cfg(feature = "parallel")]
     #[test]
     fn a_panic_on_a_helper_reaches_the_caller() {
         use std::sync::atomic::AtomicBool;
         use std::time::{Duration, Instant};
-        // This thread is outside the pool. Its first group does not end until a helper has taken
-        // one, and the helper's panics.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        // The caller's first group does not end until the helper has taken one, and the
+        // helper's panics.
         let taken = Arc::new(AtomicBool::new(false));
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let taken = Arc::clone(&taken);
-            spread(4, move |g| {
-                if rayon::current_thread_index().is_some() {
-                    taken.store(true, Ordering::Relaxed);
-                    panic!("group {g} on a helper");
-                }
-                let start = Instant::now();
-                while !taken.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(60) {
-                    std::thread::yield_now();
-                }
-                g
+            pool.install(|| {
+                let caller = rayon::current_thread_index();
+                let taken = Arc::clone(&taken);
+                spread(4, move |g| {
+                    if rayon::current_thread_index() != caller {
+                        taken.store(true, Ordering::Relaxed);
+                        panic!("group {g} on a helper");
+                    }
+                    let start = Instant::now();
+                    while !taken.load(Ordering::Relaxed)
+                        && start.elapsed() < Duration::from_secs(60)
+                    {
+                        std::thread::yield_now();
+                    }
+                    g
+                })
             })
         }));
         let panic = outcome.expect_err("the helper's panic reaches the caller");
@@ -951,7 +977,48 @@ mod tests {
             .downcast_ref::<String>()
             .expect("the helper's own payload");
         assert!(message.ends_with("on a helper"), "{message}");
-        assert_eq!(spread(4, |g| g + 1), [1, 2, 3, 4]);
+        assert_eq!(pool.install(|| spread(4, |g| g + 1)), [1, 2, 3, 4]);
+    }
+
+    /// A group that panics on the calling thread stops the helpers: of 64 groups only the
+    /// caller's and the one the helper already had are begun.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn a_panic_on_the_caller_stops_the_helpers() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let taken = Arc::new(AtomicBool::new(false));
+        let begun = Arc::new(AtomicUsize::new(0));
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            pool.install(|| {
+                let caller = rayon::current_thread_index();
+                let (taken, begun) = (Arc::clone(&taken), Arc::clone(&begun));
+                spread(64, move |g| {
+                    begun.fetch_add(1, Ordering::Relaxed);
+                    if rayon::current_thread_index() != caller {
+                        taken.store(true, Ordering::Relaxed);
+                        // long enough for the caller to have unwound out of `spread`
+                        std::thread::sleep(Duration::from_millis(200));
+                        return g;
+                    }
+                    let start = Instant::now();
+                    while !taken.load(Ordering::Relaxed)
+                        && start.elapsed() < Duration::from_secs(60)
+                    {
+                        std::thread::yield_now();
+                    }
+                    panic!("group {g} on the caller");
+                })
+            })
+        }));
+        assert!(outcome.is_err());
+        // The helper's group ends after the caller has gone, and it takes no other.
+        pool.install(|| std::thread::sleep(Duration::from_millis(400)));
+        assert_eq!(begun.load(Ordering::Relaxed), 2);
     }
 
     /// A window whose digits do not fit the `i16` they are kept in is refused, not truncated into

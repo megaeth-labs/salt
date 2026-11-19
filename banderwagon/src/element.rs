@@ -664,9 +664,9 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 ///
 /// The scalar path spreads its windows over every thread of the pool. A vector task runs on one
 /// thread, and on up to four when its MSM is the only one in flight ([`LANE_MSMS`]). On one thread
-/// the lanes are the faster path from 128 points up, the smallest size timed, and both MSMs of a
-/// proof check are over the cutoff: the 274-point one every check ends with, and the one with a
-/// point per trie node.
+/// the lanes are the faster path from 128 points up, the smallest size timed. The cutoff is under
+/// the 274 points of the MSM every proof check ends with. A check's other MSM has a point per
+/// trie node, and is over the cutoff for all but the smallest witnesses.
 ///
 /// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), at 274 points: one thread takes 0.54 ms in
 /// lanes and 3.2 ms on the scalar path. In a pool of 32 threads that was asleep the lanes take
@@ -719,7 +719,9 @@ fn lane_msm_tasks(points: usize, threads: usize) -> usize {
 /// threads to help with its groups; one that starts beside another keeps each task on one thread,
 /// since the threads it would borrow are the ones the others are using. The choice is made once,
 /// when the MSM starts, and only vector MSMs are counted: a pool busy with other work has no
-/// thread to help, and the MSM then takes as long as it would on its own.
+/// thread to help, and the MSM then takes as long as it would on its own. An MSM split into tasks
+/// spreads each of them: the tasks do not end together, and a thread whose task is done can take
+/// groups of one that is not.
 ///
 /// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), verifying the witnesses of 62 mainnet
 /// blocks: one at a time in an idle pool, a verification takes 2.0 ms with its MSMs' groups spread
