@@ -551,7 +551,7 @@ impl SaltProof {
             .into_iter()
             .map(|q| VerifierQuery {
                 commitment: commitments[q.commitment as usize].to_element(),
-                point: q.point,
+                point: Fr::from(q.point),
                 result: q.result,
             })
             .collect())
@@ -651,7 +651,7 @@ impl SaltProof {
             };
             queries.push(IndexedQuery {
                 commitment,
-                point: Fr::from(point as u64),
+                point: point as u32,
                 result: fr,
             });
         }
@@ -685,7 +685,7 @@ impl SaltProof {
             };
             queries.push(IndexedQuery {
                 commitment,
-                point: Fr::from(point as u64),
+                point: point as u32,
                 result: slot_to_field(salt_val),
             });
         }
@@ -774,8 +774,8 @@ fn create_internal_node_queries(
                                 })?;
 
                         queries.push(IndexedQuery {
-                            commitment,                    // Parent polynomial commitment
-                            point: Fr::from(point as u64), // Child index (0-255)
+                            commitment,          // Parent polynomial commitment
+                            point: point as u32, // Child index (0-255)
                             result: *fr, // Expected result: child's commitment as field element
                         });
                     }
@@ -911,7 +911,7 @@ fn create_leaf_node_queries(
                     // Create query: verify bucket_polynomial(slot_position) == stored_value
                     Ok(IndexedQuery {
                         commitment,                      // Bucket polynomial commitment
-                        point: Fr::from(point as u64),   // Slot position within bucket (0-255)
+                        point: point as u32,             // Slot position within bucket (0-255)
                         result: slot_to_field(salt_val), // Stored value converted to field element
                     })
                 })
@@ -2019,8 +2019,8 @@ mod tests {
         assert_eq!(queries.len(), 2); // One query per child
 
         // Verify query structure
-        assert_eq!(queries[0].point, Fr::from(0u64));
-        assert_eq!(queries[1].point, Fr::from(1u64));
+        assert_eq!(queries[0].point, 0);
+        assert_eq!(queries[1].point, 1);
     }
 
     /// Tests create_leaf_node_queries with valid bucket data.
@@ -2051,8 +2051,8 @@ mod tests {
         assert_eq!(queries.len(), 2); // One query per slot
 
         // Verify query structure
-        assert_eq!(queries[0].point, Fr::from(0u64));
-        assert_eq!(queries[1].point, Fr::from(5u64));
+        assert_eq!(queries[0].point, 0);
+        assert_eq!(queries[1].point, 5);
     }
 
     #[test]
@@ -2079,9 +2079,9 @@ mod tests {
 
         assert_eq!(first_key, start_key);
         assert_eq!(queries.len(), 2);
-        assert_eq!(queries[0].point, Fr::from(0u64));
+        assert_eq!(queries[0].point, 0);
         assert_eq!(queries[0].result, slot_to_field(&None));
-        assert_eq!(queries[1].point, Fr::from(255u64));
+        assert_eq!(queries[1].point, 255);
         assert_eq!(queries[1].result, slot_to_field(&Some(value)));
     }
 
