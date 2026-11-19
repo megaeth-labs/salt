@@ -2,7 +2,7 @@
 //! accumulation and bucket reduction run eight-wide on AVX-512 IFMA, in the lane field arithmetic of
 //! [`crate::ifma`].
 //!
-//! Accumulation, lane = bucket over digit-sorted runs (`msm_runs`): the points are prepared once, eight at
+//! Accumulation, lane = bucket over digit-sorted runs (`group_sums`): the points are prepared once, eight at
 //! a time, into a point-major table (x, y, x + y, d·x·y in lane limbs); for each window the points are
 //! counting-sorted by their signed digit, the non-empty buckets (runs) are ordered longest first, and eight
 //! runs at a time are summed in registers — each step loads one point per lane by three row loads and an
@@ -10,7 +10,9 @@
 //! exhausted; a finished batch's eight bucket sums are scattered once into a lane-major bucket store
 //! (lane = window there), kept per thread across calls. Nothing is gathered or scattered per point.
 //! Reduction, lane = window: the running sums over the buckets, high to low, are eight independent chains
-//! per group of windows; buckets no point reached are read as the identity through a mask. Signed digits
+//! per group of windows; buckets no point reached are read as the identity through a mask. A group of
+//! eight windows is accumulated and reduced as one unit, and the groups of an MSM can run on different
+//! threads (`spread`): they share the digits and the prepared points and nothing else. Signed digits
 //! and the window combination are ark-ec's (`msm_bigint_wnaf`); the window size is the lanes' own
 //! (`lane_window`). The result is the same group element the scalar path computes, which the tests check
 //! against `EdwardsProjective::msm` on random inputs including zero scalars, the identity, equal scalars
@@ -27,17 +29,28 @@ use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Edward
 use ark_ff::Field;
 use ark_ff::{BigInt, PrimeField, Zero};
 use core::arch::x86_64::*;
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::sync::OnceLock;
+#[cfg(feature = "parallel")]
+use std::{
+    any::Any,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, PoisonError,
+    },
+};
 
 thread_local! {
-    /// The bucket store, kept per thread across calls. Its size follows the window, not the input
-    /// (0.66 MB at window 8, 1.3 MB at window 9), and it is written before it is read, so a call
-    /// neither allocates nor clears it. The tables whose size follows the input (the prepared points,
-    /// the digits, the sort order: 258 bytes per point at window 9) are allocated per call. Keeping
-    /// them per thread as well changed the time of a task of 4,096 to 16,384 points by under 1%, on
-    /// glibc's allocator and on jemalloc: both hand the freed blocks back to the next call.
-    static BUCKET_SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// The bucket store of one group of windows, kept per thread across calls. Its size follows the
+    /// window, not the input (0.17 MB at window 8, 0.33 MB at window 9), and it is written before it
+    /// is read, so a group neither allocates nor clears it. A group takes it out of this slot and
+    /// puts it back when it is done. The tables whose size follows the input are allocated: the
+    /// prepared points and the digits once per call, the sort order once per group. Keeping them
+    /// per thread as well, timed when all of them were allocated once per call, changed the time
+    /// of a task of 4,096 to 16,384 points by under 1%, on glibc's allocator and on jemalloc: both
+    /// hand the freed blocks back to the next call.
+    static BUCKET_SCRATCH: Cell<Vec<u64>> = const { Cell::new(Vec::new()) };
 }
 
 /// Projective extended point, eight lanes.
@@ -226,13 +239,20 @@ const BW: usize = 160;
 const PW: usize = 24;
 
 /// `sum_i scalars[i] * bases[i]`, the same element as `EdwardsProjective::msm(bases, scalars)`.
+/// With `spread` the pool's idle threads are asked to help with the groups of windows; without
+/// it, or without the `parallel` feature, the groups run one after another on this thread. The
+/// result is the same.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
+pub(crate) unsafe fn msm(
+    bases: &[EdwardsAffine],
+    scalars: &[Fr],
+    spread: bool,
+) -> EdwardsProjective {
     let n = bases.len().min(scalars.len());
-    msm_runs(bases, scalars, lane_window(n))
+    msm_runs(bases, scalars, lane_window(n), spread)
 }
 
 /// The window size for the lane accumulation: 9 from 4,097 points, 8 from 32 points, 3 below. The
@@ -244,17 +264,17 @@ pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProj
 /// In lanes the reduction's two full additions per bucket are the dear part (22 lane products per
 /// bucket) and the bucket store must stay in cache, so the window is smaller than ark's.
 ///
-/// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 1.03, 1.11, 1.03 and 1.21
-/// for 4,096 points; 1.08, 1.04, 0.94 and 0.97 for 8,192; 1.06, 1.06, 0.88 and 0.77 for 50,000.
-/// At windows 6, 7, 8 and 9: 1.88, 1.91, 2.00 and 2.81 for 274 points; 1.42, 1.30, 1.18 and 1.40
-/// for 1,024; 1.38, 1.20, 1.03 and 1.16 for 2,047.
+/// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 1.00, 1.05, 1.01 and 1.16 for
+/// 4,096 points; 1.01, 0.98, 0.89 and 0.92 for 8,192; 1.00, 1.01, 0.88 and 0.74 for 50,000. At windows
+/// 6, 7, 8 and 9: 1.86, 1.88, 1.96 and 2.73 for 274 points; 1.40, 1.27, 1.14 and 1.37 for 1,024; 1.35,
+/// 1.16, 1.01 and 1.13 for 2,047.
 fn lane_window(n: usize) -> usize {
     if n < 32 {
         3
     } else {
         let log2 = usize::BITS - (n - 1).leading_zeros();
-        // Capped at 9 (a 1.3 MB bucket store, against 2.6 MB at window 10 and 7.9 MB at 11):
-        // the store is thread-local, and every thread that has run a task keeps it.
+        // Capped at 9 (a 0.33 MB bucket store, against 0.66 MB at window 10 and 2.6 MB at 11):
+        // the store is thread-local, and every thread that has run a group keeps it.
         (log2 as usize).saturating_sub(4).clamp(8, 9)
     }
 }
@@ -293,7 +313,7 @@ unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
 }
 
 /// One batch of up to eight runs (bucket, start in `order`, length), accumulated in registers with lane =
-/// run, then scattered once into the lane-major bucket store at group offset `gbase` and lane `lane`.
+/// run, then scattered once into the group's lane-major bucket store at lane `lane`.
 /// A separate `target_feature` function rather than a closure, so the intrinsics inline.
 #[target_feature(enable = "avx512f,avx512ifma")]
 #[allow(clippy::too_many_arguments)]
@@ -305,7 +325,6 @@ unsafe fn run_batch(
     batch: &[(u32, u32, u32); 8],
     fill: usize,
     bptr: *mut u64,
-    gbase: usize,
     lane: usize,
     nonempty: &mut [u8],
 ) {
@@ -367,16 +386,12 @@ unsafe fn run_batch(
             z: sel(m, &p.z, &r.z),
         };
     }
-    // word index = ((gbase + b) * 20 + kk) * 8 + lane
+    // word index = (b * 20 + kk) * 8 + lane
     // BW = 160. Shifts avoid VPMULLQ, which requires AVX-512DQ in addition
     // to the AVX-512F/IFMA features checked by runtime dispatch.
     const { assert!(BW == 160) };
-    let bucket_v = _mm512_add_epi64(b_v, _mm512_set1_epi64(gbase as i64));
     let base_v = _mm512_add_epi64(
-        _mm512_add_epi64(
-            _mm512_slli_epi64(bucket_v, 7),
-            _mm512_slli_epi64(bucket_v, 5),
-        ),
+        _mm512_add_epi64(_mm512_slli_epi64(b_v, 7), _mm512_slli_epi64(b_v, 5)),
         _mm512_set1_epi64(lane as i64),
     );
     let out = [
@@ -392,17 +407,16 @@ unsafe fn run_batch(
         );
     }
     for l in 0..fill {
-        nonempty[gbase + batch[l].0 as usize] |= 1 << lane;
+        nonempty[batch[l].0 as usize] |= 1 << lane;
     }
 }
 
-/// Bucket accumulation with lane = bucket over digit-sorted runs: for each window the points are
-/// counting-sorted by their digit, the non-empty buckets (runs) are ordered by length, and eight runs at a
-/// time are accumulated in registers — each step loads one prepared point per lane from the point-major
-/// table (row loads and a transpose in registers, not a gather) and adds it, masked where a lane's run is
-/// exhausted; a finished batch's eight bucket sums are scattered once into the lane-major bucket store
-/// the reduction reads (lane = window there). No bucket state is gathered or scattered per point; empty
-/// buckets are never written and the reduction reads them as the identity through a mask.
+/// The MSM at window size `cbits`: the signed digits and the prepared points are made once, each
+/// group of eight windows is summed by [`group_sums`], and the window sums are combined. With
+/// `spread` (and the `parallel` feature) the pool's idle threads are asked to take groups while
+/// this thread sums them, see [`spread()`]. No group does work another has done: what spreading
+/// costs is the queueing, the tables read from several cores, and a bucket store on each thread
+/// that takes a group.
 ///
 /// # Panics
 /// On a window whose digits do not fit the `i16` they are kept in (`cbits` of 16 or more).
@@ -410,7 +424,12 @@ unsafe fn run_batch(
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> EdwardsProjective {
+unsafe fn msm_runs(
+    bases: &[EdwardsAffine],
+    scalars: &[Fr],
+    cbits: usize,
+    spread: bool,
+) -> EdwardsProjective {
     let c = context();
     let k = consts();
     let n = bases.len().min(scalars.len());
@@ -446,18 +465,193 @@ unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> Edw
     // prepared points, point-major
     let mut pts = vec![0u64; n * PW];
     prep_points(c, k, &bases[..n], &mut pts);
-    // bucket store, lane-major per group: written only where a bucket is non-empty
-    let words = groups * nb * BW;
-    let bptr = BUCKET_SCRATCH.with(|b| {
-        let mut b = b.borrow_mut();
-        if b.len() < words {
-            b.resize(words, 0);
+    let tables = Tables {
+        digits,
+        pts,
+        n,
+        nwin,
+        nb,
+    };
+    let combine = |sums: Vec<[EdwardsProjective; 8]>| {
+        let window_sums: Vec<EdwardsProjective> = sums.into_iter().flatten().collect();
+        combine_windows(&window_sums[..nwin], cbits)
+    };
+    // The groups of eight windows are independent from here on: each reads the tables, and
+    // accumulates and reduces in the bucket store of the thread it runs on.
+    #[cfg(feature = "parallel")]
+    if spread && groups > 1 {
+        // SAFETY: the caller has checked the host, which is the same for every thread.
+        return combine(self::spread(groups, move |g| unsafe {
+            group_sums(&tables, g)
+        }));
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = spread;
+    // SAFETY: the caller's contract is this function's.
+    combine(
+        (0..groups)
+            .map(|g| unsafe { group_sums(&tables, g) })
+            .collect(),
+    )
+}
+
+/// What the groups of one MSM read, built once by [`msm_runs`].
+struct Tables {
+    /// The signed digits, `nwin` per point, each of magnitude under `nb`.
+    digits: Vec<i16>,
+    /// The prepared points, [`PW`] words per point.
+    pts: Vec<u64>,
+    /// The number of points.
+    n: usize,
+    /// The number of windows.
+    nwin: usize,
+    /// The buckets of a window, bucket 0 included.
+    nb: usize,
+}
+
+/// The groups of one job, taken one at a time by whichever thread asks next.
+#[cfg(feature = "parallel")]
+struct Spread<T, F> {
+    /// What a thread does with a group it has taken.
+    sum: F,
+    groups: usize,
+    /// The next group nobody has taken.
+    next: AtomicUsize,
+    state: Mutex<SpreadState<T>>,
+    /// Signalled when the last group is done, and when a helper has panicked.
+    done: Condvar,
+}
+
+#[cfg(feature = "parallel")]
+struct SpreadState<T> {
+    /// The groups' results, each written when its group is done.
+    sums: Vec<Option<T>>,
+    /// The groups done.
+    finished: usize,
+    /// What a helper panicked with while it had a group, if one did.
+    panic: Option<Box<dyn Any + Send>>,
+}
+
+#[cfg(feature = "parallel")]
+impl<T, F: Fn(usize) -> T> Spread<T, F> {
+    /// Takes groups until none is left to take.
+    fn work(&self) {
+        loop {
+            let g = self.next.fetch_add(1, Ordering::Relaxed);
+            if g >= self.groups {
+                return;
+            }
+            let sum = (self.sum)(g);
+            let mut state = self.state.lock().unwrap();
+            state.sums[g] = Some(sum);
+            state.finished += 1;
+            if state.finished == self.groups {
+                self.done.notify_all();
+            }
         }
-        b.as_mut_ptr()
+    }
+}
+
+/// `sum(g)` for every group `g`, in order, with the pool's idle threads helping.
+///
+/// This thread starts on the groups at once and takes one after another. A helper is queued on
+/// the pool for each group but the first, up to the threads the pool has besides this one, and a
+/// helper that gets to run takes groups the same way. So this thread waits only for groups a
+/// helper has already begun, and in a pool with no thread to spare it does every group itself,
+/// as it would without spreading. A helper that runs after the call has returned finds it gone.
+///
+/// `sum` must not wait for the pool itself: this thread may be one of the pool's, and it waits
+/// for the helpers' groups without running other jobs.
+///
+/// # Panics
+/// If `sum` panics, on this thread or on a helper's. The pool aborts the process on a panic in
+/// a queued job, so a helper catches its own, no further group is started, and this thread
+/// panics with it.
+#[cfg(feature = "parallel")]
+fn spread<T, F>(groups: usize, sum: F) -> Vec<T>
+where
+    T: Send + 'static,
+    F: Fn(usize) -> T + Send + Sync + 'static,
+{
+    let shared = Arc::new(Spread {
+        sum,
+        groups,
+        next: AtomicUsize::new(0),
+        state: Mutex::new(SpreadState {
+            sums: (0..groups).map(|_| None).collect(),
+            finished: 0,
+            panic: None,
+        }),
+        done: Condvar::new(),
     });
-    let mut nonempty = vec![0u8; groups * nb];
-    // the highest non-empty bucket of each group's windows: the reduction starts there
-    let mut top = vec![0usize; groups];
+    let others =
+        rayon::current_num_threads() - usize::from(rayon::current_thread_index().is_some());
+    for _ in 0..groups.saturating_sub(1).min(others) {
+        // A helper holds the job only while it works on it: one still queued when this call
+        // returns keeps nothing alive.
+        let job = Arc::downgrade(&shared);
+        rayon::spawn(move || {
+            let Some(shared) = job.upgrade() else { return };
+            // After a panic only `panic` is read: the results are discarded.
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| shared.work())) {
+                shared.next.fetch_max(groups, Ordering::Relaxed);
+                let mut state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.panic.get_or_insert(panic);
+                shared.done.notify_all();
+            }
+        });
+    }
+    shared.work();
+    let mut state = shared.state.lock().unwrap();
+    while state.finished < groups && state.panic.is_none() {
+        state = shared.done.wait(state).unwrap();
+    }
+    if let Some(panic) = state.panic.take() {
+        drop(state);
+        resume_unwind(panic);
+    }
+    state.sums.drain(..).map(Option::unwrap).collect()
+}
+
+/// The sums of one group of up to eight windows, window `8 * g` and the seven after it.
+///
+/// Accumulation, lane = bucket over digit-sorted runs: for each window the points are counting-sorted
+/// by their digit, the non-empty buckets (runs) are ordered by length, and eight runs at a time are
+/// accumulated in registers — each step loads one prepared point per lane from the point-major table
+/// (row loads and a transpose in registers, not a gather) and adds it, masked where a lane's run is
+/// exhausted; a finished batch's eight bucket sums are scattered once into the lane-major bucket
+/// store the reduction reads (lane = window there). No bucket state is gathered or scattered per
+/// point; empty buckets are never written and the reduction reads them as the identity through a mask.
+///
+/// The group runs from start to end on one thread, in the bucket store it takes from that thread,
+/// and nothing reads the store after it returns.
+///
+/// # Safety
+/// `available()` must have returned true on this host, and `tables` must be as [`msm_runs`]
+/// builds them: the prepared points are read unchecked.
+#[target_feature(enable = "avx512f,avx512ifma")]
+unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
+    let c = context();
+    let k = consts();
+    let Tables {
+        digits,
+        pts,
+        n,
+        nwin,
+        nb,
+    } = tables;
+    let (n, nwin, nb) = (*n, *nwin, *nb);
+    // The bucket store, lane-major, written only where a bucket is non-empty. It is taken from
+    // the thread and handed back at the end, so the thread's slot is empty while this group uses it.
+    let mut store = BUCKET_SCRATCH.take();
+    let words = nb * BW;
+    if store.len() < words {
+        store.resize(words, 0);
+    }
+    let bptr = store.as_mut_ptr();
+    let mut nonempty = vec![0u8; nb];
+    // the highest non-empty bucket of the group's windows: the reduction starts there
+    let mut top = 0usize;
     // per-window scratch
     let mut cnt = vec![0u32; nb];
     let mut cursor = vec![0u32; nb];
@@ -466,8 +660,7 @@ unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> Edw
     const LMAX: usize = 64;
     let mut by_len: Vec<Vec<(u32, u32, u32)>> = (0..LMAX).map(|_| Vec::new()).collect();
     let zero = _mm512_setzero_si512();
-    for w in 0..nwin {
-        let g = w / 8;
+    for w in 8 * g..nwin.min(8 * g + 8) {
         let lane = w % 8;
         cnt.fill(0);
         for i in 0..n {
@@ -498,7 +691,7 @@ unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> Edw
             if len > 0 {
                 by_len[(len as usize).min(LMAX - 1)].push((b as u32, start, len));
                 start += len;
-                top[g] = top[g].max(b);
+                top = top.max(b);
             }
         }
         // batches of eight runs, longest bins first
@@ -509,67 +702,43 @@ unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> Edw
                 batch[fill] = r;
                 fill += 1;
                 if fill == 8 {
-                    run_batch(
-                        c,
-                        k,
-                        &pts,
-                        &order,
-                        &batch,
-                        8,
-                        bptr,
-                        g * nb,
-                        lane,
-                        &mut nonempty,
-                    );
+                    run_batch(c, k, pts, &order, &batch, 8, bptr, lane, &mut nonempty);
                     fill = 0;
                 }
             }
         }
         if fill > 0 {
-            run_batch(
-                c,
-                k,
-                &pts,
-                &order,
-                &batch,
-                fill,
-                bptr,
-                g * nb,
-                lane,
-                &mut nonempty,
-            );
+            run_batch(c, k, pts, &order, &batch, fill, bptr, lane, &mut nonempty);
         }
     }
-    // reduction per group: running sums over the buckets high to low, lanes = windows; empty buckets read
-    // as the identity through the non-empty mask. The walk starts at the group's highest non-empty
-    // bucket, since above it both sums are still the identity.
+    // reduction: running sums over the buckets high to low, lanes = windows; empty buckets read as
+    // the identity through the non-empty mask. The walk starts at the highest non-empty bucket,
+    // since above it both sums are still the identity.
     let id_words = [
         zero, zero, zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4], zero, zero,
         zero, zero, zero, c.one[0], c.one[1], c.one[2], c.one[3], c.one[4],
     ];
-    let mut window_sums = vec![EdwardsProjective::zero(); groups * 8];
-    for g in 0..groups {
-        let mut running = k.id;
-        let mut res = k.id;
-        for b in (1..=top[g]).rev() {
-            let ne: __mmask8 = nonempty[g * nb + b];
-            let base = bptr.add((g * nb + b) * BW);
-            let mut wv = [zero; 20];
-            for kk in 0..20 {
-                wv[kk] = _mm512_mask_loadu_epi64(id_words[kk], ne, base.add(kk * 8) as *const _);
-            }
-            let p = PtL {
-                x: [wv[0], wv[1], wv[2], wv[3], wv[4]],
-                y: [wv[5], wv[6], wv[7], wv[8], wv[9]],
-                t: [wv[10], wv[11], wv[12], wv[13], wv[14]],
-                z: [wv[15], wv[16], wv[17], wv[18], wv[19]],
-            };
-            running = padd(c, k, &running, &p);
-            res = padd(c, k, &res, &running);
+    let mut running = k.id;
+    let mut res = k.id;
+    for b in (1..=top).rev() {
+        let ne: __mmask8 = nonempty[b];
+        let base = bptr.add(b * BW);
+        let mut wv = [zero; 20];
+        for kk in 0..20 {
+            wv[kk] = _mm512_mask_loadu_epi64(id_words[kk], ne, base.add(kk * 8) as *const _);
         }
-        window_sums[g * 8..g * 8 + 8].copy_from_slice(&unlane(c, &res));
+        let p = PtL {
+            x: [wv[0], wv[1], wv[2], wv[3], wv[4]],
+            y: [wv[5], wv[6], wv[7], wv[8], wv[9]],
+            t: [wv[10], wv[11], wv[12], wv[13], wv[14]],
+            z: [wv[15], wv[16], wv[17], wv[18], wv[19]],
+        };
+        running = padd(c, k, &running, &p);
+        res = padd(c, k, &res, &running);
     }
-    combine_windows(&window_sums[..nwin], cbits)
+    let sums = unlane(c, &res);
+    BUCKET_SCRATCH.set(store);
+    sums
 }
 
 #[cfg(test)]
@@ -597,11 +766,11 @@ mod tests {
             let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
             let reps = if n > 10000 { 2 } else { 8 };
             for &cb in &[8usize, 9, 10, 11] {
-                let got = unsafe { msm_runs(&bases, &scalars, cb) };
+                let got = unsafe { msm_runs(&bases, &scalars, cb, false) };
                 assert_eq!(got, want, "runs n = {n} c = {cb}");
                 let t = std::time::Instant::now();
                 for _ in 0..reps {
-                    let _ = unsafe { msm_runs(&bases, &scalars, cb) };
+                    let _ = unsafe { msm_runs(&bases, &scalars, cb, false) };
                 }
                 let ns = t.elapsed().as_nanos() as f64 / (n * reps) as f64;
                 println!("lane msm n = {n}: c = {cb}: runs {ns:.0} ns/pt");
@@ -610,10 +779,11 @@ mod tests {
         }
     }
 
-    /// The lane MSM returns the curve point `EdwardsProjective::msm` returns: at the window
-    /// [`lane_window`] picks for each size, up to the sizes the dispatch hands over, and at every
-    /// window from 3 to 12 on the smaller ones. Windows 8 and 9 are the ones the dispatch's tasks
-    /// get, and window 11 the one whose last digit runs over the whole radix instead of half of it.
+    /// The lane MSM returns the curve point `EdwardsProjective::msm` returns, with its groups on
+    /// one thread and spread over the pool: at the window [`lane_window`] picks for each size, up
+    /// to the sizes the dispatch hands over, and at every window from 3 to 12 on the smaller ones.
+    /// Windows 8 and 9 are the ones the dispatch's tasks get, and window 11 the one whose last
+    /// digit runs over the whole radix instead of half of it.
     #[test]
     fn lane_msm_matches_ark_msm() {
         if !lanes_under_test() {
@@ -631,14 +801,18 @@ mod tests {
                 scalars[3] = -Fr::from(1u64);
             }
             let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
-            let got = unsafe { msm(&bases, &scalars) };
-            assert_eq!(got, want, "n = {n}");
+            for spread in [false, true] {
+                let got = unsafe { msm(&bases, &scalars, spread) };
+                assert_eq!(got, want, "n = {n} spread = {spread}");
+            }
             if n > 2560 {
                 continue;
             }
             for cb in 3usize..=12 {
-                let got = unsafe { msm_runs(&bases, &scalars, cb) };
-                assert_eq!(got, want, "runs n = {n} c = {cb}");
+                for spread in [false, true] {
+                    let got = unsafe { msm_runs(&bases, &scalars, cb, spread) };
+                    assert_eq!(got, want, "runs n = {n} c = {cb} spread = {spread}");
+                }
             }
         }
         // every point in one bucket (equal scalars) and long runs with the sign flipped
@@ -647,8 +821,137 @@ mod tests {
         let s = Fr::rand(&mut rng);
         let scalars: Vec<Fr> = (0..n).map(|i| if i % 3 == 0 { -s } else { s }).collect();
         let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
-        let got = unsafe { msm_runs(&bases, &scalars, 10) };
+        let got = unsafe { msm_runs(&bases, &scalars, 10, true) };
         assert_eq!(got, want, "equal scalars");
+    }
+
+    /// Many MSMs at once in a pool of two to four threads, every one spreading its groups, each
+    /// checked against arkworks. The few threads take groups of different MSMs in turn, at window
+    /// 8 and at window 9 (the sizes over 4,096 points), where a thread's bucket store grows and
+    /// the last group has five windows.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn concurrent_lane_msms_match_ark_msm() {
+        use rayon::prelude::*;
+        if !lanes_under_test() {
+            return;
+        }
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xc3);
+        let bases: Vec<EdwardsAffine> = (0..8192).map(|_| EdwardsAffine::rand(&mut rng)).collect();
+        let scalars: Vec<Fr> = (0..8192).map(|_| Fr::rand(&mut rng)).collect();
+        // (offset, length): 48 inputs of 300 to 2,099 points, and 8 of 4,200 to 5,600
+        let jobs: Vec<(usize, usize)> = (0..48)
+            .map(|j| (j * 37 % 1900, 300 + j * 53 % 1800))
+            .chain((0..8).map(|j| (j * 311, 4200 + j * 200)))
+            .collect();
+        let want: Vec<EdwardsProjective> = jobs
+            .iter()
+            .map(|&(o, l)| EdwardsProjective::msm(&bases[o..o + l], &scalars[o..o + l]).unwrap())
+            .collect();
+        for threads in [2, 3, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for round in 0..4 {
+                let got: Vec<EdwardsProjective> = pool.install(|| {
+                    jobs.par_iter()
+                        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
+                        .map(|&(o, l)| unsafe { msm(&bases[o..o + l], &scalars[o..o + l], true) })
+                        .collect()
+                });
+                assert_eq!(got, want, "threads = {threads}, round {round}");
+            }
+        }
+    }
+
+    /// `spread` returns every group's result in group order: called from outside any pool, where
+    /// the helpers are queued on the global one, and from a thread of a pool of one to four
+    /// threads, with more groups than threads and fewer.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spread_returns_every_group_in_order() {
+        for groups in [1usize, 2, 3, 4, 11] {
+            let want: Vec<usize> = (0..groups).map(|g| g * g).collect();
+            assert_eq!(spread(groups, |g| g * g), want);
+            for threads in 1..=4 {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                assert_eq!(pool.install(|| spread(groups, |g| g * g)), want);
+            }
+        }
+    }
+
+    /// A thread of the pool that has handed groups out waits for the ones a helper has begun,
+    /// and gets them: its own first group does not end until another thread has taken one.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spread_waits_for_a_group_a_helper_has_begun() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        for threads in 2..=4 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let helped = Arc::new(AtomicBool::new(false));
+            let got = pool.install(|| {
+                let caller = rayon::current_thread_index();
+                let helped = Arc::clone(&helped);
+                spread(4, move |g| {
+                    if rayon::current_thread_index() != caller {
+                        helped.store(true, Ordering::Relaxed);
+                        // long enough for the caller to run out of groups and wait
+                        std::thread::sleep(Duration::from_millis(20));
+                    } else {
+                        let start = Instant::now();
+                        while !helped.load(Ordering::Relaxed)
+                            && start.elapsed() < Duration::from_secs(60)
+                        {
+                            std::thread::yield_now();
+                        }
+                    }
+                    g
+                })
+            });
+            assert_eq!(got, [0, 1, 2, 3], "threads = {threads}");
+            assert!(helped.load(Ordering::Relaxed), "threads = {threads}");
+        }
+    }
+
+    /// A group that panics on a helper's thread panics the caller with the same payload: the
+    /// helper does not take the process down, and the caller does not wait for a group that
+    /// will never be done. The pool serves the next call.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn a_panic_on_a_helper_reaches_the_caller() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        // This thread is outside the pool. Its first group does not end until a helper has taken
+        // one, and the helper's panics.
+        let taken = Arc::new(AtomicBool::new(false));
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let taken = Arc::clone(&taken);
+            spread(4, move |g| {
+                if rayon::current_thread_index().is_some() {
+                    taken.store(true, Ordering::Relaxed);
+                    panic!("group {g} on a helper");
+                }
+                let start = Instant::now();
+                while !taken.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(60) {
+                    std::thread::yield_now();
+                }
+                g
+            })
+        }));
+        let panic = outcome.expect_err("the helper's panic reaches the caller");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("the helper's own payload");
+        assert!(message.ends_with("on a helper"), "{message}");
+        assert_eq!(spread(4, |g| g + 1), [1, 2, 3, 4]);
     }
 
     /// A window whose digits do not fit the `i16` they are kept in is refused, not truncated into
@@ -662,7 +965,7 @@ mod tests {
         let scalars = [Fr::from(3u64); 2];
         // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
         let at = |cbits: usize| {
-            std::panic::catch_unwind(|| unsafe { msm_runs(&bases, &scalars, cbits) })
+            std::panic::catch_unwind(|| unsafe { msm_runs(&bases, &scalars, cbits, false) })
         };
         assert_eq!(at(15).ok(), Some(EdwardsProjective::zero()));
         assert!(at(16).is_err());
