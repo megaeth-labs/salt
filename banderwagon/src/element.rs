@@ -3,8 +3,6 @@ use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Edward
 use ark_ff::{serial_batch_inversion_and_mul, Field, One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{
     hash::{Hash, Hasher},
     iter::Sum,
@@ -659,11 +657,11 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
     }
 }
 
-/// The smallest multi-scalar multiplication the vector path ([`crate::ifma_msm`]) takes. Below it
+/// The smallest multi-scalar multiplication the vector path (`ifma_msm`) takes. Below it
 /// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
 ///
 /// The scalar path spreads its windows over every thread of the pool. A vector task runs on one
-/// thread, and on up to four when its MSM is the only one in flight ([`LANE_MSMS`]). On one thread
+/// thread, and on up to four when its MSM is the only one in flight (`LANE_MSMS` there). On one thread
 /// the lanes are the faster path from 128 points up, the smallest size timed. The cutoff is under
 /// the 274 points of the MSM every proof check ends with. A check's other MSM has a point per
 /// trie node, and is over the cutoff for all but the smallest witnesses.
@@ -683,94 +681,22 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 ///
 /// The size compared is the MSM's own input, after a proof check has coalesced repeated
 /// commitments, not the number of proof queries.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
 const LANE_MSM_MIN_POINTS: usize = 256;
 
-/// The points a vector task gets when an MSM is split: one task for every full
-/// `LANE_MSM_TASK_POINTS` the MSM has, and no more than one per thread.
-///
-/// Smaller tasks finish a large MSM sooner in an idle pool and take more thread time doing it:
-/// every task repeats the bucket reduction, and past one task per core the tasks share cores. On
-/// an EPYC 9B45 (a 32-thread KVM guest, 16 cores), in a pool of 32 threads that was asleep, 65,536
-/// points take 3.7 ms as 32 tasks of 2,048 points, with 116 ms of thread time, and 4.9 ms as 8
-/// tasks of 8,192, with 109 ms. With 64 such MSMs at once in that pool the batch takes 3.5 ms per
-/// MSM in the smaller tasks and 4.0 ms in the larger.
-///
-/// Verifying 22 witnesses of 59,000 to 65,000 points with tasks of this size instead of 8,192
-/// points: one verification in an idle pool takes 73 ms instead of 74 ms, and 16 threads verifying
-/// at once do 87 a second instead of 83.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-const LANE_MSM_TASK_POINTS: usize = 1024;
+/// The vector multi-scalar multiplication, as `ifma_msm` hands it out.
+pub(crate) type LaneMsm = fn(&[EdwardsAffine], &[Fr]) -> EdwardsProjective;
 
-/// The tasks the vector path splits `points` into on `threads` threads: one for every full
-/// [`LANE_MSM_TASK_POINTS`], at least one, and no more than one per thread. The caller spreads
-/// the points evenly over them, so that no task is left a short remainder beside full ones:
-/// 2,049 points on two threads are 1,025 and 1,024, not 2,048 and 1. An MSM takes as long as its
-/// longest task. Below two full tasks' worth an MSM is one task, of up to 2,047 points.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-fn lane_msm_tasks(points: usize, threads: usize) -> usize {
-    (points / LANE_MSM_TASK_POINTS).min(threads).max(1)
-}
-
-/// The vector MSMs in flight in this process, in whichever pool.
-///
-/// A vector task sums its windows in groups of eight, and the groups can run on different threads
-/// without repeating any work. An MSM that starts while no other is in flight asks the pool's idle
-/// threads to help with its groups; one that starts beside another keeps each task on one thread,
-/// since the threads it would borrow are the ones the others are using. The choice is made once,
-/// when the MSM starts, and only vector MSMs are counted: a pool busy with other work has no
-/// thread to help, and the MSM then takes as long as it would on its own. An MSM split into tasks
-/// spreads each of them: the tasks do not end together, and a thread whose task is done can take
-/// groups of one that is not.
-///
-/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), verifying the witnesses of 62 mainnet
-/// blocks: one at a time in an idle pool, a verification takes 2.0 ms with its MSMs' groups spread
-/// and 2.8 ms without. With 16 threads verifying at once, spreading every MSM's groups does 2,850
-/// a second, and spreading only the ones that start alone 2,980, against 2,970 for none.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-static LANE_MSMS: AtomicUsize = AtomicUsize::new(0);
-
-/// One MSM's entry in a count of the MSMs in flight, taken out when the MSM ends, however it
-/// ends.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-struct InFlight {
-    count: &'static AtomicUsize,
-    /// Whether no other MSM was in flight when this one started.
-    alone: bool,
-}
-
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-impl InFlight {
-    fn enter(count: &'static AtomicUsize) -> Self {
-        Self {
-            count,
-            alone: count.fetch_add(1, Ordering::Relaxed) == 0,
-        }
+/// The vector MSM where this host has it: the lane module is compiled (`x86_64` with `std`) and
+/// the CPU reports AVX-512 IFMA.
+fn lane_msm() -> Option<LaneMsm> {
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    {
+        crate::ifma_msm::lane_msm()
     }
-}
-
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        self.count.fetch_sub(1, Ordering::Relaxed);
+    #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+    {
+        None
     }
-}
-
-/// The vector path of [`msm`]: the points in [`lane_msm_tasks`] even tasks, each summed in lanes,
-/// with the pool's idle threads helping on a task's groups of windows where `spread` is set.
-///
-/// # Safety
-/// `crate::ifma::available()` must have returned true on this host.
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
-unsafe fn lane_msm(bases: &[EdwardsAffine], scalars: &[Fr], spread: bool) -> EdwardsProjective {
-    let chunk = bases
-        .len()
-        .div_ceil(lane_msm_tasks(bases.len(), num_threads!()));
-    chunks!(bases, chunk)
-        .zip(chunks!(scalars, chunk))
-        // SAFETY: the caller's contract is this function's.
-        .map(|(b, s)| unsafe { crate::ifma_msm::msm(b, s, spread) })
-        .sum()
 }
 
 /// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
@@ -781,11 +707,10 @@ fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
         scalars.len(),
         "number of bases should equal number of scalars"
     );
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
-    if bases.len() >= LANE_MSM_MIN_POINTS && crate::ifma::available() {
-        let in_flight = InFlight::enter(&LANE_MSMS);
-        // SAFETY: `available()` returned true just above.
-        return unsafe { lane_msm(bases, scalars, in_flight.alone) };
+    if bases.len() >= LANE_MSM_MIN_POINTS {
+        if let Some(lanes) = lane_msm() {
+            return lanes(bases, scalars);
+        }
     }
     crate::msm::msm_windowed(bases, scalars)
 }
@@ -908,7 +833,7 @@ pub(crate) mod tests {
 
     /// The dispatch returns what arkworks' MSM returns on both sides of the vector path's cutoff,
     /// on both sides of its first split, and in pools of one, two and eight threads, which split
-    /// the sizes from 2,048 points up into one to eight chunks: the affine entry the same curve
+    /// the sizes from 2,048 points up into one to eight tasks: the affine entry the same curve
     /// point, the element entry the same element.
     #[cfg(feature = "parallel")]
     #[test]
@@ -952,97 +877,9 @@ pub(crate) mod tests {
                         Element(reference),
                         "projective n={n} threads={threads}"
                     );
-                    // The dispatch spreads an MSM's groups or not by what else is in flight in
-                    // the process, other tests included, so the vector path is also run both ways.
-                    #[cfg(all(feature = "std", target_arch = "x86_64"))]
-                    if n > 0 && crate::ifma::available() {
-                        for spread in [false, true] {
-                            assert_eq!(
-                                // SAFETY: `available()` returned true just above.
-                                unsafe { lane_msm(&bases[..n], &scalars[..n], spread) },
-                                reference,
-                                "lanes n={n} threads={threads} spread={spread}"
-                            );
-                        }
-                    }
                 });
             }
         }
-    }
-
-    /// An entry in a count of MSMs in flight says whether it started alone, and leaves the count
-    /// when it is dropped, by a panic too.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
-    #[test]
-    fn in_flight_counts_what_is_running() {
-        static COUNT: AtomicUsize = AtomicUsize::new(0);
-        {
-            let first = InFlight::enter(&COUNT);
-            assert!(first.alone);
-            {
-                let second = InFlight::enter(&COUNT);
-                assert!(!second.alone);
-                assert_eq!(COUNT.load(Ordering::Relaxed), 2);
-            }
-            assert!(!InFlight::enter(&COUNT).alone);
-            assert_eq!(COUNT.load(Ordering::Relaxed), 1);
-        }
-        assert_eq!(COUNT.load(Ordering::Relaxed), 0);
-        let unwound = self::std::panic::catch_unwind(|| {
-            let _entry = InFlight::enter(&COUNT);
-            assert_eq!(COUNT.load(Ordering::Relaxed), 1);
-            panic!("while in flight");
-        });
-        let message = unwound.expect_err("the closure panics");
-        assert_eq!(message.downcast_ref::<&str>(), Some(&"while in flight"));
-        assert_eq!(COUNT.load(Ordering::Relaxed), 0);
-        assert!(InFlight::enter(&COUNT).alone);
-    }
-
-    /// The vector path's tasks: one for every full [`LANE_MSM_TASK_POINTS`], at least one, and no
-    /// more than one per thread. They are even: they differ by fewer points than there are tasks,
-    /// so the shortest is under one point per task below `LANE_MSM_TASK_POINTS`, and while threads
-    /// remain none has twice that.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
-    #[test]
-    fn lane_msm_tasks_are_even() {
-        const TASK: usize = LANE_MSM_TASK_POINTS;
-        for threads in [1, 2, 8, 16, 32] {
-            for points in [
-                LANE_MSM_MIN_POINTS,
-                TASK,
-                2 * TASK - 1,
-                2 * TASK,
-                2 * TASK + 1,
-                3 * TASK - 1,
-                12_000,
-                32 * TASK + 1,
-                50_000,
-                65_292,
-                300_000,
-            ] {
-                let tasks = lane_msm_tasks(points, threads);
-                let chunk = points.div_ceil(tasks);
-                let last = points - (points.div_ceil(chunk) - 1) * chunk;
-                let what = format!("{points} points, {threads} threads");
-                assert_eq!(tasks, (points / TASK).clamp(1, threads), "{what}");
-                assert_eq!(
-                    points.div_ceil(chunk),
-                    tasks,
-                    "{what}: every task has points"
-                );
-                assert!(chunk - last < tasks, "{what}: {chunk} and {last}");
-                assert!(tasks == 1 || last + tasks > TASK, "{what}: {last}");
-                assert!(chunk < 2 * TASK || tasks == threads, "{what}: {chunk}");
-            }
-        }
-        // one task up to the last point before two full ones, then an even split
-        assert_eq!(lane_msm_tasks(2 * TASK - 1, 32), 1);
-        assert_eq!(lane_msm_tasks(2 * TASK + 1, 32), 2);
-        assert_eq!((2 * TASK + 1).div_ceil(2), TASK + 1);
-        // a short last task: 31 of 1,025 points and one of 994
-        assert_eq!(lane_msm_tasks(32 * TASK + 1, 32), 32);
-        assert_eq!(32 * TASK + 1 - 31 * (32 * TASK + 1).div_ceil(32), TASK - 30);
     }
 
     /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its

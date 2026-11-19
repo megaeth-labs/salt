@@ -26,7 +26,7 @@
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].
 #![allow(clippy::needless_range_loop)]
-use ark_ff::{BigInt, FftField, Field, One, PrimeField, Zero};
+use ark_ff::{BigInt, BigInteger, FftField, Field, One, PrimeField, Zero};
 use core::arch::x86_64::*;
 use std::sync::OnceLock;
 
@@ -225,14 +225,10 @@ unsafe fn ctx() -> Ctx {
         one_p_l[i] = s & MASK52;
         carry = s >> 52;
     }
-    // 2p as 52-bit limbs (< 2^257: fits)
-    let mut two_p_l = [0u64; 5];
-    let mut carry = 0u64;
-    for i in 0..5 {
-        let s = 2 * p_scalar[i] + carry;
-        two_p_l[i] = s & MASK52;
-        carry = s >> 52;
-    }
+    // 2p as 52-bit limbs: p has 255 bits, so the doubling carries nothing out
+    let mut two_p_big = Fq::MODULUS;
+    assert!(!two_p_big.mul2());
+    let two_p_l = to_limbs52(&two_p_big);
     let mut p = [_mm512_setzero_si512(); 5];
     let mut two_p = [_mm512_setzero_si512(); 5];
     let mut one = [_mm512_setzero_si512(); 5];
