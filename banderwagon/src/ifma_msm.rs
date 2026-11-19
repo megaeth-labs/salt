@@ -42,11 +42,11 @@ thread_local! {
 
 /// Projective extended point, eight lanes.
 #[derive(Clone, Copy)]
-pub(crate) struct PtL {
-    pub(crate) x: L5,
-    pub(crate) y: L5,
-    pub(crate) t: L5,
-    pub(crate) z: L5,
+struct PtL {
+    x: L5,
+    y: L5,
+    t: L5,
+    z: L5,
 }
 
 /// Affine point prepared for mixed addition, eight lanes: x, y, x + y, d·x·y.
@@ -58,11 +58,11 @@ struct AffL {
     dt: L5,
 }
 
-pub(crate) struct Consts {
-    pub(crate) five: L5,
-    pub(crate) d: L5,
-    pub(crate) zero: L5,
-    pub(crate) id: PtL,
+struct Consts {
+    five: L5,
+    d: L5,
+    zero: L5,
+    id: PtL,
     /// 2^264 mod p on every lane: `mont_mul(x·2^256, k264) = x·2^260`, ark's Montgomery representation
     /// taken straight into the lane form without a scalar reduction.
     k264: L5,
@@ -72,7 +72,7 @@ pub(crate) struct Consts {
 ///
 /// # Panics
 /// On a host without AVX-512 IFMA, as [`context`] does.
-pub(crate) fn consts() -> &'static Consts {
+fn consts() -> &'static Consts {
     static K: OnceLock<Consts> = OnceLock::new();
     K.get_or_init(|| {
         let c = context();
@@ -187,7 +187,7 @@ unsafe fn madd(c: &Ctx, k: &Consts, p: &PtL, q: &AffL) -> PtL {
 /// Full addition p + q, 11 lane products.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
+unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
     let a = mont_mul(c, &p.x, &q.x);
     let b = mont_mul(c, &p.y, &q.y);
     let cc = mont_mul(c, &mont_mul(c, &p.t, &q.t), &k.d);
@@ -207,7 +207,7 @@ pub(crate) unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
 
 /// The eight lanes of a lane point as ark projective points.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
+unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
     let x = store(c, &p.x);
     let y = store(c, &p.y);
     let t = store(c, &p.t);
@@ -262,7 +262,7 @@ fn lane_window(n: usize) -> usize {
 /// 8 × 8 transpose of 64-bit words: `r[i]` holds point `i`'s eight words in; word `j` of every point out.
 #[inline]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
+unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
     let t0 = _mm512_unpacklo_epi64(r[0], r[1]);
     let t1 = _mm512_unpackhi_epi64(r[0], r[1]);
     let t2 = _mm512_unpacklo_epi64(r[2], r[3]);
@@ -410,11 +410,7 @@ unsafe fn run_batch(
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn msm_runs(
-    bases: &[EdwardsAffine],
-    scalars: &[Fr],
-    cbits: usize,
-) -> EdwardsProjective {
+unsafe fn msm_runs(bases: &[EdwardsAffine], scalars: &[Fr], cbits: usize) -> EdwardsProjective {
     let c = context();
     let k = consts();
     let n = bases.len().min(scalars.len());

@@ -807,7 +807,7 @@ pub(crate) unsafe fn bcast(l: &[u64; 5]) -> L5 {
     v
 }
 
-/// The eight lanes' limbs as a [5][8] array (lane-major storage of points).
+/// The eight lanes' limbs as a `[5][8]` array (lane-major storage of points).
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn to_words(v: &L5) -> [[u64; 8]; 5] {

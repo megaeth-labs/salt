@@ -682,7 +682,7 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
 /// The size compared is the MSM's own input, after a proof check has coalesced repeated
 /// commitments, not the number of proof queries.
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-pub const LANE_MSM_MIN_POINTS: usize = 256;
+const LANE_MSM_MIN_POINTS: usize = 256;
 
 /// The points a vector task gets when an MSM is split: one task for every full
 /// `LANE_MSM_TASK_POINTS` the MSM has, and no more than one per thread.
@@ -698,7 +698,7 @@ pub const LANE_MSM_MIN_POINTS: usize = 256;
 /// points: one verification in an idle pool takes 74 ms instead of 81 ms, and 16 threads
 /// verifying at once do 86 a second instead of 81.
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-pub const LANE_MSM_TASK_POINTS: usize = 1024;
+const LANE_MSM_TASK_POINTS: usize = 1024;
 
 /// The tasks the vector path splits `points` into on `threads` threads: one for every full
 /// [`LANE_MSM_TASK_POINTS`], at least one, and no more than one per thread. The caller spreads
