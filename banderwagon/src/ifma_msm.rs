@@ -7,7 +7,8 @@
 //! counting-sorted by their signed digit, the non-empty buckets (runs) are ordered longest first, and eight
 //! runs at a time are summed in registers — each step loads one point per lane by three row loads and an
 //! in-register 8 × 8 transpose (no gather touches the table) and adds it, masked where a lane's run is
-//! exhausted; a finished batch's eight bucket sums are scattered once into a lane-major bucket store
+//! exhausted (a run's first point is taken as it is, with nothing to add it to); a finished batch's
+//! eight bucket sums are scattered once into a lane-major bucket store
 //! (lane = window there), kept per thread across calls. Nothing is gathered or scattered per point.
 //! Reduction, lane = window: the running sums over the buckets, high to low, are eight independent chains
 //! per group of windows; buckets no point reached are read as the identity through a mask. A group of
@@ -406,6 +407,51 @@ unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
     ]
 }
 
+/// The eight lanes' points at step `s` of their runs, negated where the digit is negative: index
+/// and sign from `order` (a lane outside `m` re-reads its first point), three eight-word rows per
+/// point loaded and transposed in registers, so no gather touches the table.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+unsafe fn next_points(
+    c: &Ctx,
+    k: &Consts,
+    pts: &[u64],
+    order: &[u64],
+    starts: &[i64; 8],
+    s: usize,
+    m: __mmask8,
+) -> AffL {
+    let mut neg: __mmask8 = 0;
+    let mut rows = [[_mm512_setzero_si512(); 8]; 3];
+    for l in 0..8 {
+        let pos = if (m >> l) & 1 == 1 {
+            starts[l] as usize + s
+        } else {
+            starts[l] as usize
+        };
+        let e = *order.get_unchecked(pos.min(order.len() - 1));
+        neg |= (((e >> 32) & 1) as u8) << l;
+        let base = pts.as_ptr().add((e & 0xffff_ffff) as usize * PW);
+        for r in 0..3 {
+            rows[r][l] = _mm512_loadu_si512(base.add(r * 8) as *const _);
+        }
+    }
+    let t0 = transpose8(&rows[0]);
+    let t1 = transpose8(&rows[1]);
+    let t2 = transpose8(&rows[2]);
+    let wv = [
+        t0[0], t0[1], t0[2], t0[3], t0[4], t0[5], t0[6], t0[7], t1[0], t1[1], t1[2], t1[3], t1[4],
+        t1[5], t1[6], t1[7], t2[0], t2[1], t2[2], t2[3],
+    ];
+    let q = AffL {
+        x: [wv[0], wv[1], wv[2], wv[3], wv[4]],
+        y: [wv[5], wv[6], wv[7], wv[8], wv[9]],
+        xy: [wv[10], wv[11], wv[12], wv[13], wv[14]],
+        dt: [wv[15], wv[16], wv[17], wv[18], wv[19]],
+    };
+    neg_aff(c, k, &q, neg)
+}
+
 /// One batch of up to eight runs (bucket, start in `order`, length), accumulated in registers with lane =
 /// run, then scattered once into the group's lane-major bucket store at lane `lane`.
 /// A separate `target_feature` function rather than a closure, so the intrinsics inline.
@@ -422,7 +468,6 @@ unsafe fn run_batch(
     lane: usize,
     nonempty: &mut [u8],
 ) {
-    let zero = _mm512_setzero_si512();
     let mut bl = [0i64; 8];
     let mut sl = [0i64; 8];
     let mut ll = [0i64; 8];
@@ -436,43 +481,20 @@ unsafe fn run_batch(
     let m_valid: __mmask8 = ((1u16 << fill) - 1) as __mmask8;
     let len_v = _mm512_loadu_si512(ll.as_ptr() as *const _);
     let b_v = _mm512_loadu_si512(bl.as_ptr() as *const _);
-    let mut p = k.id;
-    for s in 0..maxlen as i64 {
-        let s_v = _mm512_set1_epi64(s);
-        let m: __mmask8 = _mm512_cmpgt_epi64_mask(len_v, s_v) & m_valid;
-        // the eight lanes' next points: index and sign from `order` (an exhausted lane re-reads its first
-        // point, masked out of the addition below), three eight-word rows per point loaded and
-        // transposed in registers so no gather touches the table
-        let mut neg: __mmask8 = 0;
-        let mut rows = [[zero; 8]; 3];
-        for l in 0..8 {
-            let pos = if (m >> l) & 1 == 1 {
-                sl[l] as usize + s as usize
-            } else {
-                sl[l] as usize
-            };
-            let e = *order.get_unchecked(pos.min(order.len() - 1));
-            neg |= (((e >> 32) & 1) as u8) << l;
-            let base = pts.as_ptr().add((e & 0xffff_ffff) as usize * PW);
-            for r in 0..3 {
-                rows[r][l] = _mm512_loadu_si512(base.add(r * 8) as *const _);
-            }
-        }
-        let t0 = transpose8(&rows[0]);
-        let t1 = transpose8(&rows[1]);
-        let t2 = transpose8(&rows[2]);
-        let wv = [
-            t0[0], t0[1], t0[2], t0[3], t0[4], t0[5], t0[6], t0[7], t1[0], t1[1], t1[2], t1[3],
-            t1[4], t1[5], t1[6], t1[7], t2[0], t2[1], t2[2], t2[3],
-        ];
-        let q = AffL {
-            x: [wv[0], wv[1], wv[2], wv[3], wv[4]],
-            y: [wv[5], wv[6], wv[7], wv[8], wv[9]],
-            xy: [wv[10], wv[11], wv[12], wv[13], wv[14]],
-            dt: [wv[15], wv[16], wv[17], wv[18], wv[19]],
-        };
-        let qq = neg_aff(c, k, &q, neg);
-        let r = madd(c, k, &p, &qq);
+    // A run's first point starts its sum: (x, y, x·y, 1) is the point in extended coordinates, for
+    // one lane product where adding it to the identity takes nine. Every run has a first point, and
+    // the lanes past `fill` are not stored.
+    let first = next_points(c, k, pts, order, &sl, 0, m_valid);
+    let mut p = PtL {
+        x: first.x,
+        y: first.y,
+        t: mont_mul(c, &first.x, &first.y),
+        z: c.one,
+    };
+    for s in 1..maxlen as usize {
+        let m: __mmask8 = _mm512_cmpgt_epi64_mask(len_v, _mm512_set1_epi64(s as i64)) & m_valid;
+        let q = next_points(c, k, pts, order, &sl, s, m);
+        let r = madd(c, k, &p, &q);
         p = PtL {
             x: sel(m, &p.x, &r.x),
             y: sel(m, &p.y, &r.y),
@@ -639,10 +661,18 @@ unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
                 cnt[d.unsigned_abs() as usize] += 1;
             }
         }
-        let mut acc = 0u32;
+        for v in by_len.iter_mut() {
+            v.clear();
+        }
+        let mut start = 0u32;
         for b in 1..nb {
-            cursor[b] = acc;
-            acc += cnt[b];
+            let len = cnt[b];
+            cursor[b] = start;
+            if len > 0 {
+                by_len[(len as usize).min(LMAX - 1)].push((b as u32, start, len));
+                start += len;
+                top = top.max(b);
+            }
         }
         for i in 0..n {
             let d = digits[i * nwin + w];
@@ -650,18 +680,6 @@ unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
                 let b = d.unsigned_abs() as usize;
                 order[cursor[b] as usize] = (i as u64) | (((d < 0) as u64) << 32);
                 cursor[b] += 1;
-            }
-        }
-        for v in by_len.iter_mut() {
-            v.clear();
-        }
-        let mut start = 0u32;
-        for b in 1..nb {
-            let len = cnt[b];
-            if len > 0 {
-                by_len[(len as usize).min(LMAX - 1)].push((b as u32, start, len));
-                start += len;
-                top = top.max(b);
             }
         }
         // batches of eight runs, longest bins first
