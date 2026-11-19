@@ -324,9 +324,11 @@ pub mod parents_commitments_serde {
         let (ids, bytes) = d.deserialize_map(EntriesVisitor)?;
 
         // The batch decode returns the points in the order of `bytes`, beside `ids`, and stops at the
-        // first point it rejects.
+        // first point it rejects. Wrapping them reuses the vector's buffer (`SerdeCommitment` is
+        // `repr(transparent)` over `AffineElement`).
         let commitments = AffineElement::from_bytes_batch(&bytes)
             .map_err(|_| serde::de::Error::custom("invalid element bytes"))?
+            .into_iter()
             .map(SerdeCommitment)
             .collect();
         Ok(PathCommitments::from_sorted(ids, commitments))
