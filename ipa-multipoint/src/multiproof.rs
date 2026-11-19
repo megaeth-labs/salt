@@ -300,6 +300,9 @@ const BYTES_PER_QUERY: usize = 99; // 32 + 1 + 32 + 1 + 32 + 1
 /// serialization-and-hash handoffs for large proofs while keeping memory bounded.
 const TRANSCRIPT_CHUNK_QUERIES: usize = 16384;
 
+/// Queries the serial transcript writer buffers between two updates of the hash (6.3 KB).
+const SERIAL_BUFFER_QUERIES: usize = 64;
+
 /// One query's 99 transcript bytes: `C` and the commitment, `z` and the point, `y` and the
 /// result, each a 32-byte compressed encoding.
 #[inline(always)]
@@ -370,24 +373,56 @@ fn record_query_transcript<T: QueryData + Sync>(transcript: &mut Transcript, que
     });
 }
 
-/// The same transcript bytes as [`record_query_transcript`] for indexed queries: each
-/// commitment is serialized once.
+/// The same transcript bytes as [`record_query_transcript`] for indexed queries.
+///
+/// A proof of fewer than [`TRANSCRIPT_CHUNK_QUERIES`] queries (every witness of an ordinary
+/// block) is written on the calling thread, a few queries at a time into a small buffer that
+/// is hashed as it fills: its bytes take less time to write than a hand-off to the thread pool
+/// and back, which a verifier called from outside the pool waits for, and which waits longer
+/// still while other verifications keep the pool busy. Each commitment is serialized once per
+/// run of consecutive queries that open it (a proof's queries come grouped by node).
+///
+/// A larger proof is written in parallel, a chunk at a time, each commitment serialized once.
 #[inline(always)]
 fn record_indexed_query_transcript(
     transcript: &mut Transcript,
     commitments: &[AffineElement],
     queries: &[IndexedQuery],
 ) {
-    let commitment_bytes: Vec<[u8; 32]> = iter!(commitments).map(|c| c.to_bytes()).collect();
-    record_query_bytes(transcript, queries.len(), |i, chunk_res| {
-        let q = &queries[i];
-        write_query_bytes(
-            chunk_res,
-            &commitment_bytes[q.commitment as usize],
-            &domain_point_bytes(q.point),
-            &q.result,
-        )
-    });
+    if queries.len() >= TRANSCRIPT_CHUNK_QUERIES {
+        let commitment_bytes: Vec<[u8; 32]> = iter!(commitments).map(|c| c.to_bytes()).collect();
+        record_query_bytes(transcript, queries.len(), |i, chunk_res| {
+            let q = &queries[i];
+            write_query_bytes(
+                chunk_res,
+                &commitment_bytes[q.commitment as usize],
+                &domain_point_bytes(q.point),
+                &q.result,
+            )
+        });
+        return;
+    }
+    let mut buffer = [0u8; SERIAL_BUFFER_QUERIES * BYTES_PER_QUERY];
+    let mut previous: Option<(u32, [u8; 32])> = None;
+    for batch in queries.chunks(SERIAL_BUFFER_QUERIES) {
+        for (q, chunk_res) in batch.iter().zip(buffer.chunks_exact_mut(BYTES_PER_QUERY)) {
+            let commitment = match previous {
+                Some((index, bytes)) if index == q.commitment => bytes,
+                _ => {
+                    let bytes = commitments[q.commitment as usize].to_bytes();
+                    previous = Some((q.commitment, bytes));
+                    bytes
+                }
+            };
+            write_query_bytes(
+                chunk_res,
+                &commitment,
+                &domain_point_bytes(q.point),
+                &q.result,
+            );
+        }
+        transcript.append_raw(&buffer[..batch.len() * BYTES_PER_QUERY]);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -931,7 +966,8 @@ mod tests {
 
         // Indexed queries over a shared commitment slice: the same bytes again, across chunk
         // boundaries (more queries than one transcript chunk, each commitment opened at
-        // several points).
+        // several points), and below one chunk, where the indexed form writes on the calling
+        // thread.
         let (prover_queries, verifier_queries) =
             generate_test_queries(3 * TRANSCRIPT_CHUNK_QUERIES + 17);
         let mut commitments: Vec<Element> = Vec::new();
@@ -953,7 +989,15 @@ mod tests {
             })
             .collect();
         let affine: Vec<AffineElement> = commitments.iter().map(|c| (*c).into()).collect();
-        for n in [0, 1, TRANSCRIPT_CHUNK_QUERIES, indexed.len()] {
+        for n in [
+            0,
+            1,
+            SERIAL_BUFFER_QUERIES,
+            SERIAL_BUFFER_QUERIES + 1,
+            TRANSCRIPT_CHUNK_QUERIES - 1,
+            TRANSCRIPT_CHUNK_QUERIES,
+            indexed.len(),
+        ] {
             let mut transcript = Transcript::new(b"");
             record_indexed_query_transcript(&mut transcript, &affine, &indexed[..n]);
             let mut expected = Transcript::new(b"");
