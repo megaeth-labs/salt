@@ -1,4 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// cargo-llvm-cov sets `coverage_nightly` on a nightly toolchain: the manual benches are left out of
+// the coverage report, where as ignored tests they would count as uncovered lines
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
@@ -18,6 +21,12 @@ use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, multi_scalar_mul_affine, AffineElement, Element, Fr};
 pub mod salt_committer;
 mod scalar_multi_asm;
+// Used by the vector MSM (`x86_64` with `std`); its tests need no vector unit and run everywhere.
+#[cfg(all(
+    feature = "std",
+    any(target_arch = "x86_64", all(test, feature = "parallel"))
+))]
+mod spread;
 
 // Re-export arkworks traits that one may need to use in order to use
 // specific methods on field elements and for serialization.

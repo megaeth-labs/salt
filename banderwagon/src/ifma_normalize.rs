@@ -264,7 +264,8 @@ unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
         let last = (n - 1 - k) / CHAINS * CHAINS + k; // the largest g ≡ k (mod 4) below n
         ends[k] = s.prefix[last];
     }
-    let mut inv = batch_inverse::<CHAINS>(c, &ends);
+    let mut inv = ends;
+    batch_inverse(c, &mut inv);
     let zero = [_mm512_setzero_si512(); 5];
     for g in (0..n).rev() {
         let k = g % CHAINS;
@@ -428,6 +429,7 @@ pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::tests::lanes_under_test;
     use crate::element::{
         batch_map_to_scalar_field_affine_scalar, batch_map_to_scalar_field_scalar,
         batch_to_commitments_scalar, hash_commitments_scalar,
@@ -470,7 +472,7 @@ mod tests {
 
     #[test]
     fn lane_batch_to_commitments_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 16, 64, 2048, 2056, 4096 + 24] {
@@ -487,7 +489,7 @@ mod tests {
     /// points, at every batch length modulo the block.
     #[test]
     fn lane_batch_map_to_scalar_field_affine_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 16, 64, 2048, 2056, 4096 + 24] {
@@ -518,7 +520,7 @@ mod tests {
 
     #[test]
     fn lane_batch_map_to_scalar_field_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 24, 2048, 2056, 4096 + 8] {
@@ -532,7 +534,7 @@ mod tests {
 
     #[test]
     fn lane_hash_commitments_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 40, 2048, 2064] {
@@ -577,6 +579,7 @@ mod tests {
     /// `cargo test --release -p banderwagon bench_normalize -- --ignored --nocapture`
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_normalize() {
         if !available() {
             return;
