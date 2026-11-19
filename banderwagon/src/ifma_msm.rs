@@ -32,11 +32,11 @@ use std::sync::OnceLock;
 
 thread_local! {
     /// The bucket store, kept per thread across calls. Its size follows the window, not the input
-    /// (1.3 MB at window 9), and it is written before it is read, so a call neither allocates nor clears
-    /// it. The tables whose size follows the input (the prepared points, the digits, the sort order:
-    /// 258 bytes per point at window 9) are allocated per call. Keeping them per thread as well changed
-    /// the time of a task of the dispatch's sizes by under 1%, on glibc's allocator and on jemalloc:
-    /// both hand the freed blocks back to the next call.
+    /// (0.66 MB at window 8, 1.3 MB at window 9), and it is written before it is read, so a call
+    /// neither allocates nor clears it. The tables whose size follows the input (the prepared points,
+    /// the digits, the sort order: 258 bytes per point at window 9) are allocated per call. Keeping
+    /// them per thread as well changed the time of a task of 4,096 to 16,384 points by under 1%, on
+    /// glibc's allocator and on jemalloc: both hand the freed blocks back to the next call.
     static BUCKET_SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -235,9 +235,10 @@ pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProj
     msm_runs(bases, scalars, lane_window(n))
 }
 
-/// The window size for the lane accumulation: 9 from 4,097 points, 8 from 32 points, 3 below. Every
-/// task the dispatch hands over has more than 4,096 points, apart from the 4,096-point half of an
-/// 8,193-point MSM, so its tasks run at window 9.
+/// The window size for the lane accumulation: 9 from 4,097 points, 8 from 32 points, 3 below. The
+/// dispatch hands over tasks of 256 points and more, and of 4,096 or fewer while the pool has a
+/// thread for every 4,096 points of the MSM, so its tasks run at window 8. A larger task runs at
+/// window 9: any MSM over 4,096 points in a pool of one thread, one over 131,072 in a pool of 32.
 ///
 /// ark's rule (`ln(n) + 2`: 10 at 8,192 points) balances scalar bucket additions against the reduction.
 /// In lanes the reduction's two full additions per bucket are the dear part (22 lane products per
@@ -245,6 +246,8 @@ pub(crate) unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProj
 ///
 /// One thread of an EPYC 9B45, µs per point at windows 8, 9, 10 and 11: 1.03, 1.11, 1.03 and 1.21
 /// for 4,096 points; 1.08, 1.04, 0.94 and 0.97 for 8,192; 1.06, 1.06, 0.88 and 0.77 for 50,000.
+/// At windows 6, 7, 8 and 9: 1.88, 1.91, 2.00 and 2.81 for 274 points; 1.42, 1.30, 1.18 and 1.40
+/// for 1,024; 1.38, 1.20, 1.03 and 1.16 for 2,047.
 fn lane_window(n: usize) -> usize {
     if n < 32 {
         3
@@ -613,8 +616,8 @@ mod tests {
 
     /// The lane MSM returns the curve point `EdwardsProjective::msm` returns: at the window
     /// [`lane_window`] picks for each size, up to the sizes the dispatch hands over, and at every
-    /// window from 3 to 12 on the smaller ones. Window 9 is the one the dispatch's chunks get, and
-    /// window 11 the one whose last digit runs over the whole radix instead of half of it.
+    /// window from 3 to 12 on the smaller ones. Windows 8 and 9 are the ones the dispatch's tasks
+    /// get, and window 11 the one whose last digit runs over the whole radix instead of half of it.
     #[test]
     fn lane_msm_matches_ark_msm() {
         if !lanes_under_test() {

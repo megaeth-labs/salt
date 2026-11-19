@@ -657,29 +657,57 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
     }
 }
 
-/// The smallest multi-scalar multiplication the vector path ([`crate::ifma_msm`]) takes, and the
-/// most points one of its tasks gets while there are threads to split over. Below it
+/// The smallest multi-scalar multiplication the vector path ([`crate::ifma_msm`]) takes. Below it
 /// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
 ///
-/// A vector task runs on one thread, and the scalar path spreads its windows over all of them.
-/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), on one thread the lanes are the faster
-/// path from 128 points up: 0.42 ms against 1.6 ms there, 8.6 ms against 48 ms at 8,192 points.
-/// In an idle pool of 32 threads the scalar path takes 3.5 ms for 8,191 points, with 72 ms of
-/// thread time, and the lanes take 8.5 ms for 8,192 points, on one thread.
+/// A vector task runs on one thread, and the scalar path spreads its windows over all of them. So
+/// in an idle pool the scalar path returns sooner at the sizes just above the cutoff, and takes
+/// several times the thread time to do it; in a busy pool, where the threads it would use have
+/// other work, the lanes are the faster path as well. The cutoff is placed for the busy pool.
+///
+/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), at the 274 points of the MSM every proof
+/// check ends with: one thread takes 0.55 ms in lanes and 3.2 ms on the scalar path. In a pool
+/// of 32 threads that was asleep the lanes take 0.56 ms on one thread, and the scalar path
+/// 0.45 ms with 10 ms of thread time. With 64 of them at once in that pool the batch takes
+/// 0.03 ms per MSM in lanes and 0.17 ms on the scalar path. At 2,047 points, the largest MSM
+/// that is not split, those are 2.1 ms and 14.5 ms, 2.1 ms and 1.1 ms (25 ms of thread time),
+/// 0.12 ms and 0.72 ms.
+///
+/// Verifying the witnesses of 62 mainnet blocks (MSMs of 112 to 3,127 points, and the 274-point
+/// one in each) with this cutoff instead of one at 8,192 points: 16 threads verifying at once do
+/// 2,950 a second instead of 1,310, and one verification in an idle pool takes 2.9 ms instead of
+/// 2.3 ms. Cutoffs of 64, 128 and 256 points timed alike there. One of 512, which leaves the
+/// 274-point MSM on the scalar path, gave about a quarter of the gain.
 ///
 /// The size compared is the MSM's own input, after a proof check has coalesced repeated
 /// commitments, not the number of proof queries.
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-pub const LANE_MSM_MIN_POINTS: usize = 8192;
+pub const LANE_MSM_MIN_POINTS: usize = 256;
 
-/// The tasks the vector path splits `points` into on `threads` threads: as few as keep every
-/// task at [`LANE_MSM_MIN_POINTS`] points or fewer, and no more than one per thread. The caller
-/// spreads the points evenly over them, so that no task is left a short remainder beside full
-/// ones: 8,193 points on two threads are 4,097 and 4,096, not 8,192 and 1. An MSM takes as long
-/// as its longest task.
+/// The points a vector task gets when an MSM is split: one task for every full
+/// `LANE_MSM_TASK_POINTS` the MSM has, and no more than one per thread.
+///
+/// Smaller tasks finish a large MSM sooner in an idle pool and take more thread time doing it:
+/// every task repeats the bucket reduction, and past one task per core the tasks share cores.
+/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), in a pool of 32 threads that was asleep,
+/// 65,536 points take 3.7 ms as 32 tasks of 2,048 points, with 117 ms of thread time, and 8.4 ms
+/// as 8 tasks of 8,192, with 68 ms. With 64 such MSMs at once in that pool the batch takes
+/// 3.5 ms per MSM in the smaller tasks and 4.0 ms in the larger.
+///
+/// Verifying 22 witnesses of 59,000 to 65,000 points with tasks of this size instead of 8,192
+/// points: one verification in an idle pool takes 74 ms instead of 81 ms, and 16 threads
+/// verifying at once do 86 a second instead of 81.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+pub const LANE_MSM_TASK_POINTS: usize = 1024;
+
+/// The tasks the vector path splits `points` into on `threads` threads: one for every full
+/// [`LANE_MSM_TASK_POINTS`], at least one, and no more than one per thread. The caller spreads
+/// the points evenly over them, so that no task is left a short remainder beside full ones:
+/// 2,049 points on two threads are 1,025 and 1,024, not 2,048 and 1. An MSM takes as long as its
+/// longest task. Below two full tasks' worth an MSM is one task, of up to 2,047 points.
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 fn lane_msm_tasks(points: usize, threads: usize) -> usize {
-    points.div_ceil(LANE_MSM_MIN_POINTS).min(threads).max(1)
+    (points / LANE_MSM_TASK_POINTS).min(threads).max(1)
 }
 
 /// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
@@ -820,10 +848,10 @@ pub(crate) mod tests {
     extern crate std;
     use self::std::println;
 
-    /// The dispatch returns what arkworks' MSM returns on both sides of the vector path's cutoff
-    /// and in pools of one, two and eight threads, which split the sizes above the cutoff into
-    /// one to three chunks: the affine entry the same curve point, the element entry the same
-    /// element.
+    /// The dispatch returns what arkworks' MSM returns on both sides of the vector path's cutoff,
+    /// on both sides of its first split, and in pools of one, two and eight threads, which split
+    /// the sizes from 2,048 points up into one to eight chunks: the affine entry the same curve
+    /// point, the element entry the same element.
     #[cfg(feature = "parallel")]
     #[test]
     fn msm_pool_crossover_preserves_group_result() {
@@ -847,7 +875,7 @@ pub(crate) mod tests {
                 .build()
                 .unwrap()
         });
-        for n in [0, 1024, 8191, 8192, 8193, 12289, 16385] {
+        for n in [0, 255, 256, 257, 1024, 2047, 2048, 2049, 4097, 8193, 16385] {
             let reference = EdwardsProjective::msm(&bases[..n], &scalars[..n]).unwrap();
             let projective: Vec<_> = bases[..n]
                 .iter()
@@ -871,42 +899,50 @@ pub(crate) mod tests {
         }
     }
 
-    /// The vector path's tasks are even: they differ by fewer points than there are tasks, none
-    /// is over the cutoff while threads remain, and a thread count the points do not fill gets
-    /// one task per [`LANE_MSM_MIN_POINTS`] points, rounded up.
+    /// The vector path's tasks: one for every full [`LANE_MSM_TASK_POINTS`], at least one, and no
+    /// more than one per thread. They are even: they differ by fewer points than there are tasks,
+    /// so the shortest is under one point per task below `LANE_MSM_TASK_POINTS`, and while threads
+    /// remain none has twice that.
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn lane_msm_tasks_are_even() {
-        const CUT: usize = LANE_MSM_MIN_POINTS;
-        for threads in [1, 2, 8, 32] {
+        const TASK: usize = LANE_MSM_TASK_POINTS;
+        for threads in [1, 2, 8, 16, 32] {
             for points in [
-                CUT,
-                CUT + 1,
+                LANE_MSM_MIN_POINTS,
+                TASK,
+                2 * TASK - 1,
+                2 * TASK,
+                2 * TASK + 1,
+                3 * TASK - 1,
                 12_000,
-                2 * CUT - 1,
-                2 * CUT,
-                2 * CUT + 1,
+                32 * TASK + 1,
                 50_000,
+                65_292,
                 300_000,
             ] {
                 let tasks = lane_msm_tasks(points, threads);
                 let chunk = points.div_ceil(tasks);
                 let last = points - (points.div_ceil(chunk) - 1) * chunk;
                 let what = format!("{points} points, {threads} threads");
-                assert_eq!(tasks, points.div_ceil(CUT).min(threads), "{what}");
+                assert_eq!(tasks, (points / TASK).clamp(1, threads), "{what}");
                 assert_eq!(
                     points.div_ceil(chunk),
                     tasks,
                     "{what}: every task has points"
                 );
                 assert!(chunk - last < tasks, "{what}: {chunk} and {last}");
-                assert!(chunk <= CUT || tasks == threads, "{what}: {chunk}");
+                assert!(tasks == 1 || last + tasks > TASK, "{what}: {last}");
+                assert!(chunk < 2 * TASK || tasks == threads, "{what}: {chunk}");
             }
         }
-        // the cases a remainder split got wrong
-        assert_eq!(lane_msm_tasks(CUT + 1, 32), 2);
-        assert_eq!((CUT + 1).div_ceil(2), CUT / 2 + 1);
-        assert_eq!(lane_msm_tasks(2 * CUT - 1, 32), 2);
+        // one task up to the last point before two full ones, then an even split
+        assert_eq!(lane_msm_tasks(2 * TASK - 1, 32), 1);
+        assert_eq!(lane_msm_tasks(2 * TASK + 1, 32), 2);
+        assert_eq!((2 * TASK + 1).div_ceil(2), TASK + 1);
+        // a short last task: 31 of 1,025 points and one of 994
+        assert_eq!(lane_msm_tasks(32 * TASK + 1, 32), 32);
+        assert_eq!(32 * TASK + 1 - 31 * (32 * TASK + 1).div_ceil(32), TASK - 30);
     }
 
     /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its
