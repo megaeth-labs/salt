@@ -998,27 +998,26 @@ mod tests {
         assert_eq!(verifier_state, verifier_state2);
 
         // Indexed queries over a shared commitment slice: the same bytes again, across chunk
-        // boundaries (more queries than one transcript chunk, each commitment opened at
-        // several points), and below one chunk, where the indexed form writes on the calling
-        // thread.
-        let (prover_queries, verifier_queries) =
-            generate_test_queries(3 * TRANSCRIPT_CHUNK_QUERIES + 17);
-        let mut commitments: Vec<Element> = Vec::new();
-        let indexed: Vec<IndexedQuery> = prover_queries
+        // boundaries (more queries than one transcript chunk) and below one chunk, where the
+        // indexed form writes on the calling thread. Each commitment is opened by a run of
+        // consecutive queries, at different points, and again by runs further on, in every chunk.
+        let mut rng = test_rng();
+        let commitments: Vec<Element> = (0..97)
+            .map(|_| Element::prime_subgroup_generator() * Fr::rand(&mut rng))
+            .collect();
+        let indexed: Vec<IndexedQuery> = (0..3 * TRANSCRIPT_CHUNK_QUERIES + 17)
+            .map(|i| IndexedQuery {
+                commitment: ((i / 3) % commitments.len()) as u32,
+                point: (i % 256) as u32,
+                result: Fr::rand(&mut rng),
+            })
+            .collect();
+        let verifier_queries: Vec<VerifierQuery> = indexed
             .iter()
-            .map(|q| {
-                let idx = match commitments.iter().position(|c| *c == q.commitment) {
-                    Some(i) => i,
-                    None => {
-                        commitments.push(q.commitment);
-                        commitments.len() - 1
-                    }
-                };
-                IndexedQuery {
-                    commitment: idx as u32,
-                    point: q.point as u32,
-                    result: q.result,
-                }
+            .map(|q| VerifierQuery {
+                commitment: commitments[q.commitment as usize],
+                point: Fr::from(q.point),
+                result: q.result,
             })
             .collect();
         let affine: Vec<AffineElement> = commitments.iter().map(|c| (*c).into()).collect();
