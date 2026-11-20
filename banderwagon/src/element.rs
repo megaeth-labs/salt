@@ -480,7 +480,7 @@ impl Element {
             elements,
             [0u8; 64],
             crate::ifma_normalize::batch_to_commitments,
-            batch_to_commitments_scalar,
+            batch_to_commitments_tail,
         ) {
             return out;
         }
@@ -581,6 +581,18 @@ fn on_lanes<T, O: Copy>(
 pub(crate) fn batch_to_commitments_scalar(elements: &[Element]) -> Vec<[u8; 64]> {
     let points: Vec<_> = elements.iter().map(|e| e.0).collect();
     EdwardsProjective::normalize_batch(&points)
+        .into_iter()
+        .map(affine_to_canonical_bytes)
+        .collect()
+}
+
+/// [`Element::batch_to_commitments`] for the one to seven elements after the lanes' groups of
+/// eight: their `Z` inverted in one serial batch ([`to_affine_bases`]), where ark's batch
+/// normalization ([`batch_to_commitments_scalar`]) would invert each in a parallel task of its
+/// own.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+fn batch_to_commitments_tail(elements: &[Element]) -> Vec<[u8; 64]> {
+    to_affine_bases(elements)
         .into_iter()
         .map(affine_to_canonical_bytes)
         .collect()
