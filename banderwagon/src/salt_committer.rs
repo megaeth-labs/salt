@@ -63,6 +63,9 @@ pub struct Committer {
     /// Precomputed tables of multiples for each base point.
     /// Structure: tables[base_index][window_index * half_window_size + multiple]
     tables: Vec<Vec<EdwardsAffine>>,
+    /// What the lane path keeps beside `tables`, on a host where it runs.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    lane: Option<crate::ifma_committer::LaneTables>,
 }
 
 impl Drop for Committer {
@@ -152,6 +155,8 @@ impl Committer {
         };
 
         Committer {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            lane: crate::ifma_committer::LaneTables::new(&tables, window_size),
             tables,
             window_size,
         }
@@ -182,6 +187,8 @@ impl Committer {
             .collect();
 
         Committer {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            lane: crate::ifma_committer::LaneTables::new(&tables, window_size),
             tables,
             window_size,
         }
@@ -299,22 +306,22 @@ impl Committer {
     pub fn mul_index_batch(&self, scalars: &[Fr], indices: &[usize]) -> Vec<Element> {
         assert_eq!(scalars.len(), indices.len(), "one index per scalar");
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
-        {
-            if crate::ifma::available() {
-                let mut out = Vec::with_capacity(scalars.len());
-                for (s, g) in scalars.chunks(LANES).zip(indices.chunks(LANES)) {
-                    // SAFETY: lanes are available; the chunks are equal length <= 8; every index is
-                    // below `tables.len()` (or `tables[g]` panics here as `mul_index` would).
-                    for &gi in g {
-                        assert!(gi < self.tables.len(), "base index out of range");
-                    }
-                    let r = unsafe {
-                        crate::ifma_committer::mul_index8(&self.tables, self.window_size, s, g)
-                    };
-                    out.extend(r[..s.len()].iter().map(|p| Element(*p)));
-                }
-                return out;
+        if let Some(lane) = &self.lane {
+            for &g in indices {
+                assert!(g < self.tables.len(), "base index out of range");
             }
+            // SAFETY: `lane` was built from `self.tables` at `self.window_size`, the lengths
+            // are equal and every index is below `tables.len()`.
+            let products = unsafe {
+                crate::ifma_committer::mul_index_batch(
+                    &self.tables,
+                    lane,
+                    self.window_size,
+                    scalars,
+                    indices,
+                )
+            };
+            return products.into_iter().map(Element).collect();
         }
         scalars
             .iter()
@@ -378,7 +385,7 @@ impl Committer {
     /// Where [`Committer::mul_index_batch`] runs in lanes, each thread's terms go through it, so
     /// these multiplications are batched like the trie update's.
     pub fn msm(&self, terms: &[(usize, Fr)]) -> Element {
-        chunks!(terms, msm_task_size(terms.len()))
+        chunks!(terms, self.msm_task_size(terms.len()))
             .map(|task| self.sum_terms(task.iter().copied()))
             .sum()
     }
@@ -390,7 +397,7 @@ impl Committer {
     ///
     /// If there are more scalars than bases.
     pub fn msm_dense(&self, scalars: &[Fr]) -> Element {
-        let task_size = msm_task_size(scalars.len());
+        let task_size = self.msm_task_size(scalars.len());
         chunks!(scalars, task_size)
             .enumerate()
             .map(|(task, scalars)| {
@@ -408,7 +415,7 @@ impl Committer {
     /// Sums `scalar · G[index]` over one task's terms, skipping zero scalars: in lanes where the
     /// host has them, otherwise one [`Committer::mul_index`] after another.
     fn sum_terms(&self, terms: impl Iterator<Item = (usize, Fr)>) -> Element {
-        if lanes_available() {
+        if self.in_lanes() {
             return self.sum_terms_batched(terms);
         }
         terms
@@ -424,35 +431,35 @@ impl Committer {
             terms.filter(|(_, scalar)| !scalar.is_zero()).unzip();
         self.mul_index_batch(&scalars, &indices).into_iter().sum()
     }
+
+    /// Whether [`Committer::mul_index_batch`] runs in lanes: this committer holds their tables.
+    #[inline]
+    fn in_lanes(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        {
+            self.lane.is_some()
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        {
+            false
+        }
+    }
+
+    /// Terms per parallel task of [`Committer::msm`] and [`Committer::msm_dense`]: `len` spread
+    /// over the threads and, where the multiplications run in lanes, rounded up to whole lane
+    /// groups, so that only the last task can leave lanes idle.
+    fn msm_task_size(&self, len: usize) -> usize {
+        let size = thread_chunk_size!(len);
+        if self.in_lanes() {
+            size.next_multiple_of(LANES)
+        } else {
+            size
+        }
+    }
 }
 
 /// Multiplications per vector register in [`Committer::mul_index_batch`]'s lane path.
-const LANES: usize = 8;
-
-/// Whether [`Committer::mul_index_batch`] runs in lanes on this host.
-#[inline]
-fn lanes_available() -> bool {
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
-    {
-        crate::ifma::available()
-    }
-    #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
-    {
-        false
-    }
-}
-
-/// Terms per parallel task of [`Committer::msm`] and [`Committer::msm_dense`]: `len` spread over
-/// the threads and, where the multiplications run in lanes, rounded up to whole lane groups, so
-/// that only the last task can leave lanes idle.
-fn msm_task_size(len: usize) -> usize {
-    let size = thread_chunk_size!(len);
-    if lanes_available() {
-        size.next_multiple_of(LANES)
-    } else {
-        size
-    }
-}
+pub(crate) const LANES: usize = 8;
 
 /// Adds an affine point to a projective point using extended Edwards coordinates.
 ///
@@ -566,7 +573,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
 ///
 /// A vector of w-bit values representing the windowed decomposition.
 #[inline]
-pub(crate) fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
+fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     // Convert scalar from Montgomery form to big integer
     let source_vec = scalar.into_bigint().0;
     let mut index_vec = vec![];
@@ -717,10 +724,12 @@ mod tests {
     /// in lanes, holds whole lane groups; elsewhere it is the plain spread over the threads.
     #[test]
     fn msm_task_size_fills_lane_groups() {
+        let crs = [Element::prime_subgroup_generator()];
+        let committer = Committer::new(&crs, platform::LANE_PRECOMP_WINDOW_SIZE);
         for len in [0, 1, 7, 8, 9, 129, 256, 1000] {
-            let size = msm_task_size(len);
+            let size = committer.msm_task_size(len);
             assert!(size >= 1, "{len} terms");
-            if lanes_available() {
+            if committer.in_lanes() {
                 assert_eq!(size % LANES, 0, "{len} terms");
                 assert!(size < thread_chunk_size!(len) + LANES, "{len} terms");
             } else {

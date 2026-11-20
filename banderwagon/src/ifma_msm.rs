@@ -56,11 +56,11 @@ thread_local! {
 
 /// Projective extended point, eight lanes.
 #[derive(Clone, Copy)]
-pub(crate) struct PtL {
-    pub(crate) x: L5,
-    pub(crate) y: L5,
-    pub(crate) t: L5,
-    pub(crate) z: L5,
+struct PtL {
+    x: L5,
+    y: L5,
+    t: L5,
+    z: L5,
 }
 
 /// Affine point prepared for mixed addition, eight lanes: x, y, x + y, d·x·y.
@@ -72,11 +72,11 @@ struct AffL {
     dt: L5,
 }
 
-pub(crate) struct Consts {
-    pub(crate) five: L5,
+struct Consts {
+    five: L5,
     d: L5,
-    pub(crate) zero: L5,
-    pub(crate) id: PtL,
+    zero: L5,
+    id: PtL,
     /// 2^264 mod p on every lane: `mont_mul(x·2^256, k264) = x·2^260`, ark's Montgomery representation
     /// taken straight into the lane form without a scalar reduction.
     k264: L5,
@@ -86,7 +86,7 @@ pub(crate) struct Consts {
 ///
 /// # Panics
 /// On a host without AVX-512 IFMA, as [`context`] does.
-pub(crate) fn consts() -> &'static Consts {
+fn consts() -> &'static Consts {
     static K: OnceLock<Consts> = OnceLock::new();
     K.get_or_init(|| {
         let c = context();
@@ -221,7 +221,7 @@ unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
 
 /// The eight lanes of a lane point as ark projective points.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
+unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
     let x = store(c, &p.x);
     let y = store(c, &p.y);
     let t = store(c, &p.t);
