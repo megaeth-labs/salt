@@ -371,9 +371,10 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
     }
 }
 
-/// `AffineElement::batch_map_to_scalar_field` on the lanes. The 64-byte affine records (`x` then `y`,
-/// Montgomery words) are read as `hash_commitments` reads plain bytes: `x/y` is a ratio, the common
-/// factor cancels.
+/// `AffineElement::batch_map_to_scalar_field` on the lanes: [`records_to_scalars`] on the points'
+/// 64-byte records (`x` then `y`, Montgomery words), read as `hash_commitments` reads plain bytes:
+/// `x/y` is a ratio, the common factor cancels. They are not checked: every word is below the
+/// modulus, and the records are points already.
 ///
 /// # Panics
 ///
@@ -383,58 +384,59 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement], out: &mut [Fr]) {
-    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
-    let c = context();
-    let g = groups_of(elements.len());
-    let mut s = Scratch::new(c, g);
-    let mut xs = vec![c.one; g];
-    let mut ys = vec![c.one; g];
-    for (blk, out_blk) in elements.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
-        let n = blk.len() / 8;
-        for g in 0..n {
-            let (x, y) = load_xy_bytes(c, blk.as_ptr().add(8 * g) as *const [u8; 64]);
-            xs[g] = x;
-            ys[g] = y;
-        }
-        ratios_to_scalars(c, &xs[..n], &ys[..n], &mut s, out_blk);
-    }
+    // SAFETY: an `AffineElement` is the 64-byte record `x` then `y` (asserted above), and a
+    // `[u8; 64]` has no alignment to keep.
+    let records = core::slice::from_raw_parts(elements.as_ptr().cast::<[u8; 64]>(), elements.len());
+    records_to_scalars::<false>(records, out)
 }
 
-/// `Element::hash_commitments` on the lanes.
+/// `Element::hash_commitments` on the lanes: [`records_to_scalars`] on the commitments, each
+/// coordinate checked to be canonical first, as the scalar path's unchecked decoding checks it.
 ///
 /// # Panics
 ///
-/// If `commitments.len()` is not a multiple of eight or `out` is not as long.
+/// If `commitments.len()` is not a multiple of eight or `out` is not as long, or a coordinate is
+/// not below the modulus.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) {
-    assert!(commitments.len().is_multiple_of(8) && out.len() == commitments.len());
+    records_to_scalars::<true>(commitments, out)
+}
+
+/// `x/y` in the scalar field for every 64-byte record (`x` then `y`, little-endian), the plain
+/// words read as the lane form of `x/R` and `y/R`: the ratio is `x/y` all the same. With `CHECKED`,
+/// each record's coordinates are checked to be canonical before its block is loaded (and, in
+/// debug builds, the record decoded as a point, as the scalar path does).
+#[target_feature(enable = "avx512f,avx512ifma")]
+unsafe fn records_to_scalars<const CHECKED: bool>(records: &[[u8; 64]], out: &mut [Fr]) {
+    assert!(records.len().is_multiple_of(8) && out.len() == records.len());
     let c = context();
-    let g = groups_of(commitments.len());
+    let g = groups_of(records.len());
     let mut s = Scratch::new(c, g);
     let mut xs = vec![c.one; g];
     let mut ys = vec![c.one; g];
-    for (blk, out_blk) in commitments.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
-        for bytes in blk {
-            // Unchecked point decoding still rejects noncanonical field coordinates.
-            // Validate before raw lane loads, without a Montgomery conversion.
-            for coordinate in bytes.chunks_exact(32) {
-                let words = core::array::from_fn(|i| {
-                    u64::from_le_bytes(coordinate[i * 8..i * 8 + 8].try_into().unwrap())
-                });
-                assert!(
-                    BigInt::<4>(words) < Fq::MODULUS,
-                    "noncanonical commitment coordinate"
-                );
+    for (blk, out_blk) in records.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
+        if CHECKED {
+            for bytes in blk {
+                // Unchecked point decoding still rejects noncanonical field coordinates.
+                // Validate before raw lane loads, without a Montgomery conversion.
+                for coordinate in bytes.chunks_exact(32) {
+                    let words = core::array::from_fn(|i| {
+                        u64::from_le_bytes(coordinate[i * 8..i * 8 + 8].try_into().unwrap())
+                    });
+                    assert!(
+                        BigInt::<4>(words) < Fq::MODULUS,
+                        "noncanonical commitment coordinate"
+                    );
+                }
+                #[cfg(debug_assertions)]
+                let _ = Element::from_bytes_unchecked_uncompressed(*bytes);
             }
-            #[cfg(debug_assertions)]
-            let _ = Element::from_bytes_unchecked_uncompressed(*bytes);
         }
         let n = blk.len() / 8;
         for g in 0..n {
-            // plain x, y read as the lane form of x/R, y/R: the ratio is x/y all the same
             let (x, y) = load_xy_bytes(c, blk.as_ptr().add(8 * g));
             xs[g] = x;
             ys[g] = y;
