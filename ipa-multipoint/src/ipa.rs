@@ -28,10 +28,12 @@ impl IPAProof {
     }
 
     /// The proof that follows `leading` compressed points in `bytes`, and those points. All of
-    /// them, the proof's `L` and `R` too, are decoded in one batch ([`Element::from_bytes_batch`])
-    /// instead of one [`Element::from_bytes`] each: on a host with AVX-512 IFMA the points of a
-    /// proof over 256 values (with `D`, seventeen) fit one chunk of the vector lanes, and
-    /// elsewhere the batch is split over the pool's threads as any batch is.
+    /// them, the proof's `L` and `R` too, are decoded in one batch on the calling thread
+    /// ([`Element::from_bytes_batch_serial`]) instead of one [`Element::from_bytes`] each: on a
+    /// host with AVX-512 IFMA the points of a proof over 256 values (with `D`, seventeen) fit one
+    /// chunk of the vector lanes, and elsewhere they share one inversion. They are not handed to
+    /// the thread pool, which a verifier outside it would wait for, the longer the busier the pool
+    /// is.
     ///
     /// # Errors
     ///
@@ -52,8 +54,9 @@ impl IPAProof {
 
         let (point_bytes, a_bytes) = bytes.split_at(points * 32);
         let (point_bytes, _) = point_bytes.as_chunks::<32>();
-        let mut decoded =
-            Element::from_bytes_batch(point_bytes).map_err(|_| SerdeError::InvalidData)?;
+        let mut decoded = Element::from_bytes_batch_serial(point_bytes)
+            .map_err(|_| SerdeError::InvalidData)?
+            .into_iter();
         let lead = decoded.by_ref().take(leading).collect();
         let L_vec = decoded.by_ref().take(num_points).collect();
         let R_vec = decoded.collect();

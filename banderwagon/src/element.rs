@@ -176,6 +176,15 @@ impl Element {
         Ok(tasks.into_iter().flatten())
     }
 
+    /// [`Element::from_bytes_batch`] as one task on the calling thread: on the vector lanes where
+    /// this host has them, otherwise the scalar decode with the inversions shared by the batch. It
+    /// is for a handful of points, such as a proof's: where the lanes are missing,
+    /// `from_bytes_batch` cuts a batch that small into one-point tasks for the thread pool, and a
+    /// caller outside the pool waits for that hand-off, the longer the busier the pool is.
+    pub fn from_bytes_batch_serial(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
+        Self::decode_task(bytes)
+    }
+
     /// One task of [`Element::from_bytes_batch`] (and of [`AffineElement::from_bytes_batch`]), on
     /// the vector lanes where this host has them.
     fn decode_task<P: FromDecoded>(bytes: &[[u8; 32]]) -> Result<Vec<P>, SerializationError> {
@@ -1172,14 +1181,18 @@ pub(crate) mod tests {
 
     /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its
     /// error where it rejects one, wherever that one is: a canonical `x` with no square root or
-    /// off the prime subgroup, or bytes that are not a canonical `x`.
+    /// off the prime subgroup, or bytes that are not a canonical `x`. `from_bytes_batch_serial`
+    /// returns the same.
     #[test]
     fn from_bytes_batch_matches_from_bytes() {
         let (accepted, rejected) = accepted_and_rejected(1500);
         assert!(accepted.len() >= 500, "{} accepted", accepted.len());
         assert!(rejected.len() >= 500, "{} rejected", rejected.len());
         let batch = |inputs: &[[u8; 32]]| {
-            outcome(Element::from_bytes_batch(inputs).map(|elements| elements.collect()))
+            let got = outcome(Element::from_bytes_batch(inputs).map(|elements| elements.collect()));
+            let serial = outcome(Element::from_bytes_batch_serial(inputs));
+            assert_eq!(serial, got, "{} inputs, serial", inputs.len());
+            got
         };
         assert_eq!(batch(&accepted), expected(&accepted));
 
