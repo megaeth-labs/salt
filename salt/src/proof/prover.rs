@@ -1859,6 +1859,30 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A witness carries its proof as a byte vector of its own length: a vector that is not as
+    /// long as a proof over the domain fails the decode with an error instead of a panic.
+    #[test]
+    fn test_serde_multi_point_proof_rejects_a_wrong_length() {
+        let store = MemStore::new();
+        let proof = SaltProof::create([SaltKey::from((100, 42))], &store)
+            .unwrap()
+            .proof;
+        let bytes = proof.0.to_bytes().unwrap();
+        let decode = |bytes: &[u8]| {
+            let config = bincode::config::legacy();
+            let wire = bincode::serde::encode_to_vec(bytes, config).unwrap();
+            bincode::serde::decode_from_slice::<SerdeMultiPointProof, _>(&wire, config)
+                .map(|(proof, _)| proof)
+        };
+
+        assert_eq!(decode(&bytes).unwrap(), proof);
+        let mut longer = bytes.clone();
+        longer.push(0);
+        for wrong in [&bytes[..0], &bytes[..bytes.len() - 1], &longer] {
+            assert!(decode(wrong).is_err(), "{} bytes", wrong.len());
+        }
+    }
+
     /// The `parents_commitments` map decodes through the batch path to the commitments it was
     /// encoded from, and a single invalid compressed point fails the whole map, wherever it is:
     /// bytes that are not a field element, or an `x` no point of the subgroup has.

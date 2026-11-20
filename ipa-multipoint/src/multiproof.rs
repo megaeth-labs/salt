@@ -434,9 +434,10 @@ pub struct MultiPointProof {
 impl MultiPointProof {
     /// `D`, then the IPA proof; `D` is decoded in the same batch as the proof's points.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `bytes` is not as long as a proof for `poly_degree`.
+    /// [`SerdeError::InvalidData`](crate::SerdeError::InvalidData) if `bytes` is not as long as
+    /// a proof for `poly_degree`, if a point does not decode, or if `a` is not canonical.
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> crate::IOResult<MultiPointProof> {
         let (mut leading, open_proof) = IPAProof::from_bytes_after(bytes, poly_degree, 1)?;
         let g_x_comm = leading.pop().expect("one leading point");
@@ -863,21 +864,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_any_invalid_point() {
         let n = 256;
-        let crs = CRS::new(n, b"random seed");
-        let precomp = PrecomputedWeights::new(n);
-        let poly = LagrangeBasis::new((0..n).map(|i| Fr::from(i as u128 + 1)).collect());
-        let query = ProverQuery {
-            commitment: crs.commit_lagrange_poly(&poly),
-            poly: poly.into(),
-            point: 3,
-            result: Fr::from(4u128),
-        };
-        let proof = MultiPoint::open(
-            crs.clone(),
-            &precomp,
-            &mut Transcript::new(b"t"),
-            vec![query],
-        );
+        let proof = one_query_proof(n);
         let bytes = proof.to_bytes().unwrap();
         assert_eq!(bytes.len(), (1 + 2 * 8 + 1) * 32);
         assert_eq!(MultiPointProof::from_bytes(&bytes, n).unwrap(), proof);
@@ -889,6 +876,52 @@ mod tests {
                 "position {position}"
             );
         }
+    }
+
+    /// A proof's bytes come from the wire: any length but `D`, the IPA's `L` and `R` and `a` is
+    /// refused with an error, not a panic, and the IPA proof alone is the same bytes without `D`.
+    #[test]
+    fn from_bytes_rejects_a_wrong_length() {
+        let n = 256;
+        let proof = one_query_proof(n);
+        let bytes = proof.to_bytes().unwrap();
+        let len = bytes.len();
+        assert_eq!(MultiPointProof::from_bytes(&bytes, n).unwrap(), proof);
+        assert_eq!(
+            IPAProof::from_bytes(&bytes[32..], n).unwrap(),
+            proof.open_proof
+        );
+
+        let mut longer = bytes.clone();
+        longer.extend_from_slice(&bytes[..32]);
+        for wrong in [0, 1, 31, 32, len - 32, len - 1] {
+            assert!(
+                MultiPointProof::from_bytes(&bytes[..wrong], n).is_err(),
+                "{wrong} bytes"
+            );
+        }
+        for wrong in [len + 1, len + 32] {
+            assert!(
+                MultiPointProof::from_bytes(&longer[..wrong], n).is_err(),
+                "{wrong} bytes"
+            );
+        }
+        assert!(IPAProof::from_bytes(&bytes, n).is_err());
+        assert!(IPAProof::from_bytes(&bytes[33..], n).is_err());
+    }
+
+    /// A proof that the polynomial `i + 1` over a domain of `n` evaluates to 4 at 3.
+    fn one_query_proof(n: usize) -> MultiPointProof {
+        let crs = CRS::new(n, b"random seed");
+        let precomp = PrecomputedWeights::new(n);
+        let poly = LagrangeBasis::new((0..n).map(|i| Fr::from(i as u128 + 1)).collect());
+        let query = ProverQuery {
+            commitment: crs.commit_lagrange_poly(&poly),
+            poly: poly.into(),
+            point: 3,
+            result: Fr::from(4u128),
+        };
+        MultiPoint::open(crs, &precomp, &mut Transcript::new(b"t"), vec![query])
     }
 
     /// The committer-accelerated prover must emit byte-identical proofs to

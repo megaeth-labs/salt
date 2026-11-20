@@ -33,9 +33,11 @@ impl IPAProof {
     /// proof over 256 values (with `D`, seventeen) fit one chunk of the vector lanes, and
     /// elsewhere the batch is split over the pool's threads as any batch is.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `bytes` is not `leading` points, `2·log2(poly_degree)` points and a scalar long.
+    /// [`SerdeError::InvalidData`] if `bytes` is not `leading` points, `2·log2(poly_degree)`
+    /// points and a scalar long, if any of the points does not decode, or if the scalar is not
+    /// canonical. The bytes come from the wire, so a wrong length is refused, not asserted.
     pub(crate) fn from_bytes_after(
         bytes: &[u8],
         poly_degree: usize,
@@ -44,7 +46,9 @@ impl IPAProof {
         // Given the polynomial degree, we will have log2 * 2 points
         let num_points = log2(poly_degree) as usize;
         let points = leading + 2 * num_points;
-        assert_eq!((points + 1) * 32, bytes.len());
+        if bytes.len() != (points + 1) * 32 {
+            return Err(SerdeError::InvalidData);
+        }
 
         let (point_bytes, a_bytes) = bytes.split_at(points * 32);
         let (point_bytes, _) = point_bytes.as_chunks::<32>();
