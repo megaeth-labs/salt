@@ -45,6 +45,8 @@ impl<T> RwLock<T> {
 #[cfg(not(feature = "std"))]
 pub(crate) type RwLock<T> = spin::RwLock<T>;
 
+#[cfg(feature = "reth-codecs")]
+mod codecs;
 pub mod constant;
 pub mod empty_salt;
 pub mod proof;

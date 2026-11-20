@@ -61,6 +61,12 @@ jobs:
         with:
           command: test
 
+      - name: Run cargo test with reth-codecs feature
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p salt --features reth-codecs --lib codecs::
+
       - name: Run cargo test with bucket resize feature
         uses: actions-rs/cargo@v1
         with:
