@@ -32,10 +32,6 @@ struct CommitterConsts {
     z_inv16: L5,
 }
 
-// SAFETY: __m512i is plain data; the constants are built once and only read afterwards.
-unsafe impl Sync for CommitterConsts {}
-unsafe impl Send for CommitterConsts {}
-
 fn committer_consts() -> &'static CommitterConsts {
     static K: OnceLock<CommitterConsts> = OnceLock::new();
     // SAFETY: callers check `available()` first; this only broadcasts constants.
