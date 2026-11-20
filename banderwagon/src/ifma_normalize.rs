@@ -280,13 +280,18 @@ unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
     }
 }
 
-/// `Element::batch_to_commitments` on the lanes; `elements.len()` is a multiple of eight.
+/// `Element::batch_to_commitments` on the lanes.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long: the stores write whole
+/// groups of eight records through raw pointers.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 64]]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
+    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
     let mut s = Scratch::new(c, g);
@@ -338,13 +343,17 @@ unsafe fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, 
     }
 }
 
-/// `Element::batch_map_to_scalar_field` on the lanes; `elements.len()` is a multiple of eight.
+/// `Element::batch_map_to_scalar_field` on the lanes.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [Fr]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
+    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
     let mut s = Scratch::new(c, g);
@@ -362,15 +371,19 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
     }
 }
 
-/// `AffineElement::batch_map_to_scalar_field` on the lanes; `elements.len()` is a multiple of eight. The
-/// 64-byte affine records (`x` then `y`, Montgomery words) are read as `hash_commitments` reads plain
-/// bytes: `x/y` is a ratio, the common factor cancels.
+/// `AffineElement::batch_map_to_scalar_field` on the lanes. The 64-byte affine records (`x` then `y`,
+/// Montgomery words) are read as `hash_commitments` reads plain bytes: `x/y` is a ratio, the common
+/// factor cancels.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement], out: &mut [Fr]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
+    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
     let mut s = Scratch::new(c, g);
@@ -387,13 +400,17 @@ pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement]
     }
 }
 
-/// `Element::hash_commitments` on the lanes; `commitments.len()` is a multiple of eight.
+/// `Element::hash_commitments` on the lanes.
+///
+/// # Panics
+///
+/// If `commitments.len()` is not a multiple of eight or `out` is not as long.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) {
-    debug_assert!(commitments.len().is_multiple_of(8) && out.len() == commitments.len());
+    assert!(commitments.len().is_multiple_of(8) && out.len() == commitments.len());
     let c = context();
     let g = groups_of(commitments.len());
     let mut s = Scratch::new(c, g);
