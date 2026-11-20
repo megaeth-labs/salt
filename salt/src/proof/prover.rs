@@ -172,6 +172,9 @@ impl PathCommitments {
     }
 
     /// Sets `node_id`'s commitment, returning the one it replaces.
+    ///
+    /// O(n): the id and commitment vectors shift to keep key order. To build a collection,
+    /// collect from an iterator ([`FromIterator`]) instead of inserting entry by entry.
     pub fn insert(
         &mut self,
         node_id: NodeId,
@@ -187,6 +190,7 @@ impl PathCommitments {
         }
     }
 
+    /// Removes `node_id`'s commitment and returns it. O(n), as [`PathCommitments::insert`].
     pub fn remove(&mut self, node_id: NodeId) -> Option<SerdeCommitment> {
         let i = self.position(node_id)?;
         self.ids.remove(i);
