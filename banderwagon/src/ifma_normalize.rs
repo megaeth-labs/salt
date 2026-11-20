@@ -556,7 +556,7 @@ mod tests {
         }
         for n in [8usize, 40, 2048, 2064] {
             let mut pts = points(n, 200 + n as u64);
-            pts[2] = pts[3]; // the z = 0 record has no affine form; the zero denominator is tested below
+            pts[2] = pts[3]; // the z = 0 record has no affine form; a zero `y` is tested below
             let bytes: Vec<[u8; 64]> = pts
                 .iter()
                 .map(|e| {
@@ -573,7 +573,12 @@ mod tests {
             assert_eq!(got, want, "n = {n}");
         }
         // Unchecked release-mode parsing accepts canonical off-curve records; debug
-        // parsing rejects them, exactly as the scalar reference does.
+        // parsing rejects them, exactly as the scalar reference does. So this case, a zero `y`
+        // among valid records, runs only without debug assertions (`cargo test --release`), and
+        // the test profile keeps them on. The masking of a zero denominator it checks is
+        // `ratios_to_scalars`', which the affine kernel shares, and
+        // `lane_batch_map_to_scalar_field_affine_matches_scalar` feeds that a zero `y` in every
+        // profile.
         #[cfg(not(debug_assertions))]
         {
             let mut recs = vec![[0u8; 64]; 8];

@@ -679,6 +679,13 @@ impl AffineElement {
     }
 
     /// [`Element::map_to_scalar_field`] on an affine point: `x / y` reinterpreted.
+    ///
+    /// # Panics
+    ///
+    /// If `y` is zero, as [`Element::map_to_scalar_field`] does. No element of the group has a zero
+    /// `y`, so only a point that was never validated can, such as one read by
+    /// [`Element::from_bytes_unchecked_uncompressed`] in a release build.
+    /// [`AffineElement::batch_map_to_scalar_field`] maps such a point to zero instead.
     pub fn map_to_scalar_field(&self) -> Fr {
         base_to_scalar(self.0.x / self.0.y)
     }
