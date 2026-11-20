@@ -24,37 +24,47 @@ impl IPAProof {
         (self.L_vec.len() * 2 + 1) * 32
     }
     pub fn from_bytes(bytes: &[u8], poly_degree: usize) -> IOResult<IPAProof> {
+        Self::from_bytes_after(bytes, poly_degree, 0).map(|(_, proof)| proof)
+    }
+
+    /// The proof that follows `leading` compressed points in `bytes`, and those points. All of
+    /// them, the proof's `L` and `R` too, are decoded in one batch on the calling thread
+    /// ([`Element::from_bytes_batch_serial`]) instead of one [`Element::from_bytes`] each: on a
+    /// host with AVX-512 IFMA the points of a proof over 256 values (with `D`, seventeen) fit one
+    /// chunk of the vector lanes, and elsewhere they share one inversion. They are not handed to
+    /// the thread pool, which a verifier outside it would wait for, the longer the busier the pool
+    /// is.
+    ///
+    /// # Errors
+    ///
+    /// [`SerdeError::InvalidData`] if `bytes` is not `leading` points, `2·log2(poly_degree)`
+    /// points and a scalar long, if any of the points does not decode, or if the scalar is not
+    /// canonical. The bytes come from the wire, so a wrong length is refused, not asserted.
+    pub(crate) fn from_bytes_after(
+        bytes: &[u8],
+        poly_degree: usize,
+        leading: usize,
+    ) -> IOResult<(Vec<Element>, IPAProof)> {
         // Given the polynomial degree, we will have log2 * 2 points
-        let num_points = log2(poly_degree);
-        let mut L_vec = Vec::with_capacity(num_points as usize);
-        let mut R_vec = Vec::with_capacity(num_points as usize);
-
-        assert_eq!(((num_points * 2) + 1) * 32, bytes.len() as u32);
-        assert!(bytes.len().is_multiple_of(32));
-
-        // Chunk the byte slice into 32 bytes
-        let mut chunks = bytes.chunks_exact(32);
-
-        for _ in 0..num_points {
-            let chunk = chunks.next().unwrap();
-            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
-                .map_err(|_| SerdeError::InvalidData)?;
-            L_vec.push(point)
+        let num_points = log2(poly_degree) as usize;
+        let points = leading + 2 * num_points;
+        if bytes.len() != (points + 1) * 32 {
+            return Err(SerdeError::InvalidData);
         }
 
-        for _ in 0..num_points {
-            let chunk = chunks.next().unwrap();
-            let point: Element = Element::from_bytes(chunk.try_into().unwrap())
-                .map_err(|_| SerdeError::InvalidData)?;
-            R_vec.push(point)
-        }
+        let (point_bytes, a_bytes) = bytes.split_at(points * 32);
+        let (point_bytes, _) = point_bytes.as_chunks::<32>();
+        let mut decoded = Element::from_bytes_batch_serial(point_bytes)
+            .map_err(|_| SerdeError::InvalidData)?
+            .into_iter();
+        let lead = decoded.by_ref().take(leading).collect();
+        let L_vec = decoded.by_ref().take(num_points).collect();
+        let R_vec = decoded.collect();
 
-        let last_32_bytes = chunks.next().unwrap();
-
-        let a: Fr = CanonicalDeserialize::deserialize_compressed(last_32_bytes)
+        let a: Fr = CanonicalDeserialize::deserialize_compressed(a_bytes)
             .map_err(|_| SerdeError::InvalidData)?;
 
-        Ok(IPAProof { L_vec, R_vec, a })
+        Ok((lead, IPAProof { L_vec, R_vec, a }))
     }
     pub fn to_bytes(&self) -> IOResult<Vec<u8>> {
         // We do not serialize the length. We assume that the deserializer knows this.

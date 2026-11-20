@@ -22,6 +22,10 @@ serde_arrays = { version = "0.2", default-features = false }
 spin = { version = "0.10", default-features = false, features = ["rwlock", "lazy"] }
 thiserror = { version = "2.0", default-features = false }
 
+# optional `reth-codecs` encodings for downstream databases
+bytes = { version = "1", default-features = false, optional = true }
+reth-codecs = { version = "0.4", default-features = false, optional = true }
+
 [dev-dependencies]
 ark-ff = "0.5.0"
 bincode = { version = "2.0", features = ["serde"] }
@@ -41,6 +45,7 @@ parallel = [
     "hashbrown/rayon",
 ]
 test-bucket-resize = []
+reth-codecs = ["dep:reth-codecs", "dep:bytes"]
 enable-hugepages = ["std", "banderwagon/enable-hugepages"]
 
 [[bench]]

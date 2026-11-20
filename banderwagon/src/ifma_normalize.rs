@@ -125,10 +125,6 @@ struct FrMod {
     k: L5,
 }
 
-// SAFETY: __m512i is plain data; built once, read afterwards.
-unsafe impl Sync for FrMod {}
-unsafe impl Send for FrMod {}
-
 fn fr_mod() -> &'static FrMod {
     static M: OnceLock<FrMod> = OnceLock::new();
     // SAFETY: callers check `available()` first; this only broadcasts constants.
@@ -264,7 +260,8 @@ unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
         let last = (n - 1 - k) / CHAINS * CHAINS + k; // the largest g ≡ k (mod 4) below n
         ends[k] = s.prefix[last];
     }
-    let mut inv = batch_inverse::<CHAINS>(c, &ends);
+    let mut inv = ends;
+    batch_inverse(c, &mut inv);
     let zero = [_mm512_setzero_si512(); 5];
     for g in (0..n).rev() {
         let k = g % CHAINS;
@@ -279,13 +276,18 @@ unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
     }
 }
 
-/// `Element::batch_to_commitments` on the lanes; `elements.len()` is a multiple of eight.
+/// `Element::batch_to_commitments` on the lanes.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long: the stores write whole
+/// groups of eight records through raw pointers.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 64]]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
+    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
     let mut s = Scratch::new(c, g);
@@ -337,13 +339,17 @@ unsafe fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, 
     }
 }
 
-/// `Element::batch_map_to_scalar_field` on the lanes; `elements.len()` is a multiple of eight.
+/// `Element::batch_map_to_scalar_field` on the lanes.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [Fr]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
+    assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
     let mut s = Scratch::new(c, g);
@@ -361,62 +367,72 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
     }
 }
 
-/// `AffineElement::batch_map_to_scalar_field` on the lanes; `elements.len()` is a multiple of eight. The
-/// 64-byte affine records (`x` then `y`, Montgomery words) are read as `hash_commitments` reads plain
-/// bytes: `x/y` is a ratio, the common factor cancels.
+/// `AffineElement::batch_map_to_scalar_field` on the lanes: [`records_to_scalars`] on the points'
+/// 64-byte records (`x` then `y`, Montgomery words), read as `hash_commitments` reads plain bytes:
+/// `x/y` is a ratio, the common factor cancels. They are not checked: every word is below the
+/// modulus, and the records are points already.
+///
+/// # Panics
+///
+/// If `elements.len()` is not a multiple of eight or `out` is not as long.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement], out: &mut [Fr]) {
-    debug_assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
-    let c = context();
-    let g = groups_of(elements.len());
-    let mut s = Scratch::new(c, g);
-    let mut xs = vec![c.one; g];
-    let mut ys = vec![c.one; g];
-    for (blk, out_blk) in elements.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
-        let n = blk.len() / 8;
-        for g in 0..n {
-            let (x, y) = load_xy_bytes(c, blk.as_ptr().add(8 * g) as *const [u8; 64]);
-            xs[g] = x;
-            ys[g] = y;
-        }
-        ratios_to_scalars(c, &xs[..n], &ys[..n], &mut s, out_blk);
-    }
+    // SAFETY: an `AffineElement` is the 64-byte record `x` then `y` (asserted above), and a
+    // `[u8; 64]` has no alignment to keep.
+    let records = core::slice::from_raw_parts(elements.as_ptr().cast::<[u8; 64]>(), elements.len());
+    records_to_scalars::<false>(records, out)
 }
 
-/// `Element::hash_commitments` on the lanes; `commitments.len()` is a multiple of eight.
+/// `Element::hash_commitments` on the lanes: [`records_to_scalars`] on the commitments, each
+/// coordinate checked to be canonical first, as the scalar path's unchecked decoding checks it.
+///
+/// # Panics
+///
+/// If `commitments.len()` is not a multiple of eight or `out` is not as long, or a coordinate is
+/// not below the modulus.
 ///
 /// # Safety
 /// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) {
-    debug_assert!(commitments.len().is_multiple_of(8) && out.len() == commitments.len());
+    records_to_scalars::<true>(commitments, out)
+}
+
+/// `x/y` in the scalar field for every 64-byte record (`x` then `y`, little-endian), the plain
+/// words read as the lane form of `x/R` and `y/R`: the ratio is `x/y` all the same. With `CHECKED`,
+/// each record's coordinates are checked to be canonical before its block is loaded (and, in
+/// debug builds, the record decoded as a point, as the scalar path does).
+#[target_feature(enable = "avx512f,avx512ifma")]
+unsafe fn records_to_scalars<const CHECKED: bool>(records: &[[u8; 64]], out: &mut [Fr]) {
+    assert!(records.len().is_multiple_of(8) && out.len() == records.len());
     let c = context();
-    let g = groups_of(commitments.len());
+    let g = groups_of(records.len());
     let mut s = Scratch::new(c, g);
     let mut xs = vec![c.one; g];
     let mut ys = vec![c.one; g];
-    for (blk, out_blk) in commitments.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
-        for bytes in blk {
-            // Unchecked point decoding still rejects noncanonical field coordinates.
-            // Validate before raw lane loads, without a Montgomery conversion.
-            for coordinate in bytes.chunks_exact(32) {
-                let words = core::array::from_fn(|i| {
-                    u64::from_le_bytes(coordinate[i * 8..i * 8 + 8].try_into().unwrap())
-                });
-                assert!(
-                    BigInt::<4>(words) < Fq::MODULUS,
-                    "noncanonical commitment coordinate"
-                );
+    for (blk, out_blk) in records.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
+        if CHECKED {
+            for bytes in blk {
+                // Unchecked point decoding still rejects noncanonical field coordinates.
+                // Validate before raw lane loads, without a Montgomery conversion.
+                for coordinate in bytes.chunks_exact(32) {
+                    let words = core::array::from_fn(|i| {
+                        u64::from_le_bytes(coordinate[i * 8..i * 8 + 8].try_into().unwrap())
+                    });
+                    assert!(
+                        BigInt::<4>(words) < Fq::MODULUS,
+                        "noncanonical commitment coordinate"
+                    );
+                }
+                #[cfg(debug_assertions)]
+                let _ = Element::from_bytes_unchecked_uncompressed(*bytes);
             }
-            #[cfg(debug_assertions)]
-            let _ = Element::from_bytes_unchecked_uncompressed(*bytes);
         }
         let n = blk.len() / 8;
         for g in 0..n {
-            // plain x, y read as the lane form of x/R, y/R: the ratio is x/y all the same
             let (x, y) = load_xy_bytes(c, blk.as_ptr().add(8 * g));
             xs[g] = x;
             ys[g] = y;
@@ -428,6 +444,7 @@ pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::tests::lanes_under_test;
     use crate::element::{
         batch_map_to_scalar_field_affine_scalar, batch_map_to_scalar_field_scalar,
         batch_to_commitments_scalar, hash_commitments_scalar,
@@ -436,6 +453,16 @@ mod tests {
     use ark_ed_on_bls12_381_bandersnatch::{EdwardsAffine, EdwardsProjective, Fq};
     use ark_ff::{One, UniformRand, Zero};
     use rand_chacha::rand_core::SeedableRng;
+
+    /// The canonical little-endian bytes of a base field element: one coordinate of a 64-byte
+    /// commitment record.
+    fn fq_to_le_bytes(x: Fq) -> [u8; 32] {
+        use ark_serialize::CanonicalSerialize;
+        let mut bytes = [0u8; 32];
+        x.serialize_compressed(&mut bytes[..])
+            .expect("32 bytes hold a field element");
+        bytes
+    }
 
     fn points(n: usize, seed: u64) -> Vec<Element> {
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
@@ -470,7 +497,7 @@ mod tests {
 
     #[test]
     fn lane_batch_to_commitments_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 16, 64, 2048, 2056, 4096 + 24] {
@@ -487,7 +514,7 @@ mod tests {
     /// points, at every batch length modulo the block.
     #[test]
     fn lane_batch_map_to_scalar_field_affine_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 16, 64, 2048, 2056, 4096 + 24] {
@@ -518,7 +545,7 @@ mod tests {
 
     #[test]
     fn lane_batch_map_to_scalar_field_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 24, 2048, 2056, 4096 + 8] {
@@ -532,19 +559,19 @@ mod tests {
 
     #[test]
     fn lane_hash_commitments_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         for n in [8usize, 40, 2048, 2064] {
             let mut pts = points(n, 200 + n as u64);
-            pts[2] = pts[3]; // the z = 0 record has no affine form; the zero denominator is tested below
+            pts[2] = pts[3]; // the z = 0 record has no affine form; a zero `y` is tested below
             let bytes: Vec<[u8; 64]> = pts
                 .iter()
                 .map(|e| {
                     let a = e.0.into_affine();
                     let mut b = [0u8; 64];
-                    b[..32].copy_from_slice(&crate::element::fq_to_le_bytes(a.x));
-                    b[32..].copy_from_slice(&crate::element::fq_to_le_bytes(a.y));
+                    b[..32].copy_from_slice(&fq_to_le_bytes(a.x));
+                    b[32..].copy_from_slice(&fq_to_le_bytes(a.y));
                     b
                 })
                 .collect();
@@ -554,16 +581,21 @@ mod tests {
             assert_eq!(got, want, "n = {n}");
         }
         // Unchecked release-mode parsing accepts canonical off-curve records; debug
-        // parsing rejects them, exactly as the scalar reference does.
+        // parsing rejects them, exactly as the scalar reference does. So this case, a zero `y`
+        // among valid records, runs only without debug assertions (`cargo test --release`), and
+        // the test profile keeps them on. The masking of a zero denominator it checks is
+        // `ratios_to_scalars`', which the affine kernel shares, and
+        // `lane_batch_map_to_scalar_field_affine_matches_scalar` feeds that a zero `y` in every
+        // profile.
         #[cfg(not(debug_assertions))]
         {
             let mut recs = vec![[0u8; 64]; 8];
             let g = Element::prime_subgroup_generator().0.into_affine();
             for r in recs.iter_mut() {
-                r[..32].copy_from_slice(&crate::element::fq_to_le_bytes(g.x));
-                r[32..].copy_from_slice(&crate::element::fq_to_le_bytes(g.y));
+                r[..32].copy_from_slice(&fq_to_le_bytes(g.x));
+                r[32..].copy_from_slice(&fq_to_le_bytes(g.y));
             }
-            recs[5][..32].copy_from_slice(&crate::element::fq_to_le_bytes(Fq::from(7u64)));
+            recs[5][..32].copy_from_slice(&fq_to_le_bytes(Fq::from(7u64)));
             recs[5][32..].fill(0);
             let mut got = vec![Fr::zero(); 8];
             unsafe { hash_commitments(&recs, &mut got) };
@@ -577,6 +609,7 @@ mod tests {
     /// `cargo test --release -p banderwagon bench_normalize -- --ignored --nocapture`
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_normalize() {
         if !available() {
             return;

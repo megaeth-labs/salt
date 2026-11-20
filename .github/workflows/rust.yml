@@ -61,6 +61,12 @@ jobs:
         with:
           command: test
 
+      - name: Run cargo test with reth-codecs feature
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: "-p salt --features reth-codecs --lib codecs::"
+
       - name: Run cargo test with bucket resize feature
         uses: actions-rs/cargo@v1
         with:
@@ -88,9 +94,14 @@ jobs:
   # banderwagon's vector paths run only on a CPU with AVX-512 IFMA, and their tests return early
   # on one without it, so the suite above passes without exercising them on such a runner.
   # This job runs the suite on a host that has the extension and fails if the host does not.
+  # BANDERWAGON_REQUIRE_IFMA makes those tests fail instead of returning early when the batch
+  # decode does not take the lanes, so a regression in the feature detection or the `cfg` gate
+  # fails this job rather than leaving it green with the vector code unexecuted.
   test-avx512-ifma:
     name: Test Suite (AVX-512 IFMA)
     runs-on: blacksmith-32vcpu-ubuntu-2404
+    env:
+      BANDERWAGON_REQUIRE_IFMA: 1
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2

@@ -18,6 +18,7 @@
 use crate::ifma::*;
 use crate::ifma_msm::{consts, unlane, Consts, PtL};
 use crate::salt_committer::calculate_prefetch_index;
+use crate::Fq;
 use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, EdwardsProjective, Fr};
 use ark_ff::Field;
@@ -177,6 +178,7 @@ unsafe fn padd_folded(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::tests::lanes_under_test;
     use crate::element::Element;
     use crate::salt_committer::Committer;
     use ark_ff::{One, UniformRand, Zero};
@@ -184,7 +186,7 @@ mod tests {
 
     #[test]
     fn lane_mul_index_matches_scalar() {
-        if !available() {
+        if !lanes_under_test() {
             return;
         }
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xc3);
@@ -214,6 +216,7 @@ mod tests {
     /// `cargo test --release -p banderwagon bench_mul_index_batch -- --ignored --nocapture`
     #[test]
     #[ignore]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn bench_mul_index_batch() {
         if !available() {
             return;

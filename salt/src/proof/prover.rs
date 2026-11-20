@@ -24,21 +24,14 @@ use ipa_multipoint::{
 };
 
 use crate::Lazy;
-use salt_macros::prelude::*;
-use salt_macros::{chunks, chunks_mut, reduce, sort_unstable};
+use salt_macros::sort_unstable;
 use serde::{
     de::{Error as _, MapAccess, Visitor},
     ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use std::collections::BTreeMap;
-use std::{format, string::ToString, vec, vec::Vec};
-#[cfg(test)]
-use {
-    crate::proof::shape::parents_and_points,
-    salt_macros::{iter, thread_chunk_size},
-    std::collections::BTreeSet,
-};
+use std::{format, string::ToString, vec::Vec};
 
 use core::fmt;
 use hashbrown::HashMap;
@@ -75,11 +68,6 @@ impl SerdeCommitment {
     /// The commitment in projective form (`(x, y, x · y, 1)`).
     pub fn to_element(&self) -> Element {
         self.0.to_element()
-    }
-
-    /// The affine point.
-    pub fn affine(&self) -> AffineElement {
-        self.0
     }
 }
 
@@ -136,6 +124,15 @@ impl PathCommitments {
         self.ids.binary_search(&node_id).ok()
     }
 
+    /// The index of `node_id`'s commitment, or the same error a missing commitment gives.
+    fn index_of(&self, node_id: NodeId) -> ProofResult<u32> {
+        self.position(node_id)
+            .map(|i| i as u32)
+            .ok_or_else(|| ProofError::StateReadError {
+                reason: format!("Missing commitment for node ID {node_id}"),
+            })
+    }
+
     pub fn get(&self, node_id: NodeId) -> Option<&SerdeCommitment> {
         self.position(node_id).map(|i| &self.commitments[i])
     }
@@ -175,6 +172,9 @@ impl PathCommitments {
     }
 
     /// Sets `node_id`'s commitment, returning the one it replaces.
+    ///
+    /// O(n): the id and commitment vectors shift to keep key order. To build a collection,
+    /// collect from an iterator ([`FromIterator`]) instead of inserting entry by entry.
     pub fn insert(
         &mut self,
         node_id: NodeId,
@@ -190,6 +190,7 @@ impl PathCommitments {
         }
     }
 
+    /// Removes `node_id`'s commitment and returns it. O(n), as [`PathCommitments::insert`].
     pub fn remove(&mut self, node_id: NodeId) -> Option<SerdeCommitment> {
         let i = self.position(node_id)?;
         self.ids.remove(i);
@@ -208,20 +209,27 @@ impl PathCommitments {
 impl FromIterator<(NodeId, SerdeCommitment)> for PathCommitments {
     /// Any order; a later entry for the same id replaces the earlier one, as a map's `insert`.
     fn from_iter<I: IntoIterator<Item = (NodeId, SerdeCommitment)>>(iter: I) -> Self {
-        let mut entries: Vec<(NodeId, SerdeCommitment)> = iter.into_iter().collect();
-        entries.sort_by_key(|(id, _)| *id);
-        let mut ids = Vec::with_capacity(entries.len());
-        let mut commitments = Vec::with_capacity(entries.len());
-        for (id, c) in entries {
-            if ids.last() == Some(&id) {
-                *commitments.last_mut().unwrap() = c;
-            } else {
-                ids.push(id);
-                commitments.push(c);
-            }
-        }
+        let (ids, commitments) = sorted_last_wins(iter.into_iter().collect());
         Self { ids, commitments }
     }
+}
+
+/// `entries` in id order as an id vector and a value vector, a repeated id keeping its last
+/// entry: what inserting them into a map one by one and reading it back gives.
+fn sorted_last_wins<T>(mut entries: Vec<(NodeId, T)>) -> (Vec<NodeId>, Vec<T>) {
+    // stable, so the entries of one id stay in their order and the last one wins below
+    entries.sort_by_key(|(id, _)| *id);
+    let mut ids = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+    for (id, value) in entries {
+        if ids.last() == Some(&id) {
+            *values.last_mut().unwrap() = value;
+        } else {
+            ids.push(id);
+            values.push(value);
+        }
+    }
+    (ids, values)
 }
 
 impl<const N: usize> From<[(NodeId, SerdeCommitment); N]> for PathCommitments {
@@ -278,13 +286,9 @@ impl<'de> Deserialize<'de> for SerdeMultiPointProof {
 /// serializing already-normalized commitments (`Z = 1`) is cheap and batch normalization measured
 /// slower on real witnesses. The entries are read straight into the id and byte vectors (the wire
 /// order is ascending; any other order is sorted, a repeated id keeping its last entry, as a map
-/// would) and the points decoded in place, task by task, into the commitment vector.
+/// would) and the points decoded by [`AffineElement::from_bytes_batch`] into the commitment vector.
 pub mod parents_commitments_serde {
     use super::*;
-
-    /// Points per decode task: four lane chunks of [`AffineElement::from_bytes_batch`], so a task is
-    /// long enough (~1 ms) that scheduling it costs nothing against the exponentiations it carries.
-    const DECODE_TASK: usize = 128;
 
     struct EntriesVisitor;
 
@@ -308,18 +312,7 @@ pub mod parents_commitments_serde {
                 bytes.push(b);
             }
             if !sorted {
-                let mut entries: Vec<(NodeId, [u8; 32])> = ids.into_iter().zip(bytes).collect();
-                entries.sort_by_key(|(id, _)| *id);
-                ids = Vec::with_capacity(entries.len());
-                bytes = Vec::with_capacity(entries.len());
-                for (id, b) in entries {
-                    if ids.last() == Some(&id) {
-                        *bytes.last_mut().unwrap() = b;
-                    } else {
-                        ids.push(id);
-                        bytes.push(b);
-                    }
-                }
+                return Ok(sorted_last_wins(ids.into_iter().zip(bytes).collect()));
             }
             Ok((ids, bytes))
         }
@@ -328,28 +321,14 @@ pub mod parents_commitments_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathCommitments, D::Error> {
         let (ids, bytes) = d.deserialize_map(EntriesVisitor)?;
 
-        // Decode in tasks of many points: on a host with AVX-512 IFMA the points of a task share
-        // vector registers for their exponentiations; elsewhere this is `Element::from_bytes` per point.
-        let mut commitments = vec![SerdeCommitment(AffineElement::zero()); bytes.len()];
-        let invalid = reduce!(
-            chunks!(bytes, DECODE_TASK)
-                .zip(chunks_mut!(commitments, DECODE_TASK))
-                .map(|(task, out): (&[[u8; 32]], &mut [SerdeCommitment])| {
-                    let mut invalid = false;
-                    for (o, r) in out.iter_mut().zip(AffineElement::from_bytes_batch(task)) {
-                        match r {
-                            Ok(p) => *o = SerdeCommitment(p),
-                            Err(_) => invalid = true,
-                        }
-                    }
-                    invalid
-                }),
-            || false,
-            |a, b| a | b
-        );
-        if invalid {
-            return Err(serde::de::Error::custom("invalid element bytes"));
-        }
+        // The batch decode returns the points in the order of `bytes`, beside `ids`, and stops at the
+        // first point it rejects. Wrapping them reuses the vector's buffer (`SerdeCommitment` is
+        // `repr(transparent)` over `AffineElement`).
+        let commitments = AffineElement::from_bytes_batch(&bytes)
+            .map_err(|_| serde::de::Error::custom("invalid element bytes"))?
+            .into_iter()
+            .map(SerdeCommitment)
+            .collect();
         Ok(PathCommitments::from_sorted(ids, commitments))
     }
 }
@@ -536,51 +515,9 @@ impl SaltProof {
         }
     }
 
-    /// Creates cryptographic verifier queries for SALT proof verification.
-    ///
-    /// This function transforms a proof's structural data into the specific polynomial evaluation
-    /// queries needed by the IPA (Inner Product Argument) verifier. Each query specifies a
-    /// commitment to verify, an evaluation point, and the expected result.
-    ///
-    /// # Process Overview
-    ///
-    /// 1. **Validate Inputs**: Ensures bucket level information matches the queried keys
-    /// 2. **Analyze Tree Structure**: Determines parent nodes and evaluation points needed
-    /// 3. **Generate Queries**: Creates verification queries for both leaf and internal nodes
-    ///
-    /// # Arguments
-    ///
-    /// * `path_commitments` - Map of node IDs to their cryptographic commitments from the proof
-    /// * `kvs` - Key-value pairs to verify (already sorted and deduplicated). None values represent non-existent keys
-    /// * `buckets_level` - Bucket expansion levels for determining subtree structure
-    ///
-    /// # Returns
-    ///
-    /// Vector of `VerifierQuery` objects ready for IPA polynomial verification
-    ///
-    /// # Errors
-    ///
-    /// * `ProofError::StateReadError` - If bucket level info or path commitments are inconsistent with the queried keys
-    #[cfg(test)]
-    pub(crate) fn create_verifier_queries(
-        &self,
-        kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
-    ) -> ProofResult<Vec<ipa_multipoint::multiproof::VerifierQuery>> {
-        use ipa_multipoint::multiproof::VerifierQuery;
-        let (commitments, queries) = self.create_indexed_queries(kvs)?;
-        Ok(queries
-            .into_iter()
-            .map(|q| VerifierQuery {
-                commitment: commitments[q.commitment as usize].to_element(),
-                point: q.point,
-                result: q.result,
-            })
-            .collect())
-    }
-
-    /// [`Self::create_verifier_queries`] in the form [`MultiPointProof::check_indexed`] takes:
-    /// the proof's commitments once, in `parents_commitments`' key order, and every query
-    /// naming its node's commitment by index. A node's polynomial is opened at every child or
+    /// The verifier's queries in the form [`MultiPointProof::check_indexed`] takes: the proof's
+    /// commitments once, in `parents_commitments`' key order, and every query naming its node's
+    /// commitment by index. A node's polynomial is opened at every child or
     /// slot the proof touches, so a query per opening that carried the node's 128-byte
     /// commitment held each commitment once per opening; here it is held once.
     pub(crate) fn create_indexed_queries(
@@ -621,18 +558,14 @@ impl SaltProof {
 
         // Convert logical parent IDs to their commitment storage IDs and validate that the proof
         // contains and ONLY contains commitments for all required nodes.
-        let mut required_node_ids: Vec<NodeId> = Vec::with_capacity(self.parents_commitments.len());
-        let mut previous_node = None;
-        for node_id in internal_nodes
-            .iter()
-            .map(|&(node_id, _)| node_id)
-            .chain(leaf_nodes.iter().map(|&(node_id, _, _)| node_id))
-        {
-            if previous_node != Some(node_id) {
-                previous_node = Some(node_id);
-                required_node_ids.push(connect_parent_id(node_id));
-            }
-        }
+        // The pairs are sorted by node, so each node's pairs are one run.
+        let internal_runs = || internal_nodes.chunk_by(|a, b| a.0 == b.0);
+        let leaf_runs = || leaf_nodes.chunk_by(|a, b| a.0 == b.0);
+        let mut required_node_ids: Vec<NodeId> = internal_runs()
+            .map(|run| run[0].0)
+            .chain(leaf_runs().map(|run| run[0].0))
+            .map(connect_parent_id)
+            .collect();
         required_node_ids.sort_unstable();
         required_node_ids.dedup();
         if required_node_ids.as_slice() != self.parents_commitments.ids() {
@@ -652,301 +585,61 @@ impl SaltProof {
             .iter()
             .map(|&(encode_node, point)| {
                 let child_id = get_child_node(&logic_parent_id(encode_node), point as usize);
-                path_commitments.get(child_id).map(|c| c.0).ok_or_else(|| {
-                    ProofError::StateReadError {
-                        reason: format!("Missing commitment for node ID {child_id}"),
-                    }
-                })
+                path_commitments
+                    .index_of(child_id)
+                    .map(|index| commitments[index as usize])
             })
             .collect::<ProofResult<Vec<_>>>()?;
-        let children_frs = AffineElement::batch_map_to_scalar_field(&children_commitments);
-        let mut previous_parent = None;
-        for (&(encode_node, point), fr) in internal_nodes.iter().zip(children_frs) {
-            let commitment = match previous_parent {
-                Some((node, index)) if node == encode_node => index,
-                _ => {
-                    let index = path_commitments.index_of(connect_parent_id(encode_node))?;
-                    previous_parent = Some((encode_node, index));
-                    index
-                }
-            };
-            queries.push(IndexedQuery {
-                commitment,
-                point: Fr::from(point as u64),
-                result: fr,
-            });
+        let mut children_frs =
+            AffineElement::batch_map_to_scalar_field(&children_commitments).into_iter();
+        for run in internal_runs() {
+            let commitment = path_commitments.index_of(connect_parent_id(run[0].0))?;
+            for (&(_, point), fr) in run.iter().zip(children_frs.by_ref()) {
+                queries.push(IndexedQuery {
+                    commitment,
+                    point: point as u32,
+                    result: fr,
+                });
+            }
         }
 
         // Leaf nodes: the slot's key is the one that produced the pair when the segment's start
         // plus the position gives it back, and otherwise is looked up, as before.
-        let mut previous_leaf = None;
-        for &(parent_node, point, key_index) in &leaf_nodes {
-            let (commitment, salt_key_start) = match previous_leaf {
-                Some((node, index, start)) if node == parent_node => (index, start),
-                _ => {
-                    let index = path_commitments.index_of(connect_parent_id(parent_node))?;
-                    let start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
-                        let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
-                        SaltKey::from((bucket_id, 0))
-                    } else {
-                        subtree_leaf_start_key(&parent_node)
-                    };
-                    previous_leaf = Some((parent_node, index, start));
-                    (index, start)
-                }
-            };
-            let salt_key = SaltKey(salt_key_start.0 + point as u64);
-            let salt_val = if keys_to_verify[key_index as usize] == salt_key {
-                values[key_index as usize]
+        for run in leaf_runs() {
+            let parent_node = run[0].0;
+            let commitment = path_commitments.index_of(connect_parent_id(parent_node))?;
+            let salt_key_start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
+                let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                SaltKey::from((bucket_id, 0))
             } else {
-                kvs.get(&salt_key)
-                    .ok_or_else(|| ProofError::StateReadError {
-                        reason: format!("Missing key-value entry for salt_key: {salt_key:?}"),
-                    })?
+                subtree_leaf_start_key(&parent_node)
             };
-            queries.push(IndexedQuery {
-                commitment,
-                point: Fr::from(point as u64),
-                result: slot_to_field(salt_val),
-            });
+            for &(_, point, key_index) in run {
+                let salt_key = SaltKey(salt_key_start.0 + point as u64);
+                let salt_val = if keys_to_verify[key_index as usize] == salt_key {
+                    values[key_index as usize]
+                } else {
+                    kvs.get(&salt_key)
+                        .ok_or_else(|| ProofError::StateReadError {
+                            reason: format!("Missing key-value entry for salt_key: {salt_key:?}"),
+                        })?
+                };
+                queries.push(IndexedQuery {
+                    commitment,
+                    point: point as u32,
+                    result: slot_to_field(salt_val),
+                });
+            }
         }
 
         Ok((commitments, queries))
     }
 }
 
-impl PathCommitments {
-    /// The index of `node_id`'s commitment, or the same error a missing commitment gives.
-    fn index_of(&self, node_id: NodeId) -> ProofResult<u32> {
-        self.position(node_id)
-            .map(|i| i as u32)
-            .ok_or_else(|| ProofError::StateReadError {
-                reason: format!("Missing commitment for node ID {node_id}"),
-            })
-    }
-}
-
-/// Safely retrieves a commitment from the proof, returning an error when the commitment is missing.
-#[cfg(test)]
-fn get_commitment_safe(
-    path_commitments: &PathCommitments,
-    node_id: NodeId,
-) -> ProofResult<Element> {
-    path_commitments
-        .get(node_id)
-        .map(|c| c.to_element())
-        .ok_or_else(|| ProofError::StateReadError {
-            reason: format!("Missing commitment for node ID {node_id}"),
-        })
-}
-
-/// Creates verification queries for internal trie nodes using parallel processing.
-///
-/// This function generates polynomial evaluation queries that verify parent-child relationships
-/// in the SALT trie structure. Each query checks that a parent node's polynomial correctly
-/// evaluates to its child's commitment at the specified index.
-///
-/// # Arguments
-///
-/// * `internal_nodes` - Map of parent node IDs to sets of child indices that need verification
-/// * `path_commitments` - Cryptographic commitments for all nodes in the proof
-///
-/// # Returns
-///
-/// Vector of `VerifierQuery` objects for polynomial verification of internal node relationships
-///
-/// The reference form of [`SaltProof::create_indexed_queries`]'s internal half, kept for its tests.
-#[cfg(test)]
-fn create_internal_node_queries(
-    internal_nodes: &BTreeMap<NodeId, BTreeSet<usize>>,
-    path_commitments: &PathCommitments,
-) -> ProofResult<Vec<IndexedQuery>> {
-    // Distribute internal nodes across CPU threads for parallel processing
-    let in_nodes: Vec<_> = internal_nodes.iter().collect();
-    let chunk_size = thread_chunk_size!(in_nodes.len());
-    let queries = chunks!(in_nodes, chunk_size)
-        .map(|nodes| {
-            // Step 1: Collect all child commitments needed by this thread's nodes
-            // This enables efficient batch conversion to field elements
-            let (children_ids, children_commitments) =
-                children_commitments_to_scalars(nodes, path_commitments)?;
-
-            // Step 2: PERFORMANCE CRITICAL - Batch convert commitments to field elements
-            let children_frs = AffineElement::batch_map_to_scalar_field(&children_commitments);
-            let child_map: FxHashMap<NodeId, Fr> =
-                children_ids.into_iter().zip(children_frs).collect();
-
-            // Step 3: Generate verification queries for each parent-child relationship
-            Ok(nodes
-                .iter()
-                .map(|(&encode_node, points)| {
-                    let mut queries = Vec::new();
-                    // Get parent node's polynomial commitment (by position in the list)
-                    let commitment = path_commitments.index_of(connect_parent_id(encode_node))?;
-
-                    // Create one query per child
-                    for &point in points.iter() {
-                        let child_id = get_child_node(&logic_parent_id(encode_node), point);
-                        let fr =
-                            child_map
-                                .get(&child_id)
-                                .ok_or_else(|| ProofError::StateReadError {
-                                    reason: format!("Missing commitment for node ID {child_id}"),
-                                })?;
-
-                        queries.push(IndexedQuery {
-                            commitment,                    // Parent polynomial commitment
-                            point: Fr::from(point as u64), // Child index (0-255)
-                            result: *fr, // Expected result: child's commitment as field element
-                        });
-                    }
-
-                    Ok(queries)
-                })
-                .collect::<ProofResult<Vec<_>>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>())
-        })
-        .collect::<ProofResult<Vec<_>>>()?;
-
-    Ok(queries.into_iter().flatten().collect())
-}
-
-/// Extracts child node IDs and commitment bytes for batch processing.
-///
-/// This helper function collects all child commitments needed by a set of parent nodes,
-/// enabling efficient batch conversion to field elements. It flattens the nested structure
-/// of parent nodes → child indices → child commitments into parallel vectors.
-///
-/// # Arguments
-///
-/// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk
-/// * `path_commitments` - Map of all node commitments in the proof
-///
-/// # Returns
-///
-/// Tuple of (child_node_ids, child_commitments) ready for batch field conversion
-#[cfg(test)]
-fn children_commitments_to_scalars(
-    nodes: &[(&NodeId, &BTreeSet<usize>)],
-    path_commitments: &PathCommitments,
-) -> ProofResult<(Vec<NodeId>, Vec<AffineElement>)> {
-    // Flatten nested structure: parent_nodes → child_indices → (child_id, commitment)
-    let (children_ids, children_commitments): (Vec<_>, Vec<_>) = nodes
-        .iter()
-        .map(|(&encode_node, points)| {
-            // For each child index of this parent, get the child's node ID and commitment
-            points
-                .iter()
-                .map(|&point| {
-                    let child_id = get_child_node(&logic_parent_id(encode_node), point);
-                    Ok((
-                        child_id,
-                        // Extract the affine point from SerdeCommitment
-                        path_commitments
-                            .get(child_id)
-                            .ok_or_else(|| ProofError::StateReadError {
-                                reason: format!("Missing commitment for node ID {child_id}"),
-                            })?
-                            .0,
-                    ))
-                })
-                .collect::<ProofResult<Vec<_>>>()
-        })
-        .collect::<ProofResult<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .unzip(); // Separate into parallel vectors for batch processing
-
-    Ok((children_ids, children_commitments))
-}
-
-/// Creates verification queries for leaf trie nodes (data buckets) using parallel processing.
-///
-/// This function generates polynomial evaluation queries that verify the actual key-value data
-/// stored in SALT trie buckets. Each query checks that a bucket's polynomial correctly evaluates
-/// to the stored value at the specified slot position.
-///
-/// # Key Differences from Internal Nodes
-///
-/// * **Data Verification**: Verifies actual stored values, not just structural commitments
-/// * **No Batch Conversion**: Values are converted individually via `slot_to_field()`
-/// * **Bucket Addressing**: Maps slot positions to actual `SaltKey` addresses
-/// * **Memory Efficient**: Returns lazy iterator to avoid materializing all queries
-///
-/// # Bucket Types Handled
-///
-/// * **Main Trie Buckets**: Regular buckets with predictable addressing
-/// * **Subtree Segments**: Expanded bucket segments with calculated start positions
-///
-/// # Arguments
-///
-/// * `leaf_nodes` - Map of bucket node IDs to sets of slot positions needing verification
-/// * `path_commitments` - Cryptographic commitments for bucket polynomials
-/// * `kvs` - Key-value data to verify against
-///
-/// # Returns
-///
-/// Lazy iterator of `VerifierQuery` objects for bucket data verification
-///
-/// The reference form of [`SaltProof::create_indexed_queries`]'s leaf half, kept for its tests.
-#[cfg(test)]
-fn create_leaf_node_queries(
-    leaf_nodes: &BTreeMap<NodeId, BTreeSet<usize>>,
-    path_commitments: &PathCommitments,
-    kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
-) -> ProofResult<impl Iterator<Item = IndexedQuery>> {
-    // Process leaf nodes in parallel - each represents a data bucket
-    let queries = iter!(leaf_nodes)
-        .map(|(parent_node, evaluation_points)| {
-            // Get the polynomial commitment for this bucket (by position in the list)
-            let commitment = path_commitments.index_of(connect_parent_id(*parent_node))?;
-
-            // Calculate the starting SaltKey address for this bucket/segment
-            let salt_key_start = if *parent_node < BUCKET_SLOT_ID_MASK as NodeId {
-                // Main trie bucket: predictable addressing based on bucket ID
-                let bucket_id = (*parent_node - STARTING_NODE_ID[3]) as BucketId;
-                SaltKey::from((bucket_id, 0))
-            } else {
-                // Subtree segment: use helper to calculate complex addressing
-                subtree_leaf_start_key(parent_node)
-            };
-
-            // Generate verification queries for each slot position in this bucket
-            evaluation_points
-                .iter()
-                .map(|&point| {
-                    // Convert slot position to actual SaltKey address
-                    let salt_key = SaltKey(salt_key_start.0 + point as u64);
-
-                    // Look up the actual stored value for this key
-                    let salt_val =
-                        kvs.get(&salt_key)
-                            .ok_or_else(|| ProofError::StateReadError {
-                                reason: format!(
-                                    "Missing key-value entry for salt_key: {salt_key:?}"
-                                ),
-                            })?;
-
-                    // Create query: verify bucket_polynomial(slot_position) == stored_value
-                    Ok(IndexedQuery {
-                        commitment,                      // Bucket polynomial commitment
-                        point: Fr::from(point as u64),   // Slot position within bucket (0-255)
-                        result: slot_to_field(salt_val), // Stored value converted to field element
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Return lazy iterator for memory efficiency - avoids materializing all queries at once
-    Ok(queries.into_iter().flatten())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proof::shape::parents_and_points;
     use crate::proof::test_utils::*;
     use crate::{
         bucket_id_from_metadata_key, bucket_metadata_key,
@@ -965,7 +658,257 @@ mod tests {
     use banderwagon::{CanonicalSerialize, PrimeField};
     use ipa_multipoint::{crs::CRS, lagrange_basis::LagrangeBasis};
     use rand::{rngs::StdRng, SeedableRng};
+    use salt_macros::{chunks, iter, prelude::*, thread_chunk_size};
+    use std::collections::BTreeSet;
     use std::vec;
+
+    /// The verifier's queries as `VerifierQuery`s, each carrying its node's commitment: the form
+    /// of [`SaltProof::create_indexed_queries`] that [`MultiPointProof::check`] takes.
+    impl SaltProof {
+        /// Creates cryptographic verifier queries for SALT proof verification.
+        ///
+        /// This function transforms a proof's structural data into the specific polynomial evaluation
+        /// queries needed by the IPA (Inner Product Argument) verifier. Each query specifies a
+        /// commitment to verify, an evaluation point, and the expected result.
+        ///
+        /// # Process Overview
+        ///
+        /// 1. **Validate Inputs**: Ensures bucket level information matches the queried keys
+        /// 2. **Analyze Tree Structure**: Determines parent nodes and evaluation points needed
+        /// 3. **Generate Queries**: Creates verification queries for both leaf and internal nodes
+        ///
+        /// # Arguments
+        ///
+        /// * `path_commitments` - Map of node IDs to their cryptographic commitments from the proof
+        /// * `kvs` - Key-value pairs to verify (already sorted and deduplicated). None values represent non-existent keys
+        /// * `buckets_level` - Bucket expansion levels for determining subtree structure
+        ///
+        /// # Returns
+        ///
+        /// Vector of `VerifierQuery` objects ready for IPA polynomial verification
+        ///
+        /// # Errors
+        ///
+        /// * `ProofError::StateReadError` - If bucket level info or path commitments are inconsistent with the queried keys
+        pub(crate) fn create_verifier_queries(
+            &self,
+            kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
+        ) -> ProofResult<Vec<ipa_multipoint::multiproof::VerifierQuery>> {
+            use ipa_multipoint::multiproof::VerifierQuery;
+            let (commitments, queries) = self.create_indexed_queries(kvs)?;
+            Ok(queries
+                .into_iter()
+                .map(|q| VerifierQuery {
+                    commitment: commitments[q.commitment as usize].to_element(),
+                    point: Fr::from(q.point),
+                    result: q.result,
+                })
+                .collect())
+        }
+    }
+
+    /// Creates verification queries for internal trie nodes using parallel processing.
+    ///
+    /// This function generates polynomial evaluation queries that verify parent-child relationships
+    /// in the SALT trie structure. Each query checks that a parent node's polynomial correctly
+    /// evaluates to its child's commitment at the specified index.
+    ///
+    /// # Arguments
+    ///
+    /// * `internal_nodes` - Map of parent node IDs to sets of child indices that need verification
+    /// * `path_commitments` - Cryptographic commitments for all nodes in the proof
+    ///
+    /// # Returns
+    ///
+    /// `IndexedQuery`s for the internal nodes' openings, each naming its node's commitment by
+    /// position in `path_commitments`
+    ///
+    /// The reference form of [`SaltProof::create_indexed_queries`]'s internal half, kept for its tests.
+    fn create_internal_node_queries(
+        internal_nodes: &BTreeMap<NodeId, BTreeSet<usize>>,
+        path_commitments: &PathCommitments,
+    ) -> ProofResult<Vec<IndexedQuery>> {
+        // Distribute internal nodes across CPU threads for parallel processing
+        let in_nodes: Vec<_> = internal_nodes.iter().collect();
+        let chunk_size = thread_chunk_size!(in_nodes.len());
+        let queries = chunks!(in_nodes, chunk_size)
+            .map(|nodes| {
+                // Step 1: Collect all child commitments needed by this thread's nodes
+                // This enables efficient batch conversion to field elements
+                let (children_ids, children_commitments) =
+                    children_commitments_to_scalars(nodes, path_commitments)?;
+
+                // Step 2: PERFORMANCE CRITICAL - Batch convert commitments to field elements
+                let children_frs = AffineElement::batch_map_to_scalar_field(&children_commitments);
+                let child_map: FxHashMap<NodeId, Fr> =
+                    children_ids.into_iter().zip(children_frs).collect();
+
+                // Step 3: Generate verification queries for each parent-child relationship
+                Ok(nodes
+                    .iter()
+                    .map(|(&encode_node, points)| {
+                        let mut queries = Vec::new();
+                        // Get parent node's polynomial commitment (by position in the list)
+                        let commitment =
+                            path_commitments.index_of(connect_parent_id(encode_node))?;
+
+                        // Create one query per child
+                        for &point in points.iter() {
+                            let child_id = get_child_node(&logic_parent_id(encode_node), point);
+                            let fr = child_map.get(&child_id).ok_or_else(|| {
+                                ProofError::StateReadError {
+                                    reason: format!("Missing commitment for node ID {child_id}"),
+                                }
+                            })?;
+
+                            queries.push(IndexedQuery {
+                                commitment,          // Parent polynomial commitment
+                                point: point as u32, // Child index (0-255)
+                                result: *fr, // Expected result: child's commitment as field element
+                            });
+                        }
+
+                        Ok(queries)
+                    })
+                    .collect::<ProofResult<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>())
+            })
+            .collect::<ProofResult<Vec<_>>>()?;
+
+        Ok(queries.into_iter().flatten().collect())
+    }
+
+    /// Extracts child node IDs and commitment bytes for batch processing.
+    ///
+    /// This helper function collects all child commitments needed by a set of parent nodes,
+    /// enabling efficient batch conversion to field elements. It flattens the nested structure
+    /// of parent nodes → child indices → child commitments into parallel vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Slice of parent nodes and their child indices from one thread's work chunk
+    /// * `path_commitments` - Map of all node commitments in the proof
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (child_node_ids, child_commitments) ready for batch field conversion
+    fn children_commitments_to_scalars(
+        nodes: &[(&NodeId, &BTreeSet<usize>)],
+        path_commitments: &PathCommitments,
+    ) -> ProofResult<(Vec<NodeId>, Vec<AffineElement>)> {
+        // Flatten nested structure: parent_nodes → child_indices → (child_id, commitment)
+        let (children_ids, children_commitments): (Vec<_>, Vec<_>) = nodes
+            .iter()
+            .map(|(&encode_node, points)| {
+                // For each child index of this parent, get the child's node ID and commitment
+                points
+                    .iter()
+                    .map(|&point| {
+                        let child_id = get_child_node(&logic_parent_id(encode_node), point);
+                        Ok((
+                            child_id,
+                            // Extract the affine point from SerdeCommitment
+                            path_commitments
+                                .get(child_id)
+                                .ok_or_else(|| ProofError::StateReadError {
+                                    reason: format!("Missing commitment for node ID {child_id}"),
+                                })?
+                                .0,
+                        ))
+                    })
+                    .collect::<ProofResult<Vec<_>>>()
+            })
+            .collect::<ProofResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .unzip(); // Separate into parallel vectors for batch processing
+
+        Ok((children_ids, children_commitments))
+    }
+
+    /// Creates verification queries for leaf trie nodes (data buckets) using parallel processing.
+    ///
+    /// This function generates polynomial evaluation queries that verify the actual key-value data
+    /// stored in SALT trie buckets. Each query checks that a bucket's polynomial correctly evaluates
+    /// to the stored value at the specified slot position.
+    ///
+    /// # Key Differences from Internal Nodes
+    ///
+    /// * **Data Verification**: Verifies actual stored values, not just structural commitments
+    /// * **No Batch Conversion**: Values are converted individually via `slot_to_field()`
+    /// * **Bucket Addressing**: Maps slot positions to actual `SaltKey` addresses
+    /// * **Memory Efficient**: Returns lazy iterator to avoid materializing all queries
+    ///
+    /// # Bucket Types Handled
+    ///
+    /// * **Main Trie Buckets**: Regular buckets with predictable addressing
+    /// * **Subtree Segments**: Expanded bucket segments with calculated start positions
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_nodes` - Map of bucket node IDs to sets of slot positions needing verification
+    /// * `path_commitments` - Cryptographic commitments for bucket polynomials
+    /// * `kvs` - Key-value data to verify against
+    ///
+    /// # Returns
+    ///
+    /// Lazy iterator of `IndexedQuery`s for the leaves' slots, each naming its node's commitment
+    /// by position in `path_commitments`
+    ///
+    /// The reference form of [`SaltProof::create_indexed_queries`]'s leaf half, kept for its tests.
+    fn create_leaf_node_queries(
+        leaf_nodes: &BTreeMap<NodeId, BTreeSet<usize>>,
+        path_commitments: &PathCommitments,
+        kvs: &BTreeMap<SaltKey, Option<SaltValue>>,
+    ) -> ProofResult<impl Iterator<Item = IndexedQuery>> {
+        // Process leaf nodes in parallel - each represents a data bucket
+        let queries = iter!(leaf_nodes)
+            .map(|(parent_node, evaluation_points)| {
+                // Get the polynomial commitment for this bucket (by position in the list)
+                let commitment = path_commitments.index_of(connect_parent_id(*parent_node))?;
+
+                // Calculate the starting SaltKey address for this bucket/segment
+                let salt_key_start = if *parent_node < BUCKET_SLOT_ID_MASK as NodeId {
+                    // Main trie bucket: predictable addressing based on bucket ID
+                    let bucket_id = (*parent_node - STARTING_NODE_ID[3]) as BucketId;
+                    SaltKey::from((bucket_id, 0))
+                } else {
+                    // Subtree segment: use helper to calculate complex addressing
+                    subtree_leaf_start_key(parent_node)
+                };
+
+                // Generate verification queries for each slot position in this bucket
+                evaluation_points
+                    .iter()
+                    .map(|&point| {
+                        // Convert slot position to actual SaltKey address
+                        let salt_key = SaltKey(salt_key_start.0 + point as u64);
+
+                        // Look up the actual stored value for this key
+                        let salt_val =
+                            kvs.get(&salt_key)
+                                .ok_or_else(|| ProofError::StateReadError {
+                                    reason: format!(
+                                        "Missing key-value entry for salt_key: {salt_key:?}"
+                                    ),
+                                })?;
+
+                        // Create query: verify bucket_polynomial(slot_position) == stored_value
+                        Ok(IndexedQuery {
+                            commitment,                      // Bucket polynomial commitment
+                            point: point as u32,             // Slot position within bucket (0-255)
+                            result: slot_to_field(salt_val), // Stored value converted to field element
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Return lazy iterator for memory efficiency - avoids materializing all queries at once
+        Ok(queries.into_iter().flatten())
+    }
 
     fn fr_to_le_bytes(fr: Fr) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -1728,19 +1671,8 @@ mod tests {
         );
     }
 
-    /// Tests successful commitment retrieval for existing node IDs.
-    #[test]
-    fn test_get_commitment_safe_success() {
-        // Setup: Proof contains commitment for node 1
-        let commitments = [(1u64, mock_commitment())].into();
-
-        // Should successfully retrieve and convert commitment to Element
-        assert!(get_commitment_safe(&commitments, 1).is_ok());
-
-        // Should return error instead of panicking for missing node
-        assert!(get_commitment_safe(&commitments, 2).is_err());
-    }
-
+    /// A proof whose root commitment (node 0) is swapped for another point is refused with
+    /// `RootMismatch`.
     #[test]
     fn test_check_rejects_tampered_root_commitment() {
         let (store, salt_key, value, root) = setup_single_key_proof_case();
@@ -1878,6 +1810,88 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A witness carries its proof as a byte vector of its own length: a vector that is not as
+    /// long as a proof over the domain fails the decode with an error instead of a panic.
+    #[test]
+    fn test_serde_multi_point_proof_rejects_a_wrong_length() {
+        let store = MemStore::new();
+        let proof = SaltProof::create([SaltKey::from((100, 42))], &store)
+            .unwrap()
+            .proof;
+        let bytes = proof.0.to_bytes().unwrap();
+        let decode = |bytes: &[u8]| {
+            let config = bincode::config::legacy();
+            let wire = bincode::serde::encode_to_vec(bytes, config).unwrap();
+            bincode::serde::decode_from_slice::<SerdeMultiPointProof, _>(&wire, config)
+                .map(|(proof, _)| proof)
+        };
+
+        assert_eq!(decode(&bytes).unwrap(), proof);
+        let mut longer = bytes.clone();
+        longer.push(0);
+        for wrong in [&bytes[..0], &bytes[..bytes.len() - 1], &longer] {
+            assert!(decode(wrong).is_err(), "{} bytes", wrong.len());
+        }
+    }
+
+    /// The `parents_commitments` map decodes through the batch path to the commitments it was
+    /// encoded from, and a single invalid compressed point fails the whole map, wherever it is:
+    /// bytes that are not a field element, or an `x` no point of the subgroup has.
+    #[test]
+    fn test_parents_commitments_serde_rejects_an_invalid_point() {
+        #[derive(Deserialize)]
+        struct Parents(
+            #[serde(deserialize_with = "parents_commitments_serde::deserialize")] PathCommitments,
+        );
+        fn encode<T: Serialize>(map: &T) -> Vec<u8> {
+            bincode::serde::encode_to_vec(map, bincode::config::legacy()).unwrap()
+        }
+        fn decode(
+            points: &BTreeMap<NodeId, [u8; 32]>,
+        ) -> Result<PathCommitments, bincode::error::DecodeError> {
+            bincode::serde::decode_from_slice::<Parents, _>(
+                &encode(points),
+                bincode::config::legacy(),
+            )
+            .map(|(parents, _)| parents.0)
+        }
+
+        // more points than one decode task holds, so that the batch splits them
+        let commitments: PathCommitments = (0..300u64)
+            .map(|i| {
+                let element = Element::prime_subgroup_generator() * Fr::from(i + 1);
+                (i, SerdeCommitment::from(element))
+            })
+            .collect();
+        let points: BTreeMap<NodeId, [u8; 32]> = commitments
+            .iter()
+            .map(|(id, commitment)| (*id, commitment.0.to_bytes()))
+            .collect();
+        assert_eq!(encode(&points), encode(&commitments));
+        assert_eq!(decode(&points).unwrap(), commitments);
+
+        let not_a_field_element = [0xffu8; 32];
+        let off_the_subgroup = (2..u8::MAX)
+            .map(|x| {
+                let mut bytes = [0u8; 32];
+                bytes[31] = x;
+                bytes
+            })
+            .find(|bytes| Element::from_bytes(*bytes).is_err())
+            .expect("a small x that does not decode");
+        for invalid in [not_a_field_element, off_the_subgroup] {
+            for id in [0, 150, 299] {
+                let mut points = points.clone();
+                points.insert(id, invalid);
+                let error = decode(&points).expect_err("an invalid point fails the map");
+                assert!(
+                    error.to_string().contains("invalid element bytes"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
     /// Tests main function behavior with empty inputs (edge case).
     #[test]
     fn test_create_verifier_queries_empty() {
@@ -1982,8 +1996,8 @@ mod tests {
         assert_eq!(queries.len(), 2); // One query per child
 
         // Verify query structure
-        assert_eq!(queries[0].point, Fr::from(0u64));
-        assert_eq!(queries[1].point, Fr::from(1u64));
+        assert_eq!(queries[0].point, 0);
+        assert_eq!(queries[1].point, 1);
     }
 
     /// Tests create_leaf_node_queries with valid bucket data.
@@ -2014,8 +2028,8 @@ mod tests {
         assert_eq!(queries.len(), 2); // One query per slot
 
         // Verify query structure
-        assert_eq!(queries[0].point, Fr::from(0u64));
-        assert_eq!(queries[1].point, Fr::from(5u64));
+        assert_eq!(queries[0].point, 0);
+        assert_eq!(queries[1].point, 5);
     }
 
     #[test]
@@ -2042,9 +2056,9 @@ mod tests {
 
         assert_eq!(first_key, start_key);
         assert_eq!(queries.len(), 2);
-        assert_eq!(queries[0].point, Fr::from(0u64));
+        assert_eq!(queries[0].point, 0);
         assert_eq!(queries[0].result, slot_to_field(&None));
-        assert_eq!(queries[1].point, Fr::from(255u64));
+        assert_eq!(queries[1].point, 255);
         assert_eq!(queries[1].result, slot_to_field(&Some(value)));
     }
 

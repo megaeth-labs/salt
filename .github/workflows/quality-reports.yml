@@ -12,10 +12,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # banderwagon's vector paths run only on a CPU with AVX-512 IFMA, and their tests return early
+  # on one without it. On `ubuntu-latest` the coverage of those paths therefore depended on which
+  # CPU the runner happened to have: the same code reported 97% or 47% of the diff covered.
+  # This job runs on a host that has the extension and fails if the host does not;
+  # BANDERWAGON_REQUIRE_IFMA makes the lane tests fail instead of returning early, as in the
+  # `test-avx512-ifma` job of rust.yml.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    env:
+      BANDERWAGON_REQUIRE_IFMA: 1
     steps:
       - uses: actions/checkout@v4
+
+      - name: Require AVX-512 IFMA
+        run: |
+          grep -m 1 "model name" /proc/cpuinfo
+          grep -qw avx512f /proc/cpuinfo && grep -qw avx512ifma /proc/cpuinfo || {
+            echo "::error::this runner has no AVX-512 IFMA, so the vector paths would go uncovered"
+            exit 1
+          }
 
       # Toolchain version from rust-toolchain.toml; add llvm-tools for cargo-llvm-cov
       - uses: actions-rust-lang/setup-rust-toolchain@v1
