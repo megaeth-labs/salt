@@ -540,6 +540,12 @@ impl MultiPointProof {
     /// (`A(t) / (A'(j) · (t − j))`), where [`Self::check`] inverts one denominator per query and
     /// the `n` of the coefficients again. The field arithmetic runs on the calling thread: a
     /// few products per query, less than a hand-off to the thread pool and back costs.
+    ///
+    /// # Panics
+    ///
+    /// If `precomp` holds the weights of a domain smaller than the CRS's `n` points: they are
+    /// read for every point of the domain. `precomp` and `crs` are meant to be built for the same
+    /// domain, as SALT's are.
     pub fn check_indexed(
         &self,
         crs: &CRS,

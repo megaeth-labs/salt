@@ -716,7 +716,8 @@ mod tests {
     ///
     /// # Returns
     ///
-    /// Vector of `VerifierQuery` objects for polynomial verification of internal node relationships
+    /// `IndexedQuery`s for the internal nodes' openings, each naming its node's commitment by
+    /// position in `path_commitments`
     ///
     /// The reference form of [`SaltProof::create_indexed_queries`]'s internal half, kept for its tests.
     fn create_internal_node_queries(
@@ -849,7 +850,8 @@ mod tests {
     ///
     /// # Returns
     ///
-    /// Lazy iterator of `VerifierQuery` objects for bucket data verification
+    /// Lazy iterator of `IndexedQuery`s for the leaves' slots, each naming its node's commitment
+    /// by position in `path_commitments`
     ///
     /// The reference form of [`SaltProof::create_indexed_queries`]'s leaf half, kept for its tests.
     fn create_leaf_node_queries(
@@ -1665,7 +1667,8 @@ mod tests {
         );
     }
 
-    /// Tests successful commitment retrieval for existing node IDs.
+    /// A proof whose root commitment (node 0) is swapped for another point is refused with
+    /// `RootMismatch`.
     #[test]
     fn test_check_rejects_tampered_root_commitment() {
         let (store, salt_key, value, root) = setup_single_key_proof_case();
