@@ -125,10 +125,6 @@ struct FrMod {
     k: L5,
 }
 
-// SAFETY: __m512i is plain data; built once, read afterwards.
-unsafe impl Sync for FrMod {}
-unsafe impl Send for FrMod {}
-
 fn fr_mod() -> &'static FrMod {
     static M: OnceLock<FrMod> = OnceLock::new();
     // SAFETY: callers check `available()` first; this only broadcasts constants.
