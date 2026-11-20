@@ -101,22 +101,6 @@ reviewer = "compact witness storage port 2026-11-14"
 [[suppress]]
 kind = "line"
 category = "equivalent"
-file = "salt/src/proof/prover.rs"
-mutant = "replace match guard node == encode_node with false in SaltProof::create_indexed_queries"
-justification = "The guard only reuses the commitment position found for the previous pair of the same node. With it false every pair looks its node up again and gets the same position (or the same error), so the queries are unchanged."
-reviewer = "compact witness storage port 2026-11-14"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
-file = "salt/src/proof/prover.rs"
-mutant = "replace match guard node == parent_node with false in SaltProof::create_indexed_queries"
-justification = "The guard only reuses the commitment position and segment start key computed for the previous pair of the same leaf. With it false every pair computes both again from the same node id and gets the same values, so the queries are unchanged."
-reviewer = "compact witness storage port 2026-11-14"
-
-[[suppress]]
-kind = "line"
-category = "equivalent"
 file = "salt/src/proof/shape.rs"
 mutant = "replace | with ^ in encode_parent"
 justification = "parent is a level-3 main-trie id (< 2^25) and the level tag occupies bits 33-35; the operands are disjoint, so OR equals XOR."

@@ -554,18 +554,14 @@ impl SaltProof {
 
         // Convert logical parent IDs to their commitment storage IDs and validate that the proof
         // contains and ONLY contains commitments for all required nodes.
-        let mut required_node_ids: Vec<NodeId> = Vec::with_capacity(self.parents_commitments.len());
-        let mut previous_node = None;
-        for node_id in internal_nodes
-            .iter()
-            .map(|&(node_id, _)| node_id)
-            .chain(leaf_nodes.iter().map(|&(node_id, _, _)| node_id))
-        {
-            if previous_node != Some(node_id) {
-                previous_node = Some(node_id);
-                required_node_ids.push(connect_parent_id(node_id));
-            }
-        }
+        // The pairs are sorted by node, so each node's pairs are one run.
+        let internal_runs = || internal_nodes.chunk_by(|a, b| a.0 == b.0);
+        let leaf_runs = || leaf_nodes.chunk_by(|a, b| a.0 == b.0);
+        let mut required_node_ids: Vec<NodeId> = internal_runs()
+            .map(|run| run[0].0)
+            .chain(leaf_runs().map(|run| run[0].0))
+            .map(connect_parent_id)
+            .collect();
         required_node_ids.sort_unstable();
         required_node_ids.dedup();
         if required_node_ids.as_slice() != self.parents_commitments.ids() {
@@ -590,56 +586,46 @@ impl SaltProof {
                     .map(|index| commitments[index as usize])
             })
             .collect::<ProofResult<Vec<_>>>()?;
-        let children_frs = AffineElement::batch_map_to_scalar_field(&children_commitments);
-        let mut previous_parent = None;
-        for (&(encode_node, point), fr) in internal_nodes.iter().zip(children_frs) {
-            let commitment = match previous_parent {
-                Some((node, index)) if node == encode_node => index,
-                _ => {
-                    let index = path_commitments.index_of(connect_parent_id(encode_node))?;
-                    previous_parent = Some((encode_node, index));
-                    index
-                }
-            };
-            queries.push(IndexedQuery {
-                commitment,
-                point: point as u32,
-                result: fr,
-            });
+        let mut children_frs =
+            AffineElement::batch_map_to_scalar_field(&children_commitments).into_iter();
+        for run in internal_runs() {
+            let commitment = path_commitments.index_of(connect_parent_id(run[0].0))?;
+            for (&(_, point), fr) in run.iter().zip(children_frs.by_ref()) {
+                queries.push(IndexedQuery {
+                    commitment,
+                    point: point as u32,
+                    result: fr,
+                });
+            }
         }
 
         // Leaf nodes: the slot's key is the one that produced the pair when the segment's start
         // plus the position gives it back, and otherwise is looked up, as before.
-        let mut previous_leaf = None;
-        for &(parent_node, point, key_index) in &leaf_nodes {
-            let (commitment, salt_key_start) = match previous_leaf {
-                Some((node, index, start)) if node == parent_node => (index, start),
-                _ => {
-                    let index = path_commitments.index_of(connect_parent_id(parent_node))?;
-                    let start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
-                        let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
-                        SaltKey::from((bucket_id, 0))
-                    } else {
-                        subtree_leaf_start_key(&parent_node)
-                    };
-                    previous_leaf = Some((parent_node, index, start));
-                    (index, start)
-                }
-            };
-            let salt_key = SaltKey(salt_key_start.0 + point as u64);
-            let salt_val = if keys_to_verify[key_index as usize] == salt_key {
-                values[key_index as usize]
+        for run in leaf_runs() {
+            let parent_node = run[0].0;
+            let commitment = path_commitments.index_of(connect_parent_id(parent_node))?;
+            let salt_key_start = if parent_node < BUCKET_SLOT_ID_MASK as NodeId {
+                let bucket_id = (parent_node - STARTING_NODE_ID[3] as NodeId) as BucketId;
+                SaltKey::from((bucket_id, 0))
             } else {
-                kvs.get(&salt_key)
-                    .ok_or_else(|| ProofError::StateReadError {
-                        reason: format!("Missing key-value entry for salt_key: {salt_key:?}"),
-                    })?
+                subtree_leaf_start_key(&parent_node)
             };
-            queries.push(IndexedQuery {
-                commitment,
-                point: point as u32,
-                result: slot_to_field(salt_val),
-            });
+            for &(_, point, key_index) in run {
+                let salt_key = SaltKey(salt_key_start.0 + point as u64);
+                let salt_val = if keys_to_verify[key_index as usize] == salt_key {
+                    values[key_index as usize]
+                } else {
+                    kvs.get(&salt_key)
+                        .ok_or_else(|| ProofError::StateReadError {
+                            reason: format!("Missing key-value entry for salt_key: {salt_key:?}"),
+                        })?
+                };
+                queries.push(IndexedQuery {
+                    commitment,
+                    point: point as u32,
+                    result: slot_to_field(salt_val),
+                });
+            }
         }
 
         Ok((commitments, queries))
