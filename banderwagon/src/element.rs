@@ -438,18 +438,12 @@ impl Element {
     /// path; the values are the same.
     pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
-        if elements.len() >= 8 && crate::ifma::available() {
-            let head = elements.len() / 8 * 8;
-            let mut out = vec![Fr::zero(); elements.len()];
-            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
-            unsafe {
-                crate::ifma_normalize::batch_map_to_scalar_field(
-                    &elements[..head],
-                    &mut out[..head],
-                )
-            };
-            out.truncate(head);
-            out.extend(batch_map_to_scalar_field_scalar(&elements[head..]));
+        if let Some(out) = on_lanes(
+            elements,
+            Fr::zero(),
+            crate::ifma_normalize::batch_map_to_scalar_field,
+            batch_map_to_scalar_field_scalar,
+        ) {
             return out;
         }
         batch_map_to_scalar_field_scalar(elements)
@@ -462,13 +456,12 @@ impl Element {
     /// ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar path.
     pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
-        if elements.len() >= 8 && crate::ifma::available() {
-            let head = elements.len() / 8 * 8;
-            let mut out = vec![Fr::zero(); elements.len()];
-            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
-            unsafe { crate::ifma_normalize::hash_commitments(&elements[..head], &mut out[..head]) };
-            out.truncate(head);
-            out.extend(hash_commitments_scalar(&elements[head..]));
+        if let Some(out) = on_lanes(
+            elements,
+            Fr::zero(),
+            crate::ifma_normalize::hash_commitments,
+            hash_commitments_scalar,
+        ) {
             return out;
         }
         hash_commitments_scalar(elements)
@@ -495,15 +488,12 @@ impl Element {
     /// bytes are the same.
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
-        if elements.len() >= 8 && crate::ifma::available() {
-            let head = elements.len() / 8 * 8;
-            let mut out = vec![[0u8; 64]; elements.len()];
-            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
-            unsafe {
-                crate::ifma_normalize::batch_to_commitments(&elements[..head], &mut out[..head])
-            };
-            out.truncate(head);
-            out.extend(batch_to_commitments_scalar(&elements[head..]));
+        if let Some(out) = on_lanes(
+            elements,
+            [0u8; 64],
+            crate::ifma_normalize::batch_to_commitments,
+            batch_to_commitments_scalar,
+        ) {
             return out;
         }
         batch_to_commitments_scalar(elements)
@@ -553,24 +543,49 @@ pub(crate) fn is_positive(coordinate: Fq) -> bool {
 /// [`Element::batch_map_to_scalar_field`] on the scalar field arithmetic: one batch inversion of the `y`
 /// coordinates, then `x · y⁻¹` reinterpreted. Single-threaded on purpose (small batches).
 pub(crate) fn batch_map_to_scalar_field_scalar(elements: &[Element]) -> Vec<Fr> {
-    let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
+    ratios_to_scalars(elements.iter().map(|e| (e.0.x, e.0.y)))
+}
 
+/// [`Element::hash_commitments`] on the scalar field arithmetic.
+pub(crate) fn hash_commitments_scalar(elements: &[[u8; 64]]) -> Vec<Fr> {
+    ratios_to_scalars(elements.iter().map(|&bytes| {
+        let point = Element::from_bytes_unchecked_uncompressed(bytes).0;
+        (point.x, point.y)
+    }))
+}
+
+/// `x / y` reinterpreted in the scalar field for every `(x, y)`, the `y` inverted in one serial
+/// batch (zero where `y` is zero): the scalar path of the three maps to the scalar field.
+fn ratios_to_scalars(xys: impl Iterator<Item = (Fq, Fq)>) -> Vec<Fr> {
+    let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = xys.unzip();
     serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
-
     xs.into_iter()
         .zip(ys)
         .map(|(x, y_inv)| base_to_scalar(x * y_inv))
         .collect()
 }
 
-/// [`Element::hash_commitments`] on the scalar field arithmetic.
-pub(crate) fn hash_commitments_scalar(elements: &[[u8; 64]]) -> Vec<Fr> {
-    let elements: Vec<Element> = elements
-        .iter()
-        .map(|&bytes| Element::from_bytes_unchecked_uncompressed(bytes))
-        .collect();
-
-    batch_map_to_scalar_field_scalar(&elements)
+/// The lane conversions' dispatch: on an `x86_64` host with AVX-512 IFMA and at least eight
+/// inputs, `lanes` takes every full group of eight and `scalar` the rest, if there is any;
+/// `None` elsewhere, where the caller takes the scalar path.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+fn on_lanes<T, O: Copy>(
+    input: &[T],
+    fill: O,
+    lanes: unsafe fn(&[T], &mut [O]),
+    scalar: fn(&[T]) -> Vec<O>,
+) -> Option<Vec<O>> {
+    if input.len() < 8 || !crate::ifma::available() {
+        return None;
+    }
+    let head = input.len() / 8 * 8;
+    let mut out = vec![fill; input.len()];
+    // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
+    unsafe { lanes(&input[..head], &mut out[..head]) };
+    if head < input.len() {
+        out[head..].copy_from_slice(&scalar(&input[head..]));
+    }
+    Some(out)
 }
 
 /// [`Element::batch_to_commitments`] on the scalar field arithmetic: ark's batch normalization, then the
@@ -694,18 +709,12 @@ impl AffineElement {
     /// 64-byte records where the host has AVX-512 IFMA.
     pub fn batch_map_to_scalar_field(elements: &[AffineElement]) -> Vec<Fr> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
-        if elements.len() >= 8 && crate::ifma::available() {
-            let head = elements.len() / 8 * 8;
-            let mut out = vec![Fr::zero(); elements.len()];
-            // SAFETY: `available()` was checked; `head` is a multiple of eight within both slices.
-            unsafe {
-                crate::ifma_normalize::batch_map_to_scalar_field_affine(
-                    &elements[..head],
-                    &mut out[..head],
-                )
-            };
-            out.truncate(head);
-            out.extend(batch_map_to_scalar_field_affine_scalar(&elements[head..]));
+        if let Some(out) = on_lanes(
+            elements,
+            Fr::zero(),
+            crate::ifma_normalize::batch_map_to_scalar_field_affine,
+            batch_map_to_scalar_field_affine_scalar,
+        ) {
             return out;
         }
         batch_map_to_scalar_field_affine_scalar(elements)
@@ -714,12 +723,7 @@ impl AffineElement {
 
 /// [`AffineElement::batch_map_to_scalar_field`] on the scalar field arithmetic.
 pub(crate) fn batch_map_to_scalar_field_affine_scalar(elements: &[AffineElement]) -> Vec<Fr> {
-    let (xs, mut ys): (Vec<Fq>, Vec<Fq>) = elements.iter().map(|e| (e.0.x, e.0.y)).unzip();
-    serial_batch_inversion_and_mul(&mut ys, &Fq::ONE);
-    xs.into_iter()
-        .zip(ys)
-        .map(|(x, y_inv)| base_to_scalar(x * y_inv))
-        .collect()
+    ratios_to_scalars(elements.iter().map(|e| (e.0.x, e.0.y)))
 }
 
 /// [`multi_scalar_mul`] on affine bases: no conversion, the bases as they are.
@@ -1837,6 +1841,45 @@ pub(crate) mod tests {
 
         for (point, scalar) in points.iter().zip(got) {
             assert_eq!(point.map_to_scalar_field(), scalar);
+        }
+    }
+
+    /// The four batch conversions against the conversions one element at a time, at every length up
+    /// to two groups of eight and a tail and at a large length with a tail: on a host with AVX-512
+    /// IFMA the lanes take the full groups and the scalar path the tail, elsewhere the scalar path
+    /// takes all of it.
+    #[test]
+    fn batch_conversions_match_single_ones_at_every_tail() {
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(5);
+        let g = Element::prime_subgroup_generator();
+        // sums keep `Z ≠ 1`, so the projective conversions normalize
+        let points: Vec<Element> = (0..2048 + 13).map(|_| g * Fr::rand(&mut rng) + g).collect();
+        let affine: Vec<AffineElement> = points.iter().map(|&p| p.into()).collect();
+        let records: Vec<[u8; 64]> = points.iter().map(|p| p.to_bytes_uncompressed()).collect();
+        let scalars: Vec<Fr> = points.iter().map(|p| p.map_to_scalar_field()).collect();
+        for n in (0..=17).chain([2048 + 13]) {
+            assert_eq!(
+                Element::batch_map_to_scalar_field(&points[..n]),
+                scalars[..n],
+                "map {n}"
+            );
+            assert_eq!(
+                AffineElement::batch_map_to_scalar_field(&affine[..n]),
+                scalars[..n],
+                "affine map {n}"
+            );
+            assert_eq!(
+                Element::hash_commitments(&records[..n]),
+                scalars[..n],
+                "hash {n}"
+            );
+            assert_eq!(
+                Element::batch_to_commitments(&points[..n]),
+                records[..n],
+                "bytes {n}"
+            );
         }
     }
 
