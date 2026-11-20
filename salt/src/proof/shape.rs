@@ -106,81 +106,66 @@ fn record_key_paths(
 ) {
     let bucket_id = salt_key.bucket_id();
     let level = levels[&bucket_id];
-
-    // ============================================================================
-    // Phase 1: Main Trie Traversal
-    // ============================================================================
-    // Walk from the bucket root up to the main trie root, recording each
-    // parent-child relationship. The main trie has a fixed depth, so the walk
-    // is exactly `MAIN_TRIE_LEVELS - 1` steps; bounding it by that count rather
-    // than by reaching the root keeps a corrupt parent id from spinning forever.
-    let mut node = bucket_root_node_id(salt_key.bucket_id());
-    for _ in 0..MAIN_TRIE_LEVELS - 1 {
-        let parent_node = get_parent_node(&node);
-        // Record that this parent needs to prove the child at this position
+    // Record that this parent needs to prove the child at this position
+    let mut record = |parent_node: NodeId, position: usize| {
         internal_nodes
             .entry(parent_node)
             .or_default()
-            .insert(vc_position_in_parent(&node));
+            .insert(position);
+    };
 
+    main_trie_path(bucket_id, &mut record);
+    let leaf = subtree_leaf_for_key(salt_key);
+    subtree_path(bucket_id, leaf, level, &mut record);
+    slot_position_nodes
+        .entry(slot_node(bucket_id, leaf, level))
+        .or_default()
+        .insert(slot_position(salt_key));
+}
+
+/// Phase 1, the main trie: every `(parent, position)` pair on the way from `bucket_id`'s root up
+/// to the main trie's root. The main trie has a fixed depth, so the walk is exactly
+/// `MAIN_TRIE_LEVELS - 1` steps; bounding it by that count rather than by reaching the root
+/// keeps a corrupt parent id from spinning forever.
+fn main_trie_path(bucket_id: BucketId, mut push: impl FnMut(NodeId, usize)) {
+    let mut node = bucket_root_node_id(bucket_id);
+    for _ in 0..MAIN_TRIE_LEVELS - 1 {
+        let parent_node = get_parent_node(&node);
+        push(parent_node, vc_position_in_parent(&node));
         node = parent_node;
     }
     debug_assert_eq!(node, ROOT_NODE_ID);
+}
 
-    // ============================================================================
-    // Phase 2: Bucket Tree Traversal
-    // ============================================================================
-    // For expanded buckets (>256 slots), traverse the internal bucket tree
-    // structure from the key's leaf segment up toward the bucket root.
-    // This only applies to buckets with level > 2 (multi-level bucket trees).
-    let mut node = subtree_leaf_for_key(salt_key);
-
+/// Phases 2 and 3, the bucket tree of an expanded bucket (more than 256 slots), whose `level`
+/// is above 1: every `(parent, position)` pair from the key's leaf segment `leaf` up the bucket
+/// subtree (levels above 2), then the bridge from the subtree's top to the main trie, through
+/// the bucket root's id with the level embedded ([`encode_parent`]) to tell tree levels apart.
+fn subtree_path(bucket_id: BucketId, leaf: NodeId, level: u8, mut push: impl FnMut(NodeId, usize)) {
+    let mut node = leaf;
     let mut count = level;
     while count > 2 {
         let parent_node = get_parent_node(&node);
-        // Record parent-child relationships within the bucket subtree
-        internal_nodes
-            .entry(parent_node)
-            .or_default()
-            .insert(vc_position_in_parent(&node));
-
+        push(parent_node, vc_position_in_parent(&node));
         node = parent_node;
         count -= 1;
     }
-
-    // ============================================================================
-    // Phase 3: Bridge Connection (Expanded buckets)
-    // ============================================================================
-    // For bucket trees with exactly 2 levels, create the bridge connection
-    // between the bucket subtree and the main trie. The encode_parent function
-    // embeds level information in the node ID to distinguish different tree levels.
     if count == 2 {
-        let main_trie_node = bucket_root_node_id(salt_key.bucket_id());
-        // Use encoded parent to bridge bucket tree to main trie
-        internal_nodes
-            .entry(encode_parent(main_trie_node, level))
-            .or_default()
-            .insert(vc_position_in_parent(&node));
+        push(
+            encode_parent(bucket_root_node_id(bucket_id), level),
+            vc_position_in_parent(&node),
+        );
     }
+}
 
-    // ============================================================================
-    // Phase 4: Key-Value Slot Position
-    // ============================================================================
-    // Record the direct parent of the key-value pair itself. This determines
-    // which node contains the actual data slot and what position within that
-    // node's 256-slot array the key occupies.
-    let node = if level == 1 {
-        // Level 1: Key stored directly in bucket root (single 256-slot segment)
-        bucket_root_node_id(salt_key.bucket_id())
+/// Phase 4, the node whose 256-slot polynomial holds the key's slot: the bucket root for a
+/// one-level bucket (a single segment), the key's leaf segment `leaf` otherwise.
+fn slot_node(bucket_id: BucketId, leaf: NodeId, level: u8) -> NodeId {
+    if level == 1 {
+        bucket_root_node_id(bucket_id)
     } else {
-        // Level 2+: Key stored in a leaf segment of the bucket tree
-        subtree_leaf_for_key(salt_key)
-    };
-
-    slot_position_nodes
-        .entry(node)
-        .or_default()
-        .insert(slot_position(salt_key));
+        leaf
+    }
 }
 
 /// The position of `key`'s slot in its leaf's 256-slot polynomial (the slot id's low 8 bits).
@@ -214,48 +199,25 @@ pub(crate) fn sorted_parents_and_points(
         let bucket_id = salt_key.bucket_id();
         let level = levels[&bucket_id];
 
-        // Phase 1: the bucket root's path through the main trie, once per run of one bucket.
-        // The main trie has a fixed depth, so the walk is exactly `MAIN_TRIE_LEVELS - 1`
-        // steps; bounding it by that count rather than by reaching the root keeps a corrupt
-        // parent id from spinning forever (as in `record_key_paths`).
+        // Phase 1 once per run of one bucket, phases 2 and 3 once per run of one segment.
         if previous_bucket != Some(bucket_id) {
             previous_bucket = Some(bucket_id);
-            let mut node = bucket_root_node_id(bucket_id);
-            for _ in 0..MAIN_TRIE_LEVELS - 1 {
-                let parent_node = get_parent_node(&node);
-                internal_nodes.push((parent_node, vc_position_in_parent(&node) as u8));
-                node = parent_node;
-            }
-            debug_assert_eq!(node, ROOT_NODE_ID);
+            main_trie_path(bucket_id, |parent, position| {
+                internal_nodes.push((parent, position as u8))
+            });
         }
-
-        // Phases 2 and 3: the bucket subtree's path and its bridge, once per run of one segment.
         let leaf = subtree_leaf_for_key(salt_key);
         if previous_leaf != Some((leaf, level)) {
             previous_leaf = Some((leaf, level));
-            let mut node = leaf;
-            let mut count = level;
-            while count > 2 {
-                let parent_node = get_parent_node(&node);
-                internal_nodes.push((parent_node, vc_position_in_parent(&node) as u8));
-                node = parent_node;
-                count -= 1;
-            }
-            if count == 2 {
-                internal_nodes.push((
-                    encode_parent(bucket_root_node_id(bucket_id), level),
-                    vc_position_in_parent(&node) as u8,
-                ));
-            }
+            subtree_path(bucket_id, leaf, level, |parent, position| {
+                internal_nodes.push((parent, position as u8))
+            });
         }
-
-        // Phase 4: the key's slot position in its segment.
-        let node = if level == 1 {
-            bucket_root_node_id(bucket_id)
-        } else {
-            leaf
-        };
-        slot_position_nodes.push((node, (salt_key.slot_id() & 0xFF) as u8, index as u32));
+        slot_position_nodes.push((
+            slot_node(bucket_id, leaf, level),
+            slot_position(salt_key) as u8,
+            index as u32,
+        ));
     }
 
     internal_nodes.sort_unstable();
