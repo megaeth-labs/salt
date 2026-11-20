@@ -458,6 +458,16 @@ mod tests {
     use ark_ff::{One, UniformRand, Zero};
     use rand_chacha::rand_core::SeedableRng;
 
+    /// The canonical little-endian bytes of a base field element: one coordinate of a 64-byte
+    /// commitment record.
+    fn fq_to_le_bytes(x: Fq) -> [u8; 32] {
+        use ark_serialize::CanonicalSerialize;
+        let mut bytes = [0u8; 32];
+        x.serialize_compressed(&mut bytes[..])
+            .expect("32 bytes hold a field element");
+        bytes
+    }
+
     fn points(n: usize, seed: u64) -> Vec<Element> {
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
         let mut v: Vec<Element> = (0..n)
@@ -564,8 +574,8 @@ mod tests {
                 .map(|e| {
                     let a = e.0.into_affine();
                     let mut b = [0u8; 64];
-                    b[..32].copy_from_slice(&crate::element::fq_to_le_bytes(a.x));
-                    b[32..].copy_from_slice(&crate::element::fq_to_le_bytes(a.y));
+                    b[..32].copy_from_slice(&fq_to_le_bytes(a.x));
+                    b[32..].copy_from_slice(&fq_to_le_bytes(a.y));
                     b
                 })
                 .collect();
@@ -586,10 +596,10 @@ mod tests {
             let mut recs = vec![[0u8; 64]; 8];
             let g = Element::prime_subgroup_generator().0.into_affine();
             for r in recs.iter_mut() {
-                r[..32].copy_from_slice(&crate::element::fq_to_le_bytes(g.x));
-                r[32..].copy_from_slice(&crate::element::fq_to_le_bytes(g.y));
+                r[..32].copy_from_slice(&fq_to_le_bytes(g.x));
+                r[32..].copy_from_slice(&fq_to_le_bytes(g.y));
             }
-            recs[5][..32].copy_from_slice(&crate::element::fq_to_le_bytes(Fq::from(7u64)));
+            recs[5][..32].copy_from_slice(&fq_to_le_bytes(Fq::from(7u64)));
             recs[5][32..].fill(0);
             let mut got = vec![Fr::zero(); 8];
             unsafe { hash_commitments(&recs, &mut got) };

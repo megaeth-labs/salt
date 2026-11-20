@@ -35,19 +35,20 @@ impl PartialEq for Element {
     /// - The points lie in the correct prime-order subgroup
     /// - Points at infinity (with `y = 0`) are excluded
     fn eq(&self, other: &Self) -> bool {
-        let (x1, y1) = (self.0.x, self.0.y);
-        let (x2, y2) = (other.0.x, other.0.y);
-
-        // Fail-safe check to reject the invalid but dangerous (0, 0) point.
-        if x1.is_zero() & y1.is_zero() {
-            return false;
-        }
-        if x2.is_zero() & y2.is_zero() {
-            return false;
-        }
-
-        (x1 * y2) == (x2 * y1)
+        quotient_eq((self.0.x, self.0.y), (other.0.x, other.0.y))
     }
+}
+
+/// The quotient group's equality on `(x, y)` (projective `X`, `Y` or affine `x`, `y`: only their
+/// ratio matters): `x₁ · y₂ == x₂ · y₁`, the invalid but dangerous `(0, 0)` equal to nothing.
+fn quotient_eq((x1, y1): (Fq, Fq), (x2, y2): (Fq, Fq)) -> bool {
+    if x1.is_zero() & y1.is_zero() {
+        return false;
+    }
+    if x2.is_zero() & y2.is_zero() {
+        return false;
+    }
+    (x1 * y2) == (x2 * y1)
 }
 
 impl Element {
@@ -73,19 +74,7 @@ impl Element {
     ///
     /// Panics if serialization fails (should never occur for valid elements).
     pub fn to_bytes(&self) -> [u8; 32] {
-        let affine = EdwardsAffine::from(self.0);
-        let x = if is_positive(affine.y) {
-            affine.x
-        } else {
-            -affine.x
-        };
-        let mut bytes = [0u8; 32];
-        x.serialize_compressed(&mut bytes[..])
-            .expect("serialization failed");
-
-        // arkworks uses little endian, reverse bytes to big endian
-        bytes.reverse();
-        bytes
+        AffineElement::from(*self).to_bytes()
     }
 
     /// Deserializes a banderwagon element from a 32-byte compressed representation.
@@ -106,7 +95,7 @@ impl Element {
     ///
     /// This is the **safe** deserialization path. Always use this for untrusted input.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Element, SerializationError> {
-        Self::decode(bytes).map(Element::from_decoded)
+        Self::decode(bytes).map(|point| Element(point.into()))
     }
 
     /// The point [`Element::from_bytes`] decodes, in the affine form the decode computes it in.
@@ -171,7 +160,7 @@ impl Element {
         // collecting into a `Result` is what stops the decode: rayon schedules no further task
         // once one has returned an error, and a serial iterator stops at it
         let tasks: Vec<Vec<Element>> = chunks!(bytes, decode_task_len(bytes.len()))
-            .map(Self::decode_task)
+            .map(|task| Self::decode_task(task).map(to_elements))
             .collect::<Result<_, _>>()?;
         Ok(tasks.into_iter().flatten())
     }
@@ -182,12 +171,13 @@ impl Element {
     /// `from_bytes_batch` cuts a batch that small into one-point tasks for the thread pool, and a
     /// caller outside the pool waits for that hand-off, the longer the busier the pool is.
     pub fn from_bytes_batch_serial(bytes: &[[u8; 32]]) -> Result<Vec<Element>, SerializationError> {
-        Self::decode_task(bytes)
+        Self::decode_task(bytes).map(to_elements)
     }
 
-    /// One task of [`Element::from_bytes_batch`] (and of [`AffineElement::from_bytes_batch`]), on
-    /// the vector lanes where this host has them.
-    fn decode_task<P: FromDecoded>(bytes: &[[u8; 32]]) -> Result<Vec<P>, SerializationError> {
+    /// One task of [`AffineElement::from_bytes_batch`] (and of [`Element::from_bytes_batch`]), on
+    /// the vector lanes where this host has them: the points in the affine form the decode computes
+    /// them in.
+    fn decode_task(bytes: &[[u8; 32]]) -> Result<Vec<AffineElement>, SerializationError> {
         match lane_decoder() {
             Some(lanes) => Self::decode_task_lanes(bytes, lanes),
             None => Self::decode_task_scalar(bytes),
@@ -202,9 +192,7 @@ impl Element {
     /// # Panics
     ///
     /// On a zero denominator `d·x² − 1`, which no `x` has: `d` is not a square.
-    fn decode_task_scalar<P: FromDecoded>(
-        bytes: &[[u8; 32]],
-    ) -> Result<Vec<P>, SerializationError> {
+    fn decode_task_scalar(bytes: &[[u8; 32]]) -> Result<Vec<AffineElement>, SerializationError> {
         // (x, x²) per input, and its denominator d·x² − 1, inverted in place below
         let mut xs: Vec<(Fq, Fq)> = Vec::with_capacity(bytes.len());
         let mut den_inv: Vec<Fq> = Vec::with_capacity(bytes.len());
@@ -220,7 +208,7 @@ impl Element {
         serial_batch_inversion_and_mul(&mut den_inv, &Fq::one());
         xs.into_iter()
             .zip(den_inv)
-            .map(|((x, x_sq), den_inv)| Self::from_x(x, x_sq, || den_inv).map(P::from_decoded))
+            .map(|((x, x_sq), den_inv)| Self::from_x(x, x_sq, || den_inv).map(AffineElement))
             .collect()
     }
 
@@ -236,10 +224,10 @@ impl Element {
     /// scalar path accepts into an error. A root they do return is taken as they computed it, with
     /// the positive `y` chosen here as `from_bytes` chooses it: it is not decoded again, and the
     /// lane tests are what compare it with the scalar decoder's.
-    fn decode_task_lanes<P: FromDecoded>(
+    fn decode_task_lanes(
         bytes: &[[u8; 32]],
         mut decode_chunks: impl FnMut(&[[Fq; CHUNK]]) -> Vec<ChunkDecode>,
-    ) -> Result<Vec<P>, SerializationError> {
+    ) -> Result<Vec<AffineElement>, SerializationError> {
         let mut out = Vec::with_capacity(bytes.len());
         for group in bytes.chunks(CHUNK * TASK_CHUNKS) {
             let tail = group.len() % CHUNK;
@@ -258,7 +246,7 @@ impl Element {
                     .zip(lanes.as_flattened())
                     .zip(decoded.as_flattened());
                 for ((b, x), y) in points {
-                    out.push(P::from_decoded(match y {
+                    out.push(AffineElement(match y {
                         Some(y) => point_with_positive_y(*x, *y),
                         None => Self::decode(*b)?,
                     }));
@@ -611,15 +599,7 @@ pub struct AffineElement(pub(crate) EdwardsAffine);
 impl PartialEq for AffineElement {
     /// [`Element`]'s equality: `x₁ · y₂ == x₂ · y₁`, `(0, 0)` equal to nothing.
     fn eq(&self, other: &Self) -> bool {
-        let (x1, y1) = (self.0.x, self.0.y);
-        let (x2, y2) = (other.0.x, other.0.y);
-        if x1.is_zero() & y1.is_zero() {
-            return false;
-        }
-        if x2.is_zero() & y2.is_zero() {
-            return false;
-        }
-        (x1 * y2) == (x2 * y1)
+        quotient_eq((self.0.x, self.0.y), (other.0.x, other.0.y))
     }
 }
 
@@ -661,6 +641,7 @@ impl AffineElement {
         let mut bytes = [0u8; 32];
         x.serialize_compressed(&mut bytes[..])
             .expect("serialization failed");
+        // arkworks uses little endian, reverse bytes to big endian
         bytes.reverse();
         bytes
     }
@@ -676,9 +657,9 @@ impl AffineElement {
     }
 
     /// [`Element::from_bytes_batch`], affine: the same decode (in parallel tasks, on the vector
-    /// lanes where the host has them, stopping at the first input it rejects), each task writing
-    /// its points, in the affine form they are decoded in, into their places in the returned
-    /// vector. Nothing is gathered afterwards: the one serial pass is the vector's allocation.
+    /// lanes where the host has them, stopping at the first input it rejects), each task copying
+    /// its points, in the affine form they are decoded in, into its range of the returned vector.
+    /// Nothing is gathered afterwards: besides the tasks, the one pass is the vector's allocation.
     pub fn from_bytes_batch(bytes: &[[u8; 32]]) -> Result<Vec<AffineElement>, SerializationError> {
         let mut points = std::vec![AffineElement::zero(); bytes.len()];
         let len = decode_task_len(bytes.len());
@@ -732,16 +713,6 @@ pub fn multi_scalar_mul_affine(bases: &[AffineElement], scalars: &[Fr]) -> Eleme
     let bases: &[EdwardsAffine] =
         unsafe { core::slice::from_raw_parts(bases.as_ptr() as *const EdwardsAffine, bases.len()) };
     Element(msm(bases, scalars))
-}
-
-/// The canonical little-endian bytes of a base field element (tests).
-#[cfg(test)]
-#[allow(dead_code)] // used by the std decoder path only; the test target builds this crate with -D warnings
-pub(crate) fn fq_to_le_bytes(x: Fq) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    x.serialize_compressed(&mut bytes[..])
-        .expect("32 bytes hold a field element");
-    bytes
 }
 
 /// Canonicalizes an affine point and serializes it to 64 bytes.
@@ -821,23 +792,10 @@ fn point_with_positive_y(x: Fq, y: Fq) -> EdwardsAffine {
     EdwardsAffine::new_unchecked(x, y)
 }
 
-/// The point types the decode produces, from the affine point it decodes (its `y` the positive
-/// root): an [`Element`] is that point in projective form (`T = x · y`, `Z = 1`), an
-/// [`AffineElement`] the point as it is.
-trait FromDecoded: Sized {
-    fn from_decoded(point: EdwardsAffine) -> Self;
-}
-
-impl FromDecoded for Element {
-    fn from_decoded(point: EdwardsAffine) -> Self {
-        Element(point.into())
-    }
-}
-
-impl FromDecoded for AffineElement {
-    fn from_decoded(point: EdwardsAffine) -> Self {
-        AffineElement(point)
-    }
+/// Decoded points in projective form, `T = x · y` and `Z = 1`: what [`Element`]'s batch decodes
+/// return.
+fn to_elements(points: Vec<AffineElement>) -> Vec<Element> {
+    points.iter().map(AffineElement::to_element).collect()
 }
 
 /// Points per vector-lane chunk of the batch decode: four interleaved groups of eight lanes, enough
@@ -1225,15 +1183,15 @@ pub(crate) mod tests {
     }
 
     /// What a decode returns, comparable: the affine points, or the error's debug form.
-    fn outcome(
-        decoded: Result<Vec<Element>, SerializationError>,
+    fn outcome<P: Into<Element>>(
+        decoded: Result<Vec<P>, SerializationError>,
     ) -> Result<Vec<(Fq, Fq)>, std::string::String> {
         decoded
-            .map(|elements| {
-                elements
-                    .iter()
-                    .map(|element| {
-                        let point = element.0.into_affine();
+            .map(|points| {
+                points
+                    .into_iter()
+                    .map(|point| {
+                        let point = point.into().0.into_affine();
                         (point.x, point.y)
                     })
                     .collect()
@@ -1334,34 +1292,33 @@ pub(crate) mod tests {
             for (case, input) in cases.iter().enumerate() {
                 let want = expected(input);
                 assert_eq!(want.is_ok(), case == 0, "length {len}, case {case}");
-                let check = |decoder: &str, got: Result<Vec<Element>, SerializationError>| {
-                    assert_eq!(outcome(got), want, "{decoder}, length {len}, case {case}");
+                let check = |decoder: &str, got: Result<Vec<(Fq, Fq)>, std::string::String>| {
+                    assert_eq!(got, want, "{decoder}, length {len}, case {case}");
                 };
-                check("scalar task", Element::decode_task_scalar(input));
+                check("scalar task", outcome(Element::decode_task_scalar(input)));
                 check(
                     "stand-in lanes",
-                    Element::decode_task_lanes(input, stand_in_lanes),
+                    outcome(Element::decode_task_lanes(input, stand_in_lanes)),
                 );
                 check(
                     "rejecting lanes",
-                    Element::decode_task_lanes(input, rejecting_lanes),
+                    outcome(Element::decode_task_lanes(input, rejecting_lanes)),
                 );
                 check(
                     "lanes with negative roots",
-                    Element::decode_task_lanes(input, negative_root_lanes),
+                    outcome(Element::decode_task_lanes(input, negative_root_lanes)),
                 );
                 if lanes_under_test() {
                     let lanes = lane_decoder().expect("the lanes are under test");
-                    check("lanes", Element::decode_task_lanes(input, lanes));
+                    check("lanes", outcome(Element::decode_task_lanes(input, lanes)));
                 }
                 check(
                     "batch",
-                    Element::from_bytes_batch(input).map(|elements| elements.collect()),
+                    outcome(Element::from_bytes_batch(input).map(|elements| elements.collect())),
                 );
                 check(
                     "affine batch",
-                    AffineElement::from_bytes_batch(input)
-                        .map(|points| points.iter().map(AffineElement::to_element).collect()),
+                    outcome(AffineElement::from_bytes_batch(input)),
                 );
             }
         }
@@ -1375,26 +1332,9 @@ pub(crate) mod tests {
     #[test]
     fn affine_element_matches_element() {
         use ark_ff::UniformRand;
-        use rand_chacha::rand_core::{RngCore, SeedableRng};
+        use rand_chacha::rand_core::SeedableRng;
         let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(11);
-        let mut inputs: Vec<[u8; 32]> = Vec::new();
-        for _ in 0..300 {
-            inputs.push((Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes());
-        }
-        for _ in 0..100 {
-            let x = Fq::rand(&mut rng);
-            let mut b = [0u8; 32];
-            x.serialize_compressed(&mut b[..]).unwrap();
-            b.reverse();
-            inputs.push(b);
-        }
-        for _ in 0..10 {
-            inputs.push([0xff; 32]);
-            let mut b = [0u8; 32];
-            rng.fill_bytes(&mut b);
-            inputs.push(b);
-        }
-        inputs.push(Element::zero().to_bytes());
+        let inputs = decode_test_inputs(1200);
         let mut accepted: Vec<[u8; 32]> = Vec::new();
         for b in &inputs {
             match (Element::from_bytes(*b), AffineElement::from_bytes(*b)) {
@@ -1657,23 +1597,24 @@ pub(crate) mod tests {
             .map(|_| (Element::prime_subgroup_generator() * Fr::rand(&mut rng)).to_bytes())
             .collect();
         let want = expected(&inputs);
-        let ns_per_point = |decode: &dyn Fn() -> Result<Vec<Element>, SerializationError>| {
+        let ns_per_point = |decode: &dyn Fn() -> Result<Vec<(Fq, Fq)>, std::string::String>| {
             let t = std::time::Instant::now();
             let got = decode();
             let ns = t.elapsed().as_nanos() as f64 / inputs.len() as f64;
-            assert_eq!(outcome(got), want);
+            assert_eq!(got, want);
             ns
         };
         // the inputs through `task`, `len` at a time
-        type Task = fn(&[[u8; 32]]) -> Result<Vec<Element>, SerializationError>;
+        type Task = fn(&[[u8; 32]]) -> Result<Vec<AffineElement>, SerializationError>;
         let in_tasks = |len: usize, task: Task| {
-            let tasks: Result<Vec<Vec<Element>>, _> = inputs.chunks(len).map(task).collect();
-            tasks.map(|tasks| tasks.into_iter().flatten().collect())
+            let tasks: Result<Vec<Vec<AffineElement>>, _> = inputs.chunks(len).map(task).collect();
+            outcome(tasks.map(|tasks| tasks.into_iter().flatten().collect()))
         };
         let full = CHUNK * TASK_CHUNKS;
         let short = CHUNK / 4;
         for rep in 0..5 {
-            let point = ns_per_point(&|| inputs.iter().map(|b| Element::from_bytes(*b)).collect());
+            let point =
+                ns_per_point(&|| outcome(inputs.iter().map(|b| Element::from_bytes(*b)).collect()));
             let scalar = ns_per_point(&|| in_tasks(full, Element::decode_task_scalar));
             let task = ns_per_point(&|| in_tasks(full, Element::decode_task));
             let padded = ns_per_point(&|| in_tasks(short, Element::decode_task));
