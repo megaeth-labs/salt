@@ -377,7 +377,7 @@ fn lane_window(n: usize) -> usize {
 /// 8 × 8 transpose of 64-bit words: `r[i]` holds point `i`'s eight words in; word `j` of every point out.
 #[inline]
 #[target_feature(enable = "avx512f")]
-unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
+pub(crate) unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
     let t0 = _mm512_unpacklo_epi64(r[0], r[1]);
     let t1 = _mm512_unpackhi_epi64(r[0], r[1]);
     let t2 = _mm512_unpacklo_epi64(r[2], r[3]);

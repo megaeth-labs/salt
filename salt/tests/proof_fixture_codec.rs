@@ -1,14 +1,11 @@
 use bincode::config::legacy;
-use salt::{
-    proof::{prover::parents_commitments_serde, SerdeCommitment},
-    types::NodeId,
-    SaltProof,
-};
+use salt::{proof::SerdeCommitment, types::NodeId, SaltProof};
 use std::collections::BTreeMap;
 
+/// The parent map decoded entry by entry through `SerdeCommitment`'s own deserializer (the scalar
+/// path, one point at a time) — the reference the parallel, in-place decode is compared against.
 #[derive(serde::Deserialize)]
 struct ParentsCommitmentsFixture {
-    #[serde(deserialize_with = "parents_commitments_serde::deserialize")]
     inner: BTreeMap<NodeId, SerdeCommitment>,
 }
 
@@ -34,7 +31,7 @@ fn committed_proof_fixtures_decode_and_reencode_deterministically() {
 
         assert_eq!(consumed, bytes.len(), "{name} left trailing bytes");
         assert!(
-            proof.parents_commitments.contains_key(&0),
+            proof.parents_commitments.contains_key(0),
             "{name} has no root commitment"
         );
         assert!(
@@ -76,9 +73,19 @@ fn committed_parent_commitment_maps_decode_through_parallel_path() {
             map_bytes.len(),
             "{name} parent map left trailing bytes"
         );
-        assert_eq!(
-            decoded.inner, proof.parents_commitments,
-            "{name} parent map changed after optimized decode"
-        );
+        assert_eq!(decoded.inner.len(), proof.parents_commitments.len());
+        for ((id, c), (pid, pc)) in decoded.inner.iter().zip(proof.parents_commitments.iter()) {
+            assert_eq!(
+                (id, c),
+                (pid, pc),
+                "{name} parent map changed after optimized decode"
+            );
+            assert_eq!(c.as_bytes(), pc.as_bytes());
+        }
+        assert!(proof
+            .parents_commitments
+            .ids()
+            .windows(2)
+            .all(|w| w[0] < w[1]));
     }
 }
