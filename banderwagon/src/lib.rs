@@ -12,11 +12,19 @@ mod decoder_arithmetic;
 mod element;
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod ifma;
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod ifma_msm;
 pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, Element, Fr};
 pub mod salt_committer;
 mod scalar_multi_asm;
+// Used by the vector MSM (`x86_64` with `std`); its tests need no vector unit and run everywhere.
+#[cfg(all(
+    feature = "std",
+    any(target_arch = "x86_64", all(test, feature = "parallel"))
+))]
+mod spread;
 
 // Re-export arkworks traits that one may need to use in order to use
 // specific methods on field elements and for serialization.

@@ -657,6 +657,64 @@ fn task_len(total: usize, threads: usize, lanes: bool) -> usize {
     }
 }
 
+/// The smallest multi-scalar multiplication the vector path (`ifma_msm`) takes. Below it
+/// [`crate::msm::msm_windowed`] runs. The cutoff is the same for every thread count.
+///
+/// The scalar path spreads its windows over every thread of the pool. A vector task runs on one
+/// thread, and on up to four when its MSM is the only one in flight (`LANE_MSMS` there). On one
+/// thread the lanes are the faster path from 128 points up, the smallest size timed. The cutoff is
+/// under the 274 points of the MSM every proof check ends with. A check's other MSM has a point
+/// per trie node, and is over the cutoff for all but the smallest witnesses.
+///
+/// On an EPYC 9B45 (a 32-thread KVM guest, 16 cores), at 274 points: one thread takes 0.48 ms in
+/// lanes and 3.2 ms on the scalar path. In a pool of 32 threads that was asleep the lanes take
+/// 0.23 ms with 0.89 ms of thread time, and the scalar path 0.36 ms with 9.6 ms. With 64 of them
+/// at once in that pool the batch takes 0.03 ms per MSM in lanes and 0.17 ms on the scalar path.
+/// At 2,047 points, the largest MSM that is not split into tasks, those are 2.0 ms and 14 ms, 0.78
+/// ms (2.5 ms) and 1.1 ms (25 ms), 0.11 ms and 0.72 ms.
+///
+/// Verifying the witnesses of 62 mainnet blocks (MSMs of 67 to 3,127 points, and the 274-point one
+/// in each) with the vector path from here instead of from 8,192 points: 16 threads verifying at
+/// once do 3,090 a second instead of 1,320, and one verification in an idle pool takes 1.9 ms
+/// instead of 2.2 ms. With 16 at once, cutoffs of 64, 128 and 256 points timed alike, and one of
+/// 512, which leaves the 274-point MSM on the scalar path, gave about a quarter of the gain.
+///
+/// The size compared is the MSM's own input, after a proof check has coalesced repeated
+/// commitments, not the number of proof queries.
+const LANE_MSM_MIN_POINTS: usize = 256;
+
+/// The vector multi-scalar multiplication, as `ifma_msm` hands it out.
+pub(crate) type LaneMsm = fn(&[EdwardsAffine], &[Fr]) -> EdwardsProjective;
+
+/// The vector MSM where this host has it: the lane module is compiled (`x86_64` with `std`) and
+/// the CPU reports AVX-512 IFMA.
+fn lane_msm() -> Option<LaneMsm> {
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    {
+        crate::ifma_msm::lane_msm()
+    }
+    #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+    {
+        None
+    }
+}
+
+/// The multi-scalar multiplication: eight windows per vector register on a host with AVX-512
+/// IFMA from [`LANE_MSM_MIN_POINTS`] points up, and [`crate::msm::msm_windowed`] everywhere else.
+fn msm(bases: &[EdwardsAffine], scalars: &[Fr]) -> EdwardsProjective {
+    assert_eq!(
+        bases.len(),
+        scalars.len(),
+        "number of bases should equal number of scalars"
+    );
+    if bases.len() >= LANE_MSM_MIN_POINTS {
+        if let Some(lanes) = lane_msm() {
+            return lanes(bases, scalars);
+        }
+    }
+    crate::msm::msm_windowed(bases, scalars)
+}
+
 pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
     assert_eq!(
         bases.len(),
@@ -677,7 +735,7 @@ pub fn multi_scalar_mul(bases: &[Element], scalars: &[Fr]) -> Element {
         EdwardsProjective::batch_convert_to_mul_base(&bases_inner)
     };
 
-    Element(crate::msm::msm_windowed(&bases, scalars))
+    Element(msm(&bases, scalars))
 }
 
 /// Multiplies an `Element` by a scalar field element.
@@ -772,6 +830,58 @@ impl Hash for Element {
 pub(crate) mod tests {
     extern crate std;
     use self::std::println;
+
+    /// The dispatch returns what arkworks' MSM returns on both sides of the vector path's cutoff,
+    /// on both sides of its first split, and in pools of one, two and eight threads, which split
+    /// the sizes from 2,048 points up into one to eight tasks: the affine entry the same curve
+    /// point, the element entry the same element.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn msm_pool_crossover_preserves_group_result() {
+        use ark_ec::VariableBaseMSM;
+        use ark_ff::UniformRand;
+        use rand_chacha::rand_core::SeedableRng;
+
+        // where CI requires the lanes, the sizes from the cutoff up take them here
+        lanes_under_test();
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(0xf21);
+        let mut bases: Vec<EdwardsAffine> =
+            (0..16385).map(|_| EdwardsAffine::rand(&mut rng)).collect();
+        let mut scalars: Vec<Fr> = (0..16385).map(|_| Fr::rand(&mut rng)).collect();
+        bases[1] = EdwardsAffine::zero();
+        scalars[2] = Fr::zero();
+        scalars[3] = -Fr::one();
+
+        let pools = [1, 2, 8].map(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+        });
+        for n in [0, 255, 256, 257, 1024, 2047, 2048, 2049, 4097, 8193, 16385] {
+            let reference = EdwardsProjective::msm(&bases[..n], &scalars[..n]).unwrap();
+            let projective: Vec<_> = bases[..n]
+                .iter()
+                .map(|point| Element((*point).into()))
+                .collect();
+            for pool in &pools {
+                let threads = pool.current_num_threads();
+                pool.install(|| {
+                    assert_eq!(
+                        msm(&bases[..n], &scalars[..n]),
+                        reference,
+                        "affine n={n} threads={threads}"
+                    );
+                    assert_eq!(
+                        multi_scalar_mul(&projective, &scalars[..n]),
+                        Element(reference),
+                        "projective n={n} threads={threads}"
+                    );
+                });
+            }
+        }
+    }
+
     /// `from_bytes_batch` returns `from_bytes`'s elements where it accepts every input, and its
     /// error where it rejects one, wherever that one is: a canonical `x` with no square root or
     /// off the prime subgroup, or bytes that are not a canonical `x`.

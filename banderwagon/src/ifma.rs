@@ -26,7 +26,7 @@
 //! Compiled only for `x86_64` with `std` (runtime detection of `avx512ifma`); every other target and a host
 //! without the extension take the scalar path through [`crate::Element::from_bytes`].
 #![allow(clippy::needless_range_loop)]
-use ark_ff::{BigInt, FftField, Field, One, PrimeField, Zero};
+use ark_ff::{BigInt, BigInteger, FftField, Field, One, PrimeField, Zero};
 use core::arch::x86_64::*;
 use std::sync::OnceLock;
 
@@ -186,6 +186,7 @@ fn from_limbs52(l: &[u64; 5]) -> BigInt<4> {
 
 pub(crate) struct Ctx {
     p: L5,
+    two_p: L5,
     n0: __m512i,
     pub(crate) mask: __m512i,
     pub(crate) one: L5,
@@ -224,18 +225,25 @@ unsafe fn ctx() -> Ctx {
         one_p_l[i] = s & MASK52;
         carry = s >> 52;
     }
+    // 2p as 52-bit limbs: p has 255 bits, so the doubling carries nothing out
+    let mut two_p_big = Fq::MODULUS;
+    assert!(!two_p_big.mul2());
+    let two_p_l = to_limbs52(&two_p_big);
     let mut p = [_mm512_setzero_si512(); 5];
+    let mut two_p = [_mm512_setzero_si512(); 5];
     let mut one = [_mm512_setzero_si512(); 5];
     let mut one_p = [_mm512_setzero_si512(); 5];
     let mut neg_one = [_mm512_setzero_si512(); 5];
     for i in 0..5 {
         p[i] = _mm512_set1_epi64(p_scalar[i] as i64);
+        two_p[i] = _mm512_set1_epi64(two_p_l[i] as i64);
         one[i] = _mm512_set1_epi64(one_l[i] as i64);
         one_p[i] = _mm512_set1_epi64(one_p_l[i] as i64);
         neg_one[i] = _mm512_set1_epi64(neg_one_l[i] as i64);
     }
     let mut c = Ctx {
         p,
+        two_p,
         n0: _mm512_set1_epi64(n0 as i64),
         mask: _mm512_set1_epi64(MASK52 as i64),
         one,
@@ -389,6 +397,17 @@ pub(crate) unsafe fn canon(c: &Ctx, a: &L5) -> L5 {
         borrow = _mm512_srli_epi64(d, 63); // 1 where the subtraction wrapped
         let fixed = _mm512_and_si512(d, c.mask); // wrapped values: d + 2^64 ≡ d + 2^52 mod 2^52 in the low 52 bits
         r[j] = _mm512_mask_blend_epi64(ge, a[j], fixed);
+    }
+    r
+}
+
+/// Lane select: the lanes with their mask bit set take `b`, the others `a`.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn sel(m: __mmask8, a: &L5, b: &L5) -> L5 {
+    let mut r = *a;
+    for j in 0..5 {
+        r[j] = _mm512_mask_blend_epi64(m, a[j], b[j]);
     }
     r
 }
@@ -722,6 +741,38 @@ pub(crate) unsafe fn store(c: &Ctx, v: &L5) -> [Fq; 8] {
     out
 }
 
+/// a + b with limb carries normalized. No modular reduction: the caller keeps the bound (inputs < 2p give
+/// < 4p; `mont_mul` accepts any pair of inputs whose product is < p·2^260, e.g. 6p × 4p).
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn add(c: &Ctx, a: &L5, b: &L5) -> L5 {
+    let mut r = [_mm512_setzero_si512(); 5];
+    let mut carry = _mm512_setzero_si512();
+    for j in 0..5 {
+        let v = _mm512_add_epi64(_mm512_add_epi64(a[j], b[j]), carry);
+        r[j] = _mm512_and_si512(v, c.mask);
+        carry = _mm512_srli_epi64(v, 52);
+    }
+    r
+}
+
+/// a - b + 2p (b < 2p keeps it non-negative), limbs normalized through a signed borrow chain.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn sub(c: &Ctx, a: &L5, b: &L5) -> L5 {
+    let mut r = [_mm512_setzero_si512(); 5];
+    let mut carry = _mm512_setzero_si512();
+    for j in 0..5 {
+        let v = _mm512_add_epi64(
+            _mm512_sub_epi64(_mm512_add_epi64(a[j], c.two_p[j]), b[j]),
+            carry,
+        );
+        r[j] = _mm512_and_si512(v, c.mask);
+        carry = _mm512_srai_epi64(v, 52); // arithmetic: -1 where the limb went negative
+    }
+    r
+}
+
 /// Lane mask: which lanes of canonical `a` are zero.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
@@ -739,6 +790,28 @@ pub(crate) unsafe fn is_zero(a: &L5) -> __mmask8 {
 pub(crate) fn bcast_limbs(x: &Fq) -> [u64; 5] {
     let x16 = *x * Fq::from(16u64);
     to_limbs52(&x16.0)
+}
+
+/// The same limbs on every lane.
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn bcast(l: &[u64; 5]) -> L5 {
+    let mut v = [_mm512_setzero_si512(); 5];
+    for i in 0..5 {
+        v[i] = _mm512_set1_epi64(l[i] as i64);
+    }
+    v
+}
+
+/// The eight lanes' limbs as a `[5][8]` array (lane-major storage of points).
+#[inline]
+#[target_feature(enable = "avx512f,avx512ifma")]
+pub(crate) unsafe fn to_words(v: &L5) -> [[u64; 8]; 5] {
+    let mut w = [[0u64; 8]; 5];
+    for i in 0..5 {
+        _mm512_storeu_si512(w[i].as_mut_ptr() as *mut _, v[i]);
+    }
+    w
 }
 
 #[cfg(test)]
