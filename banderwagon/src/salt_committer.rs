@@ -616,9 +616,22 @@ mod tests {
         platform::LANE_PRECOMP_WINDOW_SIZE,
     ];
 
+    /// Runs `check` on `committer` and then on the same committer without lane tables. On a host
+    /// with the lanes that is the lane path and then the scalar fallback, so the one host CI
+    /// measures coverage on checks both; elsewhere both runs take the fallback.
+    fn on_both_paths(committer: Committer, check: impl Fn(&Committer)) {
+        check(&committer);
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        {
+            let mut committer = committer;
+            committer.lane = None;
+            check(&committer);
+        }
+    }
+
     /// `msm_dense` is `msm` over the scalars' own positions: for a full vector, a shorter
     /// one, a single scalar and none, it gives what `msm` gives for the same terms and what
-    /// the reference MSM gives, zero scalars included.
+    /// the reference MSM gives, zero scalars included, in lanes and without.
     #[test]
     fn msm_dense_matches_msm_and_the_reference() {
         let crs: Vec<Element> = (0..256)
@@ -630,28 +643,30 @@ mod tests {
         scalars[255] = Fr::zero();
 
         for window in WINDOWS {
-            let committer = Committer::new(&crs, window);
-            for len in [256, 100, 1, 0] {
-                let scalars = &scalars[..len];
-                let terms: Vec<(usize, Fr)> = scalars.iter().copied().enumerate().collect();
-                let dense = committer.msm_dense(scalars);
-                assert_eq!(
-                    dense,
-                    committer.msm(&terms),
-                    "window {window}, {len} scalars"
-                );
-                assert_eq!(
-                    dense,
-                    multi_scalar_mul(&crs[..len], scalars),
-                    "window {window}, {len} scalars"
-                );
-            }
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [256, 100, 1, 0] {
+                    let scalars = &scalars[..len];
+                    let terms: Vec<(usize, Fr)> = scalars.iter().copied().enumerate().collect();
+                    let dense = committer.msm_dense(scalars);
+                    assert_eq!(
+                        dense,
+                        committer.msm(&terms),
+                        "window {window}, {len} scalars"
+                    );
+                    assert_eq!(
+                        dense,
+                        multi_scalar_mul(&crs[..len], scalars),
+                        "window {window}, {len} scalars"
+                    );
+                }
+            });
         }
     }
 
-    /// `mul_index_batch` gives, element for element, what `mul_index` gives one by one: for no
-    /// scalars, fewer than a lane group, exactly one, and several with a remainder, with zero
-    /// and -1 among them and bases repeated.
+    /// `mul_index_batch` gives, element for element, what `mul_index` gives one by one and what
+    /// the group's own scalar multiplication gives, in lanes and without: for no scalars, fewer
+    /// than a lane group, exactly one, and several with a remainder, with zero and -1 among them
+    /// and bases repeated.
     #[test]
     fn mul_index_batch_matches_mul_index() {
         let crs: Vec<Element> = (0..16)
@@ -664,18 +679,24 @@ mod tests {
         let indices: Vec<usize> = (0..21).map(|i| (i * 5) % 16).collect();
 
         for window in WINDOWS {
-            let committer = Committer::new(&crs, window);
-            for len in [0, 1, 7, 8, 9, 21] {
-                let batch = committer.mul_index_batch(&scalars[..len], &indices[..len]);
-                assert_eq!(batch.len(), len, "window {window}");
-                for (i, product) in batch.iter().enumerate() {
-                    assert_eq!(
-                        *product,
-                        committer.mul_index(&scalars[i], indices[i]),
-                        "window {window}, {len} scalars, position {i}"
-                    );
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [0, 1, 7, 8, 9, 21] {
+                    let batch = committer.mul_index_batch(&scalars[..len], &indices[..len]);
+                    assert_eq!(batch.len(), len, "window {window}");
+                    for (i, product) in batch.iter().enumerate() {
+                        assert_eq!(
+                            *product,
+                            committer.mul_index(&scalars[i], indices[i]),
+                            "window {window}, {len} scalars, position {i}"
+                        );
+                        assert_eq!(
+                            *product,
+                            crs[indices[i]] * scalars[i],
+                            "window {window}, {len} scalars, position {i}"
+                        );
+                    }
                 }
-            }
+            });
         }
     }
 
@@ -688,8 +709,8 @@ mod tests {
     }
 
     /// A task's terms summed through `mul_index_batch` give the sum of `mul_index` over them,
-    /// so `msm` returns the same element whichever of the two the host takes: with zero
-    /// scalars, a base named twice, a single term and none.
+    /// so `msm` returns the same element whichever of the two the host takes, in lanes and
+    /// without: with zero scalars, a base named twice, a single term and none.
     #[test]
     fn sum_terms_batched_matches_the_scalar_sum() {
         let crs: Vec<Element> = (0..16)
@@ -703,20 +724,21 @@ mod tests {
         terms[9].1 = Fr::zero();
 
         for window in WINDOWS {
-            let committer = Committer::new(&crs, window);
-            for len in [0, 1, 8, 13, 40] {
-                let terms = &terms[..len];
-                let (bases, scalars): (Vec<Element>, Vec<Fr>) =
-                    terms.iter().map(|&(index, s)| (crs[index], s)).unzip();
-                let expected = multi_scalar_mul(&bases, &scalars);
-                assert_eq!(
-                    committer.sum_terms_batched(terms.iter().copied()),
-                    expected,
-                    "window {window}, {len} terms"
-                );
-                assert_eq!(committer.sum_terms(terms.iter().copied()), expected);
-                assert_eq!(committer.msm(terms), expected);
-            }
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [0, 1, 8, 13, 40] {
+                    let terms = &terms[..len];
+                    let (bases, scalars): (Vec<Element>, Vec<Fr>) =
+                        terms.iter().map(|&(index, s)| (crs[index], s)).unzip();
+                    let expected = multi_scalar_mul(&bases, &scalars);
+                    assert_eq!(
+                        committer.sum_terms_batched(terms.iter().copied()),
+                        expected,
+                        "window {window}, {len} terms"
+                    );
+                    assert_eq!(committer.sum_terms(terms.iter().copied()), expected);
+                    assert_eq!(committer.msm(terms), expected);
+                }
+            });
         }
     }
 
@@ -726,16 +748,18 @@ mod tests {
     fn msm_task_size_fills_lane_groups() {
         let crs = [Element::prime_subgroup_generator()];
         let committer = Committer::new(&crs, platform::LANE_PRECOMP_WINDOW_SIZE);
-        for len in [0, 1, 7, 8, 9, 129, 256, 1000] {
-            let size = committer.msm_task_size(len);
-            assert!(size >= 1, "{len} terms");
-            if committer.in_lanes() {
-                assert_eq!(size % LANES, 0, "{len} terms");
-                assert!(size < thread_chunk_size!(len) + LANES, "{len} terms");
-            } else {
-                assert_eq!(size, thread_chunk_size!(len), "{len} terms");
+        on_both_paths(committer, |committer| {
+            for len in [0, 1, 7, 8, 9, 129, 256, 1000] {
+                let size = committer.msm_task_size(len);
+                assert!(size >= 1, "{len} terms");
+                if committer.in_lanes() {
+                    assert_eq!(size % LANES, 0, "{len} terms");
+                    assert!(size < thread_chunk_size!(len) + LANES, "{len} terms");
+                } else {
+                    assert_eq!(size, thread_chunk_size!(len), "{len} terms");
+                }
             }
-        }
+        });
     }
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
