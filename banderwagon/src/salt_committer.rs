@@ -22,7 +22,8 @@
 //! # Performance Characteristics
 //!
 //! - Window size affects the trade-off between memory usage and computation speed
-//! - Typical window size of 11 provides good balance for 256 base points
+//! - The trie takes its window from [`crate::platform::precomp_window_size`]: 11 on the scalar
+//!   path, 7 where the multiplications run in lanes
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
@@ -48,6 +49,11 @@ use std::{vec, vec::Vec};
 /// - Window 1: [0, 2^w*G[i], 2*2^w*G[i], ..., (2^(w-1)-1)*2^w*G[i]]
 /// - And so on...
 ///
+/// On `x86_64` with `std` and a host with AVX-512 IFMA, a committer also keeps the lane path's
+/// products: 32 bytes beside each 64-byte table point, at whatever window it is built with, so
+/// its tables take half as much memory again. For 256 bases that is 59.1 MB instead of 39.4 MB
+/// at window 7, and about 605 MB instead of 403 MB at window 11.
+///
 /// # Example
 ///
 /// ```ignore
@@ -58,7 +64,7 @@ use std::{vec, vec::Vec};
 /// ```
 #[derive(Clone, Debug)]
 pub struct Committer {
-    /// Window size for windowed NAF representation (typically 11 for 256 bases)
+    /// Window size for windowed NAF representation (see [`crate::platform::precomp_window_size`])
     window_size: usize,
     /// Precomputed tables of multiples for each base point.
     /// Structure: tables[base_index][window_index * half_window_size + multiple]
@@ -618,7 +624,8 @@ mod tests {
 
     /// Runs `check` on `committer` and then on the same committer without lane tables. On a host
     /// with the lanes that is the lane path and then the scalar fallback, so the one host CI
-    /// measures coverage on checks both; elsewhere both runs take the fallback.
+    /// measures coverage on checks both; on another `x86_64` host with `std` both runs take the
+    /// fallback, and off `x86_64` or without `std` (no lane tables to drop) `check` runs once.
     fn on_both_paths(committer: Committer, check: impl Fn(&Committer)) {
         check(&committer);
         #[cfg(all(target_arch = "x86_64", feature = "std"))]

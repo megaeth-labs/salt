@@ -130,8 +130,9 @@ impl Steps {
         }
     }
 
-    /// Fills the steps for up to eight scalars; idle lanes repeat lane 0, whose result is the
-    /// only one of theirs that exists.
+    /// Fills the steps for up to eight scalars. Idle lanes copy lane 0's entries, unnegated, so
+    /// that their loads stay inside the tables; [`mul_index8`] gives them the last scalar's base,
+    /// so what they compute is no product of the batch, and [`mul_index_batch`] drops it.
     fn plan(&mut self, w: usize, scalars: &[Fr]) {
         let half_wnd = (1usize << (w - 1)) + 1;
         let wnd_size = 1usize << w;

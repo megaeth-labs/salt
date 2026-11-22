@@ -195,7 +195,7 @@ pub struct StateRoot<'a, Store> {
 
     /// Shared IPA committer for computing vector commitments.
     ///
-    /// Uses a globally shared instance with precomputed tables (window size 11)
+    /// Uses a globally shared instance with precomputed tables (the host's window, [`platform::precomp_window_size`])
     /// to accelerate cryptographic operations across all `StateRoot` instances.
     committer: Arc<Committer>,
 

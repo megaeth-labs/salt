@@ -11,7 +11,8 @@ pub const DEFAULT_PRECOMP_WINDOW_SIZE: usize = 11;
 /// count. A lane host keeps `win_num · (2^(w-1) + 1)` entries per base, each a 64-byte point and
 /// the 32-byte product the lanes add beside it: window 7 stores 37 windows and 59.1 MB for 256
 /// bases (39.4 MB of points, 19.7 MB of products), versus 24 windows and 403 MB of points at
-/// window 11 (excluding allocation metadata).
+/// window 11 (excluding allocation metadata). The products are kept at any window a lane host
+/// builds: at window 11 they add 201.5 MB to those points.
 pub const LANE_PRECOMP_WINDOW_SIZE: usize = 7;
 
 /// The committer window for this host: [`LANE_PRECOMP_WINDOW_SIZE`] where the lane path runs,
