@@ -302,14 +302,14 @@ impl Committer {
     /// ([`crate::ifma_committer`]); everywhere else this maps `mul_index`.
     ///
     /// # Panics
-    /// If the lengths differ.
+    /// If the lengths differ or an index is not below [`Committer::num_bases`].
     pub fn mul_index_batch(&self, scalars: &[Fr], indices: &[usize]) -> Vec<Element> {
         assert_eq!(scalars.len(), indices.len(), "one index per scalar");
+        for &g in indices {
+            assert!(g < self.tables.len(), "base index out of range");
+        }
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
         if let Some(lane) = &self.lane {
-            for &g in indices {
-                assert!(g < self.tables.len(), "base index out of range");
-            }
             // SAFETY: `lane` was built from `self.tables` at `self.window_size`, the lengths
             // are equal and every index is below `tables.len()`.
             let products = unsafe {
@@ -706,6 +706,16 @@ mod tests {
         let crs = [Element::prime_subgroup_generator()];
         let committer = Committer::new(&crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
         committer.mul_index_batch(&[Fr::from(1u64), Fr::from(2u64)], &[0]);
+    }
+
+    /// The bound check that keeps the lane path's unchecked loads inside the tables runs before
+    /// either path, so an index past the bases panics with the same message on every host.
+    #[test]
+    #[should_panic(expected = "base index out of range")]
+    fn mul_index_batch_rejects_an_index_past_the_bases() {
+        let crs = [Element::prime_subgroup_generator(); 2];
+        let committer = Committer::new(&crs, platform::LANE_PRECOMP_WINDOW_SIZE);
+        committer.mul_index_batch(&[Fr::from(1u64), Fr::from(2u64)], &[1, 2]);
     }
 
     /// A task's terms summed through `mul_index_batch` give the sum of `mul_index` over them,

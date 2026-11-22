@@ -87,8 +87,8 @@ fn three_p() -> &'static L5 {
             carry = v >> 52;
         }
         assert_eq!(carry, 0, "3p fits five limbs");
-        // SAFETY: only a caller holding a `LaneTables` gets here, and those exist only where
-        // the extension does; this only broadcasts constants.
+        assert!(available(), "the lane constants need AVX-512 IFMA");
+        // SAFETY: `available()` returned true just above; this only broadcasts constants.
         unsafe { bcast(&l) }
     })
 }
@@ -387,6 +387,11 @@ mod tests {
                 for l in 0..n {
                     let want = committer.mul_index(&scalars[l], indices[l]);
                     assert_eq!(got[l], want, "w = {w}, n = {n}, lane {l}");
+                    // `==` reads only X and Y; adding the product to anything also needs
+                    // T = XY/Z, which the unscale sets apart from X and Y
+                    let p = got[l].0;
+                    assert!(!p.z.is_zero(), "w = {w}, n = {n}, lane {l}: Z = 0");
+                    assert_eq!(p.x * p.y, p.t * p.z, "w = {w}, n = {n}, lane {l}: XY ≠ TZ");
                 }
             }
         }
