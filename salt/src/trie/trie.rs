@@ -756,7 +756,7 @@ where
         // multiplication per update, issued per chunk so that the committer can run them in lanes.
         let batch_size = self.par_batch_size(state_updates.len());
         let c_deltas: DeltaList = chunks!(state_updates, batch_size)
-            .flat_map(|updates| {
+            .map(|updates| {
                 let (scalars, positions): (Vec<Fr>, Vec<usize>) = updates
                     .iter()
                     .map(|(salt_key, (old_value, new_value))| {
@@ -772,6 +772,11 @@ where
                     .zip(self.committer.mul_index_batch(&scalars, &positions))
                     .collect::<Vec<_>>()
             })
+            // per chunk into its slot, then one serial copy: a parallel `flat_map` would split
+            // every chunk's vector again across the pool
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
             .collect();
 
         self.add_commitment_deltas(c_deltas, batch_size)
@@ -807,7 +812,7 @@ where
 
         let batch_size = self.par_batch_size(child_updates.len());
         let delta_list = chunks!(child_updates, batch_size)
-            .flat_map(|c_updates| {
+            .map(|c_updates| {
                 // Interleave old and new commitments for efficient batch hashing
                 let hashes = Element::hash_commitments(
                     &c_updates
@@ -827,6 +832,11 @@ where
                     .zip(self.committer.mul_index_batch(&scalars, &positions))
                     .collect::<Vec<_>>()
             })
+            // per chunk into its slot, then one serial copy: a parallel `flat_map` would split
+            // every chunk's vector again across the pool
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
             .collect();
 
         self.add_commitment_deltas(delta_list, batch_size)
