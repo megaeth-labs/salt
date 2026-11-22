@@ -144,16 +144,13 @@ impl Steps {
         for (l, s) in scalars.iter().enumerate() {
             let words = s.into_bigint().0;
             let mut carry = 0usize;
-            for i in 0..self.entry.len() {
-                let mut idx = digit(&words, w, i) + carry;
-                if idx >= half_wnd {
-                    carry = 1;
-                    idx = wnd_size - idx;
-                    self.neg[i] |= 1 << l;
-                } else {
-                    carry = 0;
-                }
-                self.entry[i][l] = (idx + i * half_wnd) as u32;
+            // without a branch: whether a digit is negated is a coin flip on random scalars
+            for (i, (entry, neg)) in self.entry.iter_mut().zip(&mut self.neg).enumerate() {
+                let idx = digit(&words, w, i) + carry;
+                carry = (idx >= half_wnd) as usize;
+                let idx = if carry == 1 { wnd_size - idx } else { idx };
+                *neg |= (carry as u8) << l;
+                entry[l] = (idx + i * half_wnd) as u32;
             }
         }
         for l in scalars.len()..LANES {
