@@ -104,6 +104,8 @@ const _: () = assert!(
 /// One group's chain: per step, the table entry each lane adds and whether the lane adds its
 /// negation (the signed-digit carry rule of `mul_index`). Reused from group to group.
 struct Steps {
+    /// The window the tables were built at.
+    w: usize,
     entry: Vec<[u32; LANES]>,
     neg: Vec<u8>,
 }
@@ -125,6 +127,7 @@ impl Steps {
     fn new(w: usize) -> Self {
         let win_num = 253 / w + 1;
         Self {
+            w,
             entry: vec![[0; LANES]; win_num],
             neg: vec![0; win_num],
         }
@@ -133,7 +136,8 @@ impl Steps {
     /// Fills the steps for up to eight scalars. Idle lanes copy lane 0's entries, unnegated, so
     /// that their loads stay inside the tables; [`mul_index8`] gives them the last scalar's base,
     /// so what they compute is no product of the batch, and [`mul_index_batch`] drops it.
-    fn plan(&mut self, w: usize, scalars: &[Fr]) {
+    fn plan(&mut self, scalars: &[Fr]) {
+        let w = self.w;
         let half_wnd = (1usize << (w - 1)) + 1;
         let wnd_size = 1usize << w;
         self.neg.fill(0);
@@ -163,8 +167,8 @@ impl Steps {
 /// `scalars[j] * bases[indices[j]]` for every `j`, the elements `mul_index` computes one by one.
 ///
 /// # Safety
-/// `lane` was built from `tables` at window `w` (so the host has the extension), the two slices
-/// are equally long, and every index is below `tables.len()`.
+/// `lane` was built from `tables` at window `w`: so the host has the extension, and every entry
+/// a plan names lies inside a base's tables. A base index past `tables` panics.
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) unsafe fn mul_index_batch(
     tables: &[Vec<EdwardsAffine>],
@@ -176,7 +180,7 @@ pub(crate) unsafe fn mul_index_batch(
     let mut out = Vec::with_capacity(scalars.len());
     let mut steps = Steps::new(w);
     for (s, g) in scalars.chunks(LANES).zip(indices.chunks(LANES)) {
-        steps.plan(w, s);
+        steps.plan(s);
         let r = mul_index8(tables, lane, &steps, g);
         out.extend_from_slice(&r[..s.len()]);
     }
@@ -194,10 +198,11 @@ unsafe fn mul_index8(
     let c = context();
     let three_p = three_p();
     let zero = [_mm512_setzero_si512(); 5];
-    let points: [*const EdwardsAffine; LANES] =
-        core::array::from_fn(|l| tables[indices[l.min(indices.len() - 1)]].as_ptr());
-    let products: [*const [u64; 4]; LANES] =
-        core::array::from_fn(|l| lane.t[indices[l.min(indices.len() - 1)]].as_ptr());
+    // idle lanes take the last base; the indexing is checked, so a base index past the tables
+    // panics here
+    let bases: [usize; LANES] = core::array::from_fn(|l| indices[l.min(indices.len() - 1)]);
+    let points = bases.map(|g| tables[g].as_ptr());
+    let products = bases.map(|g| lane.t[g].as_ptr());
     let n = steps.entry.len();
     // SAFETY (the prefetches and the loads below): an entry is below win_num · half_wnd, the
     // length of both tables of a base, so each address is that of a whole point or product.
@@ -264,7 +269,6 @@ unsafe fn transpose4(r: &[__m256i; LANES]) -> [__m512i; 4] {
 
 /// The running sum of a chain, eight lanes: after `i` steps `(X/16^i, Y/16^i, T/16^(2i), Z)` for
 /// the extended coordinates `(X : Y : T : Z)` of the sum so far. No coordinate exceeds `2p`.
-#[derive(Clone, Copy)]
 struct Acc {
     x: L5,
     y: L5,

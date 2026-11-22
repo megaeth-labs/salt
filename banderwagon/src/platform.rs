@@ -19,10 +19,8 @@ pub const LANE_PRECOMP_WINDOW_SIZE: usize = 7;
 /// [`DEFAULT_PRECOMP_WINDOW_SIZE`] everywhere else.
 pub fn precomp_window_size() -> usize {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
-    {
-        if crate::ifma::available() {
-            return LANE_PRECOMP_WINDOW_SIZE;
-        }
+    if crate::ifma::available() {
+        return LANE_PRECOMP_WINDOW_SIZE;
     }
     DEFAULT_PRECOMP_WINDOW_SIZE
 }

@@ -22,8 +22,8 @@
 //! # Performance Characteristics
 //!
 //! - Window size affects the trade-off between memory usage and computation speed
-//! - The trie takes its window from [`crate::platform::precomp_window_size`]: 11 on the scalar
-//!   path, 7 where the multiplications run in lanes
+//! - The trie takes its window from [`crate::platform::precomp_window_size`]: the scalar path's
+//!   [`crate::platform::DEFAULT_PRECOMP_WINDOW_SIZE`], or 7 where the multiplications run in lanes
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
@@ -316,8 +316,7 @@ impl Committer {
         }
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
         if let Some(lane) = &self.lane {
-            // SAFETY: `lane` was built from `self.tables` at `self.window_size`, the lengths
-            // are equal and every index is below `tables.len()`.
+            // SAFETY: `lane` was built from `self.tables` at `self.window_size`.
             let products = unsafe {
                 crate::ifma_committer::mul_index_batch(
                     &self.tables,
@@ -407,13 +406,7 @@ impl Committer {
         chunks!(scalars, task_size)
             .enumerate()
             .map(|(task, scalars)| {
-                let first = task * task_size;
-                self.sum_terms(
-                    scalars
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, scalar)| (first + offset, *scalar)),
-                )
+                self.sum_terms((task * task_size..).zip(scalars.iter().copied()))
             })
             .sum()
     }
@@ -622,6 +615,13 @@ mod tests {
         platform::LANE_PRECOMP_WINDOW_SIZE,
     ];
 
+    /// `G, 2G, …, nG`.
+    fn crs(n: usize) -> Vec<Element> {
+        (0..n)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
+            .collect()
+    }
+
     /// Runs `check` on `committer` and then on the same committer without lane tables. On a host
     /// with the lanes that is the lane path and then the scalar fallback, so the one host CI
     /// measures coverage on checks both; on another `x86_64` host with `std` both runs take the
@@ -641,9 +641,7 @@ mod tests {
     /// the reference MSM gives, zero scalars included, in lanes and without.
     #[test]
     fn msm_dense_matches_msm_and_the_reference() {
-        let crs: Vec<Element> = (0..256)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
-            .collect();
+        let crs = crs(256);
         let mut rng = ChaCha20Rng::seed_from_u64(7);
         let mut scalars: Vec<Fr> = (0..256).map(|_| Fr::rand(&mut rng)).collect();
         scalars[3] = Fr::zero();
@@ -676,9 +674,7 @@ mod tests {
     /// and bases repeated.
     #[test]
     fn mul_index_batch_matches_mul_index() {
-        let crs: Vec<Element> = (0..16)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
-            .collect();
+        let crs = crs(16);
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         let mut scalars: Vec<Fr> = (0..21).map(|_| Fr::rand(&mut rng)).collect();
         scalars[1] = Fr::zero();
@@ -715,8 +711,8 @@ mod tests {
         committer.mul_index_batch(&[Fr::from(1u64), Fr::from(2u64)], &[0]);
     }
 
-    /// The bound check that keeps the lane path's unchecked loads inside the tables runs before
-    /// either path, so an index past the bases panics with the same message on every host.
+    /// An index past the bases panics with the same message on every host: the batch checks its
+    /// indices before either path runs.
     #[test]
     #[should_panic(expected = "base index out of range")]
     fn mul_index_batch_rejects_an_index_past_the_bases() {
@@ -730,9 +726,7 @@ mod tests {
     /// without: with zero scalars, a base named twice, a single term and none.
     #[test]
     fn sum_terms_batched_matches_the_scalar_sum() {
-        let crs: Vec<Element> = (0..16)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
-            .collect();
+        let crs = crs(16);
         let mut rng = ChaCha20Rng::seed_from_u64(13);
         let mut terms: Vec<(usize, Fr)> = (0..40)
             .map(|i| ((i * 7) % 16, Fr::rand(&mut rng)))
