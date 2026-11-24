@@ -345,8 +345,7 @@ fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, out: &m
         let w = limbs_to_words(&f);
         let mut words = [[0u64; 8]; 4];
         for j in 0..4 {
-            // SAFETY: `words[j]` is the 64 bytes the store writes.
-            unsafe { _mm512_storeu_si512(words[j].as_mut_ptr() as *mut _, w[j]) };
+            store_words(&mut words[j], w[j]);
         }
         for l in 0..8 {
             out[8 * g + l] =

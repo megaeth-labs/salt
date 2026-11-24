@@ -343,8 +343,7 @@ fn unscale(c: &Ctx, factors: &[[u64; 5]; 3], p: &Acc) -> [EdwardsProjective; LAN
         let words = limbs_to_words(&canon(c, &mont_mul(c, v, k)));
         let mut out = [[0u64; LANES]; 4];
         for j in 0..4 {
-            // SAFETY: `out[j]` is the 64 bytes the store writes.
-            unsafe { _mm512_storeu_si512(out[j].as_mut_ptr() as *mut _, words[j]) };
+            store_words(&mut out[j], words[j]);
         }
         out
     });

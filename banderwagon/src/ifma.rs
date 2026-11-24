@@ -303,8 +303,7 @@ fn ctx() -> Ctx {
 fn canon_limb0(c: &Ctx, x: &Fq) -> u64 {
     let v = canon(c, &load(c, &[*x; 8]));
     let mut w = [0u64; 8];
-    // SAFETY: `w` is the 64 bytes the store writes.
-    unsafe { _mm512_storeu_si512(w.as_mut_ptr() as *mut _, v[0]) };
+    store_words(&mut w, v[0]);
     w[0]
 }
 
@@ -717,6 +716,22 @@ fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8; G]) {
     (x, ok)
 }
 
+/// The eight words of `a` in a register.
+#[inline]
+#[target_feature(enable = "avx512f")]
+pub(crate) fn load_words(a: &[u64; 8]) -> __m512i {
+    // SAFETY: `a` is the 64 bytes the load reads.
+    unsafe { _mm512_loadu_si512(a.as_ptr() as *const _) }
+}
+
+/// The register's eight words, written to `a`.
+#[inline]
+#[target_feature(enable = "avx512f")]
+pub(crate) fn store_words(a: &mut [u64; 8], v: __m512i) {
+    // SAFETY: `a` is the 64 bytes the store writes.
+    unsafe { _mm512_storeu_si512(a.as_mut_ptr() as *mut _, v) }
+}
+
 #[target_feature(enable = "avx512f,avx512ifma")]
 pub(crate) fn load(c: &Ctx, xs: &[Fq; 8]) -> L5 {
     let mut limbs = [[0u64; 8]; 5];
@@ -729,8 +744,7 @@ pub(crate) fn load(c: &Ctx, xs: &[Fq; 8]) -> L5 {
     let mut v = [_mm512_setzero_si512(); 5];
     let mut r2 = [_mm512_setzero_si512(); 5];
     for i in 0..5 {
-        // SAFETY: `limbs[i]` is the 64 bytes the load reads.
-        v[i] = unsafe { _mm512_loadu_si512(limbs[i].as_ptr() as *const _) };
+        v[i] = load_words(&limbs[i]);
         r2[i] = _mm512_set1_epi64(c.r2[i] as i64);
     }
     mont_mul(c, &v, &r2)
@@ -743,8 +757,7 @@ pub(crate) fn store(c: &Ctx, v: &L5) -> [Fq; 8] {
     let r = canon(c, &mont_mul(c, v, &one_int)); // out of Montgomery form, canonical
     let mut limbs = [[0u64; 8]; 5];
     for i in 0..5 {
-        // SAFETY: `limbs[i]` is the 64 bytes the store writes.
-        unsafe { _mm512_storeu_si512(limbs[i].as_mut_ptr() as *mut _, r[i]) };
+        store_words(&mut limbs[i], r[i]);
     }
     let mut out = [Fq::zero(); 8];
     for k in 0..8 {
@@ -902,8 +915,7 @@ pub(crate) fn bcast(l: &[u64; 5]) -> L5 {
 pub(crate) fn to_words(v: &L5) -> [[u64; 8]; 5] {
     let mut w = [[0u64; 8]; 5];
     for i in 0..5 {
-        // SAFETY: `w[i]` is the 64 bytes the store writes.
-        unsafe { _mm512_storeu_si512(w[i].as_mut_ptr() as *mut _, v[i]) };
+        store_words(&mut w[i], v[i]);
     }
     w
 }

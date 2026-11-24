@@ -140,11 +140,8 @@ fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u64]) {
         let mut xv = [_mm512_setzero_si512(); 5];
         let mut yv = [_mm512_setzero_si512(); 5];
         for j in 0..5 {
-            // SAFETY: `xl[j]` and `yl[j]` are each the 64 bytes a load reads.
-            unsafe {
-                xv[j] = _mm512_loadu_si512(xl[j].as_ptr() as *const _);
-                yv[j] = _mm512_loadu_si512(yl[j].as_ptr() as *const _);
-            }
+            xv[j] = load_words(&xl[j]);
+            yv[j] = load_words(&yl[j]);
         }
         let xv = mont_mul(c, &xv, &k.k264);
         let yv = mont_mul(c, &yv, &k.k264);
@@ -484,24 +481,19 @@ unsafe fn run_batch(
     lane: usize,
     nonempty: &mut [u8],
 ) {
-    let mut bl = [0i64; 8];
+    let mut bl = [0u64; 8];
     let mut sl = [0i64; 8];
-    let mut ll = [0i64; 8];
+    let mut ll = [0u64; 8];
     let mut maxlen = 0u32;
     for l in 0..fill {
-        bl[l] = batch[l].0 as i64;
+        bl[l] = batch[l].0 as u64;
         sl[l] = batch[l].1 as i64;
-        ll[l] = batch[l].2 as i64;
+        ll[l] = batch[l].2 as u64;
         maxlen = maxlen.max(batch[l].2);
     }
     let m_valid: __mmask8 = ((1u16 << fill) - 1) as __mmask8;
-    // SAFETY: `ll` and `bl` are each the 64 bytes a load reads.
-    let (len_v, b_v) = unsafe {
-        (
-            _mm512_loadu_si512(ll.as_ptr() as *const _),
-            _mm512_loadu_si512(bl.as_ptr() as *const _),
-        )
-    };
+    let len_v = load_words(&ll);
+    let b_v = load_words(&bl);
     // A run's first point starts its sum: (x, y, x·y, 1) is the point in extended coordinates, for
     // one lane product where adding it to the identity takes nine. Every run has a first point, and
     // the lanes past `fill` are not stored.
