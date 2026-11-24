@@ -9,6 +9,12 @@ license.workspace = true
 [lints.rust]
 # set by cargo-llvm-cov on a nightly toolchain
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }
+# an `unsafe fn` spells out each unsafe operation in it, as a safe function does
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+# every `unsafe` block says why it is sound
+undocumented_unsafe_blocks = "warn"
 
 [dependencies]
 ark-ec = { git = "https://github.com/megaeth-labs/algebra.git", rev = "80ca69c37f79d5d00750edc1602af81b5f456695", default-features = false }

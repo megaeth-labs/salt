@@ -178,13 +178,19 @@ pub(crate) unsafe fn mul_index_batch(
     let mut steps = Steps::new(w);
     for (s, g) in scalars.chunks(LANES).zip(indices.chunks(LANES)) {
         steps.plan(s);
-        let r = mul_index8(tables, lane, &steps, g);
+        // SAFETY: `steps` plans at `w`, the window `tables` and `lane` were built at (this
+        // function's contract), so every entry it names is inside a base's tables.
+        let r = unsafe { mul_index8(tables, lane, &steps, g) };
         out.extend_from_slice(&r[..s.len()]);
     }
     out
 }
 
 /// One chain per lane over `steps`, for the bases `indices` names (one to eight of them).
+///
+/// # Safety
+/// Every entry of `steps` must be below the length of a base's table, in `tables` and in
+/// `lane` alike: the points and products are read unchecked. A base index past `tables` panics.
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn mul_index8(
     tables: &[Vec<EdwardsAffine>],
@@ -201,14 +207,16 @@ unsafe fn mul_index8(
     let points = bases.map(|g| tables[g].as_ptr());
     let products = bases.map(|g| lane.t[g].as_ptr());
     let n = steps.entry.len();
-    // SAFETY (the prefetches and the loads below): an entry is below win_num · half_wnd, the
-    // length of both tables of a base, so each address is that of a whole point or product.
     let prefetch = |i: usize| {
         if i < n {
             for l in 0..LANES {
                 let e = steps.entry[i][l] as usize;
-                _mm_prefetch(points[l].add(e) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(products[l].add(e) as *const i8, _MM_HINT_T0);
+                // SAFETY: by this function's contract `e` is below the length of both tables of
+                // the lane's base, so each address is that of a whole point or product.
+                unsafe {
+                    _mm_prefetch(points[l].add(e) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(products[l].add(e) as *const i8, _MM_HINT_T0);
+                }
             }
         }
     };
@@ -228,8 +236,12 @@ unsafe fn mul_index8(
         let mut halves = [_mm256_setzero_si256(); LANES];
         for l in 0..LANES {
             let e = steps.entry[i][l] as usize;
-            rows[l] = _mm512_loadu_si512(points[l].add(e) as *const _);
-            halves[l] = _mm256_loadu_si256(products[l].add(e) as *const _);
+            // SAFETY: as for the prefetches: entry `e` of the lane's base is a 64-byte point in
+            // `tables` and a 32-byte product in `lane`.
+            unsafe {
+                rows[l] = _mm512_loadu_si512(points[l].add(e) as *const _);
+                halves[l] = _mm256_loadu_si256(products[l].add(e) as *const _);
+            }
         }
         let words = transpose8(&rows);
         let x = words_to_limbs(c, &[words[0], words[1], words[2], words[3]]);
@@ -248,7 +260,7 @@ unsafe fn mul_index8(
 /// out.
 #[inline]
 #[target_feature(enable = "avx512f")]
-unsafe fn transpose4(r: &[__m256i; LANES]) -> [__m512i; 4] {
+fn transpose4(r: &[__m256i; LANES]) -> [__m512i; 4] {
     // two lanes per register, paired so that the 128-bit shuffles below leave the lanes in order
     let pair = |a: usize, b: usize| _mm512_inserti64x4::<1>(_mm512_castsi256_si512(r[a]), r[b]);
     let (z0, z1, z2, z3) = (pair(0, 2), pair(1, 3), pair(4, 6), pair(5, 7));
@@ -288,7 +300,7 @@ struct Acc {
 /// `f < 4p`, `g < 3.12p` and `h < 6.63p`, and the largest product, `e·h`, has `u·v < 29`.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn madd(c: &Ctx, three_p: &L5, p: &Acc, x: &L5, y: &L5, t: &L5) -> Acc {
+fn madd(c: &Ctx, three_p: &L5, p: &Acc, x: &L5, y: &L5, t: &L5) -> Acc {
     let a = mont_mul(c, &p.x, x);
     let b = mont_mul(c, &p.y, y);
     let cc = mont_mul(c, &p.t, t);
@@ -325,13 +337,14 @@ unsafe fn madd(c: &Ctx, three_p: &L5, p: &Acc, x: &L5, y: &L5, t: &L5) -> Acc {
 /// factor of [`LaneTables`], which removes the chain's powers of 16 and lands on ark's Montgomery
 /// form in the one multiplication.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn unscale(c: &Ctx, factors: &[[u64; 5]; 3], p: &Acc) -> [EdwardsProjective; LANES] {
+fn unscale(c: &Ctx, factors: &[[u64; 5]; 3], p: &Acc) -> [EdwardsProjective; LANES] {
     let [xy, t, z] = factors.map(|k| bcast(&k));
     let coords = [(&p.x, &xy), (&p.y, &xy), (&p.t, &t), (&p.z, &z)].map(|(v, k)| {
         let words = limbs_to_words(&canon(c, &mont_mul(c, v, k)));
         let mut out = [[0u64; LANES]; 4];
         for j in 0..4 {
-            _mm512_storeu_si512(out[j].as_mut_ptr() as *mut _, words[j]);
+            // SAFETY: `out[j]` is the 64 bytes the store writes.
+            unsafe { _mm512_storeu_si512(out[j].as_mut_ptr() as *mut _, words[j]) };
         }
         out
     });

@@ -232,7 +232,15 @@ impl Committer {
         let mut idx;
         let mut c_next = 0;
 
+        // The unchecked reads below rest on two facts. `chunks` holds one digit per window,
+        // `253 / window_size + 1` of them (so at least one), each below `wnd_size`. And window
+        // `i` owns the `half_wnd` table entries from `i * half_wnd`: a digit that, with its
+        // carry, is below `half_wnd` indexes them directly, and a larger one is at most
+        // `wnd_size` and indexes them by `wnd_size - digit`. So `idx` and `idx_next` stay inside
+        // the base's table, which holds `half_wnd` entries for every window.
+
         // prefetch first point
+        // SAFETY: `chunks` holds at least one digit.
         let data_0 = unsafe { *chunks.get_unchecked(0) } as usize;
         if data_0 >= half_wnd {
             c_next = 1;
@@ -240,6 +248,7 @@ impl Committer {
         } else {
             idx_next = data_0;
         }
+        // SAFETY: `idx_next` is inside the table (see above).
         unsafe {
             _mm_prefetch(
                 precomp_table.as_ptr().add(idx_next) as *const i8,
@@ -251,6 +260,7 @@ impl Committer {
         // calculate point
         for i in 1..chunks.len() {
             // fetch next point
+            // SAFETY: `i` is below `chunks.len()`.
             idx_next = unsafe { *chunks.get_unchecked(i) as usize } + c_next;
             let carry = c_next;
             if idx_next >= half_wnd {
@@ -260,6 +270,7 @@ impl Committer {
                 c_next = 0;
                 idx_next += i * half_wnd;
             }
+            // SAFETY: `idx_next` is inside the table (see above).
             unsafe {
                 _mm_prefetch(
                     precomp_table.as_ptr().add(idx_next) as *const i8,
@@ -269,12 +280,14 @@ impl Committer {
 
             // add current point
             if carry > 0 {
+                // SAFETY: `idx` is inside the table (see above).
                 add_affine_point(
                     &mut result,
                     unsafe { &(-precomp_table.get_unchecked(idx).x) },
                     unsafe { &precomp_table.get_unchecked(idx).y },
                 );
             } else {
+                // SAFETY: `idx` is inside the table (see above).
                 add_affine_point(
                     &mut result,
                     unsafe { &precomp_table.get_unchecked(idx).x },
@@ -286,12 +299,14 @@ impl Committer {
 
         // last point
         if c_next > 0 {
+            // SAFETY: `idx` is inside the table (see above).
             add_affine_point(
                 &mut result,
                 unsafe { &(-precomp_table.get_unchecked(idx).x) },
                 unsafe { &precomp_table.get_unchecked(idx).y },
             );
         } else {
+            // SAFETY: `idx` is inside the table (see above).
             add_affine_point(
                 &mut result,
                 unsafe { &precomp_table.get_unchecked(idx).x },

@@ -58,6 +58,9 @@ use core::arch::asm;
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
+    // SAFETY: the only memory the assembly touches, besides its own pushes, is the four limbs at
+    // `rdi`, which is `result`. It pops every register it pushes, and the others it changes are
+    // declared below.
     unsafe {
         asm!(
             "push %rdx",
@@ -229,6 +232,13 @@ pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn mont_mul_asm(result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]) {
+    // SAFETY: besides its own pushes, the assembly reads the four limbs at `rsi` and at `rdx`
+    // (`x` and `y`; `y`'s pointer is kept in `r11`) and writes the four at `rdi` (`result`). It
+    // pops every register it pushes, and the others it changes are declared below.
+    //
+    // It uses `mulx`, `adcx` and `adox`, so it needs a CPU with BMI2 and ADX. Nothing here checks
+    // for them: the crate takes them for granted on `x86_64`, and a CPU without them stops on an
+    // illegal instruction.
     unsafe {
         asm!(
             "push %r15",

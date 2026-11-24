@@ -76,18 +76,15 @@ pub(crate) fn context() -> &'static Ctx {
 /// # Panics
 /// On a zero denominator `d·x² − 1`, which no canonical `x` has on Bandersnatch (`d` is a
 /// non-residue, so `1/d` has no root).
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn decode_chunks(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
+pub(crate) fn decode_chunks(xs: &[[Fq; CHUNK]]) -> Vec<ChunkDecode> {
     decode_chunks_with(xs, JACOBI_BATCHES)
 }
 
 /// [`decode_chunks`] with the Jacobi batch count a parameter, so a test can force lanes through the
 /// exponentiation fallback.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<ChunkDecode> {
+fn decode_chunks_with(xs: &[[Fq; CHUNK]], jacobi_batches: usize) -> Vec<ChunkDecode> {
     assert!(!xs.is_empty() && xs.len() <= TASK_CHUNKS);
     let c = context();
     let n = xs.len();
@@ -207,7 +204,7 @@ pub(crate) struct Ctx {
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn ctx() -> Ctx {
+fn ctx() -> Ctx {
     let p_scalar = to_limbs52(&Fq::MODULUS);
     let mut inv = p_scalar[0];
     for _ in 0..7 {
@@ -303,16 +300,17 @@ unsafe fn ctx() -> Ctx {
 
 /// The canonical Montgomery-form low limb of one element (the dlog table's key), through the lanes.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn canon_limb0(c: &Ctx, x: &Fq) -> u64 {
+fn canon_limb0(c: &Ctx, x: &Fq) -> u64 {
     let v = canon(c, &load(c, &[*x; 8]));
     let mut w = [0u64; 8];
-    _mm512_storeu_si512(w.as_mut_ptr() as *mut _, v[0]);
+    // SAFETY: `w` is the 64 bytes the store writes.
+    unsafe { _mm512_storeu_si512(w.as_mut_ptr() as *mut _, v[0]) };
     w[0]
 }
 
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn mont_mul(c: &Ctx, a: &L5, b: &L5) -> L5 {
+pub(crate) fn mont_mul(c: &Ctx, a: &L5, b: &L5) -> L5 {
     let zero = _mm512_setzero_si512();
     let mut t = [zero; 6];
     for i in 0..5 {
@@ -348,7 +346,7 @@ pub(crate) unsafe fn mont_mul(c: &Ctx, a: &L5, b: &L5) -> L5 {
 /// Lane mask: which lanes of `a` (< 2p, normalized limbs) equal the field element one.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn eq_one(c: &Ctx, a: &L5) -> __mmask8 {
+fn eq_one(c: &Ctx, a: &L5) -> __mmask8 {
     let mut m1: __mmask8 = 0xff;
     let mut m2: __mmask8 = 0xff;
     for j in 0..5 {
@@ -361,7 +359,7 @@ unsafe fn eq_one(c: &Ctx, a: &L5) -> __mmask8 {
 /// Lane mask: which lanes of `a` and `b` (both < 2p) are equal as field elements.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn eq_lanes(c: &Ctx, a: &L5, b: &L5) -> __mmask8 {
+fn eq_lanes(c: &Ctx, a: &L5, b: &L5) -> __mmask8 {
     // a - b ∈ (-2p, 2p); equal iff a == b or a == b ± p as integers. Compare the three cases limbwise
     // after canonicalizing both (subtract p where >= p): cheaper to canonicalize.
     eq_canon(&canon(c, a), &canon(c, b))
@@ -370,7 +368,7 @@ unsafe fn eq_lanes(c: &Ctx, a: &L5, b: &L5) -> __mmask8 {
 /// Lane mask: which lanes of canonical `a` and `b` (< p, normalized limbs) are equal.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn eq_canon(a: &L5, b: &L5) -> __mmask8 {
+fn eq_canon(a: &L5, b: &L5) -> __mmask8 {
     let mut m: __mmask8 = 0xff;
     for j in 0..5 {
         m &= _mm512_cmpeq_epi64_mask(a[j], b[j]);
@@ -381,7 +379,7 @@ unsafe fn eq_canon(a: &L5, b: &L5) -> __mmask8 {
 /// Canonical representative (< p) of a value < 2p.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn canon(c: &Ctx, a: &L5) -> L5 {
+pub(crate) fn canon(c: &Ctx, a: &L5) -> L5 {
     // ge = a >= p, lexicographic from the top limb
     let mut ge: __mmask8 = 0;
     let mut decided: __mmask8 = 0;
@@ -407,7 +405,7 @@ pub(crate) unsafe fn canon(c: &Ctx, a: &L5) -> L5 {
 /// Lane select: the lanes with their mask bit set take `b`, the others `a`.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn sel(m: __mmask8, a: &L5, b: &L5) -> L5 {
+pub(crate) fn sel(m: __mmask8, a: &L5, b: &L5) -> L5 {
     let mut r = *a;
     for j in 0..5 {
         r[j] = _mm512_mask_blend_epi64(m, a[j], b[j]);
@@ -439,7 +437,7 @@ const JACOBI_BATCHES: usize = 22;
 /// `(g | 1) = 1` times the tracked sign; the Montgomery factor `R = 2^260` is an even power of two and
 /// does not move the symbol.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn jacobi_multi<const G: usize>(
+pub(crate) fn jacobi_multi<const G: usize>(
     c: &Ctx,
     x: &[L5; G],
     batches: usize,
@@ -531,7 +529,7 @@ pub(crate) unsafe fn jacobi_multi<const G: usize>(
 /// `JACOBI_K` bits of the sum are zero (a divstep batch's transition); the result's limbs normalized.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn combine_shift(c: &Ctx, f: &L5, g: &L5, a: __m512i, b: __m512i) -> L5 {
+fn combine_shift(c: &Ctx, f: &L5, g: &L5, a: __m512i, b: __m512i) -> L5 {
     let zero = _mm512_setzero_si512();
     let mut t = [zero; 6];
     let mut hi_prev = zero;
@@ -563,7 +561,7 @@ unsafe fn combine_shift(c: &Ctx, f: &L5, g: &L5, a: __m512i, b: __m512i) -> L5 {
 
 /// x^e on all lanes, one exponent, 4-bit fixed window, `G` independent groups interleaved for ILP.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn pow_multi<const G: usize>(c: &Ctx, x: &[L5; G], e: &[u64; 4]) -> [L5; G] {
+pub(crate) fn pow_multi<const G: usize>(c: &Ctx, x: &[L5; G], e: &[u64; 4]) -> [L5; G] {
     let mut table = [[c.one; 16]; G];
     for g in 0..G {
         table[g][1] = x[g];
@@ -599,7 +597,7 @@ pub(crate) unsafe fn pow_multi<const G: usize>(c: &Ctx, x: &[L5; G], e: &[u64; 4
 /// (Montgomery's trick; for `G` groups, 3(G−1) products + one exponentiation instead of G). Taking the
 /// groups as a slice lets a task of fewer than [`TASK_CHUNKS`] chunks invert only the groups it has.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn batch_inverse(c: &Ctx, d: &mut [L5]) {
+pub(crate) fn batch_inverse(c: &Ctx, d: &mut [L5]) {
     let groups = d.len();
     assert!((1..=TASK_CHUNKS * GROUPS).contains(&groups));
     let mut prefix = [c.one; TASK_CHUNKS * GROUPS];
@@ -620,25 +618,33 @@ pub(crate) unsafe fn batch_inverse(c: &Ctx, d: &mut [L5]) {
 /// low limbs): the exponents, and the lanes whose element was found.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn dlog256(c: &Ctx, b: &L5) -> (__m512i, __mmask8) {
+fn dlog256(c: &Ctx, b: &L5) -> (__m512i, __mmask8) {
     let key = canon(c, b)[0];
     let keys = c.dlog_keys.as_ptr();
     let mut lo = _mm512_setzero_si512();
     let mut step = 128i64;
     while step > 0 {
         let probe = _mm512_add_epi64(lo, _mm512_set1_epi64(step));
-        let k = _mm512_i64gather_epi64::<8>(probe, keys as *const _);
+        // SAFETY: `lo` is the sum of the steps taken so far and `probe` adds this one: distinct
+        // powers of two from 128 down, so both stay below 256, the length of `dlog_keys`.
+        let k = unsafe { _mm512_i64gather_epi64::<8>(probe, keys as *const _) };
         let le = _mm512_cmple_epu64_mask(k, key);
         lo = _mm512_mask_blend_epi64(le, lo, probe);
         step >>= 1;
     }
-    let k = _mm512_i64gather_epi64::<8>(lo, keys as *const _);
+    // SAFETY: `lo` is below 256 (see the loop), the length of `dlog_keys` and of `dlog_vals`.
+    let k = unsafe { _mm512_i64gather_epi64::<8>(lo, keys as *const _) };
     let found = _mm512_cmpeq_epi64_mask(k, key);
-    let j = _mm512_i64gather_epi64::<8>(lo, c.dlog_vals.as_ptr() as *const _);
+    // SAFETY: as for the keys just above.
+    let j = unsafe { _mm512_i64gather_epi64::<8>(lo, c.dlog_vals.as_ptr() as *const _) };
     (j, found)
 }
 
 /// `g^(−j·2^(8i))` for eight `j` (window `i`), gathered from the table.
+///
+/// # Safety
+/// `i` must be below 4 and every lane of `j` below 256: the words read are those of entry
+/// `i·256 + j` of `neg_pow`, which holds 4·256 entries.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn neg_pow_gather(c: &Ctx, i: usize, j: __m512i) -> L5 {
@@ -647,7 +653,9 @@ unsafe fn neg_pow_gather(c: &Ctx, i: usize, j: __m512i) -> L5 {
     let base = c.neg_pow.as_ptr();
     let mut r = [_mm512_setzero_si512(); 5];
     for l in 0..5 {
-        r[l] = _mm512_i64gather_epi64::<8>(idx, base.add(l) as *const _);
+        // SAFETY: by this function's contract `idx` names an entry of `neg_pow` in every lane,
+        // and `l` is one of the entry's five words.
+        r[l] = unsafe { _mm512_i64gather_epi64::<8>(idx, base.add(l) as *const _) };
     }
     r
 }
@@ -656,7 +664,7 @@ unsafe fn neg_pow_gather(c: &Ctx, i: usize, j: __m512i) -> L5 {
 /// roots and, per group, the mask of lanes whose candidate squares back to the input (the residues).
 /// Per group: one `(t−1)/2` exponentiation, 48 squarings, seven table products, four table lookups.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8; G]) {
+fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8; G]) {
     let w = pow_multi::<G>(c, a, &c.trace_minus_one_div_two);
     let mut x = [c.one; G]; // w·a: the root up to a 2-power root of unity
     let mut b = [c.one; G]; // a^t = w²·a, in the order-2^32 subgroup
@@ -683,7 +691,9 @@ unsafe fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8
                 _mm512_sllv_epi64(j, _mm512_set1_epi64((8 * i) as i64)),
             );
             if i < 3 {
-                b[g] = mont_mul(c, &b[g], &neg_pow_gather(c, i, j));
+                // SAFETY: `i` is below 3, and `dlog256` returns entries of `dlog_vals`, which are
+                // the exponents 0 to 255.
+                b[g] = mont_mul(c, &b[g], &unsafe { neg_pow_gather(c, i, j) });
             }
         }
     }
@@ -698,7 +708,8 @@ unsafe fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8
                 _mm512_srlv_epi64(half, _mm512_set1_epi64((8 * i) as i64)),
                 byte,
             );
-            x[g] = mont_mul(c, &x[g], &neg_pow_gather(c, i, j));
+            // SAFETY: `i` is below 4, and `j` was masked to its low eight bits.
+            x[g] = mont_mul(c, &x[g], &unsafe { neg_pow_gather(c, i, j) });
         }
         let sq = mont_mul(c, &x[g], &x[g]);
         ok[g] = even & found[g] & eq_lanes(c, &sq, &a[g]);
@@ -707,7 +718,7 @@ unsafe fn sqrt_dlog<const G: usize>(c: &Ctx, a: &[L5; G]) -> ([L5; G], [__mmask8
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn load(c: &Ctx, xs: &[Fq; 8]) -> L5 {
+pub(crate) fn load(c: &Ctx, xs: &[Fq; 8]) -> L5 {
     let mut limbs = [[0u64; 8]; 5];
     for (k, x) in xs.iter().enumerate() {
         let l = to_limbs52(&x.into_bigint());
@@ -718,20 +729,22 @@ pub(crate) unsafe fn load(c: &Ctx, xs: &[Fq; 8]) -> L5 {
     let mut v = [_mm512_setzero_si512(); 5];
     let mut r2 = [_mm512_setzero_si512(); 5];
     for i in 0..5 {
-        v[i] = _mm512_loadu_si512(limbs[i].as_ptr() as *const _);
+        // SAFETY: `limbs[i]` is the 64 bytes the load reads.
+        v[i] = unsafe { _mm512_loadu_si512(limbs[i].as_ptr() as *const _) };
         r2[i] = _mm512_set1_epi64(c.r2[i] as i64);
     }
     mont_mul(c, &v, &r2)
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn store(c: &Ctx, v: &L5) -> [Fq; 8] {
+pub(crate) fn store(c: &Ctx, v: &L5) -> [Fq; 8] {
     let mut one_int = [_mm512_setzero_si512(); 5];
     one_int[0] = _mm512_set1_epi64(1);
     let r = canon(c, &mont_mul(c, v, &one_int)); // out of Montgomery form, canonical
     let mut limbs = [[0u64; 8]; 5];
     for i in 0..5 {
-        _mm512_storeu_si512(limbs[i].as_mut_ptr() as *mut _, r[i]);
+        // SAFETY: `limbs[i]` is the 64 bytes the store writes.
+        unsafe { _mm512_storeu_si512(limbs[i].as_mut_ptr() as *mut _, r[i]) };
     }
     let mut out = [Fq::zero(); 8];
     for k in 0..8 {
@@ -748,7 +761,7 @@ pub(crate) unsafe fn store(c: &Ctx, v: &L5) -> [Fq; 8] {
 /// < 4p; `mont_mul` accepts any pair of inputs whose product is < p·2^260, e.g. 6p × 4p).
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn add(c: &Ctx, a: &L5, b: &L5) -> L5 {
+pub(crate) fn add(c: &Ctx, a: &L5, b: &L5) -> L5 {
     let mut r = [_mm512_setzero_si512(); 5];
     let mut carry = _mm512_setzero_si512();
     for j in 0..5 {
@@ -762,7 +775,7 @@ pub(crate) unsafe fn add(c: &Ctx, a: &L5, b: &L5) -> L5 {
 /// a - b + 2p (b < 2p keeps it non-negative), limbs normalized through a signed borrow chain.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn sub(c: &Ctx, a: &L5, b: &L5) -> L5 {
+pub(crate) fn sub(c: &Ctx, a: &L5, b: &L5) -> L5 {
     let mut r = [_mm512_setzero_si512(); 5];
     let mut carry = _mm512_setzero_si512();
     for j in 0..5 {
@@ -779,7 +792,7 @@ pub(crate) unsafe fn sub(c: &Ctx, a: &L5, b: &L5) -> L5 {
 /// The plain (non-Montgomery) canonical integer of each lane's value: `a · R⁻¹ mod p`, in `[0, p)`.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn to_plain(c: &Ctx, a: &L5) -> L5 {
+pub(crate) fn to_plain(c: &Ctx, a: &L5) -> L5 {
     let mut one_int = [_mm512_setzero_si512(); 5];
     one_int[0] = _mm512_set1_epi64(1);
     canon(c, &mont_mul(c, a, &one_int))
@@ -788,7 +801,7 @@ pub(crate) unsafe fn to_plain(c: &Ctx, a: &L5) -> L5 {
 /// Lane mask: which lanes of canonical `a` are zero.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn is_zero(a: &L5) -> __mmask8 {
+pub(crate) fn is_zero(a: &L5) -> __mmask8 {
     let zero = _mm512_setzero_si512();
     let mut m: __mmask8 = 0xff;
     for j in 0..5 {
@@ -801,7 +814,7 @@ pub(crate) unsafe fn is_zero(a: &L5) -> __mmask8 {
 /// [`crate::element::is_positive`] (`a > −a` as canonical integers).
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn is_positive(c: &Ctx, a: &L5) -> __mmask8 {
+pub(crate) fn is_positive(c: &Ctx, a: &L5) -> __mmask8 {
     let mut gt: __mmask8 = 0;
     let mut decided: __mmask8 = 0;
     for j in (0..5).rev() {
@@ -816,7 +829,7 @@ pub(crate) unsafe fn is_positive(c: &Ctx, a: &L5) -> __mmask8 {
 /// `p − a` canonical for canonical `a` (zero stays zero): the field negation on plain or Montgomery lanes.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn neg_canon(c: &Ctx, a: &L5) -> L5 {
+pub(crate) fn neg_canon(c: &Ctx, a: &L5) -> L5 {
     let z = is_zero(a);
     let mut r = [_mm512_setzero_si512(); 5];
     let mut borrow = _mm512_setzero_si512();
@@ -832,7 +845,7 @@ pub(crate) unsafe fn neg_canon(c: &Ctx, a: &L5) -> L5 {
 /// Five 52-bit limbs (a canonical value < 2^255) as four 64-bit words, the little-endian integer.
 #[inline]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn limbs_to_words(l: &L5) -> [__m512i; 4] {
+pub(crate) fn limbs_to_words(l: &L5) -> [__m512i; 4] {
     [
         _mm512_or_si512(l[0], _mm512_slli_epi64(l[1], 52)),
         _mm512_or_si512(_mm512_srli_epi64(l[1], 12), _mm512_slli_epi64(l[2], 40)),
@@ -845,7 +858,7 @@ pub(crate) unsafe fn limbs_to_words(l: &L5) -> [__m512i; 4] {
 /// 52-bit limbs; the inverse of [`limbs_to_words`].
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn words_to_limbs(c: &Ctx, w: &[__m512i; 4]) -> L5 {
+pub(crate) fn words_to_limbs(c: &Ctx, w: &[__m512i; 4]) -> L5 {
     let m = c.mask;
     [
         _mm512_and_si512(w[0], m),
@@ -875,7 +888,7 @@ pub(crate) fn bcast_limbs(x: &Fq) -> [u64; 5] {
 /// The same limbs on every lane.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn bcast(l: &[u64; 5]) -> L5 {
+pub(crate) fn bcast(l: &[u64; 5]) -> L5 {
     let mut v = [_mm512_setzero_si512(); 5];
     for i in 0..5 {
         v[i] = _mm512_set1_epi64(l[i] as i64);
@@ -886,10 +899,11 @@ pub(crate) unsafe fn bcast(l: &[u64; 5]) -> L5 {
 /// The eight lanes' limbs as a `[5][8]` array (lane-major storage of points).
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn to_words(v: &L5) -> [[u64; 8]; 5] {
+pub(crate) fn to_words(v: &L5) -> [[u64; 8]; 5] {
     let mut w = [[0u64; 8]; 5];
     for i in 0..5 {
-        _mm512_storeu_si512(w[i].as_mut_ptr() as *mut _, v[i]);
+        // SAFETY: `w[i]` is the 64 bytes the store writes.
+        unsafe { _mm512_storeu_si512(w[i].as_mut_ptr() as *mut _, v[i]) };
     }
     w
 }
@@ -902,7 +916,8 @@ mod tests {
 
     /// The lane symbol of every input, through groups of sixteen: `Some(is a nonzero residue)` where
     /// the lane settled, `None` where it did not.
-    unsafe fn lane_symbols(xs: &[Fq]) -> Vec<Option<bool>> {
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn lane_symbols(xs: &[Fq]) -> Vec<Option<bool>> {
         let c = context();
         let mut out = Vec::with_capacity(xs.len());
         for chunk in xs.chunks(16) {
@@ -946,6 +961,7 @@ mod tests {
         }
         let structured = xs.len() - 6000;
         let want: Vec<bool> = xs.iter().map(|x| x.legendre().is_qr()).collect();
+        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
         let got = unsafe { lane_symbols(&xs) };
         let mut unsettled = 0;
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
@@ -1008,9 +1024,11 @@ mod tests {
             }
             // every task length shares one inversion; each equals the settled decode
             for n in 1..=TASK_CHUNKS {
+                // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                 let full = unsafe { decode_chunks_with(&xs[..n], JACOBI_BATCHES) };
                 assert_eq!(full.len(), n);
                 for batches in [0usize, 14] {
+                    // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                     let forced = unsafe { decode_chunks_with(&xs[..n], batches) };
                     for k in 0..n {
                         for i in 0..CHUNK {
@@ -1018,6 +1036,7 @@ mod tests {
                         }
                     }
                 }
+                // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                 let single: Vec<ChunkDecode> = (0..n)
                     .map(|k| unsafe { decode_chunks_with(&xs[k..k + 1], JACOBI_BATCHES) }[0])
                     .collect();
@@ -1043,6 +1062,7 @@ mod tests {
         let c = context();
         let n = 4096;
         let xs: Vec<Fq> = (0..n).map(|_| Fq::rand(&mut rng)).collect();
+        // SAFETY: `available()` returned true above.
         let lanes: Vec<L5> = xs
             .chunks(8)
             .map(|ch| unsafe { load(c, ch.try_into().unwrap()) })
@@ -1052,6 +1072,7 @@ mod tests {
             let mut acc = 0u32;
             for pair in lanes.chunks(2) {
                 let (res, dec) =
+                    // SAFETY: `available()` returned true above.
                     unsafe { jacobi_multi::<2>(c, &[pair[0], pair[1]], JACOBI_BATCHES) };
                 acc += (res[0] & dec[0]).count_ones() + (res[1] & dec[1]).count_ones();
                 assert_eq!(dec, [0xff, 0xff], "a random input did not settle");
@@ -1060,6 +1081,7 @@ mod tests {
             let t = std::time::Instant::now();
             let mut acc4 = 0u32;
             for quad in lanes.chunks(4) {
+                // SAFETY: `available()` returned true above.
                 let (res, dec) = unsafe {
                     jacobi_multi::<4>(c, &[quad[0], quad[1], quad[2], quad[3]], JACOBI_BATCHES)
                 };
@@ -1071,6 +1093,7 @@ mod tests {
             let t = std::time::Instant::now();
             let mut acc_e = 0u32;
             for quad in lanes.chunks(4) {
+                // SAFETY: `available()` returned true above.
                 let leg = unsafe {
                     pow_multi::<4>(
                         c,
@@ -1079,6 +1102,7 @@ mod tests {
                     )
                 };
                 for l in &leg {
+                    // SAFETY: `available()` returned true above.
                     acc_e += unsafe { eq_one(c, l) }.count_ones();
                 }
             }
