@@ -205,7 +205,8 @@ jobs:
   # A broken intra-doc link is only a warning, so `cargo doc` alone lets one land. Two passes:
   # the public docs, where a public item's link to a private one is an error, and the docs with
   # the private items in, which is the only pass that resolves the links inside private items
-  # (banderwagon's lane modules among them, compiled on this x86_64 runner).
+  # (banderwagon's lane modules among them, compiled on this x86_64 runner). Each runs with every
+  # feature and again with the default features off, for the code only a `no_std` build has.
   docs:
     name: Docs
     runs-on: ubuntu-latest
@@ -231,3 +232,15 @@ jobs:
         with:
           command: doc
           args: --no-deps --workspace --all-features --document-private-items
+
+      - name: Run cargo doc without default features
+        uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --no-deps --workspace --no-default-features
+
+      - name: Run cargo doc without default features, with private items
+        uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --no-deps --workspace --no-default-features --document-private-items

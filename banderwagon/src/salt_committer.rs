@@ -64,8 +64,9 @@ use std::{vec, vec::Vec};
 pub struct Committer {
     /// Window size for windowed NAF representation (see [`crate::platform::precomp_window_size`])
     window_size: usize,
-    /// Precomputed tables of multiples for each base point.
-    /// Structure: tables[base_index][window_index * half_window_size + multiple]
+    /// Precomputed tables of multiples for each base point. A window is `2^(window_size - 1) + 1`
+    /// points, so multiple `m` of window `k` of a base is at
+    /// `tables[base_index][k * (2^(window_size - 1) + 1) + m]`.
     tables: Vec<Vec<EdwardsAffine>>,
     /// What the lane path keeps beside `tables`, on a host where it runs.
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
