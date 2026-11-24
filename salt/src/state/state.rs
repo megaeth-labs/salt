@@ -11,7 +11,7 @@
 //!
 //! 2. **Ephemeral State Management**: Buffers modifications in memory without
 //!    immediately persisting them, allowing for batch operations, rollbacks, and
-//!    transactional semantics. All changes are accumulated as [`StateUpdates`](crate::StateUpdates)
+//!    transactional semantics. All changes are accumulated as [`StateUpdates`]
 //!    that can be applied atomically.
 //!
 //! ## SHI Hash Table Implementation

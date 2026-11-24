@@ -149,8 +149,7 @@ mod tests {
     }
 
     /// Returns once `flag` is set. It gives up after a minute, so that a test whose other thread
-    /// never arrives fails on its assertion instead of hanging. The load is `Acquire`: a waiter
-    /// let through by a flag stored with `Release` also sees whatever its setter had seen.
+    /// never arrives fails on its assertion instead of hanging.
     fn wait_for(flag: &AtomicBool) {
         let start = Instant::now();
         while !flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(60) {
@@ -233,8 +232,7 @@ mod tests {
     }
 
     /// A group that panics on the calling thread stops the helpers: of 64 groups only the
-    /// caller's and the one the helper already had are begun. The helper keeps its group until
-    /// the caller is out of the call, so nothing here depends on how long a step takes.
+    /// caller's and the one the helper already had are begun.
     #[test]
     fn a_panic_on_the_caller_stops_the_helpers() {
         let pool = pool(2);
@@ -267,9 +265,9 @@ mod tests {
             .downcast_ref::<String>()
             .expect("the caller's payload");
         assert!(message.ends_with("on the caller"), "{message}");
-        // The caller has gone. The helper's group ends now, and it takes no other: the broadcast
-        // comes back once the helper's thread is through with the job it was on. `Release`, for
-        // the `Acquire` in `wait_for`: the helper that sees the flag sees the job stopped too.
+        // The broadcast comes back once the helper's thread is through with the job it was on,
+        // so the count is final. `Release` pairs with the `Acquire` in `wait_for`: the helper
+        // that sees the flag sees the job stopped too.
         released.store(true, Ordering::Release);
         pool.broadcast(|_| ());
         assert_eq!(begun.load(Ordering::Relaxed), 2);

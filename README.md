@@ -182,7 +182,7 @@ SALT is implemented as a Rust workspace with three main crates that work togethe
   - `StateRoot`: Incremental state root computation
   - `MemStore`: Thread-safe in-memory storage backend
   - `SaltKey`/`SaltValue`: Encoded key-value pairs
-  - `PlainKeysProof`: Inclusion/exclusion proofs for plain keys
+  - `Witness`: Inclusion/exclusion proofs for plain keys
 
 ### Architectural Design
 
