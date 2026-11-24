@@ -140,7 +140,6 @@ SALT is implemented as a Rust workspace with three main crates that work togethe
 - **Key Features**:
   - Optimized group operations for the prime subgroup of Bandersnatch
   - Multi-scalar multiplication (MSM) with precomputation tables
-  - Memory-efficient operations with optional hugepage support
   - SIMD-optimized scalar multiplication
 - **Core Types**:
   - `Element`: Group elements on the curve
@@ -252,32 +251,6 @@ SALT cleanly separates storage from authentication through trait interfaces:
 - **`MemStore`**: Reference implementation using `RwLock<HashMap>`
 
 This allows plugging in different storage backends (RocksDB, PostgreSQL, etc.) without changing the core logic.
-
-### Hugepage Configuration (Linux)
-
-By default, SALT uses standard memory allocation for compatibility. For optimal performance with large precomputation tables, you can enable hugepages:
-
-```bash
-# Check current hugepage allocation
-grep HugePages /proc/meminfo
-
-# Allocate hugepages (requires ~400MB for precomputation tables)
-sudo sysctl -w vm.nr_hugepages=1024
-```
-
-To enable hugepages when building SALT:
-
-```bash
-cargo build --features enable-hugepages
-cargo test --features enable-hugepages
-```
-
-Or enable it in your Cargo.toml:
-
-```toml
-[dependencies]
-salt = { path = "path/to/salt", features = ["enable-hugepages"] }
-```
 
 ## Development and Testing
 
