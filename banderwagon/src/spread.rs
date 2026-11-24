@@ -232,22 +232,28 @@ mod tests {
     }
 
     /// A group that panics on the calling thread stops the helpers: of 64 groups only the
-    /// caller's and the one the helper already had are begun.
+    /// caller's and the one the helper already had are begun. The helper keeps its group until
+    /// the caller is out of the call, so nothing here depends on how long a step takes.
     #[test]
     fn a_panic_on_the_caller_stops_the_helpers() {
         let pool = pool(2);
         let taken = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
         let begun = Arc::new(AtomicUsize::new(0));
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             pool.install(|| {
                 let caller = rayon::current_thread_index();
-                let (taken, begun) = (Arc::clone(&taken), Arc::clone(&begun));
+                let (taken, released, begun) = (
+                    Arc::clone(&taken),
+                    Arc::clone(&released),
+                    Arc::clone(&begun),
+                );
                 spread_groups(64, move |g| {
                     begun.fetch_add(1, Ordering::Relaxed);
                     if rayon::current_thread_index() != caller {
                         taken.store(true, Ordering::Relaxed);
-                        // long enough for the caller to have unwound out of the call
-                        std::thread::sleep(Duration::from_millis(200));
+                        // held until the caller has unwound out of the call
+                        wait_for(&released);
                         return g;
                     }
                     wait_for(&taken);
@@ -260,8 +266,10 @@ mod tests {
             .downcast_ref::<String>()
             .expect("the caller's payload");
         assert!(message.ends_with("on the caller"), "{message}");
-        // The helper's group ends after the caller has gone, and it takes no other.
-        std::thread::sleep(Duration::from_millis(400));
+        // The caller has gone. The helper's group ends now, and it takes no other: the broadcast
+        // comes back once the helper's thread is through with the job it was on.
+        released.store(true, Ordering::Relaxed);
+        pool.broadcast(|_| ());
         assert_eq!(begun.load(Ordering::Relaxed), 2);
     }
 }
