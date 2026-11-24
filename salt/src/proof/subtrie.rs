@@ -22,7 +22,7 @@ use crate::{
     proof::{
         prover::slot_to_field,
         shape::{connect_parent_id, logic_parent_id, parents_and_points, slot_position},
-        ProofError, ProofResult, SerdeCommitment,
+        PathCommitments, ProofError, ProofResult, SerdeCommitment,
     },
     traits::{StateReader, TrieReader},
     trie::{
@@ -37,7 +37,7 @@ use ipa_multipoint::{lagrange_basis::LagrangeBasis, multiproof::ProverQuery};
 
 use salt_macros::prelude::*;
 use salt_macros::{chunks, iter, reduce, thread_chunk_size};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::{format, string::ToString, sync::Arc, vec, vec::Vec};
 
 use hashbrown::HashMap;
@@ -245,11 +245,7 @@ pub(crate) const METADATA_BUCKET_LEVEL: u8 = 1;
 const ROOT_LEVEL_CHILD_START: NodeId = 1;
 
 /// Information returned by the subtrie creation process
-type SubTrieInfo = (
-    Vec<ProverQuery>,
-    BTreeMap<NodeId, SerdeCommitment>,
-    FxHashMap<BucketId, u8>,
-);
+type SubTrieInfo = (Vec<ProverQuery>, PathCommitments, FxHashMap<BucketId, u8>);
 
 /// The polynomial of every internal node in `nodes` (logical ids), in order: its 256 child
 /// commitments mapped to the scalar field, with the level's default commitment where a child
@@ -463,9 +459,9 @@ where
             })
             .collect::<ProofResult<_>>()?
     };
-    let parents_commitments: BTreeMap<NodeId, SerdeCommitment> = parents
+    let parents_commitments: PathCommitments = parents
         .iter()
-        .map(|parent| (parent.physical, SerdeCommitment(parent.commitment)))
+        .map(|parent| (parent.physical, SerdeCommitment::from(parent.commitment)))
         .collect();
 
     // Step 5: Resolve the polynomial of every parent, internal nodes in parallel chunks and

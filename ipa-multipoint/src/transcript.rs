@@ -1,5 +1,4 @@
 use banderwagon::{trait_defs::*, Element, Fr};
-use std::vec::Vec;
 
 pub trait TranscriptProtocol {
     /// Compute a `label`ed challenge variable.
@@ -10,32 +9,47 @@ pub trait TranscriptProtocol {
 }
 
 use sha2::{Digest, Sha256};
+
+/// The Fiat–Shamir transcript: every appended byte goes straight into a running SHA-256, and a
+/// challenge is the digest of everything appended since the previous challenge.
+///
+/// This used to buffer the appended bytes in a `Vec<u8>` and hash the buffer at each challenge.
+/// The digest is the same either way (SHA-256 over the same byte sequence), but a witness of
+/// tens of thousands of queries appended ≈ 8 MB of commitments and evaluations before its first
+/// challenge, held for the whole verification, in every concurrent verification.
 pub struct Transcript {
-    pub state: Vec<u8>,
+    hasher: Sha256,
 }
 
 impl Transcript {
     pub fn new(label: &'static [u8]) -> Transcript {
-        // TODO: add a with capacity method, so we don't reallocate alot
-        let mut state = Vec::new();
-        state.extend(label);
-        Transcript { state }
+        let mut hasher = Sha256::new();
+        hasher.update(label);
+        Transcript { hasher }
     }
 
     fn append_message(&mut self, message: &[u8], label: &'static [u8]) {
-        self.state.extend(label);
-        self.state.extend(message);
+        self.hasher.update(label);
+        self.hasher.update(message);
     }
     // TODO: Add this to the other implementations! or most likely, we just need to add
     // TODO sub protocol specific domain separators ipa_domain_sep(n) and under the roof
     // TODO it adds the ipa label and the argument size n
     pub fn append_u64(&mut self, label: &'static [u8], number: u64) {
-        self.state.extend(label);
-        self.state.extend(number.to_be_bytes());
+        self.hasher.update(label);
+        self.hasher.update(number.to_be_bytes());
     }
 
     pub fn append_raw(&mut self, message: &[u8]) {
-        self.state.extend(message);
+        self.hasher.update(message);
+    }
+
+    /// The digest of everything appended since the last challenge, without disturbing the
+    /// transcript — what `challenge_scalar` would hash next, for tests that compare two
+    /// transcripts' states.
+    #[cfg(test)]
+    pub(crate) fn pending_digest(&self) -> [u8; 32] {
+        self.hasher.clone().finalize().into()
     }
 }
 
@@ -43,13 +57,8 @@ impl TranscriptProtocol for Transcript {
     fn challenge_scalar(&mut self, label: &'static [u8]) -> Fr {
         self.domain_sep(label);
 
-        // Hash entire transcript state
-        let mut sha256 = Sha256::new();
-        sha256.update(&self.state);
-        let hash: Vec<u8> = sha256.finalize_reset().to_vec();
-
-        // Clear the state
-        self.state.clear();
+        // Hash entire transcript state since the last challenge, and start afresh
+        let hash = self.hasher.finalize_reset();
 
         let scalar = Fr::from_le_bytes_mod_order(&hash);
 
@@ -70,10 +79,9 @@ impl TranscriptProtocol for Transcript {
     }
 
     fn domain_sep(&mut self, label: &'static [u8]) {
-        self.state.extend(label)
+        self.hasher.update(label)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
