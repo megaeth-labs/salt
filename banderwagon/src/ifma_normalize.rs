@@ -613,6 +613,7 @@ mod tests {
             recs[5][..32].copy_from_slice(&fq_to_le_bytes(Fq::from(7u64)));
             recs[5][32..].fill(0);
             let mut got = vec![Fr::zero(); 8];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { hash_commitments(&recs, &mut got) };
             let g_scalar = Element::prime_subgroup_generator().map_to_scalar_field();
             for (i, v) in got.iter().enumerate() {
