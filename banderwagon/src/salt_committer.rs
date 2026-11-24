@@ -22,7 +22,8 @@
 //! # Performance Characteristics
 //!
 //! - Window size affects the trade-off between memory usage and computation speed
-//! - Typical window size of 11 provides good balance for 256 base points
+//! - The trie takes its window from [`crate::platform::precomp_window_size`]: the scalar path's
+//!   [`crate::platform::DEFAULT_PRECOMP_WINDOW_SIZE`], or 7 where the multiplications run in lanes
 //! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
@@ -48,6 +49,11 @@ use std::{vec, vec::Vec};
 /// - Window 1: [0, 2^w*G[i], 2*2^w*G[i], ..., (2^(w-1)-1)*2^w*G[i]]
 /// - And so on...
 ///
+/// On `x86_64` with `std` and a host with AVX-512 IFMA, a committer also keeps the lane path's
+/// products: 32 bytes beside each 64-byte table point, at whatever window it is built with, so
+/// its tables take half as much memory again. For 256 bases that is 59.1 MB instead of 39.4 MB
+/// at window 7, and about 605 MB instead of 403 MB at window 11.
+///
 /// # Example
 ///
 /// ```ignore
@@ -58,11 +64,14 @@ use std::{vec, vec::Vec};
 /// ```
 #[derive(Clone, Debug)]
 pub struct Committer {
-    /// Window size for windowed NAF representation (typically 11 for 256 bases)
+    /// Window size for windowed NAF representation (see [`crate::platform::precomp_window_size`])
     window_size: usize,
     /// Precomputed tables of multiples for each base point.
     /// Structure: tables[base_index][window_index * half_window_size + multiple]
     tables: Vec<Vec<EdwardsAffine>>,
+    /// What the lane path keeps beside `tables`, on a host where it runs.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    lane: Option<crate::ifma_committer::LaneTables>,
 }
 
 impl Drop for Committer {
@@ -152,6 +161,8 @@ impl Committer {
         };
 
         Committer {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            lane: crate::ifma_committer::LaneTables::new(&tables, window_size),
             tables,
             window_size,
         }
@@ -182,6 +193,8 @@ impl Committer {
             .collect();
 
         Committer {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            lane: crate::ifma_committer::LaneTables::new(&tables, window_size),
             tables,
             window_size,
         }
@@ -289,6 +302,39 @@ impl Committer {
         Element(result)
     }
 
+    /// `scalars[i] * G[indices[i]]` for every `i`, the elements [`Committer::mul_index`] returns one by one.
+    ///
+    /// On `x86_64` with `std` and a host with AVX-512 IFMA, eight multiplications run per vector register
+    /// ([`crate::ifma_committer`]); everywhere else this maps `mul_index`.
+    ///
+    /// # Panics
+    /// If the lengths differ or an index is not below [`Committer::num_bases`].
+    pub fn mul_index_batch(&self, scalars: &[Fr], indices: &[usize]) -> Vec<Element> {
+        assert_eq!(scalars.len(), indices.len(), "one index per scalar");
+        for &g in indices {
+            assert!(g < self.tables.len(), "base index out of range");
+        }
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        if let Some(lane) = &self.lane {
+            // SAFETY: `lane` was built from `self.tables` at `self.window_size`.
+            let products = unsafe {
+                crate::ifma_committer::mul_index_batch(
+                    &self.tables,
+                    lane,
+                    self.window_size,
+                    scalars,
+                    indices,
+                )
+            };
+            return products.into_iter().map(Element).collect();
+        }
+        scalars
+            .iter()
+            .zip(indices)
+            .map(|(s, &g)| self.mul_index(s, g))
+            .collect()
+    }
+
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This is the generic implementation for non-x86_64 architectures.
@@ -340,17 +386,12 @@ impl Committer {
     }
 
     /// Sums `scalar · G[index]` over `terms`, splitting them across threads.
+    ///
+    /// Where [`Committer::mul_index_batch`] runs in lanes, each thread's terms go through it, so
+    /// these multiplications are batched like the trie update's.
     pub fn msm(&self, terms: &[(usize, Fr)]) -> Element {
-        chunks!(terms, thread_chunk_size!(terms.len()))
-            .map(|chunk| {
-                let mut acc = Element::zero();
-                for (index, scalar) in chunk {
-                    if !scalar.is_zero() {
-                        acc += self.mul_index(scalar, *index);
-                    }
-                }
-                acc
-            })
+        chunks!(terms, self.msm_task_size(terms.len()))
+            .map(|task| self.sum_terms(task.iter().copied()))
             .sum()
     }
 
@@ -361,21 +402,63 @@ impl Committer {
     ///
     /// If there are more scalars than bases.
     pub fn msm_dense(&self, scalars: &[Fr]) -> Element {
-        let chunk_size = thread_chunk_size!(scalars.len());
-        chunks!(scalars, chunk_size)
+        let task_size = self.msm_task_size(scalars.len());
+        chunks!(scalars, task_size)
             .enumerate()
-            .map(|(chunk, scalars)| {
-                let mut acc = Element::zero();
-                for (offset, scalar) in scalars.iter().enumerate() {
-                    if !scalar.is_zero() {
-                        acc += self.mul_index(scalar, chunk * chunk_size + offset);
-                    }
-                }
-                acc
+            .map(|(task, scalars)| {
+                self.sum_terms((task * task_size..).zip(scalars.iter().copied()))
             })
             .sum()
     }
+
+    /// Sums `scalar · G[index]` over one task's terms, skipping zero scalars: in lanes where the
+    /// host has them, otherwise one [`Committer::mul_index`] after another.
+    fn sum_terms(&self, terms: impl Iterator<Item = (usize, Fr)>) -> Element {
+        if self.in_lanes() {
+            return self.sum_terms_batched(terms);
+        }
+        terms
+            .filter(|(_, scalar)| !scalar.is_zero())
+            .map(|(index, scalar)| self.mul_index(&scalar, index))
+            .sum()
+    }
+
+    /// [`Committer::sum_terms`] through [`Committer::mul_index_batch`]. Right on any host; worth
+    /// its two vectors only where the batch runs in lanes.
+    fn sum_terms_batched(&self, terms: impl Iterator<Item = (usize, Fr)>) -> Element {
+        let (indices, scalars): (Vec<usize>, Vec<Fr>) =
+            terms.filter(|(_, scalar)| !scalar.is_zero()).unzip();
+        self.mul_index_batch(&scalars, &indices).into_iter().sum()
+    }
+
+    /// Whether [`Committer::mul_index_batch`] runs in lanes: this committer holds their tables.
+    #[inline]
+    fn in_lanes(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        {
+            self.lane.is_some()
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        {
+            false
+        }
+    }
+
+    /// Terms per parallel task of [`Committer::msm`] and [`Committer::msm_dense`]: `len` spread
+    /// over the threads and, where the multiplications run in lanes, rounded up to whole lane
+    /// groups, so that only the last task can leave lanes idle.
+    fn msm_task_size(&self, len: usize) -> usize {
+        let size = thread_chunk_size!(len);
+        if self.in_lanes() {
+            size.next_multiple_of(LANES)
+        } else {
+            size
+        }
+    }
 }
+
+/// Multiplications per vector register in [`Committer::mul_index_batch`]'s lane path.
+pub(crate) const LANES: usize = 8;
 
 /// Adds an affine point to a projective point using extended Edwards coordinates.
 ///
@@ -525,32 +608,169 @@ mod tests {
     use std::str::FromStr;
     use std::string::ToString;
 
+    /// The windows a shared committer is built with: the default, and the one a host takes
+    /// when its multiplications run in lanes.
+    const WINDOWS: [usize; 2] = [
+        platform::DEFAULT_PRECOMP_WINDOW_SIZE,
+        platform::LANE_PRECOMP_WINDOW_SIZE,
+    ];
+
+    /// `G, 2G, …, nG`.
+    fn crs(n: usize) -> Vec<Element> {
+        (0..n)
+            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
+            .collect()
+    }
+
+    /// Runs `check` on `committer` and then on the same committer without lane tables. On a host
+    /// with the lanes that is the lane path and then the scalar fallback, so the one host CI
+    /// measures coverage on checks both; on another `x86_64` host with `std` both runs take the
+    /// fallback, and off `x86_64` or without `std` (no lane tables to drop) `check` runs once.
+    fn on_both_paths(committer: Committer, check: impl Fn(&Committer)) {
+        check(&committer);
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        {
+            let mut committer = committer;
+            committer.lane = None;
+            check(&committer);
+        }
+    }
+
     /// `msm_dense` is `msm` over the scalars' own positions: for a full vector, a shorter
     /// one, a single scalar and none, it gives what `msm` gives for the same terms and what
-    /// the reference MSM gives, zero scalars included.
+    /// the reference MSM gives, zero scalars included, in lanes and without.
     #[test]
     fn msm_dense_matches_msm_and_the_reference() {
-        let crs: Vec<Element> = (0..256)
-            .map(|i| Element::prime_subgroup_generator() * Fr::from((i + 1) as u64))
-            .collect();
-        let committer = Committer::new(&crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
-
+        let crs = crs(256);
         let mut rng = ChaCha20Rng::seed_from_u64(7);
         let mut scalars: Vec<Fr> = (0..256).map(|_| Fr::rand(&mut rng)).collect();
         scalars[3] = Fr::zero();
         scalars[255] = Fr::zero();
 
-        for len in [256, 100, 1, 0] {
-            let scalars = &scalars[..len];
-            let terms: Vec<(usize, Fr)> = scalars.iter().copied().enumerate().collect();
-            let dense = committer.msm_dense(scalars);
-            assert_eq!(dense, committer.msm(&terms), "{len} scalars");
-            assert_eq!(
-                dense,
-                multi_scalar_mul(&crs[..len], scalars),
-                "{len} scalars"
-            );
+        for window in WINDOWS {
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [256, 100, 1, 0] {
+                    let scalars = &scalars[..len];
+                    let terms: Vec<(usize, Fr)> = scalars.iter().copied().enumerate().collect();
+                    let dense = committer.msm_dense(scalars);
+                    assert_eq!(
+                        dense,
+                        committer.msm(&terms),
+                        "window {window}, {len} scalars"
+                    );
+                    assert_eq!(
+                        dense,
+                        multi_scalar_mul(&crs[..len], scalars),
+                        "window {window}, {len} scalars"
+                    );
+                }
+            });
         }
+    }
+
+    /// `mul_index_batch` gives, element for element, what `mul_index` gives one by one and what
+    /// the group's own scalar multiplication gives, in lanes and without: for no scalars, fewer
+    /// than a lane group, exactly one, and several with a remainder, with zero and -1 among them
+    /// and bases repeated.
+    #[test]
+    fn mul_index_batch_matches_mul_index() {
+        let crs = crs(16);
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+        let mut scalars: Vec<Fr> = (0..21).map(|_| Fr::rand(&mut rng)).collect();
+        scalars[1] = Fr::zero();
+        scalars[2] = -Fr::from(1u64);
+        let indices: Vec<usize> = (0..21).map(|i| (i * 5) % 16).collect();
+
+        for window in WINDOWS {
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [0, 1, 7, 8, 9, 21] {
+                    let batch = committer.mul_index_batch(&scalars[..len], &indices[..len]);
+                    assert_eq!(batch.len(), len, "window {window}");
+                    for (i, product) in batch.iter().enumerate() {
+                        assert_eq!(
+                            *product,
+                            committer.mul_index(&scalars[i], indices[i]),
+                            "window {window}, {len} scalars, position {i}"
+                        );
+                        assert_eq!(
+                            *product,
+                            crs[indices[i]] * scalars[i],
+                            "window {window}, {len} scalars, position {i}"
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "one index per scalar")]
+    fn mul_index_batch_rejects_unequal_lengths() {
+        let crs = [Element::prime_subgroup_generator()];
+        let committer = Committer::new(&crs, platform::DEFAULT_PRECOMP_WINDOW_SIZE);
+        committer.mul_index_batch(&[Fr::from(1u64), Fr::from(2u64)], &[0]);
+    }
+
+    /// An index past the bases panics with the same message on every host: the batch checks its
+    /// indices before either path runs.
+    #[test]
+    #[should_panic(expected = "base index out of range")]
+    fn mul_index_batch_rejects_an_index_past_the_bases() {
+        let crs = [Element::prime_subgroup_generator(); 2];
+        let committer = Committer::new(&crs, platform::LANE_PRECOMP_WINDOW_SIZE);
+        committer.mul_index_batch(&[Fr::from(1u64), Fr::from(2u64)], &[1, 2]);
+    }
+
+    /// A task's terms summed through `mul_index_batch` give the sum of `mul_index` over them,
+    /// so `msm` returns the same element whichever of the two the host takes, in lanes and
+    /// without: with zero scalars, a base named twice, a single term and none.
+    #[test]
+    fn sum_terms_batched_matches_the_scalar_sum() {
+        let crs = crs(16);
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let mut terms: Vec<(usize, Fr)> = (0..40)
+            .map(|i| ((i * 7) % 16, Fr::rand(&mut rng)))
+            .collect();
+        terms[0].1 = Fr::zero();
+        terms[9].1 = Fr::zero();
+
+        for window in WINDOWS {
+            on_both_paths(Committer::new(&crs, window), |committer| {
+                for len in [0, 1, 8, 13, 40] {
+                    let terms = &terms[..len];
+                    let (bases, scalars): (Vec<Element>, Vec<Fr>) =
+                        terms.iter().map(|&(index, s)| (crs[index], s)).unzip();
+                    let expected = multi_scalar_mul(&bases, &scalars);
+                    assert_eq!(
+                        committer.sum_terms_batched(terms.iter().copied()),
+                        expected,
+                        "window {window}, {len} terms"
+                    );
+                    assert_eq!(committer.sum_terms(terms.iter().copied()), expected);
+                    assert_eq!(committer.msm(terms), expected);
+                }
+            });
+        }
+    }
+
+    /// A task is never empty (`chunks!` takes no zero size) and, where the multiplications run
+    /// in lanes, holds whole lane groups; elsewhere it is the plain spread over the threads.
+    #[test]
+    fn msm_task_size_fills_lane_groups() {
+        let crs = [Element::prime_subgroup_generator()];
+        let committer = Committer::new(&crs, platform::LANE_PRECOMP_WINDOW_SIZE);
+        on_both_paths(committer, |committer| {
+            for len in [0, 1, 7, 8, 9, 129, 256, 1000] {
+                let size = committer.msm_task_size(len);
+                assert!(size >= 1, "{len} terms");
+                if committer.in_lanes() {
+                    assert_eq!(size % LANES, 0, "{len} terms");
+                    assert!(size < thread_chunk_size!(len) + LANES, "{len} terms");
+                } else {
+                    assert_eq!(size, thread_chunk_size!(len), "{len} terms");
+                }
+            }
+        });
     }
 
     /// Tests the correctness of precomputed MSM against the reference implementation.
