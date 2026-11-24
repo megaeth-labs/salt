@@ -139,19 +139,19 @@
 //!
 //! ## Navigation Functions
 //!
-//! - [`vc_position_in_parent`]: Calculate a node's position (0-255) in parent's VC
+//! - `vc_position_in_parent`: Calculate a node's position (0-255) in parent's VC
 //! - [`get_child_node`]: Navigate from parent to specific child by index
-//! - [`get_parent_node`]: Navigate from child back to parent node
+//! - `get_parent_node`: Navigate from child back to parent node
 //!
 //! ## Bucket Functions
 //!
-//! - [`bucket_root_node_id`]: Get the main trie node ID for a bucket
-//! - [`subtree_root_level`]: Determine subtree depth needed for capacity
+//! - `bucket_root_node_id`: Get the main trie node ID for a bucket
+//! - `subtree_root_level`: Determine subtree depth needed for capacity
 //!
 //! ## Subtree Functions
 //!
-//! - [`subtree_leaf_for_key`]: Map a SaltKey to its containing subtree leaf
-//! - [`subtree_leaf_start_key`]: Get the first SaltKey in a leaf's range
+//! - `subtree_leaf_for_key`: Map a SaltKey to its containing subtree leaf
+//! - `subtree_leaf_start_key`: Get the first SaltKey in a leaf's range
 //!
 //! # Usage Examples
 //!

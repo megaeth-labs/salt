@@ -42,9 +42,9 @@ use std::{vec, vec::Vec};
 ///
 /// # Memory Layout
 ///
-/// For each base point G[i] and window size w, the table stores:
-/// - Window 0: [0, G[i], 2*G[i], ..., (2^(w-1)-1)*G[i]]
-/// - Window 1: [0, 2^w*G[i], 2*2^w*G[i], ..., (2^(w-1)-1)*2^w*G[i]]
+/// For each base point `G[i]` and window size `w`, the table stores:
+/// - Window 0: `[0, G[i], 2*G[i], ..., 2^(w-1)*G[i]]`
+/// - Window 1: `[0, 2^w*G[i], 2*2^w*G[i], ..., 2^(w-1)*2^w*G[i]]`
 /// - And so on...
 ///
 /// On `x86_64` with `std` and a host with AVX-512 IFMA, a committer also keeps the lane path's
@@ -211,7 +211,7 @@ impl Committer {
     /// `scalars[i] * G[indices[i]]` for every `i`, the elements [`Committer::mul_index`] returns one by one.
     ///
     /// On `x86_64` with `std` and a host with AVX-512 IFMA, eight multiplications run per vector register
-    /// ([`crate::ifma_committer`]); everywhere else this maps `mul_index`.
+    /// (`ifma_committer`); everywhere else this maps `mul_index`.
     ///
     /// # Panics
     /// If the lengths differ or an index is not below [`Committer::num_bases`].

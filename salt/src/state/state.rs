@@ -11,7 +11,7 @@
 //!
 //! 2. **Ephemeral State Management**: Buffers modifications in memory without
 //!    immediately persisting them, allowing for batch operations, rollbacks, and
-//!    transactional semantics. All changes are accumulated as [`StateUpdates`]
+//!    transactional semantics. All changes are accumulated as [`StateUpdates`](crate::StateUpdates)
 //!    that can be applied atomically.
 //!
 //! ## SHI Hash Table Implementation
@@ -79,8 +79,10 @@ pub struct EphemeralSaltState<'a, Store> {
     /// Cache for state entries accessed or modified during this session.
     ///
     /// Always caches writes to track modifications and provide read consistency.
-    /// Optionally caches reads when [`cache_reads`] is enabled. Each entry maps
+    /// Optionally caches reads when [`cache_read`] is enabled. Each entry maps
     /// a [`SaltKey`] to its current value (`Some(value)`) or deletion marker (`None`).
+    ///
+    /// [`cache_read`]: EphemeralSaltState::cache_read
     pub cache: HashMap<SaltKey, Option<SaltValue>>,
     /// Tracks the net change in bucket usage counts relative to the base store.
     ///
@@ -289,6 +291,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// let mut state = EphemeralSaltState::new(&store);
     /// let updates = state.update_fin(&batch)?;  // Automatically canonicalized
     /// ```
+    ///
+    /// [`canonicalize()`]: Self::canonicalize
+    /// [`update_fin()`]: Self::update_fin
     pub fn update<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
@@ -314,6 +319,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     /// Updates the SALT state and canonicalizes bucket layouts in one operation.
     ///
     /// This is a convenience method that combines [`update()`] and [`canonicalize()`].
+    ///
+    /// [`update()`]: Self::update
+    /// [`canonicalize()`]: Self::canonicalize
     pub fn update_fin<'b>(
         &mut self,
         kvs: impl IntoIterator<Item = (&'b Vec<u8>, &'b Option<Vec<u8>>)>,
@@ -338,6 +346,9 @@ impl<'a, Store: StateReader> EphemeralSaltState<'a, Store> {
     ///
     /// * `Ok(StateUpdates)` - State changes to revert premature bucket expansions
     /// * `Err(error)` - If store access fails
+    ///
+    /// [`set_nonce`]: Self::set_nonce
+    /// [`shi_rehash`]: Self::shi_rehash
     pub fn canonicalize(&mut self) -> Result<StateUpdates, Store::Error> {
         let mut updates = StateUpdates::default();
 
@@ -1065,7 +1076,6 @@ fn get_bucket_resize_threshold() -> u64 {
 ///
 /// # Returns
 /// The minimum capacity where `used/capacity` is at or below the threshold.
-/// ```
 fn compute_resize_capacity(capacity: u64, used: u64) -> u64 {
     let mut new_capacity = capacity;
     while used * 100 > new_capacity * get_bucket_resize_threshold() {

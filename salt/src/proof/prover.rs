@@ -96,7 +96,7 @@ impl<'de> Deserialize<'de> for SerdeCommitment {
 
 /// The proof's node commitments: the node ids in ascending order and, beside them, each node's
 /// commitment, so a commitment is found by binary search and named by its position — the position
-/// the verifier's queries carry ([`SaltProof::create_indexed_queries`]) and the slice the verifier
+/// the verifier's queries carry (`SaltProof::create_indexed_queries`) and the slice the verifier
 /// hands its multi-scalar multiplication without a copy. A witness holds tens of thousands of these;
 /// 72 bytes each here (a `BTreeMap<NodeId, SerdeCommitment>` held each 128-byte projective point in a
 /// map node). Wire format: a map of `NodeId` to 32-byte compressed point in key order, as before.

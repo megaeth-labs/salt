@@ -2,7 +2,7 @@
 //!
 //! This module provides the core functionality for creating minimal subtries and generating
 //! IPA (Inner Product Argument) proofs for SALT's authenticated key-value store. The main
-//! function [`create_sub_trie`] constructs the authentication paths needed to prove the
+//! function `create_sub_trie` constructs the authentication paths needed to prove the
 //! existence or non-existence of specified keys.
 //!
 //! # Architecture
@@ -10,7 +10,7 @@
 //! The proof generation process follows these steps:
 //! 1. Extract and deduplicate bucket IDs from input keys
 //! 2. Determine trie levels for each bucket (metadata vs dynamic data buckets)
-//! 3. Build minimal node hierarchy using [`parents_and_points`]
+//! 3. Build minimal node hierarchy using `parents_and_points`
 //! 4. Read the commitment of every parent node
 //! 5. Resolve every parent's polynomial, from the process-wide node-polynomial cache or storage
 //! 6. Generate IPA prover queries for leaf nodes (bucket contents) and internal nodes (child commitments)

@@ -319,7 +319,7 @@ impl Witness {
     /// This method performs a two-phase verification process:
     ///
     /// 1. **Cryptographic Proof Verification**: Validates the underlying SALT
-    ///    witness proof against the [`state_root()`] to ensure the proof is
+    ///    witness proof against the [`state_root()`](Self::state_root) to ensure the proof is
     ///    cryptographically sound and the claimed key-value pairs are authentic.
     ///
     /// 2. **Key Location Verification**: For each plain key in the proof, verifies
