@@ -208,7 +208,9 @@ impl Committer {
     /// Multiplies a precomputed base point by a scalar using windowed NAF.
     ///
     /// This x86_64-optimized version uses CPU prefetching instructions to
-    /// improve cache performance during table lookups.
+    /// improve cache performance during table lookups, and adds the points with the assembly
+    /// multiplication. That needs a CPU with BMI2 and ADX; on a host without them the
+    /// portable path computes the same element.
     ///
     /// # Arguments
     ///
@@ -221,6 +223,14 @@ impl Committer {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
         use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+        if !crate::scalar_multi_asm::available() {
+            return self.mul_index_portable(scalar, g_i);
+        }
+        // SAFETY: the host has BMI2 and ADX: `available()` returned true just above.
+        let add = |result: &mut EdwardsProjective, x: &Fq, y: &Fq| unsafe {
+            add_affine_point_asm(result, x, y)
+        };
 
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut result = EdwardsProjective::default();
@@ -281,14 +291,14 @@ impl Committer {
             // add current point
             if carry > 0 {
                 // SAFETY: `idx` is inside the table (see above).
-                add_affine_point(
+                add(
                     &mut result,
                     unsafe { &(-precomp_table.get_unchecked(idx).x) },
                     unsafe { &precomp_table.get_unchecked(idx).y },
                 );
             } else {
                 // SAFETY: `idx` is inside the table (see above).
-                add_affine_point(
+                add(
                     &mut result,
                     unsafe { &precomp_table.get_unchecked(idx).x },
                     unsafe { &precomp_table.get_unchecked(idx).y },
@@ -300,14 +310,14 @@ impl Committer {
         // last point
         if c_next > 0 {
             // SAFETY: `idx` is inside the table (see above).
-            add_affine_point(
+            add(
                 &mut result,
                 unsafe { &(-precomp_table.get_unchecked(idx).x) },
                 unsafe { &precomp_table.get_unchecked(idx).y },
             );
         } else {
             // SAFETY: `idx` is inside the table (see above).
-            add_affine_point(
+            add(
                 &mut result,
                 unsafe { &precomp_table.get_unchecked(idx).x },
                 unsafe { &precomp_table.get_unchecked(idx).y },
@@ -364,6 +374,14 @@ impl Committer {
     /// The result of `scalar * G[g_i]` as an `Element`.
     #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
     pub fn mul_index(&self, scalar: &Fr, g_i: usize) -> Element {
+        self.mul_index_portable(scalar, g_i)
+    }
+
+    /// [`Committer::mul_index`] in portable code: all that a target other than `x86_64` with
+    /// `std` runs, and what that one runs on a host without BMI2 and ADX (so it is kept out of
+    /// line there).
+    #[cfg_attr(all(target_arch = "x86_64", feature = "std"), cold)]
+    fn mul_index_portable(&self, scalar: &Fr, g_i: usize) -> Element {
         let chunks = calculate_prefetch_index(scalar, self.window_size);
         let mut carry = 0;
         let half_win = 1 << (self.window_size - 1);
@@ -479,13 +497,13 @@ pub(crate) const LANES: usize = 8;
 ///
 /// This is the generic implementation using the extended twisted Edwards addition formula.
 /// The formula is optimized for adding an affine point (Z=1) to a projective point.
+/// It is compiled on every target: [`Committer::mul_index_portable`] adds with it.
 ///
 /// # Arguments
 ///
 /// * `result` - The projective point to update (in-place)
 /// * `p2_x` - X-coordinate of the affine point to add
 /// * `p2_y` - Y-coordinate of the affine point to add
-#[cfg(not(target_arch = "x86_64"))]
 fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
     use ark_ff::biginteger::BigInt;
 
@@ -529,10 +547,16 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
 ///
 /// # Safety
 ///
-/// Uses unsafe assembly operations that are guaranteed correct for the Bandersnatch field.
-#[cfg(target_arch = "x86_64")]
-fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
-    use crate::scalar_multi_asm::*;
+/// The host must have BMI2 and ADX ([`crate::scalar_multi_asm::available`] returns true): the
+/// assembly multiplication uses `mulx`, `adcx` and `adox`.
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+unsafe fn add_affine_point_asm(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
+    use crate::scalar_multi_asm::mont_mul_by5_asm;
+
+    // SAFETY: the caller guarantees BMI2 and ADX, which is all `mont_mul_asm` asks for.
+    let mont_mul_asm = |result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]| unsafe {
+        crate::scalar_multi_asm::mont_mul_asm(result, x, y)
+    };
 
     let mut a = Fq::default();
     let mut b = Fq::default();
@@ -586,7 +610,7 @@ fn add_affine_point(result: &mut EdwardsProjective, p2_x: &Fq, p2_y: &Fq) {
 /// # Returns
 ///
 /// A vector of w-bit values representing the windowed decomposition.
-#[inline]
+#[inline(always)]
 fn calculate_prefetch_index(scalar: &Fr, w: usize) -> Vec<u64> {
     // Convert scalar from Montgomery form to big integer
     let source_vec = scalar.into_bigint().0;
@@ -828,6 +852,29 @@ mod tests {
         });
 
         assert_eq!(got_result, result);
+    }
+
+    /// `mul_index` gives the element the portable path gives, for random scalars, the small
+    /// ones on both sides of zero and both windows. On an `x86_64` host with `std`, BMI2 and
+    /// ADX that compares the assembly additions with the portable ones; everywhere else
+    /// `mul_index` is the portable path.
+    #[test]
+    fn mul_index_matches_the_portable_path() {
+        let crs = crs(4);
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+        let mut scalars: Vec<Fr> = (0..64).map(|_| Fr::rand(&mut rng)).collect();
+        scalars.extend((0..4u64).flat_map(|i| [Fr::from(i), -Fr::from(i)]));
+        for window in WINDOWS {
+            let committer = Committer::new(&crs, window);
+            for (i, scalar) in scalars.iter().enumerate() {
+                let g = i % crs.len();
+                assert_eq!(
+                    committer.mul_index(scalar, g),
+                    committer.mul_index_portable(scalar, g),
+                    "window {window}, scalar {i}"
+                );
+            }
+        }
     }
 
     /// Tests a specific edge case with known output for debugging and validation.
