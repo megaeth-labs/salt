@@ -152,7 +152,7 @@ mod tests {
     /// never arrives fails on its assertion instead of hanging.
     fn wait_for(flag: &AtomicBool) {
         let start = Instant::now();
-        while !flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(60) {
+        while !flag.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(60) {
             std::thread::yield_now();
         }
     }
@@ -266,9 +266,8 @@ mod tests {
             .expect("the caller's payload");
         assert!(message.ends_with("on the caller"), "{message}");
         // The broadcast comes back once the helper's thread is through with the job it was on,
-        // so the count is final. `Release` pairs with the `Acquire` in `wait_for`: the helper
-        // that sees the flag sees the job stopped too.
-        released.store(true, Ordering::Release);
+        // so the count is final.
+        released.store(true, Ordering::Relaxed);
         pool.broadcast(|_| ());
         assert_eq!(begun.load(Ordering::Relaxed), 2);
     }
