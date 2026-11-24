@@ -149,10 +149,11 @@ mod tests {
     }
 
     /// Returns once `flag` is set. It gives up after a minute, so that a test whose other thread
-    /// never arrives fails on its assertion instead of hanging.
+    /// never arrives fails on its assertion instead of hanging. The load is `Acquire`: a waiter
+    /// let through by a flag stored with `Release` also sees whatever its setter had seen.
     fn wait_for(flag: &AtomicBool) {
         let start = Instant::now();
-        while !flag.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(60) {
+        while !flag.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(60) {
             std::thread::yield_now();
         }
     }
@@ -267,8 +268,9 @@ mod tests {
             .expect("the caller's payload");
         assert!(message.ends_with("on the caller"), "{message}");
         // The caller has gone. The helper's group ends now, and it takes no other: the broadcast
-        // comes back once the helper's thread is through with the job it was on.
-        released.store(true, Ordering::Relaxed);
+        // comes back once the helper's thread is through with the job it was on. `Release`, for
+        // the `Acquire` in `wait_for`: the helper that sees the flag sees the job stopped too.
+        released.store(true, Ordering::Release);
         pool.broadcast(|_| ());
         assert_eq!(begun.load(Ordering::Relaxed), 2);
     }
