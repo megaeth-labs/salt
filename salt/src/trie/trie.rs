@@ -728,8 +728,8 @@ where
     /// updates the commitments stored in the trie's leaf nodes using a delta approach.
     ///
     /// # Vector Commitment Model
-    /// Each leaf node stores: C = Σ(G[i] * hash(kv[i])) for i in 0..256
-    /// When kv[j] changes: new_C = old_C + G[j] * (hash(new_kv[j]) - hash(old_kv[j]))
+    /// Each leaf node stores: `C = Σ(G[i] * hash(kv[i]))` for `i` in `0..256`
+    /// When `kv[j]` changes: `new_C = old_C + G[j] * (hash(new_kv[j]) - hash(old_kv[j]))`
     /// This delta approach avoids recomputing the entire 256-element sum.
     ///
     /// # Arguments
@@ -796,7 +796,7 @@ where
     /// * `TrieUpdates` - Commitment updates for the parent nodes
     ///
     /// # Delta Computation
-    /// For each child update, computes: delta = G[child_index] * (new_child - old_child)
+    /// For each child update, computes: `delta = G[child_index] * (new_child - old_child)`
     /// where child_index is the child's position (0-255) within its parent's vector commitment.
     /// All deltas for the same parent are accumulated to produce the parent's new commitment.
     ///

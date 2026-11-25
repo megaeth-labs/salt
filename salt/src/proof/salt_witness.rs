@@ -41,7 +41,6 @@ use std::{collections::BTreeMap, format, vec::Vec};
 ///
 /// - **No Range Manipulation**: Range queries are disabled to prevent selective
 ///   omission attacks where a prover hides some keys while including others in a range.
-/// ```
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SaltWitness {
     /// All witnessed data in this proof, including both metadata and regular

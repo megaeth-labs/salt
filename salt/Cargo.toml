@@ -46,7 +46,6 @@ parallel = [
 ]
 test-bucket-resize = []
 reth-codecs = ["dep:reth-codecs", "dep:bytes"]
-enable-hugepages = ["std", "banderwagon/enable-hugepages"]
 
 [[bench]]
 name = "salt_trie"

@@ -63,9 +63,9 @@ Manages cryptographic commitments using IPA vector commitments:
 
 #### Proof Generation ([`proof`])
 Creates and verifies cryptographic witnesses:
-- [`BlockWitness`]: Generates witnesses for state transitions
+- [`SaltWitness`]: Generates witnesses for state transitions
   - Supports both inclusion and exclusion proofs
-- [`PlainKeysProof`]: Proves existence/non-existence of plain keys
+- [`Witness`]: Proves existence/non-existence of plain keys
   - Enables light client verification
 - [`SaltProof`]: Low-level proof structure with IPA commitments
 
@@ -199,11 +199,13 @@ cargo bench
 [`state`]: crate::state
 [`trie`]: crate::trie
 [`traits`]: crate::traits
-[`EphemeralSaltState`]: crate::state::EphemeralSaltState
-[`StateUpdates`]: crate::state::StateUpdates
-[`StateRoot`]: crate::trie::StateRoot
-[`TrieUpdates`]: crate::trie::TrieUpdates
-[`BlockWitness`]: crate::trie::BlockWitness
+[`EphemeralSaltState`]: crate::EphemeralSaltState
+[`StateUpdates`]: crate::StateUpdates
+[`StateRoot`]: crate::StateRoot
+[`TrieUpdates`]: crate::TrieUpdates
+[`node_utils`]: crate::trie::node_utils
+[`SaltWitness`]: crate::SaltWitness
+[`Witness`]: crate::Witness
 [`StateReader`]: crate::traits::StateReader
 [`TrieReader`]: crate::traits::TrieReader
 [`SaltKey`]: crate::types::SaltKey

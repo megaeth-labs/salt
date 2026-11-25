@@ -201,3 +201,34 @@ jobs:
         with:
           command: clippy
           args: --all-targets -- -D warnings
+
+  # A broken intra-doc link is only a warning, so `cargo doc` alone lets one land. The docs are
+  # built with the private items in: only then are the links inside private items resolved
+  # (banderwagon's lane modules among them, compiled on this x86_64 runner), and a public item's
+  # link to a private one is an error either way. Once with every feature, and once with the
+  # default features off, for the code only a `no_std` build has.
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: perf-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo doc
+        uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --no-deps --workspace --all-features --document-private-items
+
+      - name: Run cargo doc without default features
+        uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --no-deps --workspace --no-default-features --document-private-items

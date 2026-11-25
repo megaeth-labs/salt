@@ -264,7 +264,6 @@ impl SaltKey {
     ///
     /// # Returns
     /// An inclusive range covering all keys in the specified buckets.
-    /// ```
     pub fn bucket_range(start_bucket: BucketId, end_bucket: BucketId) -> RangeInclusive<SaltKey> {
         SaltKey::from((start_bucket, 0))..=SaltKey::from((end_bucket, BUCKET_SLOT_ID_MASK))
     }

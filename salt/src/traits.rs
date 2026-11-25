@@ -34,7 +34,7 @@ pub trait StateReader: Debug + Send + Sync {
     ///
     /// Returns the state value associated with the given key, or `None` if the key
     /// doesn't exist. This method does not return default values for missing keys;
-    /// it's the responsibility of higher-level methods (e.g., [`metadata`]) to
+    /// it's the responsibility of higher-level methods (e.g., [`metadata`](Self::metadata)) to
     /// interpret the meaning of missing keys.
     ///
     /// # Arguments
@@ -152,6 +152,8 @@ pub trait StateReader: Debug + Send + Sync {
     /// - Partial state backends MUST implement this to provide known mappings.
     /// - Full state backends MAY return an error, or optionally implement this
     ///   as a performance optimization.
+    ///
+    /// [`EphemeralSaltState`]: crate::EphemeralSaltState
     fn plain_value_fast(&self, plain_key: &[u8]) -> Result<SaltKey, Self::Error>;
 
     /// Computes the number of levels in a bucket's subtree.

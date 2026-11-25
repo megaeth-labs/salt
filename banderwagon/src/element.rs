@@ -311,6 +311,9 @@ impl Element {
     ///
     /// Panics on invalid bytes, indicating the upper protocol layers (IPA commitment scheme
     /// and ultimately authenticated key-value store) violated the safety contract.
+    ///
+    /// [`from_bytes()`]: Element::from_bytes
+    /// [`to_bytes_uncompressed()`]: Element::to_bytes_uncompressed
     pub fn from_bytes_unchecked_uncompressed(bytes: [u8; 64]) -> Self {
         let point = EdwardsProjective::deserialize_uncompressed_unchecked(&bytes[..])
             .expect("could not deserialize byte array into a point");
@@ -422,7 +425,7 @@ impl Element {
     /// Vector of scalar field elements, one for each input Element
     ///
     /// On an `x86_64` host with AVX-512 IFMA the inversions and products run eight elements per vector
-    /// register ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar
+    /// register (`ifma_normalize`) for every full group of eight, the tail through the scalar
     /// path; the values are the same.
     pub fn batch_map_to_scalar_field(elements: &[Element]) -> Vec<Fr> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
@@ -441,7 +444,7 @@ impl Element {
     /// See [`map_to_scalar_field()`](Element::map_to_scalar_field) for mapping semantics.
     ///
     /// On an `x86_64` host with AVX-512 IFMA the bytes are read straight into the lanes
-    /// ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar path.
+    /// (`ifma_normalize`) for every full group of eight, the tail through the scalar path.
     pub fn hash_commitments(elements: &[[u8; 64]]) -> Vec<Fr> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
         if let Some(out) = on_lanes(
@@ -472,7 +475,7 @@ impl Element {
     /// - Bytes 32-63: Y-coordinate (little-endian, always positive)
     ///
     /// On an `x86_64` host with AVX-512 IFMA the normalization runs eight points per vector register
-    /// ([`crate::ifma_normalize`]) for every full group of eight, the tail through the scalar path; the
+    /// (`ifma_normalize`) for every full group of eight, the tail through the scalar path; the
     /// bytes are the same.
     pub fn batch_to_commitments(elements: &[Element]) -> Vec<[u8; 64]> {
         #[cfg(all(feature = "std", target_arch = "x86_64"))]

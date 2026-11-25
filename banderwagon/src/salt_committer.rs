@@ -8,7 +8,6 @@
 //! # Key Features
 //!
 //! - **Precomputed Tables**: Stores multiples of base points for fast scalar multiplication
-//! - **Memory Optimization**: Optional hugepage support for better cache performance
 //! - **Batch Operations**: Efficient batch conversion between projective and affine coordinates
 //! - **Platform Optimization**: x86_64 specific optimizations with prefetching and assembly
 //!
@@ -24,7 +23,6 @@
 //! - Window size affects the trade-off between memory usage and computation speed
 //! - The trie takes its window from [`crate::platform::precomp_window_size`]: the scalar path's
 //!   [`crate::platform::DEFAULT_PRECOMP_WINDOW_SIZE`], or 7 where the multiplications run in lanes
-//! - Hugepage support can reduce TLB misses for large precomputed tables
 
 use crate::element::Element;
 use ark_ec::CurveGroup;
@@ -44,9 +42,9 @@ use std::{vec, vec::Vec};
 ///
 /// # Memory Layout
 ///
-/// For each base point G[i] and window size w, the table stores:
-/// - Window 0: [0, G[i], 2*G[i], ..., (2^(w-1)-1)*G[i]]
-/// - Window 1: [0, 2^w*G[i], 2*2^w*G[i], ..., (2^(w-1)-1)*2^w*G[i]]
+/// For each base point `G[i]` and window size `w`, the table stores:
+/// - Window 0: `[0, G[i], 2*G[i], ..., 2^(w-1)*G[i]]`
+/// - Window 1: `[0, 2^w*G[i], 2*2^w*G[i], ..., 2^(w-1)*2^w*G[i]]`
 /// - And so on...
 ///
 /// On `x86_64` with `std` and a host with AVX-512 IFMA, a committer also keeps the lane path's
@@ -66,109 +64,17 @@ use std::{vec, vec::Vec};
 pub struct Committer {
     /// Window size for windowed NAF representation (see [`crate::platform::precomp_window_size`])
     window_size: usize,
-    /// Precomputed tables of multiples for each base point.
-    /// Structure: tables[base_index][window_index * half_window_size + multiple]
+    /// Precomputed multiples of each base point: multiple `m` of window `k` is at
+    /// `tables[base_index][k * (2^(window_size - 1) + 1) + m]`.
     tables: Vec<Vec<EdwardsAffine>>,
     /// What the lane path keeps beside `tables`, on a host where it runs.
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     lane: Option<crate::ifma_committer::LaneTables>,
 }
 
-impl Drop for Committer {
-    #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
-    fn drop(&mut self) {
-        use hugepage_rs;
-        use std::alloc::Layout;
-        // drop inner vectors
-        for table in self.tables.iter_mut() {
-            let ptr = table.as_mut_ptr() as *mut u8;
-            let cap = table.capacity();
-            let layout = Layout::array::<EdwardsAffine>(cap).unwrap();
-            std::mem::forget(std::mem::take(table));
-            hugepage_rs::dealloc(ptr, layout);
-        }
-
-        // drop the outer vector
-        let ptr = self.tables.as_mut_ptr() as *mut u8;
-        let cap = self.tables.capacity();
-        let layout = Layout::array::<Vec<EdwardsAffine>>(cap).unwrap();
-        std::mem::forget(std::mem::take(&mut self.tables));
-        hugepage_rs::dealloc(ptr, layout);
-    }
-
-    #[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
-    fn drop(&mut self) {
-        // Standard drop implementation, no need for explicit deallocation
-    }
-}
-
 impl Committer {
-    #[cfg(all(not(target_os = "macos"), feature = "enable-hugepages"))]
-    pub fn new(bases: &[Element], window_size: usize) -> Committer {
-        use hugepage_rs;
-        use std::alloc::Layout;
-
-        let table_num = bases.len();
-        let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
-        let inner_length = win_num * (1 << (window_size - 1)) + win_num;
-
-        let src_tables: Vec<Vec<EdwardsAffine>> = bases
-            .par_iter()
-            .map(|base| {
-                let mut table = Vec::with_capacity(inner_length);
-                let mut element = base.0;
-                // Calculate the element values for each window
-                for _ in 0..win_num {
-                    let base = element;
-                    table.push(EdwardsProjective::zero());
-                    table.push(element);
-                    for _i in 1..(1 << (window_size - 1)) {
-                        element += &base;
-                        table.push(element);
-                    }
-                    element += element;
-                }
-                EdwardsProjective::normalize_batch(&table)
-            })
-            .collect();
-
-        let tables = {
-            let layout = Layout::array::<Vec<EdwardsAffine>>(table_num).unwrap();
-            let tables_ptr = hugepage_rs::alloc(layout) as *mut Vec<EdwardsAffine>;
-
-            for (i, _) in src_tables.iter().enumerate() {
-                let layout = Layout::array::<EdwardsAffine>(inner_length).unwrap();
-                let dst_ptr = hugepage_rs::alloc(layout) as *mut EdwardsAffine;
-                if tables_ptr.is_null() || dst_ptr.is_null() {
-                    panic!("Failed to allocate hugepages for the ECMUL precompute table.");
-                }
-                let src_ptr = src_tables[i].as_ptr();
-                assert!(
-                    src_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
-                    "Source pointer is not aligned"
-                );
-                assert!(
-                    dst_ptr.align_offset(std::mem::align_of::<EdwardsAffine>()) == 0,
-                    "Destination pointer is not aligned"
-                );
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, inner_length);
-                    *tables_ptr.add(i) = Vec::from_raw_parts(dst_ptr, inner_length, inner_length);
-                }
-            }
-
-            unsafe { Vec::from_raw_parts(tables_ptr, table_num, table_num) }
-        };
-
-        Committer {
-            #[cfg(all(target_arch = "x86_64", feature = "std"))]
-            lane: crate::ifma_committer::LaneTables::new(&tables, window_size),
-            tables,
-            window_size,
-        }
-    }
-
-    #[cfg(any(target_os = "macos", not(feature = "enable-hugepages")))]
+    /// Builds the tables of `bases` at `window_size`, laid out as the type's
+    /// [Memory Layout](Self#memory-layout) says.
     pub fn new(bases: &[Element], window_size: usize) -> Committer {
         let win_num = 253 / window_size + 1; // 253 is the bit length of Fr
         let inner_length = win_num * (1 << (window_size - 1)) + win_num;
@@ -305,7 +211,7 @@ impl Committer {
     /// `scalars[i] * G[indices[i]]` for every `i`, the elements [`Committer::mul_index`] returns one by one.
     ///
     /// On `x86_64` with `std` and a host with AVX-512 IFMA, eight multiplications run per vector register
-    /// ([`crate::ifma_committer`]); everywhere else this maps `mul_index`.
+    /// (`ifma_committer`); everywhere else this maps `mul_index`.
     ///
     /// # Panics
     /// If the lengths differ or an index is not below [`Committer::num_bases`].
