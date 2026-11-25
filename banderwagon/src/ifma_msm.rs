@@ -96,7 +96,7 @@ fn consts() -> &'static Consts {
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn build_consts(c: &Ctx) -> Consts {
+fn build_consts(c: &Ctx) -> Consts {
     let five = bcast(&bcast_limbs(&-BandersnatchConfig::COEFF_A));
     let d = bcast(&bcast_limbs(&BandersnatchConfig::COEFF_D));
     let zero = [_mm512_setzero_si512(); 5];
@@ -122,7 +122,7 @@ unsafe fn build_consts(c: &Ctx) -> Consts {
 /// The affine points in lane form, point-major: 20 words each (x, y, x + y, d·x·y), eight points per
 /// pass through the lane multiplier; the tail is padded with the last point.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u64]) {
+fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u64]) {
     let n = bases.len();
     let mut i = 0;
     while i < n {
@@ -140,8 +140,8 @@ unsafe fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u
         let mut xv = [_mm512_setzero_si512(); 5];
         let mut yv = [_mm512_setzero_si512(); 5];
         for j in 0..5 {
-            xv[j] = _mm512_loadu_si512(xl[j].as_ptr() as *const _);
-            yv[j] = _mm512_loadu_si512(yl[j].as_ptr() as *const _);
+            xv[j] = load_words(&xl[j]);
+            yv[j] = load_words(&yl[j]);
         }
         let xv = mont_mul(c, &xv, &k.k264);
         let yv = mont_mul(c, &yv, &k.k264);
@@ -166,7 +166,7 @@ unsafe fn prep_points(c: &Ctx, k: &Consts, bases: &[EdwardsAffine], out: &mut [u
 /// Lanes of `q` negated where the mask bit is set: (-x, y), x+y -> y-x, d·x·y -> -d·x·y.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn neg_aff(c: &Ctx, k: &Consts, q: &AffL, m: __mmask8) -> AffL {
+fn neg_aff(c: &Ctx, k: &Consts, q: &AffL, m: __mmask8) -> AffL {
     let nx = sub(c, &k.zero, &q.x);
     let nxy = sub(c, &q.y, &q.x);
     let ndt = sub(c, &k.zero, &q.dt);
@@ -181,7 +181,7 @@ unsafe fn neg_aff(c: &Ctx, k: &Consts, q: &AffL, m: __mmask8) -> AffL {
 /// Mixed addition p + q (Z2 = 1, a = -5), 9 lane products.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn madd(c: &Ctx, k: &Consts, p: &PtL, q: &AffL) -> PtL {
+fn madd(c: &Ctx, k: &Consts, p: &PtL, q: &AffL) -> PtL {
     let a = mont_mul(c, &p.x, &q.x);
     let b = mont_mul(c, &p.y, &q.y);
     let cc = mont_mul(c, &p.t, &q.dt);
@@ -201,7 +201,7 @@ unsafe fn madd(c: &Ctx, k: &Consts, p: &PtL, q: &AffL) -> PtL {
 /// Full addition p + q, 11 lane products.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
+fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
     let a = mont_mul(c, &p.x, &q.x);
     let b = mont_mul(c, &p.y, &q.y);
     let cc = mont_mul(c, &mont_mul(c, &p.t, &q.t), &k.d);
@@ -221,7 +221,7 @@ unsafe fn padd(c: &Ctx, k: &Consts, p: &PtL, q: &PtL) -> PtL {
 
 /// The eight lanes of a lane point as ark projective points.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
+fn unlane(c: &Ctx, p: &PtL) -> [EdwardsProjective; 8] {
     let x = store(c, &p.x);
     let y = store(c, &p.y);
     let t = store(c, &p.t);
@@ -344,11 +344,8 @@ unsafe fn split_msm(bases: &[EdwardsAffine], scalars: &[Fr], spread: bool) -> Ed
 ///
 /// # Panics
 /// If there are not as many scalars as bases.
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn msm(bases: &[EdwardsAffine], scalars: &[Fr], spread: bool) -> EdwardsProjective {
+fn msm(bases: &[EdwardsAffine], scalars: &[Fr], spread: bool) -> EdwardsProjective {
     msm_runs(bases, scalars, lane_window(bases.len()), spread)
 }
 
@@ -377,7 +374,7 @@ fn lane_window(n: usize) -> usize {
 /// 8 × 8 transpose of 64-bit words: `r[i]` holds point `i`'s eight words in; word `j` of every point out.
 #[inline]
 #[target_feature(enable = "avx512f")]
-pub(crate) unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
+pub(crate) fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
     let t0 = _mm512_unpacklo_epi64(r[0], r[1]);
     let t1 = _mm512_unpackhi_epi64(r[0], r[1]);
     let t2 = _mm512_unpacklo_epi64(r[2], r[3]);
@@ -410,6 +407,10 @@ pub(crate) unsafe fn transpose8(r: &[__m512i; 8]) -> [__m512i; 8] {
 /// The eight lanes' points at step `s` of their runs, negated where the digit is negative: index
 /// and sign from `order` (a lane outside `m` re-reads its first point), three eight-word rows per
 /// point loaded and transposed in registers, so no gather touches the table.
+///
+/// # Safety
+/// `order` must not be empty, and the low 32 bits of each of its entries must be the index of a
+/// point of `pts`, which holds [`PW`] words per point.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn next_points(
@@ -429,11 +430,17 @@ unsafe fn next_points(
         } else {
             starts[l] as usize
         };
-        let e = *order.get_unchecked(pos.min(order.len() - 1));
+        // SAFETY: `order` is not empty (this function's contract), so the clamped position is
+        // inside it.
+        let e = unsafe { *order.get_unchecked(pos.min(order.len() - 1)) };
         neg |= (((e >> 32) & 1) as u8) << l;
-        let base = pts.as_ptr().add((e & 0xffff_ffff) as usize * PW);
-        for r in 0..3 {
-            rows[r][l] = _mm512_loadu_si512(base.add(r * 8) as *const _);
+        // SAFETY: by this function's contract the entry's low half names a point of `pts`, whose
+        // `PW` (24) words are the three rows of eight read here.
+        unsafe {
+            let base = pts.as_ptr().add((e & 0xffff_ffff) as usize * PW);
+            for r in 0..3 {
+                rows[r][l] = _mm512_loadu_si512(base.add(r * 8) as *const _);
+            }
         }
     }
     let t0 = transpose8(&rows[0]);
@@ -455,6 +462,12 @@ unsafe fn next_points(
 /// One batch of up to eight runs (bucket, start in `order`, length), accumulated in registers with lane =
 /// run, then scattered once into the group's lane-major bucket store at lane `lane`.
 /// A separate `target_feature` function rather than a closure, so the intrinsics inline.
+///
+/// # Safety
+/// - `order` and `pts` must be as [`next_points`] requires them.
+/// - `bptr` must point to a bucket store that is valid for writes and holds [`BW`] words for
+///   every bucket up to the highest one named in the first `fill` entries of `batch`.
+/// - `lane` must be below 8.
 #[target_feature(enable = "avx512f,avx512ifma")]
 #[allow(clippy::too_many_arguments)]
 unsafe fn run_batch(
@@ -468,23 +481,24 @@ unsafe fn run_batch(
     lane: usize,
     nonempty: &mut [u8],
 ) {
-    let mut bl = [0i64; 8];
+    let mut bl = [0u64; 8];
     let mut sl = [0i64; 8];
-    let mut ll = [0i64; 8];
+    let mut ll = [0u64; 8];
     let mut maxlen = 0u32;
     for l in 0..fill {
-        bl[l] = batch[l].0 as i64;
+        bl[l] = batch[l].0 as u64;
         sl[l] = batch[l].1 as i64;
-        ll[l] = batch[l].2 as i64;
+        ll[l] = batch[l].2 as u64;
         maxlen = maxlen.max(batch[l].2);
     }
     let m_valid: __mmask8 = ((1u16 << fill) - 1) as __mmask8;
-    let len_v = _mm512_loadu_si512(ll.as_ptr() as *const _);
-    let b_v = _mm512_loadu_si512(bl.as_ptr() as *const _);
+    let len_v = load_words(&ll);
+    let b_v = load_words(&bl);
     // A run's first point starts its sum: (x, y, x·y, 1) is the point in extended coordinates, for
     // one lane product where adding it to the identity takes nine. Every run has a first point, and
     // the lanes past `fill` are not stored.
-    let first = next_points(c, k, pts, order, &sl, 0, m_valid);
+    // SAFETY: `order` and `pts` are as this function's contract passes them on.
+    let first = unsafe { next_points(c, k, pts, order, &sl, 0, m_valid) };
     let mut p = PtL {
         x: first.x,
         y: first.y,
@@ -493,7 +507,8 @@ unsafe fn run_batch(
     };
     for s in 1..maxlen as usize {
         let m: __mmask8 = _mm512_cmpgt_epi64_mask(len_v, _mm512_set1_epi64(s as i64)) & m_valid;
-        let q = next_points(c, k, pts, order, &sl, s, m);
+        // SAFETY: as for the first points above.
+        let q = unsafe { next_points(c, k, pts, order, &sl, s, m) };
         let r = madd(c, k, &p, &q);
         p = PtL {
             x: sel(m, &p.x, &r.x),
@@ -515,12 +530,18 @@ unsafe fn run_batch(
         p.t[1], p.t[2], p.t[3], p.t[4], p.z[0], p.z[1], p.z[2], p.z[3], p.z[4],
     ];
     for kk in 0..20 {
-        _mm512_mask_i64scatter_epi64::<8>(
-            bptr as *mut _,
-            m_valid,
-            _mm512_add_epi64(base_v, _mm512_set1_epi64((kk * 8) as i64)),
-            out[kk],
-        );
+        // SAFETY: only the lanes of `m_valid` are written, the first `fill`. Lane `l` writes word
+        // `b * BW + kk * 8 + lane` for its bucket `b = batch[l].0`: with `kk` below 20 and `lane`
+        // below 8 that is inside bucket `b`'s `BW` (160) words, which the store holds by this
+        // function's contract.
+        unsafe {
+            _mm512_mask_i64scatter_epi64::<8>(
+                bptr as *mut _,
+                m_valid,
+                _mm512_add_epi64(base_v, _mm512_set1_epi64((kk * 8) as i64)),
+                out[kk],
+            );
+        }
     }
     for l in 0..fill {
         nonempty[batch[l].0 as usize] |= 1 << lane;
@@ -536,11 +557,8 @@ unsafe fn run_batch(
 /// # Panics
 /// If there are not as many scalars as bases, and on a window whose digits do not fit the `i16`
 /// they are kept in (`cbits` of 16 or more).
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn msm_runs(
+fn msm_runs(
     bases: &[EdwardsAffine],
     scalars: &[Fr],
     cbits: usize,
@@ -594,7 +612,8 @@ unsafe fn msm_runs(
     };
     // The groups of eight windows are independent from here on: each reads the tables, and
     // accumulates and reduces in the bucket store of the thread it runs on.
-    // SAFETY: the caller has checked the host, which is the same for every thread.
+    // SAFETY: `tables` was built just above, as `group_sums` requires it; and the host has the
+    // extension on whichever thread runs the closure, since this function runs only where it has.
     let sum = move |g| unsafe { group_sums(&tables, g) };
     let sums: Vec<[EdwardsProjective; 8]> = if spread {
         spread_groups(groups, sum)
@@ -621,8 +640,7 @@ struct Tables {
 /// on one thread, in the bucket store it takes from that thread ([`BUCKET_SCRATCH`]).
 ///
 /// # Safety
-/// `available()` must have returned true on this host, and `tables` must be as [`msm_runs`]
-/// builds them: the prepared points are read unchecked.
+/// `tables` must be as [`msm_runs`] builds them: the prepared points are read unchecked.
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
     let c = context();
@@ -690,13 +708,17 @@ unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
                 batch[fill] = r;
                 fill += 1;
                 if fill == 8 {
-                    run_batch(c, k, pts, &order, &batch, 8, bptr, lane, &mut nonempty);
+                    // SAFETY: there is a run, so `order` has an entry, and each entry was written
+                    // above from a point index below `n`, or is still zero. `batch` holds buckets
+                    // below `nb`, the buckets `store` was sized for, and `lane` is `w % 8`.
+                    unsafe { run_batch(c, k, pts, &order, &batch, 8, bptr, lane, &mut nonempty) };
                     fill = 0;
                 }
             }
         }
         if fill > 0 {
-            run_batch(c, k, pts, &order, &batch, fill, bptr, lane, &mut nonempty);
+            // SAFETY: as for a full batch above.
+            unsafe { run_batch(c, k, pts, &order, &batch, fill, bptr, lane, &mut nonempty) };
         }
     }
     // reduction: running sums over the buckets high to low, lanes = windows; empty buckets read as
@@ -708,10 +730,14 @@ unsafe fn group_sums(tables: &Tables, g: usize) -> [EdwardsProjective; 8] {
     let mut res = k.id;
     for b in (1..=top).rev() {
         let ne: __mmask8 = nonempty[b];
-        let base = bptr.add(b * BW);
         let mut wv = [zero; 20];
-        for kk in 0..20 {
-            wv[kk] = _mm512_mask_loadu_epi64(id_words[kk], ne, base.add(kk * 8) as *const _);
+        // SAFETY: `b` is at most `top`, a bucket below `nb`, and `store` holds `BW` words for each
+        // of them: the 20 rows of eight read here are bucket `b`'s 160.
+        unsafe {
+            let base = bptr.add(b * BW);
+            for kk in 0..20 {
+                wv[kk] = _mm512_mask_loadu_epi64(id_words[kk], ne, base.add(kk * 8) as *const _);
+            }
         }
         let p = PtL {
             x: [wv[0], wv[1], wv[2], wv[3], wv[4]],
@@ -774,10 +800,12 @@ mod tests {
             let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
             let reps = if n > 10000 { 2 } else { 8 };
             for &cb in &[8usize, 9, 10, 11] {
+                // SAFETY: `available()` returned true above.
                 let got = unsafe { msm_runs(&bases, &scalars, cb, false) };
                 assert_eq!(got, want, "runs n = {n} c = {cb}");
                 let t = std::time::Instant::now();
                 for _ in 0..reps {
+                    // SAFETY: `available()` returned true above.
                     let _ = unsafe { msm_runs(&bases, &scalars, cb, false) };
                 }
                 let ns = t.elapsed().as_nanos() as f64 / (n * reps) as f64;
@@ -801,6 +829,7 @@ mod tests {
             let (bases, scalars) = input(0xc2 + n as u64, n);
             let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
             for spread in [false, true] {
+                // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                 let got = unsafe { msm(&bases, &scalars, spread) };
                 assert_eq!(got, want, "n = {n} spread = {spread}");
             }
@@ -809,6 +838,7 @@ mod tests {
             }
             for cb in 3usize..=12 {
                 for spread in [false, true] {
+                    // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
                     let got = unsafe { msm_runs(&bases, &scalars, cb, spread) };
                     assert_eq!(got, want, "runs n = {n} c = {cb} spread = {spread}");
                 }
@@ -819,6 +849,7 @@ mod tests {
         let s = scalars[0];
         let scalars: Vec<Fr> = (0..300).map(|i| if i % 3 == 0 { -s } else { s }).collect();
         let want = EdwardsProjective::msm(&bases, &scalars).unwrap();
+        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
         let got = unsafe { msm_runs(&bases, &scalars, 10, true) };
         assert_eq!(got, want, "equal scalars");
     }
@@ -958,8 +989,8 @@ mod tests {
         }
         let bases = [EdwardsAffine::zero(); 2];
         let scalars = [Fr::from(3u64); 2];
-        // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
         let at = |cbits: usize| {
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             std::panic::catch_unwind(|| unsafe { msm_runs(&bases, &scalars, cbits, false) })
         };
         assert_eq!(at(15).ok(), Some(EdwardsProjective::zero()));

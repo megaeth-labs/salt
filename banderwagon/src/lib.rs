@@ -22,6 +22,7 @@ pub use ark_ed_on_bls12_381_bandersnatch::Fq;
 use ark_ff::BigInteger256;
 pub use element::{multi_scalar_mul, multi_scalar_mul_affine, AffineElement, Element, Fr};
 pub mod salt_committer;
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod scalar_multi_asm;
 // Used by the vector MSM (`x86_64` with `std`); its tests need no vector unit and run everywhere.
 #[cfg(all(

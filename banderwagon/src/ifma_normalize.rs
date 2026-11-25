@@ -58,6 +58,9 @@ fn word(a: &[__m512i; 8], b: &[__m512i; 8], w: usize) -> __m512i {
 }
 
 /// Loads eight consecutive points' `x`, `y`, `z` words as lane limbs of `x/16`, `y/16`, `z/16`.
+///
+/// # Safety
+/// `pts` must point to eight consecutive [`Element`]s that are valid to read.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn load_xyz(c: &Ctx, pts: *const Element) -> (L5, L5, L5) {
@@ -65,8 +68,12 @@ unsafe fn load_xyz(c: &Ctx, pts: *const Element) -> (L5, L5, L5) {
     let mut lo = [_mm512_setzero_si512(); 8];
     let mut hi = [_mm512_setzero_si512(); 8];
     for i in 0..8 {
-        lo[i] = _mm512_loadu_si512(base.add(128 * i) as *const _);
-        hi[i] = _mm512_loadu_si512(base.add(128 * i + 64) as *const _);
+        // SAFETY: an `Element` is 128 bytes (asserted above), so these are the two halves of
+        // point `i` of the eight the caller vouches for.
+        unsafe {
+            lo[i] = _mm512_loadu_si512(base.add(128 * i) as *const _);
+            hi[i] = _mm512_loadu_si512(base.add(128 * i + 64) as *const _);
+        }
     }
     let a = transpose8(&lo); // words 0..8 of every point
     let b = transpose8(&hi); // words 8..16
@@ -87,13 +94,17 @@ unsafe fn load_xyz(c: &Ctx, pts: *const Element) -> (L5, L5, L5) {
 
 /// Loads eight consecutive 64-byte commitments (`x` then `y`, little-endian canonical integers) as plain
 /// lane limbs.
+///
+/// # Safety
+/// `recs` must point to eight consecutive records that are valid to read.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn load_xy_bytes(c: &Ctx, recs: *const [u8; 64]) -> (L5, L5) {
     let base = recs as *const u8;
     let mut r = [_mm512_setzero_si512(); 8];
     for i in 0..8 {
-        r[i] = _mm512_loadu_si512(base.add(64 * i) as *const _);
+        // SAFETY: record `i` of the eight the caller vouches for, 64 bytes each.
+        r[i] = unsafe { _mm512_loadu_si512(base.add(64 * i) as *const _) };
     }
     let a = transpose8(&r);
     let x = words_to_limbs(c, &[a[0], a[1], a[2], a[3]]);
@@ -102,6 +113,9 @@ unsafe fn load_xy_bytes(c: &Ctx, recs: *const [u8; 64]) -> (L5, L5) {
 }
 
 /// Stores eight points' canonical `(x, y)` plain limbs as 64-byte commitments.
+///
+/// # Safety
+/// `out` must point to eight consecutive records that are valid to write.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
 unsafe fn store_xy_bytes(x: &L5, y: &L5, out: *mut [u8; 64]) {
@@ -110,7 +124,8 @@ unsafe fn store_xy_bytes(x: &L5, y: &L5, out: *mut [u8; 64]) {
     let r = transpose8(&[xw[0], xw[1], xw[2], xw[3], yw[0], yw[1], yw[2], yw[3]]);
     let base = out as *mut u8;
     for i in 0..8 {
-        _mm512_storeu_si512(base.add(64 * i) as *mut _, r[i]);
+        // SAFETY: record `i` of the eight the caller vouches for, 64 bytes each.
+        unsafe { _mm512_storeu_si512(base.add(64 * i) as *mut _, r[i]) };
     }
 }
 
@@ -132,7 +147,7 @@ fn fr_mod() -> &'static FrMod {
 }
 
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn build_fr_mod() -> FrMod {
+fn build_fr_mod() -> FrMod {
     let r = to_limbs52(&Fr::MODULUS);
     let mut inv = r[0];
     for _ in 0..7 {
@@ -151,7 +166,7 @@ unsafe fn build_fr_mod() -> FrMod {
 /// limbs and `a·b < r·2^260`, output `< 2r`.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn mont_mul_r(c: &Ctx, m: &FrMod, a: &L5, b: &L5) -> L5 {
+fn mont_mul_r(c: &Ctx, m: &FrMod, a: &L5, b: &L5) -> L5 {
     let zero = _mm512_setzero_si512();
     let mut t = [zero; 6];
     for i in 0..5 {
@@ -187,7 +202,7 @@ unsafe fn mont_mul_r(c: &Ctx, m: &FrMod, a: &L5, b: &L5) -> L5 {
 /// Canonical representative (< r) of a value < 2r.
 #[inline]
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn canon_r(c: &Ctx, m: &FrMod, a: &L5) -> L5 {
+fn canon_r(c: &Ctx, m: &FrMod, a: &L5) -> L5 {
     let mut ge: __mmask8 = 0;
     let mut decided: __mmask8 = 0;
     for j in (0..5).rev() {
@@ -239,7 +254,7 @@ fn groups_of(n: usize) -> usize {
 /// `s.inv`, one exponentiation for the block: `mont_mul(v, inv_plain)` of a lane value `v` is then the
 /// plain quotient `v / d` directly.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
+fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
     let n = d.len();
     debug_assert!(n <= GROUPS);
     for g in 0..n {
@@ -282,11 +297,8 @@ unsafe fn invert_block(c: &Ctx, d: &[L5], s: &mut Scratch) {
 ///
 /// If `elements.len()` is not a multiple of eight or `out` is not as long: the stores write whole
 /// groups of eight records through raw pointers.
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 64]]) {
+pub(crate) fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 64]]) {
     assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
@@ -297,7 +309,8 @@ pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 
     for (blk, out_blk) in elements.chunks(BLOCK).zip(out.chunks_mut(BLOCK)) {
         let n = blk.len() / 8;
         for g in 0..n {
-            let (x, y, z) = load_xyz(c, blk.as_ptr().add(8 * g));
+            // SAFETY: `g` is below `blk.len() / 8`, so the eight points from `8 * g` are in `blk`.
+            let (x, y, z) = unsafe { load_xyz(c, blk.as_ptr().add(8 * g)) };
             xs[g] = x;
             ys[g] = y;
             zs[g] = z;
@@ -311,7 +324,9 @@ pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 
             let flip = !is_positive(c, &y);
             let x = sel(flip, &x, &neg_canon(c, &x));
             let y = sel(flip, &y, &neg_canon(c, &y));
-            store_xy_bytes(&x, &y, out_blk.as_mut_ptr().add(8 * g));
+            // SAFETY: `out` is as long as `elements` (asserted above) and chunked alike, so
+            // `out_blk` is as long as `blk` and holds the eight records from `8 * g`.
+            unsafe { store_xy_bytes(&x, &y, out_blk.as_mut_ptr().add(8 * g)) };
         }
     }
 }
@@ -320,7 +335,7 @@ pub(crate) unsafe fn batch_to_commitments(elements: &[Element], out: &mut [[u8; 
 /// field as the scalar path does (`Fr::from_le_bytes_mod_order` of the little-endian bytes: `u mod r`, in
 /// Montgomery form), on the lanes.
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, out: &mut [Fr]) {
+fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, out: &mut [Fr]) {
     let m = fr_mod();
     let n = nums.len();
     invert_block(c, dens, s);
@@ -330,7 +345,7 @@ unsafe fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, 
         let w = limbs_to_words(&f);
         let mut words = [[0u64; 8]; 4];
         for j in 0..4 {
-            _mm512_storeu_si512(words[j].as_mut_ptr() as *mut _, w[j]);
+            store_words(&mut words[j], w[j]);
         }
         for l in 0..8 {
             out[8 * g + l] =
@@ -344,11 +359,8 @@ unsafe fn ratios_to_scalars(c: &Ctx, nums: &[L5], dens: &[L5], s: &mut Scratch, 
 /// # Panics
 ///
 /// If `elements.len()` is not a multiple of eight or `out` is not as long.
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [Fr]) {
+pub(crate) fn batch_map_to_scalar_field(elements: &[Element], out: &mut [Fr]) {
     assert!(elements.len().is_multiple_of(8) && out.len() == elements.len());
     let c = context();
     let g = groups_of(elements.len());
@@ -359,7 +371,8 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
         let n = blk.len() / 8;
         for g in 0..n {
             // x/y = (X/Z)/(Y/Z) = X/Y: the projective coordinates directly, Z unused
-            let (x, y, _) = load_xyz(c, blk.as_ptr().add(8 * g));
+            // SAFETY: `g` is below `blk.len() / 8`, so the eight points from `8 * g` are in `blk`.
+            let (x, y, _) = unsafe { load_xyz(c, blk.as_ptr().add(8 * g)) };
             xs[g] = x;
             ys[g] = y;
         }
@@ -375,14 +388,13 @@ pub(crate) unsafe fn batch_map_to_scalar_field(elements: &[Element], out: &mut [
 /// # Panics
 ///
 /// If `elements.len()` is not a multiple of eight or `out` is not as long.
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement], out: &mut [Fr]) {
+pub(crate) fn batch_map_to_scalar_field_affine(elements: &[AffineElement], out: &mut [Fr]) {
     // SAFETY: an `AffineElement` is the 64-byte record `x` then `y` (asserted above), and a
     // `[u8; 64]` has no alignment to keep.
-    let records = core::slice::from_raw_parts(elements.as_ptr().cast::<[u8; 64]>(), elements.len());
+    let records = unsafe {
+        core::slice::from_raw_parts(elements.as_ptr().cast::<[u8; 64]>(), elements.len())
+    };
     records_to_scalars::<false>(records, out)
 }
 
@@ -393,11 +405,8 @@ pub(crate) unsafe fn batch_map_to_scalar_field_affine(elements: &[AffineElement]
 ///
 /// If `commitments.len()` is not a multiple of eight or `out` is not as long, or a coordinate is
 /// not below the modulus.
-///
-/// # Safety
-/// `available()` must have returned true on this host.
 #[target_feature(enable = "avx512f,avx512ifma")]
-pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) {
+pub(crate) fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) {
     records_to_scalars::<true>(commitments, out)
 }
 
@@ -406,7 +415,7 @@ pub(crate) unsafe fn hash_commitments(commitments: &[[u8; 64]], out: &mut [Fr]) 
 /// each record's coordinates are checked to be canonical before its block is loaded (and, in
 /// debug builds, the record decoded as a point, as the scalar path does).
 #[target_feature(enable = "avx512f,avx512ifma")]
-unsafe fn records_to_scalars<const CHECKED: bool>(records: &[[u8; 64]], out: &mut [Fr]) {
+fn records_to_scalars<const CHECKED: bool>(records: &[[u8; 64]], out: &mut [Fr]) {
     assert!(records.len().is_multiple_of(8) && out.len() == records.len());
     let c = context();
     let g = groups_of(records.len());
@@ -433,7 +442,8 @@ unsafe fn records_to_scalars<const CHECKED: bool>(records: &[[u8; 64]], out: &mu
         }
         let n = blk.len() / 8;
         for g in 0..n {
-            let (x, y) = load_xy_bytes(c, blk.as_ptr().add(8 * g));
+            // SAFETY: `g` is below `blk.len() / 8`, so the eight records from `8 * g` are in `blk`.
+            let (x, y) = unsafe { load_xy_bytes(c, blk.as_ptr().add(8 * g)) };
             xs[g] = x;
             ys[g] = y;
         }
@@ -504,6 +514,7 @@ mod tests {
             let pts = points(n, n as u64);
             let want = batch_to_commitments_scalar(&pts);
             let mut got = vec![[0u8; 64]; n];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { batch_to_commitments(&pts, &mut got) };
             assert_eq!(got, want, "n = {n}");
         }
@@ -533,11 +544,13 @@ mod tests {
                 .collect();
             let want = batch_map_to_scalar_field_affine_scalar(&affine);
             let mut got = vec![Fr::zero(); n];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { batch_map_to_scalar_field_affine(&affine, &mut got) };
             assert_eq!(got, want, "n = {n}");
             // and the projective kernel on the same points
             let mut proj = vec![Fr::zero(); n];
             let as_elements: Vec<Element> = affine.iter().map(|a| a.to_element()).collect();
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { batch_map_to_scalar_field(&as_elements, &mut proj) };
             assert_eq!(proj, want, "n = {n} (projective)");
         }
@@ -552,6 +565,7 @@ mod tests {
             let pts = points(n, 100 + n as u64);
             let want = batch_map_to_scalar_field_scalar(&pts);
             let mut got = vec![Fr::zero(); n];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { batch_map_to_scalar_field(&pts, &mut got) };
             assert_eq!(got, want, "n = {n}");
         }
@@ -577,6 +591,7 @@ mod tests {
                 .collect();
             let want = hash_commitments_scalar(&bytes);
             let mut got = vec![Fr::zero(); n];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { hash_commitments(&bytes, &mut got) };
             assert_eq!(got, want, "n = {n}");
         }
@@ -598,6 +613,7 @@ mod tests {
             recs[5][..32].copy_from_slice(&fq_to_le_bytes(Fq::from(7u64)));
             recs[5][32..].fill(0);
             let mut got = vec![Fr::zero(); 8];
+            // SAFETY: `lanes_under_test()` returned true, so the host has the extension.
             unsafe { hash_commitments(&recs, &mut got) };
             let g_scalar = Element::prime_subgroup_generator().map_to_scalar_field();
             for (i, v) in got.iter().enumerate() {

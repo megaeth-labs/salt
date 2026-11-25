@@ -25,11 +25,19 @@
 //!
 //! # Safety
 //!
-//! All functions use `unsafe` blocks as they contain inline assembly. The assembly
-//! code assumes x86_64 architecture and may not work on other platforms.
+//! All functions use `unsafe` blocks as they contain inline assembly. The module is compiled
+//! on `x86_64` with `std` only, and [`mont_mul_asm`] also needs a CPU with BMI2 and ADX:
+//! [`available`] says whether the host has them, and the routine is an `unsafe fn` that asks
+//! its caller for them.
 
-#[cfg(target_arch = "x86_64")]
 use core::arch::asm;
+
+/// Whether this host executes [`mont_mul_asm`] (`bmi2` + `adx`); the detection macro caches
+/// what the CPU reports.
+#[inline]
+pub(crate) fn available() -> bool {
+    std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx")
+}
 
 /// Multiplies a field element by 5 in Montgomery form using optimized assembly.
 ///
@@ -55,9 +63,12 @@ use core::arch::asm;
 ///
 /// This function is only available on x86_64 targets and uses inline assembly.
 /// The caller must ensure the input is a valid Montgomery form field element.
-#[cfg(target_arch = "x86_64")]
+/// It uses no instruction beyond the `x86_64` baseline, so it runs on every host.
 #[inline(always)]
 pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
+    // SAFETY: the only memory the assembly touches, besides its own pushes, is the four limbs at
+    // `rdi`, which is `result`. It pops every register it pushes, and the others it changes are
+    // declared below.
     unsafe {
         asm!(
             "push %rdx",
@@ -214,8 +225,11 @@ pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
 ///
 /// # Safety
 ///
-/// This function is only available on x86_64 targets and uses inline assembly.
-/// Both operands must be valid Montgomery form field elements (< 2^256).
+/// The host must have BMI2 and ADX ([`available`] returns true): the routine uses `mulx`,
+/// `adcx` and `adox`, and a CPU without them stops on an illegal instruction.
+///
+/// Both operands must be valid Montgomery form field elements (< 2^256) for the result to be
+/// one; that is a matter of correctness, not of memory safety.
 ///
 /// # Example Usage
 ///
@@ -223,12 +237,16 @@ pub(crate) fn mont_mul_by5_asm(result: &mut [u64; 4]) {
 /// let mut result = [0u64; 4];
 /// let x = [1, 0, 0, 0];  // Montgomery form of 1
 /// let y = [2, 0, 0, 0];  // Montgomery form of 2
-/// mont_mul_asm(&mut result, &x, &y);
+/// // SAFETY: the host has BMI2 and ADX.
+/// unsafe { mont_mul_asm(&mut result, &x, &y) };
 /// // result now contains Montgomery form of (1 * 2 * R^-1) mod p
 /// ```
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub(crate) fn mont_mul_asm(result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]) {
+pub(crate) unsafe fn mont_mul_asm(result: &mut [u64; 4], x: &[u64; 4], y: &[u64; 4]) {
+    // SAFETY: besides its own pushes, the assembly reads the four limbs at `rsi` and at `rdx`
+    // (`x` and `y`; `y`'s pointer is kept in `r11`) and writes the four at `rdi` (`result`). It
+    // pops every register it pushes, and the others it changes are declared below. Its `mulx`,
+    // `adcx` and `adox` need BMI2 and ADX, which the caller guarantees.
     unsafe {
         asm!(
             "push %r15",
